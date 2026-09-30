@@ -4,6 +4,20 @@ import { SESSION_SCOPE_HEADER } from "./message-links";
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
+import {
+  downloadSessionProxySiteHtml,
+  getSessionProxyArtifactAssociation,
+  getSessionProxyWorkspaceGrant,
+  SESSION_PROXY_SITE_HTML_MAX_BYTES,
+  SessionProxySiteHtmlTooLargeError,
+} from "./session-proxy-client";
+export {
+  downloadSessionProxySiteHtml,
+  getSessionProxyArtifactAssociation,
+  getSessionProxyWorkspaceGrant,
+  SESSION_PROXY_SITE_HTML_MAX_BYTES,
+  SessionProxySiteHtmlTooLargeError,
+} from "./session-proxy-client";
 
 /**
  * Packaged same-origin backend for the React conversation surfaces.
@@ -148,13 +162,18 @@ export type SessionProxyHandlerOptions = {
    *
    * Every request must name its session in the `x-opengeni-session-id` header
    * (`SessionArtifactViewer` and `SessionConversation` do this). The proxy
-   * runs `authorizeSession`, then only forwards an artifact OpenGeni lists for
+   * runs `authorizeSession`, then only forwards an artifact OpenGeni associates with
    * that session, so the browser cannot open other workspace artifacts through
    * it. Editing still requires the user's own `artifacts:publish` grant. Site
    * tool calls are not proxied.
    *
    * The editor's live socket is ticket-authenticated and connects to OpenGeni
-   * directly; `editableLiveUrl` overrides the URL derived from the client.
+   * directly; the ticket binds the source session and the API revalidates its
+   * authority while connected. `editableLiveUrl` overrides the derived URL.
+   * Site HTML streams with backpressure and cancellation, with a 25 MiB
+   * actual-byte ceiling (`SESSION_PROXY_SITE_HTML_MAX_BYTES`). Oversize streams
+   * fail with `SessionProxySiteHtmlTooLargeError` / `site_html_too_large`;
+   * headers cannot be replaced once streaming has begun.
    */
   artifacts?: boolean | { editableLiveUrl?: string | undefined } | undefined;
   /**
@@ -236,23 +255,6 @@ export function createSessionProxyHandler(
           service.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
       )
     : null;
-  // Positive session→artifact decisions, briefly, so one open does not repeat
-  // the association lookup for its detail, HTML, and ticket requests.
-  const artifactDecisions = new Map<string, number>();
-  const accessContexts = new Map<
-    string,
-    Promise<Awaited<ReturnType<ProxyClient["getAccessContext"]>>>
-  >();
-  const accessOf = (client: ProxyClient, key: string) => {
-    let access = accessContexts.get(key);
-    if (!access) {
-      access = client.getAccessContext();
-      access.catch(() => accessContexts.delete(key));
-      if (accessContexts.size >= 1_000) accessContexts.delete(accessContexts.keys().next().value!);
-      accessContexts.set(key, access);
-    }
-    return access;
-  };
   const modelSelection = options.modelSelection ?? true;
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const sessionList = options.sessionList ?? "mine";
@@ -360,7 +362,7 @@ export function createSessionProxyHandler(
             ? {
                 editableLiveUrl,
                 cachePartition: await cachePartition(
-                  await accessOf(client, `${source}\u0000${resolved.user}`),
+                  await getSessionProxyWorkspaceGrant(client, workspaceId, call),
                   workspaceId,
                   source,
                 ),
@@ -448,17 +450,16 @@ export function createSessionProxyHandler(
         if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
           return errorJson(404, "session_not_found", "Session not found.");
         }
-        const decision = `${source}\u0000${resolved.user}\u0000${sessionId}\u0000${area}\u0000${artifactId}`;
-        if ((artifactDecisions.get(decision) ?? 0) < Date.now()) {
-          const listed = editable
-            ? await sessionListsEditableArtifact(client, base, sessionId, artifactId, call)
-            : await sessionListsSite(client, base, sessionId, artifactId, call);
-          if (!listed) return errorJson(404, "artifact_not_found", "Artifact not found.");
-          if (artifactDecisions.size >= 1_000) {
-            artifactDecisions.delete(artifactDecisions.keys().next().value!);
-          }
-          artifactDecisions.set(decision, Date.now() + ARTIFACT_DECISION_TTL_MS);
-        }
+        // No positive authorization cache: revocation must take effect even
+        // between detail, HTML and ticket requests for the same artifact.
+        await getSessionProxyArtifactAssociation(
+          client,
+          workspaceId,
+          sessionId,
+          editable ? "editable" : "site",
+          artifactId,
+          call,
+        );
         const item = `${base}/${area}/${artifactId}`;
         if (route === "GET ") {
           const replicaId = editable ? query.replicaId : undefined;
@@ -475,7 +476,10 @@ export function createSessionProxyHandler(
         if (route === "POST live-ticket") {
           const body = await readJsonBody(request, maxBodyBytes);
           return json(
-            await client.requestJson("POST", `${item}/live-ticket`, pick(body, TICKET_FIELDS)),
+            await client.requestJson("POST", `${item}/live-ticket`, {
+              ...pick(body, TICKET_FIELDS),
+              sourceSessionId: sessionId,
+            }),
             201,
           );
         }
@@ -483,11 +487,13 @@ export function createSessionProxyHandler(
         if (typeof versionId !== "string" || !SEGMENT.test(versionId)) {
           reject(400, "version_required", "versionId is required.");
         }
-        const html = await client.getWorkspaceArtifactHtml(workspaceId, artifactId, {
+        const html = await downloadSessionProxySiteHtml(client, workspaceId, artifactId, {
           versionId,
           signal: request.signal,
         });
-        return new Response(html, { headers: SITE_HTML_HEADERS });
+        return new Response(boundedSiteHtml(html.body, request.signal), {
+          headers: SITE_HTML_HEADERS,
+        });
       }
 
       if (area !== "sessions") return errorJson(404, "route_not_allowed", "Not found.");
@@ -642,7 +648,6 @@ export function createSessionProxyHandler(
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
-const ARTIFACT_DECISION_TTL_MS = 60_000;
 const TICKET_FIELDS = [
   "replicaId",
   "modality",
@@ -674,75 +679,65 @@ function liveSocketUrl(value: string): string {
   return url.href;
 }
 
-function randomReplicaId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  bytes[0] = bytes[0]! | 1;
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function sessionListsEditableArtifact(
-  client: ProxyClient,
-  base: string,
-  sessionId: string,
-  artifactId: string,
-  call: { signal: AbortSignal },
-): Promise<boolean> {
-  try {
-    const list = await client.requestJson<{ artifacts?: { id?: unknown }[] }>(
-      "GET",
-      `${base}/editable-artifacts`,
-      undefined,
-      { sourceSessionId: sessionId, replicaId: randomReplicaId() },
-      call,
-    );
-    return (list.artifacts ?? []).some((artifact) => artifact.id === artifactId);
-  } catch (error) {
-    if (error instanceof OpenGeniApiError && (error.status === 404 || error.status === 422)) {
-      return false;
-    }
-    throw error;
-  }
-}
-
-const SITE_ASSOCIATION_PAGES = 5;
-
-async function sessionListsSite(
-  client: ProxyClient,
-  base: string,
-  sessionId: string,
-  artifactId: string,
-  call: { signal: AbortSignal },
-): Promise<boolean> {
-  let cursor: string | undefined;
-  try {
-    for (let page = 0; page < SITE_ASSOCIATION_PAGES; page += 1) {
-      const result = await client.requestJson<{
-        items?: { id?: unknown }[];
-        nextCursor?: string | null;
-      }>(
-        "GET",
-        `${base}/artifact-catalog`,
-        undefined,
-        {
-          sourceSessionId: sessionId,
-          kind: "site",
-          status: "active",
-          limit: "100",
-          ...(cursor ? { cursor } : {}),
-        },
-        call,
-      );
-      if ((result.items ?? []).some((item) => item.id === artifactId)) return true;
-      if (!result.nextCursor) return false;
-      cursor = result.nextCursor;
-    }
-    return false;
-  } catch (error) {
-    if (error instanceof OpenGeniApiError && (error.status === 404 || error.status === 422)) {
-      return false;
-    }
-    throw error;
-  }
+function boundedSiteHtml(
+  body: ReadableStream<Uint8Array> | null,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  const reader = body?.getReader();
+  let bytes = 0;
+  let settled = false;
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+  const cleanup = () => signal.removeEventListener("abort", abort);
+  const cancel = async (reason: unknown) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    await reader?.cancel(reason).catch(() => undefined);
+    reader?.releaseLock();
+  };
+  const abort = () => {
+    if (settled) return;
+    controller.error(signal.reason);
+    void cancel(signal.reason);
+  };
+  return new ReadableStream<Uint8Array>(
+    {
+      start(value) {
+        controller = value;
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      },
+      async pull(value) {
+        if (settled) return;
+        try {
+          const chunk = await reader?.read();
+          if (settled) return;
+          if (!chunk || chunk.done) {
+            settled = true;
+            cleanup();
+            reader?.releaseLock();
+            value.close();
+            return;
+          }
+          bytes += chunk.value.byteLength;
+          if (bytes > SESSION_PROXY_SITE_HTML_MAX_BYTES) {
+            const error = new SessionProxySiteHtmlTooLargeError();
+            value.error(error);
+            await cancel(error);
+            return;
+          }
+          value.enqueue(chunk.value);
+        } catch (error) {
+          if (settled) return;
+          value.error(error);
+          await cancel(error);
+        }
+      },
+      cancel,
+    },
+    // Read only when the downstream consumer requests a chunk.
+    { highWaterMark: 0 },
+  );
 }
 
 /**
@@ -752,7 +747,8 @@ async function sessionListsSite(
  * partition. `client` acts as that user (for example `asUser(...)`).
  */
 export async function artifactViewerCapability(input: {
-  client: Pick<ProxyClient, "getAccessContext" | "apiUrl">;
+  client: Pick<ProxyClient, "getAccessContext" | "apiUrl"> &
+    Partial<Pick<ProxyClient, "requestJson">>;
   workspaceId: string;
   /** Stable namespace of the host's user identities, mixed into the partition. */
   source?: string | undefined;
@@ -766,7 +762,12 @@ export async function artifactViewerCapability(input: {
       input.editableLiveUrl ?? input.client.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
     ),
     cachePartition: await cachePartition(
-      await input.client.getAccessContext(),
+      input.client.requestJson
+        ? await getSessionProxyWorkspaceGrant(
+            input.client as Pick<ProxyClient, "requestJson">,
+            input.workspaceId,
+          )
+        : await legacyViewerGrant(input.client, input.workspaceId),
       input.workspaceId,
       input.source ?? "default",
     ),
@@ -775,30 +776,46 @@ export async function artifactViewerCapability(input: {
 
 /** The editor's browser cache partition for this proxied user and workspace. */
 async function cachePartition(
-  access: Awaited<ReturnType<ProxyClient["getAccessContext"]>>,
+  grant: import("./types").AccessGrant,
   workspaceId: string,
   source: string,
 ): Promise<{ accountId: string; principalId: string; authorizationEpoch: string }> {
-  const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
-  if (!grant) reject(403, "workspace_not_allowed", "This workspace is not available.");
+  if (grant.workspaceId !== workspaceId) {
+    reject(403, "workspace_not_allowed", "This workspace is not available.");
+  }
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(
       JSON.stringify({
         source,
-        subjectId: access.subjectId,
+        subjectId: grant.subjectId,
         accountId: grant.accountId,
+        workspaceId,
         permissions: [...grant.permissions].sort(),
+        // Effective external grants carry live identity/link revisions. Include
+        // them even when a revoke/regrant restores an identical permission set.
+        externalActor: grant.metadata?.externalActor ?? null,
       }),
     ),
   );
   return {
     accountId: grant.accountId,
-    principalId: access.subjectId,
+    principalId: grant.subjectId,
     authorizationEpoch: `sha256:${[...new Uint8Array(digest)]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("")}`,
   };
+}
+
+/** Preserve custom capability clients that supplied only the original two methods. */
+async function legacyViewerGrant(
+  client: Pick<ProxyClient, "getAccessContext">,
+  workspaceId: string,
+): Promise<import("./types").AccessGrant> {
+  const access = await client.getAccessContext();
+  const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  if (!grant) reject(403, "workspace_not_allowed", "This workspace is not available.");
+  return grant;
 }
 
 /** Sandbox link download: one path, no route/target override. */

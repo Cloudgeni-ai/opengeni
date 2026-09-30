@@ -8,6 +8,10 @@ import {
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
 import { OPENGENI_API_CONTRACT_REVISION } from "../src/types";
+import {
+  SESSION_PROXY_SITE_HTML_MAX_BYTES,
+  SessionProxySiteHtmlTooLargeError,
+} from "../src/session-proxy";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 const OTHER_WORKSPACE_ID = "99999999-9999-4999-8999-999999999999";
@@ -75,6 +79,26 @@ function upstreamServer() {
           },
         ],
       });
+    }
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/access/grant`) {
+      return Response.json({
+        workspaceId: WORKSPACE_ID,
+        accountId: "acct-1",
+        subjectId: "subject-u42",
+        permissions: ["sessions:read", "artifacts:read"],
+      });
+    }
+    if (path.endsWith("/access/grant")) {
+      return Response.json({ error: { code: "forbidden" } }, { status: 403 });
+    }
+    if (path.includes("/artifact-associations/")) {
+      return path.endsWith(`/${EDITABLE_ID}`) || path.endsWith(`/${SITE_ID}`)
+        ? Response.json({
+            sessionId: SESSION_ID,
+            artifactId: path.endsWith(EDITABLE_ID) ? EDITABLE_ID : SITE_ID,
+            kind: path.endsWith(EDITABLE_ID) ? "editable" : "site",
+          })
+        : Response.json({ error: { code: "artifact_not_found" } }, { status: 404 });
     }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/editable-artifacts` && request.method === "GET") {
       return Response.json({ artifacts: [{ id: EDITABLE_ID, title: "Weekly report" }] });
@@ -664,9 +688,10 @@ describe("createSessionProxyHandler", () => {
       replicaId: "1234567890abcdef",
     });
     const listing = on.upstream.requests.find((r) =>
-      r.url.pathname.endsWith("/editable-artifacts"),
+      r.url.pathname.endsWith(`/artifact-associations/${EDITABLE_ID}`),
     )!;
-    expect(listing.url.searchParams.get("sourceSessionId")).toBe(SESSION_ID);
+    expect(listing.url.pathname).toContain(`/sessions/${SESSION_ID}/`);
+    expect(Object.fromEntries(listing.url.searchParams)).toEqual({ kind: "editable" });
 
     const ticket = await on.handler(
       new Request(`${item}/live-ticket`, {
@@ -683,6 +708,7 @@ describe("createSessionProxyHandler", () => {
     expect(on.upstream.requests.at(-1)!.body).toEqual({
       replicaId: "1234567890abcdef",
       modality: "document",
+      sourceSessionId: SESSION_ID,
     });
 
     // An artifact OpenGeni does not list for this session is not served.
@@ -720,11 +746,205 @@ describe("createSessionProxyHandler", () => {
     expect(await html.text()).toBe("<h1>Dashboard</h1>");
     expect(html.headers.get("content-security-policy")).toBe("sandbox allow-scripts");
     expect(html.headers.get("content-disposition")).toContain("attachment");
-    const catalog = on.upstream.requests.find((r) => r.url.pathname.endsWith("/artifact-catalog"))!;
-    expect(Object.fromEntries(catalog.url.searchParams)).toMatchObject({
-      sourceSessionId: SESSION_ID,
-      kind: "site",
+    const catalog = on.upstream.requests.find((r) =>
+      r.url.pathname.endsWith(`/artifact-associations/${SITE_ID}`),
+    )!;
+    expect(catalog.url.pathname).toContain(`/sessions/${SESSION_ID}/`);
+    expect(Object.fromEntries(catalog.url.searchParams)).toEqual({ kind: "site" });
+  });
+
+  test("reauthorizes source sessions on repeated association reads without a positive cache", async () => {
+    const upstream = upstreamServer();
+    let allowed = true;
+    let checks = 0;
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (request.url.includes("/artifact-associations/")) {
+          checks += 1;
+          if (!allowed) {
+            return Response.json({ error: { code: "session_not_found" } }, { status: 404 });
+          }
+        }
+        return upstream.fetch(input, init);
+      },
     });
+    const handler = createSessionProxyHandler(service, {
+      artifacts: true,
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const request = () =>
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`,
+        {
+          headers: { "x-opengeni-session-id": SESSION_ID },
+        },
+      );
+    expect((await handler(request())).status).toBe(200);
+    allowed = false;
+    expect((await handler(request())).status).toBe(404);
+    expect(checks).toBe(2);
+    expect(
+      upstream.requests.filter((r) =>
+        r.url.pathname.endsWith(`/editable-artifacts/${EDITABLE_ID}`),
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("refreshes effective grants and changes the authorization epoch on config reread", async () => {
+    const upstream = upstreamServer();
+    let permissions = ["sessions:read", "artifacts:read", "artifacts:publish"];
+    let reads = 0;
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        if (
+          new URL(input instanceof Request ? input.url : input).pathname.endsWith("/access/grant")
+        ) {
+          reads += 1;
+          return Response.json({
+            accountId: "acct-1",
+            workspaceId: WORKSPACE_ID,
+            subjectId: "subject-u42",
+            permissions,
+          });
+        }
+        return upstream.fetch(input, init);
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      artifacts: true,
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const config = async () => {
+      const response = await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`));
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const before = await config();
+    permissions = ["sessions:read", "artifacts:read"];
+    const after = await config();
+    expect(after.artifacts.cachePartition.authorizationEpoch).not.toBe(
+      before.artifacts.cachePartition.authorizationEpoch,
+    );
+    expect(reads).toBe(2);
+  });
+
+  test("streams Site HTML with backpressure and an actual-byte ceiling without buffering", async () => {
+    const upstream = upstreamServer();
+    let pulls = 0;
+    let cancelled: unknown;
+    const chunk = new Uint8Array(64 * 1024);
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        if (new URL(input instanceof Request ? input.url : input).pathname.endsWith("/html")) {
+          return new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                pull(controller) {
+                  pulls += 1;
+                  controller.enqueue(chunk);
+                },
+                cancel(reason) {
+                  cancelled = reason;
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+            // Even an incorrect declared length cannot bypass the actual-byte check.
+            { headers: { "Content-Length": "1" } },
+          );
+        }
+        return upstream.fetch(input, init);
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      artifacts: true,
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const response = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/html?versionId=v1`,
+        {
+          headers: { "x-opengeni-session-id": SESSION_ID },
+        },
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect(pulls).toBe(0);
+    const reader = response.body!.getReader();
+    let bytes = 0;
+    try {
+      for (;;) {
+        const result = await reader.read();
+        if (result.done) throw new Error("An infinite upstream should exceed the ceiling");
+        bytes += result.value.byteLength;
+      }
+    } catch (error) {
+      expect(error).toBeInstanceOf(SessionProxySiteHtmlTooLargeError);
+      expect((error as SessionProxySiteHtmlTooLargeError).code).toBe("site_html_too_large");
+    } finally {
+      reader.releaseLock();
+    }
+    expect(bytes).toBe(SESSION_PROXY_SITE_HTML_MAX_BYTES);
+    expect(pulls).toBe(SESSION_PROXY_SITE_HTML_MAX_BYTES / chunk.byteLength + 1);
+    expect(cancelled).toBeInstanceOf(SessionProxySiteHtmlTooLargeError);
+  });
+
+  test("cancels upstream Site HTML on downstream cancellation and request abort", async () => {
+    for (const mode of ["cancel", "abort"] as const) {
+      const upstream = upstreamServer();
+      let cancelled: unknown;
+      let pulls = 0;
+      const abort = new AbortController();
+      const service = new OpenGeniClient({
+        baseUrl: API,
+        apiKey: "og_org_key",
+        fetch: async (input, init) => {
+          if (new URL(input instanceof Request ? input.url : input).pathname.endsWith("/html")) {
+            return new Response(
+              new ReadableStream<Uint8Array>(
+                {
+                  pull(controller) {
+                    pulls += 1;
+                    controller.enqueue(new Uint8Array([42]));
+                  },
+                  cancel(reason) {
+                    cancelled = reason;
+                  },
+                },
+                { highWaterMark: 0 },
+              ),
+            );
+          }
+          return upstream.fetch(input, init);
+        },
+      });
+      const handler = createSessionProxyHandler(service, {
+        artifacts: true,
+        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+      });
+      const response = await handler(
+        new Request(
+          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${SITE_ID}/html?versionId=v1`,
+          {
+            headers: { "x-opengeni-session-id": SESSION_ID },
+            signal: abort.signal,
+          },
+        ),
+      );
+      expect(pulls).toBe(0);
+      if (mode === "cancel") await response.body!.cancel("consumer closed");
+      else abort.abort("request closed");
+      await Promise.resolve();
+      expect(cancelled).toBe(mode === "cancel" ? "consumer closed" : "request closed");
+      expect(pulls).toBe(0);
+    }
   });
 
   test("artifactViewerCapability gives a custom proxy the same client-config capability", async () => {
