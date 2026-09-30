@@ -1215,7 +1215,8 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/allowance/grants",
       "sdk": [
-        "OpenGeniEmbeddingClient.grantWorkspaceCredits"
+        "OpenGeniEmbeddingClient.grantWorkspaceCredits",
+        "createSessionProxyHandler"
       ],
       "request": [
         "GrantWorkspaceCreditsRequest"
@@ -1228,7 +1229,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/allowance/state",
       "sdk": [
-        "OpenGeniEmbeddingClient.getWorkspaceAllowanceState"
+        "OpenGeniEmbeddingClient.getWorkspaceAllowanceState",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
