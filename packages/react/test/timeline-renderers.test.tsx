@@ -2,7 +2,8 @@ import { setStartupDetails } from "../src/timeline/startup-preference";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { registerDom, renderComponent, flush, actRun } from "./render-hook";
+import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -362,6 +363,31 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("does not render background command delivery notices in chat", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "command-result",
+                kind: "background_command_result",
+                classification: "success",
+                sourceId: "command-1",
+                summary: "execCommand: completed successfully.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("details[data-og-machine-input-batch]")).toBeNull();
+    expect(r.container.textContent).not.toContain("Command result received");
+    await r.unmount();
+  });
+
   test("opens the typed child source without treating receipt delivery as work completion", async () => {
     resetTimelineEvents();
     const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -547,6 +573,56 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
 }
 
 describe("SiteArtifactRenderer", () => {
+  test("Site actions expose pending and retry state instead of swallowing failures", async () => {
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    const pending = new Promise<void>((_resolve, rejectPending) => {
+      reject = rejectPending;
+    });
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      status: "complete",
+      output: {
+        artifact: {
+          id: "22222222-2222-4222-8222-222222222222",
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          title: "Board",
+        },
+        version: { revision: 1 },
+      },
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const view = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={() => ({
+          open: () => {
+            calls++;
+            return pending;
+          },
+        })}
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    try {
+      await flush();
+      const button = view.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open Board"]',
+      )!;
+      await actRun(() => button.click());
+      await flush();
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      button.click();
+      expect(calls).toBe(1);
+      await actRun(() => reject(new Error("failed")));
+      await flush();
+      expect(button.disabled).toBe(false);
+      expect(button.textContent).toBe("Retry open");
+    } finally {
+      await view.unmount();
+    }
+  });
   test("renders a direct durable Site link from the structured mutation result", async () => {
     const item = toolItem({
       name: "opengeni__artifacts_create",
@@ -569,10 +645,25 @@ describe("SiteArtifactRenderer", () => {
       status: "complete",
     });
     const Renderer = defaultToolRegistry.resolve(item);
-    const r = await renderComponent(<Renderer item={item} />);
+    // Without a host resolver the console route would 404 inside an embedder.
+    const bare = await renderComponent(<Renderer item={item} />);
     await flush();
+    expect(bare.container.textContent).toContain("Published Incident board");
+    expect(bare.container.querySelector('[aria-label="Open Incident board"]')).toBeNull();
+    await bare.unmount();
 
-    expect(r.container.textContent).toContain("Published Incident board");
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) =>
+          target.kind === "site"
+            ? { href: `/workspaces/${target.workspaceId}/artifacts/${target.artifactId}` }
+            : null
+        }
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
     const link = r.container.querySelector('a[aria-label="Open Incident board"]');
     expect(link?.getAttribute("href")).toBe(
       "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",

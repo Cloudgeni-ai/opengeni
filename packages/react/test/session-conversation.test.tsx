@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import type { SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "../src/components/session-conversation";
+import { Markdown } from "../src/components/markdown";
+import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import { conversationTimeline } from "../src/conversation-timeline";
 import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -8,6 +10,86 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
 
 registerDom();
+
+test("an outer host resolver overrides conversation download defaults", async () => {
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    streamEvents: async function* () {},
+    listEvents: async () =>
+      [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+          sequence: 1,
+          type: "user.message",
+          occurredAt: "2026-09-30T10:00:00Z",
+          payload: { text: "Show file" },
+        },
+      ] as never,
+  });
+  const view = await renderComponent(
+    <OpenGeniLinkProvider resolveLink={() => ({ href: "/host-file-panel" })}>
+      <SessionConversation
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        modelPicker={false}
+        renderMessageText={() => (
+          <Markdown>{"[File](artifact:33333333-3333-4333-8333-333333333333)"}</Markdown>
+        )}
+      />
+    </OpenGeniLinkProvider>,
+  );
+  try {
+    await flush(100);
+    expect(view.container.querySelector('a[href="/host-file-panel"]')).not.toBeNull();
+    expect(view.container.querySelector('button[title="Open file"]')).toBeNull();
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("proxy sandbox capability disables default downloads in the complete conversation", async () => {
+  const base = fakeClient({});
+  for (const enabled of [false, true]) {
+    const client = fakeClient({
+      getClientConfig: async () => ({ ...(await base.getClientConfig()), sandboxFiles: enabled }),
+      getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+      getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+      streamEvents: async function* () {},
+      listEvents: async () =>
+        [
+          {
+            id: "33333333-3333-4333-8333-333333333333",
+            workspaceId: WORKSPACE_ID,
+            sessionId: SESSION_ID,
+            sequence: 1,
+            type: "user.message",
+            occurredAt: "2026-09-30T10:00:00Z",
+            payload: { text: "Show code" },
+          },
+        ] as never,
+    });
+    const view = await renderComponent(
+      <SessionConversation
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        modelPicker={false}
+        renderMessageText={() => <Markdown>{"[Code](sandbox:src/a)"}</Markdown>}
+      />,
+    );
+    try {
+      await flush(100);
+      expect(view.container.querySelector('button[title="Open src/a"]') !== null).toBe(enabled);
+      expect(view.container.querySelector('a[href^="sandbox:"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  }
+});
 
 for (const mode of [
   "pending",

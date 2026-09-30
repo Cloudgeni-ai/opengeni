@@ -1068,7 +1068,7 @@ export function editableArtifactHttpError(error: unknown): unknown {
       case "unsupported_format":
         return new ApiHttpError(422, {
           code: "validation_failed",
-          message: "Editable artifact format is not available for this artifact.",
+          message: error.message,
         });
       case "not_ready":
         return new ApiHttpError(409, {

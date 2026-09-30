@@ -21,6 +21,7 @@
 // `createEditor` for text when `exec` is absent.
 
 import { createHash } from "node:crypto";
+import { confinedFileReadCommand, parseConfinedFileRead } from "./confined-file-read";
 import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
   FileSystemRouteIdentity,
@@ -882,6 +883,33 @@ export class SandboxChannelAService {
 
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
     this.assertFileSystemRoute(req.route);
+    if (req.workspaceOnly) {
+      const canonical = assertSafeRelPath(req.path, this.workspaceRoot);
+      const relative = isConnectedMachineAbsolutePath(canonical)
+        ? relativeConnectedMachinePath(this.workspaceRoot, canonical)
+        : canonical;
+      if (!relative || /[\u0000-\u001f\u007f\\]/u.test(relative)) {
+        throw new ChannelAValidationError("invalid workspace file path");
+      }
+      const result = await this.runReadOnly({
+        cmd: confinedFileReadCommand(this.workspaceRoot, relative, req.maxBytes),
+        login: false,
+        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1024,
+      });
+      if (result.exitCode === 66) throw new ChannelANotFoundError("workspace file not found");
+      if (result.exitCode === 67) {
+        throw new ChannelAValidationError("workspace file path must not contain symlinks");
+      }
+      const bytes =
+        result.sessionId === undefined && result.exitCode === 0
+          ? parseConfinedFileRead(result.stdout, req.maxBytes)
+          : null;
+      if (!bytes)
+        throw new ChannelAUnavailableError(
+          "Confined workspace reads are unavailable on this provider.",
+        );
+      return this.shapeRead(canonical, Buffer.from(bytes), req);
+    }
     const path =
       this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(req.path)
         ? resolveConnectedMachinePath(this.workspaceRoot, req.path)
@@ -1064,6 +1092,7 @@ export class SandboxChannelAService {
   }
 
   private shapeRead(path: string, bytes: Buffer, req: FsReadRequest): FsReadResponse {
+    bytes = bytes.subarray(0, req.maxBytes);
     const truncated = bytes.byteLength >= req.maxBytes;
     const isBinary = sniffBinary(bytes);
     const encoding = req.encoding === "base64" || isBinary ? "base64" : "utf8";

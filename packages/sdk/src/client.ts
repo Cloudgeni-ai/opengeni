@@ -3169,7 +3169,9 @@ export class OpenGeniClient {
   ): Promise<FsReadResponse> {
     return await this.requestJson<FsReadResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
+      request.workspaceOnly
+        ? `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read-workspace`
+        : `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
       request,
       {},
       options,

@@ -16,6 +16,12 @@ import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import { SessionChrome } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import {
+  chainLinkResolvers,
+  sessionLinkResolver,
+  useOpenGeniLinkResolver,
+  type OpenGeniLinkResolver,
+} from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
@@ -24,6 +30,13 @@ export type SessionConversationProps = ClientOverride & {
   sessionId: string;
   /** Host-owned artifact links, previews and other message presentation. */
   renderMessageText?: MessageTimelineProps["renderMessageText"];
+  /**
+   * Open OpenGeni object links in agent replies (`artifact:`, `sandbox:`,
+   * editable artifacts, Sites). Asked first; by default retained files and
+   * sandbox files download only when the proxy explicitly enables them, while
+   * editable artifacts and Sites stay unavailable until the host resolves them.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
   /** Product-specific tool-call renderers; defaults to the built-in registry. */
   toolRegistry?: MessageTimelineProps["toolRegistry"];
   /**
@@ -58,6 +71,7 @@ export function SessionConversation(props: SessionConversationProps) {
 function Conversation({
   sessionId,
   renderMessageText,
+  resolveLink,
   toolRegistry,
   attachments: attachmentsRequested = true,
   modelPicker,
@@ -115,6 +129,21 @@ function Conversation({
       : {}),
   });
   const region = useRef<HTMLDivElement>(null);
+  const inheritedLinks = useOpenGeniLinkResolver();
+  const defaultLinks = useMemo(
+    () =>
+      sessionLinkResolver({
+        client: context.client,
+        workspaceId: context.workspaceId,
+        sessionId,
+        sandboxFiles: config.sandboxFiles,
+      }),
+    [context.client, context.workspaceId, sessionId, config.sandboxFiles],
+  );
+  const links = useMemo(
+    () => chainLinkResolvers(resolveLink, inheritedLinks, defaultLinks) ?? undefined,
+    [resolveLink, inheritedLinks, defaultLinks],
+  );
   const error = detail.error ?? feed.error ?? human.error;
   return (
     <div
@@ -129,6 +158,7 @@ function Conversation({
       {error && <p role="alert">{error.message}</p>}
       <MessageTimeline
         renderMessageText={renderMessageText}
+        resolveLink={links}
         userMessageDisclosureLabels={userMessageDisclosureLabels}
         className="min-h-0 flex-1"
         {...(toolRegistry ? { toolRegistry } : {})}
@@ -250,9 +280,10 @@ function useClientConfigFlags(client: {
   getClientConfig: () => Promise<{
     fileUploads?: { enabled?: boolean };
     modelSelection?: boolean | undefined;
+    sandboxFiles?: boolean | undefined;
   }>;
-}): { uploads: boolean; modelSelection: boolean } {
-  const [flags, setFlags] = useState({ uploads: false, modelSelection: true });
+}): { uploads: boolean; modelSelection: boolean; sandboxFiles: boolean } {
+  const [flags, setFlags] = useState({ uploads: false, modelSelection: true, sandboxFiles: false });
   useEffect(() => {
     let live = true;
     client.getClientConfig().then(
@@ -261,6 +292,7 @@ function useClientConfigFlags(client: {
           setFlags({
             uploads: config.fileUploads?.enabled === true,
             modelSelection: config.modelSelection !== false,
+            sandboxFiles: config.sandboxFiles !== false,
           });
         }
       },
