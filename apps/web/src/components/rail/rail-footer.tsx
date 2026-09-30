@@ -1,33 +1,23 @@
-// Pinned account row with direct settings, feedback, and collapse actions.
-// In the collapsed rail, the same controls stack with accessible labels.
-import {
-  ChartColumnIcon,
-  ChevronsLeftIcon,
-  ChevronsRightIcon,
-  LockIcon,
-  LogOutIcon,
-  UserIcon,
-  MessageSquareIcon as FeedbackIcon,
-} from "lucide-react";
+// Pinned account row: the account button (avatar and name, one target) and a
+// Settings gear. Feedback, Help, Appearance and Sign out live in the account
+// menu; the collapse toggle lives at the top of the rail with the wordmark.
+// Collapsed, the avatar and the gear stack.
+import { LockIcon, LogOutIcon, UserIcon } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
-import { WorkspaceNav } from "@/components/rail/workspace-nav";
-import { Link } from "@tanstack/react-router";
-import { AppearanceMenu } from "@/components/appearance-menu";
+import { AppearanceSubmenu } from "@/components/appearance-menu";
 import { HelpMenu } from "@/components/help-menu";
 import {
   accountMenuAriaLabel,
-  OrganizationInvitationCountBadge,
-  OrganizationInvitationRailNotice,
   OrganizationInvitationsDialog,
   OrganizationInvitationsMenuItem,
   useOrganizationInvitations,
 } from "@/components/organization-invitations";
+import { AccountTrigger } from "@/components/rail/account-trigger";
 import { useRail } from "@/components/rail/rail-context";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
+import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,11 +26,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
 const FeedbackDialog = lazy(() =>
   import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
@@ -52,17 +40,12 @@ const BrowserAccountMenu = lazy(() =>
   })),
 );
 
-function userInitial(label: string): string {
-  return (label.trim()[0] ?? "U").toUpperCase();
-}
-
 export function RailFooter() {
   const rail = useRail();
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
   const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
-  const showAnalyticsPreferences = analyticsPreferencesAvailable(context.clientConfig.analytics);
   const displayName =
     context.authSession?.user.name ??
     context.authSession?.user.email ??
@@ -70,6 +53,11 @@ export function RailFooter() {
     context.accessContext.subjectId;
   const secondary = context.authSession?.user.email ?? context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const canSendFeedback = hasWorkspacePermission(
+    context.accessContext,
+    rail.workspaceId,
+    "sessions:create",
+  );
   const newOrganization = useNewOrganizationMenuItem();
   const organizationInvitations = useOrganizationInvitations({
     client: context.client,
@@ -84,10 +72,11 @@ export function RailFooter() {
     },
     onAccepted: context.revalidatePrincipalAccess,
   });
+  const onSendFeedback = canSendFeedback ? () => setFeedbackOpen(true) : undefined;
 
   return (
     <div className="mt-auto p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-      {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
+      {canSendFeedback ? (
         <Suspense fallback={null}>
           <FeedbackDialog
             key={rail.workspaceId}
@@ -109,56 +98,34 @@ export function RailFooter() {
                 <AccountTrigger
                   collapsed={rail.collapsed}
                   displayName={displayName}
-                  secondary={secondary}
                   image={image}
+                  aria-label="Loading account menu"
+                  disabled
                 />
               }
             >
-              <BrowserAccountMenu />
+              <BrowserAccountMenu onSendFeedback={onSendFeedback} />
             </Suspense>
           </div>
         ) : (
           <div className={rail.collapsed ? undefined : "min-w-0 flex-1"}>
-            {!rail.collapsed ? (
-              <OrganizationInvitationRailNotice controller={organizationInvitations} />
-            ) : null}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
+                <AccountTrigger
+                  collapsed={rail.collapsed}
+                  displayName={displayName}
+                  image={image}
+                  pendingCount={organizationInvitations.pendingCount}
                   aria-label={accountMenuAriaLabel({
                     displayName,
                     pendingCount: organizationInvitations.pendingCount,
                   })}
-                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
-                >
-                  <span className="relative shrink-0">
-                    <Avatar size="sm">
-                      {image ? <AvatarImage src={image} alt="" /> : null}
-                      <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-                        {userInitial(displayName)}
-                      </AvatarFallback>
-                    </Avatar>
-                    <OrganizationInvitationCountBadge
-                      pendingCount={organizationInvitations.pendingCount}
-                    />
-                  </span>
-                  {!rail.collapsed ? (
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-normal text-fg">
-                        {displayName}
-                      </span>
-                      {secondary && secondary !== displayName ? (
-                        <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
-                      ) : null}
-                    </span>
-                  ) : null}
-                </button>
+                />
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="start"
                 side={rail.collapsed ? "right" : "top"}
-                className="w-[min(18rem,calc(100vw-1rem))]"
+                className="w-[min(16rem,calc(100vw-1rem))]"
               >
                 <DropdownMenuLabel className="grid gap-0.5 pb-1.5">
                   <span className="truncate text-sm text-fg">{displayName}</span>
@@ -171,25 +138,15 @@ export function RailFooter() {
                   <OrganizationInvitationsMenuItem controller={organizationInvitations} />
                 ) : null}
                 {newOrganization.item}
-                <AppearanceMenu />
-                {managed ? (
-                  <DropdownMenuItem asChild>
-                    <Link to="/settings/security">
-                      <LockIcon className="size-4" />
-                      Personal settings
-                    </Link>
-                  </DropdownMenuItem>
+                {(managed && organizationInvitations.pendingCount > 0) || newOrganization.item ? (
+                  <DropdownMenuSeparator />
                 ) : null}
-                {showAnalyticsPreferences ? (
-                  <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
-                    <ChartColumnIcon className="size-4" />
-                    Analytics preferences
-                  </DropdownMenuItem>
-                ) : null}
+                <AppearanceSubmenu />
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
-                  leadingSeparator={managed || showAnalyticsPreferences}
+                  onSendFeedback={onSendFeedback}
                 />
+                <DropdownMenuSeparator />
                 {managed ? (
                   <DropdownMenuItem
                     variant="destructive"
@@ -201,7 +158,7 @@ export function RailFooter() {
                         );
                     }}
                   >
-                    <LogOutIcon className="size-4" />
+                    <LogOutIcon />
                     Sign out
                   </DropdownMenuItem>
                 ) : context.keyAuthRequired ? (
@@ -209,12 +166,12 @@ export function RailFooter() {
                     variant="destructive"
                     onSelect={() => context.forgetAccessKey()}
                   >
-                    <LockIcon className="size-4" />
+                    <LockIcon />
                     Clear access key
                   </DropdownMenuItem>
                 ) : (
                   <DropdownMenuItem disabled>
-                    <UserIcon className="size-4" />
+                    <UserIcon />
                     {context.accessContext.mode} access
                   </DropdownMenuItem>
                 )}
@@ -224,83 +181,11 @@ export function RailFooter() {
         )}
 
         <WorkspaceNav compact />
-        {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
-                aria-label="Send feedback"
-                onClick={() => setFeedbackOpen(true)}
-              >
-                <FeedbackIcon className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side={rail.collapsed ? "right" : "top"}>Send feedback</TooltipContent>
-          </Tooltip>
-        ) : null}
-
-        {!rail.isMobile ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-                onClick={rail.toggleCollapsed}
-                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
-              >
-                {rail.collapsed ? (
-                  <ChevronsRightIcon className="size-4" />
-                ) : (
-                  <ChevronsLeftIcon className="size-4" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            </TooltipContent>
-          </Tooltip>
-        ) : null}
       </div>
       {managed && !browserAccounts ? (
         <OrganizationInvitationsDialog controller={organizationInvitations} />
       ) : null}
       {newOrganization.dialog}
     </div>
-  );
-}
-
-function AccountTrigger(props: {
-  collapsed: boolean;
-  displayName: string;
-  secondary: string;
-  image: string | undefined;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label="Loading account menu"
-      disabled
-      className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left"
-    >
-      <Avatar size="sm">
-        {props.image ? <AvatarImage src={props.image} alt="" /> : null}
-        <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-          {userInitial(props.displayName)}
-        </AvatarFallback>
-      </Avatar>
-      {!props.collapsed ? (
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-normal text-fg">{props.displayName}</span>
-          {props.secondary !== props.displayName ? (
-            <span className="block truncate text-2xs text-fg-subtle">{props.secondary}</span>
-          ) : null}
-        </span>
-      ) : null}
-    </button>
   );
 }

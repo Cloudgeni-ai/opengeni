@@ -226,6 +226,21 @@ opacity-muted text.
   2 more", the empty note) is `fg-muted` or `fg-subtle`. The open session row is a selected row:
   `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is the `hover` wash. The
   settings rail follows the same rule, with its group labels in `fg-muted`.
+- Rail top and footer: the top row is the mark and wordmark with the collapse toggle (a ghost
+  icon button, chevrons) at its right end; collapsed, the toggle sits under the mark. The footer is
+  one row: the account button (16px avatar-sm plus the name in 14/400 `fg-label`, one target, a
+  10px `status-waiting` dot on the avatar while organization invitations are pending) and a
+  Settings gear (cog icon, tooltip "Settings", one click to the current workspace's settings).
+  Collapsed, the avatar and the gear stack. The rail footer holds nothing else: no feedback, help
+  or collapse buttons.
+- Account menu (opens up from the footer, 16rem): name and email header; Invitations with a count
+  only while some are pending; New organization only for people who can create one; then
+  Appearance (a submenu: Light, Dark, System, the chosen one checked) and Help & feedback (a
+  submenu: Documentation when the deployment publishes a link, Send feedback when the person may
+  send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
+  settings or Privacy preferences: both live in Settings > Your account (Privacy preferences only
+  where analytics consent is configured). Deployments with browser accounts keep the same footer
+  and put their account list and "Add another account" first in the same menu.
 - Every page works at 390px wide with no horizontal scroll and 44px touch targets on coarse
   pointers.
 

@@ -2,6 +2,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { ShieldCheckIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { PrivacyPreferencesSection } from "./privacy-preferences";
 import { SettingsShell, settingsHomeLink } from "./settings-sidebar";
 import { parseReturnTo, returnToOf, returnToSearch } from "@/lib/return-to";
 
@@ -50,6 +51,7 @@ export function PersonalSettingsShell({ email, children }: { email: string; chil
       page={null}
     >
       {children}
+      <PrivacyPreferencesSection />
     </SettingsShell>
   );
 }

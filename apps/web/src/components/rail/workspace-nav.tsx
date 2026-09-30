@@ -1,7 +1,7 @@
 // One predictable entry to the workspace management shell. Operational
 // destinations live in that shell as clearly marked workspace-page links.
 import { Link, useRouterState } from "@tanstack/react-router";
-import { SlidersHorizontalIcon } from "lucide-react";
+import { SettingsIcon } from "lucide-react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { isWorkspaceConfigPath } from "@/components/rail/workspace-nav-data";
@@ -59,7 +59,7 @@ export function WorkspaceNav({ compact = false }: { compact?: boolean }) {
                 active ? "opacity-100" : "opacity-0",
               )}
             />
-            <SlidersHorizontalIcon className="size-4 shrink-0" />
+            <SettingsIcon className="size-4 shrink-0" />
             {rail.collapsed || compact ? null : <span className="min-w-0 truncate">Settings</span>}
           </Link>
         </TooltipTrigger>

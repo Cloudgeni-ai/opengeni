@@ -1,47 +1,54 @@
-import { BookOpenIcon, ExternalLinkIcon } from "lucide-react";
+import { BookOpenIcon, CircleHelpIcon, ExternalLinkIcon, MessageSquareIcon } from "lucide-react";
 
 import {
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { documentationLinkFromClientConfig } from "@/lib/documentation-link";
 import type { ClientConfig } from "@/types";
 
 export type HelpMenuProps = {
   documentationUrl: ClientConfig["documentationUrl"];
-  itemClassName?: string;
-  /**
-   * Whether a separator must open the section. Callers pass false when the
-   * item before Help is already a separator (AppearanceMenu ends with one),
-   * so optional items between them never leave two separators back to back.
-   */
-  leadingSeparator: boolean;
+  /** Opens the feedback dialog; omit when the person can't send feedback. */
+  onSendFeedback?: (() => void) | undefined;
 };
 
 /**
- * The account menu's Help section. It renders nothing when the deployment
- * publishes no documentation link (see documentationLinkFromClientConfig).
- * Both account menus import it statically, so opening a menu never waits on
- * or fails with a separately fetched chunk. Neither menu is part of the
- * direct-session bundle graph.
+ * The account menu's "Help & feedback" row and its submenu: Documentation (when
+ * the deployment publishes a link, see documentationLinkFromClientConfig) and
+ * Send feedback (when the person may send it). It renders nothing when neither
+ * applies. Both account menus import it statically, so opening a menu never
+ * waits on or fails with a separately fetched chunk.
  */
-export function HelpMenu({ documentationUrl, itemClassName, leadingSeparator }: HelpMenuProps) {
+export function HelpMenu({ documentationUrl, onSendFeedback }: HelpMenuProps) {
   const href = documentationLinkFromClientConfig({ documentationUrl });
-  if (!href) return null;
+  if (!href && !onSendFeedback) return null;
   return (
-    <>
-      {leadingSeparator ? <DropdownMenuSeparator /> : null}
-      <DropdownMenuLabel>Help</DropdownMenuLabel>
-      <DropdownMenuItem asChild className={itemClassName}>
-        <a href={href} target="_blank" rel="noopener noreferrer">
-          <BookOpenIcon className="size-4" />
-          Documentation
-          <ExternalLinkIcon className="ml-auto size-3.5 text-fg-muted" aria-hidden="true" />
-          <span className="sr-only">(opens in a new tab)</span>
-        </a>
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-    </>
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <CircleHelpIcon />
+        Help &amp; feedback
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-52">
+        {href ? (
+          <DropdownMenuItem asChild>
+            <a href={href} target="_blank" rel="noopener noreferrer">
+              <BookOpenIcon />
+              Documentation
+              <ExternalLinkIcon className="ml-auto size-3.5 text-fg-muted" aria-hidden="true" />
+              <span className="sr-only">(opens in a new tab)</span>
+            </a>
+          </DropdownMenuItem>
+        ) : null}
+        {onSendFeedback ? (
+          <DropdownMenuItem onSelect={onSendFeedback}>
+            <MessageSquareIcon />
+            Send feedback
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   );
 }
