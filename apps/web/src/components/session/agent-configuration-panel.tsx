@@ -11,7 +11,7 @@ import {
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { PencilIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -82,6 +82,7 @@ export function AgentConfigurationPanel(props: {
   const [identity, setIdentity] = useState(config?.identity ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const scrollRegion = useRef<HTMLDivElement>(null);
 
   // Someone else's save (or a reload) while not editing shows the new truth.
   const configKey = JSON.stringify(config);
@@ -115,6 +116,7 @@ export function AgentConfigurationPanel(props: {
       setError(
         agentConfigErrorText(failure, "Couldn't save the agent settings. Nothing was changed."),
       );
+      scrollRegion.current?.scrollTo({ top: 0 });
       if (failure instanceof OpenGeniApiError && failure.status === 409) {
         await props.onReloadSession();
       }
@@ -127,7 +129,10 @@ export function AgentConfigurationPanel(props: {
     AGENT_STARTING_POINTS.find((option) => option.value === current.from)?.title ?? "";
 
   return (
-    <div className="flex h-full min-h-[28rem] w-full min-w-0 flex-col overflow-hidden">
+    <div
+      data-agent-panel
+      className="flex h-full min-h-[28rem] w-full min-w-0 flex-col overflow-hidden"
+    >
       <div className="flex min-w-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0">
           <h2 className="text-sm font-medium text-fg">{editing ? "Edit agent" : "Agent"}</h2>
@@ -156,6 +161,7 @@ export function AgentConfigurationPanel(props: {
         ) : null}
       </div>
       <div
+        ref={scrollRegion}
         // Focusable so keyboard users can scroll a long list.
         tabIndex={0}
         role="region"
@@ -165,6 +171,12 @@ export function AgentConfigurationPanel(props: {
         <div className="flex min-w-0 flex-col gap-6 px-4 py-4">
           {editing ? (
             <>
+              {error ? (
+                // First in the form, so it is seen right after pressing Save.
+                <Notice tone="failed" title="Not saved">
+                  {error}
+                </Notice>
+              ) : null}
               {!config ? (
                 <Notice tone="info">
                   Saving converts this session to agent settings, starting from what it can do now.
@@ -194,11 +206,6 @@ export function AgentConfigurationPanel(props: {
                   onChange={(event) => setIdentity(event.target.value)}
                 />
               </Field>
-              {error ? (
-                <Notice tone="failed" title="Not saved">
-                  {error}
-                </Notice>
-              ) : null}
             </>
           ) : (
             <>

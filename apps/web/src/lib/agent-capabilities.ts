@@ -227,7 +227,12 @@ export function capabilitySummary(
 ): string {
   const offered = AGENT_CAPABILITY_IDS.filter((id) => availability.isAvailable(id));
   const on = offered.filter((id) => capabilityOn(values, id)).length;
-  if (on === offered.length) return "All capabilities";
+  if (on === offered.length) {
+    // Say "available" when the server holds some back, so "all" stays true.
+    return offered.length === AGENT_CAPABILITY_IDS.length
+      ? "All capabilities"
+      : `All ${offered.length} available capabilities`;
+  }
   if (on === 0) return "No capabilities";
   return `${on} of ${offered.length} capabilities`;
 }

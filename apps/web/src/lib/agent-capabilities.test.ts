@@ -73,7 +73,7 @@ describe("drafts and requests", () => {
     const draft = withCapability(draftFromRequest("none"), "webSearch", true);
     expect(requestFromDraft(draft, availability)).toBe("none");
     expect(capabilitySummary(draftFromRequest("all").values, availability)).toBe(
-      "All capabilities",
+      "All 12 available capabilities",
     );
   });
 

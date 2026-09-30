@@ -329,6 +329,13 @@ const SCENARIOS: Scenario[] = [
     steps: (page) => openComposerCapabilities(page),
   },
 
+  {
+    name: "composer-viewer",
+    user: "aiko",
+    path: (ids) => `/workspaces/${ids.support}/sessions`,
+    steps: (page) => openComposerCapabilities(page),
+  },
+
   // 3. Session dock > Agent
   {
     name: "session-agent-all",
@@ -437,6 +444,14 @@ const SCENARIOS: Scenario[] = [
     steps: (page) => openDockTab(page, "Agent"),
   },
 
+  {
+    name: "session-agent-deployment-disabled",
+    path: (ids) =>
+      `/workspaces/${ids.support}/sessions/${ids.sessions["Everything the workspace offers"]}`,
+    intercept: (context) => unavailableCapabilities(context, ["webSearch", "browser"]),
+    steps: (page) => openDockTab(page, "Agent"),
+  },
+
   // 4. Model-context inspector: instruction sections
   {
     name: "inspector-instruction-sections",
@@ -466,6 +481,16 @@ const SCENARIOS: Scenario[] = [
       await settle(page, 600);
       await page.locator('[data-instruction-section="operational_contract:knowledge"]').click();
       await settle(page, 900);
+    },
+  },
+
+  {
+    name: "inspector-no-capture",
+    path: (ids) => `/workspaces/${ids.legacyChild.workspace}/sessions/${ids.legacyChild.session}`,
+    steps: async (page) => {
+      await openDockTab(page, "Debug");
+      await page.getByRole("tab", { name: "Context" }).first().click();
+      await settle(page, 1500);
     },
   },
 
@@ -510,6 +535,25 @@ const SCENARIOS: Scenario[] = [
         .getByRole("button", { name: /What the agent can do/ })
         .first()
         .click();
+      await settle(page);
+      await page
+        .getByRole("button", { name: /What the agent can do/ })
+        .first()
+        .scrollIntoViewIfNeeded();
+    },
+  },
+
+  {
+    name: "schedule-deployment-disabled",
+    path: (ids) => `/workspaces/${ids.support}/schedules/new`,
+    intercept: (context) => unavailableCapabilities(context, ["webSearch", "media"]),
+    steps: async (page) => {
+      await page
+        .getByRole("button", { name: /What the agent can do/ })
+        .first()
+        .click();
+      await settle(page);
+      await page.getByRole("radio", { name: "Choose for this schedule" }).first().click();
       await settle(page);
       await page
         .getByRole("button", { name: /What the agent can do/ })
@@ -566,6 +610,7 @@ const browser = await chromium.launch();
 const ids = await resolveIds(browser);
 mkdirSync(OUT, { recursive: true });
 const axeResults: Record<string, unknown[]> = {};
+const layoutResults: Record<string, unknown> = {};
 const failures: string[] = [];
 const CONCURRENCY = Number(option("--concurrency") ?? 4);
 type Job = { scenario: Scenario; width: number; height: number; theme: "light" | "dark" };
@@ -609,6 +654,42 @@ async function runJob({ scenario, width, height, theme }: Job) {
     if (scenario.scrollEnd) await scrollMainToEnd(page);
     await page.screenshot({ path: file });
     if (theme === "light") {
+      // Responsive checks: no horizontal scroll, and 44px touch targets on
+      // phones and tablets inside the agent-settings surfaces.
+      const layout = await page.evaluate((coarse) => {
+        const overflow =
+          document.documentElement.scrollWidth > window.innerWidth + 1
+            ? document.documentElement.scrollWidth - window.innerWidth
+            : 0;
+        const scopes = document.querySelectorAll(
+          '[data-slot="agent-capability-picker"], [data-slot="agent-capability-summary"], [data-agent-panel], [role="menu"]',
+        );
+        const small: string[] = [];
+        if (coarse) {
+          for (const scope of scopes) {
+            for (const element of scope.querySelectorAll<HTMLElement>(
+              'button, a[href], input, [role="menuitem"], [role="menuitemcheckbox"], [role="radio"]',
+            )) {
+              const box = element.getBoundingClientRect();
+              if (box.width === 0 || box.height === 0) continue;
+              // Checkboxes and switches rely on their labelled row or an enlarged hit area.
+              const target = element.closest("label") ?? element;
+              const hit = target.getBoundingClientRect();
+              const after = getComputedStyle(element, "::after");
+              const enlarged = after.content !== "none" && after.position === "absolute";
+              if (!enlarged && (hit.height < 43.5 || hit.width < 43.5)) {
+                small.push(
+                  `${element.tagName.toLowerCase()} "${(element.getAttribute("aria-label") ?? element.textContent ?? "").trim().slice(0, 40)}" ${Math.round(hit.width)}x${Math.round(hit.height)}`,
+                );
+              }
+            }
+          }
+        }
+        return { overflow, small: [...new Set(small)].slice(0, 12) };
+      }, width < 1024);
+      if (layout.overflow || layout.small.length) {
+        layoutResults[`${scenario.name}@${width}`] = layout;
+      }
       // With a menu or dialog open, Radix hides the page behind it from
       // assistive tech; check what is actually reachable.
       const overlay = (await page.locator('[role="menu"], [role="dialog"]').count()) > 0;
@@ -653,6 +734,13 @@ for (const key of Object.keys(previousAxe)) {
   if (ONLY?.includes(key.split("@")[0]!)) delete previousAxe[key];
 }
 writeFileSync(axePath, `${JSON.stringify({ ...previousAxe, ...axeResults }, null, 2)}\n`);
+const layoutPath = resolve(OUT, "layout.json");
+const previousLayout: Record<string, unknown> =
+  ONLY && existsSync(layoutPath) ? JSON.parse(readFileSync(layoutPath, "utf8")) : {};
+for (const key of Object.keys(previousLayout)) {
+  if (ONLY?.includes(key.split("@")[0]!)) delete previousLayout[key];
+}
+writeFileSync(layoutPath, `${JSON.stringify({ ...previousLayout, ...layoutResults }, null, 2)}\n`);
 const failuresPath = resolve(OUT, "failures.txt");
 const previousFailures =
   ONLY && existsSync(failuresPath)
