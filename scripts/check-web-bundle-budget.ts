@@ -450,7 +450,11 @@ const budgets = {
   // measures 36,831 gzip bytes and the merged rebuild 42,744 (Bun 1.4
   // Linux/x64). The DEV-only UI kit has its own stylesheet and is excluded
   // from this scan, so only product utilities remain.
-  cssGzip: wholeKibEnvelope(42_744),
+  // The neutral retheme (settings cards, menu anatomy, hover and glow tokens,
+  // resource-page frame) adds its utilities: main 6f4be148e measures 43,000
+  // gzip bytes and the merged retheme 44,100 (Bun 1.4 Linux/x64). Keep the
+  // next whole-KiB envelope; every other cap remains fixed.
+  cssGzip: wholeKibEnvelope(44_100),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
