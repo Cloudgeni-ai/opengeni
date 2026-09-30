@@ -239,13 +239,23 @@ export function useSettingsRail(input: {
   function openWorkspace(nextWorkspaceId: string) {
     context.resetSessionView();
     switch (location.kind) {
-      case "settings":
+      case "settings": {
+        // A Personal workspace has no API keys or Developer page; land on General.
+        const nextPersonal = isPersonalWorkspace(
+          context.workspaces.find((candidate) => candidate.id === nextWorkspaceId) ?? null,
+          context.managedSelfContext,
+        );
+        const section =
+          nextPersonal && (location.section === "api-keys" || location.section === "developer")
+            ? "general"
+            : location.section;
         void navigate({
           to: "/workspaces/$workspaceId/settings",
           params: { workspaceId: nextWorkspaceId },
-          search: location.section ? { section: location.section } : {},
+          search: section ? { section } : {},
         });
         return;
+      }
       case "page":
         void navigate({ to: location.target, params: { workspaceId: nextWorkspaceId } });
         return;
@@ -379,8 +389,9 @@ export function useSettingsRail(input: {
     sections.push({
       id: "organization",
       label: "Organization",
-      // Without a picker (a workspace managed without access), the header names it.
-      ...(picker ? {} : { meta: organizationName }),
+      // Without a picker (a workspace managed without access), or without a
+      // workspace to open its pages through, the header names it.
+      ...(picker && anchor ? {} : { meta: organizationName }),
       // Two groups set apart by space: the organization and its people, then
       // what it provides, pays for and protects. A short list (a member's two
       // pages) stays one group rather than two lone rows.

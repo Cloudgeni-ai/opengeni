@@ -63,6 +63,10 @@ export function DefaultSandboxEnvironmentRow({ workspaceId }: { workspaceId: str
           options={[
             { value: NONE, label: "None" },
             ...choices.map((rig) => ({ value: rig.id, label: rig.name })),
+            // A default that was deleted or made personal still shows as the value.
+            ...(current && !rigs.loading && !choices.some((rig) => rig.id === current)
+              ? [{ value: current, label: "Unavailable environment" }]
+              : []),
           ]}
           value={current ?? NONE}
           loading={rigs.loading}
