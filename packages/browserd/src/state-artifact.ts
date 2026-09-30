@@ -362,6 +362,10 @@ async function* walkProfile(
   const entries = await readdir(directory, { withFileTypes: true });
   entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
   for (const entry of entries) {
+    // macOS app shims leave a version link at the profile root. It describes
+    // the running Chrome installation, not portable browser state.
+    if (relativeDirectory === "" && entry.name === "RunningChromeVersion" && entry.isSymbolicLink())
+      continue;
     if (excluded(relativeDirectory, entry.name, entry.isDirectory())) continue;
     const relativePath = relativeDirectory ? posix.join(relativeDirectory, entry.name) : entry.name;
     assertArchivePath(relativePath);
