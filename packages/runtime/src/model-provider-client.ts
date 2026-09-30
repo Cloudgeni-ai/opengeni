@@ -289,7 +289,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   if (scopedCredentialProvider && !provider.apiKey) {
     if (provider.api === "anthropic-messages")
       throw new Error(
-        "Claude is not connected. Ask an organization administrator to connect it in Models.",
+        "Claude is not connected. Ask someone who manages this connection to connect it in Models.",
       );
     if (provider.kind === "openrouter-organization") {
       throw new OrganizationOpenRouterUnavailableError();
