@@ -4257,6 +4257,33 @@ export type AccessGrant = {
   serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;
 };
 
+/**
+ * Authority of a directly used organization or workspace API key, separate
+ * from the caller's account and workspace grants. Full organization keys can
+ * provision shared workspaces, external members, and sessions through `asUser`;
+ * those user requests additionally need the user's live membership.
+ * Organization-key scope excludes Personal workspaces. Neither key kind bypasses
+ * session visibility or the explicit `secrets:read` permission requirement.
+ */
+export type AccessCredential = {
+  kind: "organization_api_key" | "workspace_api_key";
+  /** Organization keys only; omitted for workspace keys. */
+  access?: OrganizationApiKeyAccess | undefined;
+  /** The key's organization id. */
+  accountId: string;
+  /** Null for an organization key: all shared workspaces in that organization, never Personal. */
+  workspaceId: string | null;
+  /**
+   * Workspace permissions after `workspace:admin` expansion. Excludes
+   * account-only permissions and includes `secrets:read` only when explicitly
+   * granted. Full organization keys include `sessions:create` and `members:manage`.
+   */
+  effectiveWorkspacePermissions: Permission[];
+  /** Plain-language explanation of the key's scope and limits. */
+  note: string;
+};
+
+/** Caller identity, grants, defaults, and optional direct API-key authority. */
 export type AccessContext = {
   mode: ProductAccessMode;
   subjectId: string;
@@ -4265,6 +4292,15 @@ export type AccessContext = {
   workspaceGrants: AccessGrant[];
   defaultAccountId: string | null;
   defaultWorkspaceId: string | null;
+  /**
+   * Direct API-key authority; omitted for `asUser`/external actors, humans,
+   * delegated tokens, other caller contexts, and older servers. Existing grants
+   * are unchanged. Full organization keys can provision shared workspaces,
+   * external members, and `asUser` sessions; user requests still need live
+   * membership. Organization-key scope excludes Personal workspaces. Neither key
+   * kind bypasses session visibility or the explicit `secrets:read` requirement.
+   */
+  credential?: AccessCredential | undefined;
 };
 
 export type ManagedOrganizationMembership = {
@@ -4874,8 +4910,11 @@ export type UpdateWorkspaceRequest = {
 
 /**
  * Organization API key access tier, derived by the server from the key's
- * permissions: `full` administers the organization, `read` only inventories
- * shared workspaces and reads their sessions, events, and files.
+ * permissions: `full` can provision shared workspaces, external members, and
+ * `asUser` sessions (user requests additionally need live membership);
+ * `read` only inventories shared workspaces and reads their sessions, events,
+ * and files. Organization-key scope excludes Personal workspaces and bypasses neither
+ * session visibility nor the explicit `secrets:read` permission requirement.
  */
 export type OrganizationApiKeyAccess = "full" | "read";
 

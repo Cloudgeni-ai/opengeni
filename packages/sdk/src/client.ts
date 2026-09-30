@@ -4909,7 +4909,17 @@ export class OpenGeniClient {
     );
   }
 
-  /** The caller's access context: subject, account + workspace grants, defaults. */
+  /**
+   * The caller's subject, grants, defaults, and optional direct API-key authority.
+   * `credential.effectiveWorkspacePermissions` expands workspace admin without
+   * changing existing grants or including account-only permissions. Full
+   * organization keys can provision shared workspaces, external members, and
+   * `asUser` sessions; user requests additionally need live membership.
+   * Organization-key scope excludes Personal workspaces. Neither key kind bypasses
+   * session visibility or the explicit `secrets:read` permission requirement. Credential
+   * metadata is omitted for `asUser`/external actors, humans, delegated tokens,
+   * other caller contexts, and older servers.
+   */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
   }

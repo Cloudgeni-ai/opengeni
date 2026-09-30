@@ -7468,6 +7468,7 @@
         "$": "object",
         "$.accountGrants": "array!",
         "$.accountGrants[]": "ref(AccountGrant)",
+        "$.credential": "ref(AccessCredential)?",
         "$.defaultAccountId": "string! null",
         "$.defaultWorkspaceId": "string! null",
         "$.mode": "ref(ProductAccessMode)!",
@@ -7475,6 +7476,21 @@
         "$.subjectLabel": "string?",
         "$.workspaceGrants": "array!",
         "$.workspaceGrants[]": "ref(AccessGrant)"
+      }
+    },
+    "AccessCredential": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.access": "ref(OrganizationApiKeyAccess)?",
+        "$.accountId": "string!",
+        "$.effectiveWorkspacePermissions": "array!",
+        "$.effectiveWorkspacePermissions[]": "ref(Permission)",
+        "$.kind": "enum!=[\"\\\"organization_api_key\\\"\",\"\\\"workspace_api_key\\\"\"]",
+        "$.note": "string!",
+        "$.workspaceId": "string! null"
       }
     },
     "AccessGrant": {
@@ -23491,6 +23507,7 @@
     "@opengeni/sdk": {
       "AcceptOrganizationRecoveryCustodyRequest": "type",
       "AccessContext": "type",
+      "AccessCredential": "type",
       "AccessGrant": "type",
       "AccountGrant": "type",
       "AccountRole": "type",
