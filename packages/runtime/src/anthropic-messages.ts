@@ -233,12 +233,22 @@ export function buildAnthropicRequest(
       description: handoff.toolDescription,
       input_schema: structuredClone(handoff.inputJsonSchema),
     });
-  // Three ordered breakpoints: stable tools, stable instructions, growing conversation.
+  // Up to four breakpoints: tools, instructions, previous request, current history.
   // No TTL mixing, no global scope, and no marker on signed thinking blocks.
   if (provider.anthropic?.cacheTtl !== "off") {
     const cache = { type: "ephemeral", ttl: provider.anthropic?.cacheTtl ?? "5m" };
     if (tools.length) tools.at(-1)!.cache_control = { ...cache };
     if (system.length) system.at(-1)!.cache_control = { ...cache };
+    // Anthropic searches only a bounded number of blocks before a breakpoint.
+    // A large parallel tool batch can move the old request prefix outside that
+    // window; explicitly retain its boundary before the latest assistant reply.
+    const lastAssistant = messages.findLastIndex((message) => message.role === "assistant");
+    const previous = messages
+      .slice(0, Math.max(0, lastAssistant))
+      .flatMap((message) => message.content)
+      .reverse()
+      .find((block) => !["thinking", "redacted_thinking"].includes(block.type));
+    if (previous) previous.cache_control = { ...cache };
     const last = [...messages.at(-1)!.content]
       .reverse()
       .find((block) => !["thinking", "redacted_thinking"].includes(block.type));
@@ -294,7 +304,16 @@ function normalizeUsage(raw: Json): Usage {
     inputTokens: input,
     outputTokens: output,
     totalTokens: input + output,
-    inputTokensDetails: { cached_tokens: cached, cache_write_tokens: written },
+    inputTokensDetails: {
+      cached_tokens: cached,
+      cache_write_tokens: written,
+      ...(raw.cache_creation?.ephemeral_5m_input_tokens === undefined
+        ? {}
+        : { cache_write_tokens_5m: count(raw.cache_creation.ephemeral_5m_input_tokens) }),
+      ...(raw.cache_creation?.ephemeral_1h_input_tokens === undefined
+        ? {}
+        : { cache_write_tokens_1h: count(raw.cache_creation.ephemeral_1h_input_tokens) }),
+    },
     outputTokensDetails: { reasoning_tokens: count(raw.output_tokens_details?.thinking_tokens) },
   });
 }

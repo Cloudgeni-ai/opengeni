@@ -110,6 +110,83 @@ const collect = async (model: AnthropicMessagesModel, req = request()) => {
   return result;
 };
 
+test("large tool batches retain the previous cache prefix with at most four markers", () => {
+  const calls = Array.from({ length: 25 }, (_, index) => ({
+    type: "function_call" as const,
+    callId: `call_${index}`,
+    name: "lookup",
+    arguments: "{}",
+  }));
+  const req = request([
+    { role: "user", content: "Initial conversation prefix" },
+    ...calls,
+    ...calls.map((call) => ({
+      type: "function_call_result" as const,
+      callId: call.callId,
+      name: call.name,
+      output: "Result",
+    })),
+  ]);
+  req.tools = [
+    {
+      type: "function",
+      name: "lookup",
+      description: "Lookup",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ];
+  const before = JSON.stringify(req);
+  for (const ttl of ["5m", "1h"] as const) {
+    const body = buildAnthropicRequest(
+      req,
+      "claude-opus-5-5",
+      {
+        anthropic: {
+          auth: "api-key",
+          cacheTtl: ttl,
+          maxOutputTokens: 32000,
+          streamIdleTimeoutMs: 600000,
+        },
+      },
+      true,
+    );
+    const history = body.messages.flatMap((message: any) => message.content);
+    expect(history.length).toBeGreaterThan(40);
+    expect(history[0].cache_control).toEqual({ type: "ephemeral", ttl });
+    expect(history.at(-1).cache_control).toEqual({ type: "ephemeral", ttl });
+    const marked = [...body.tools, ...body.system, ...history].filter(
+      (block: any) => block.cache_control,
+    );
+    expect(marked).toHaveLength(4);
+    expect(
+      marked.every((block: any) => !["thinking", "redacted_thinking"].includes(block.type)),
+    ).toBe(true);
+  }
+  expect(JSON.stringify(req)).toBe(before);
+});
+
+test("streamed cache creation TTL details survive SDK usage without double counting", async () => {
+  const frames = events([{ type: "text", text: "Done" }]);
+  (frames[0] as any).message.usage.cache_creation = {
+    ephemeral_5m_input_tokens: 10,
+    ephemeral_1h_input_tokens: 20,
+  };
+  const model = new AnthropicMessagesModel(provider, "claude", (async () =>
+    stream(frames)) as typeof fetch);
+  const result: any = (await collect(model)).at(-1);
+  expect(result.response.usage.inputTokens).toBe(132);
+  expect(result.response.usage.inputTokensDetails[0]).toEqual({
+    cached_tokens: 100,
+    cache_write_tokens: 30,
+    cache_write_tokens_5m: 10,
+    cache_write_tokens_1h: 20,
+  });
+  const combined = new (await import("@openai/agents")).Usage();
+  combined.add(result.response.usage);
+  expect(combined.inputTokensDetails[0]).toEqual(result.response.usage.inputTokensDetails[0]);
+});
+
 describe("Claude full-history Messages adapter", () => {
   test("stable tool/system prefixes, three cache breakpoints, no thread references or mutation", () => {
     const req = request();

@@ -1088,7 +1088,7 @@ export function ReplaceKeyDialog({
       leading={<ProviderTile provider={config.provider} />}
       title={`Replace the ${config.title} ${config.credentialLabelText === "Setup token" ? "token" : "key"}`}
       description="New work uses the new credential right away. Work already running finishes on the old one."
-      submitLabel="Replace credential"
+      submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
       pendingLabel="Saving…"
       submitDisabled={!key.trim() || !claude.valid}
       onSubmit={async () => await state.saveKey(key, claude.identity)}
@@ -1187,10 +1187,16 @@ export function ProviderConnectionPage({
       leading={<ProviderTile provider={config.provider} />}
       title={config.title}
       chips={
-        status.status === "loading" || status.status === "connected" ? null : (
+        status.status === "loading" ? null : (
           <StatusBadge
             variant="outline"
-            status={status.status === "unavailable" ? "unavailable" : "off"}
+            status={
+              status.status === "connected"
+                ? "connected"
+                : status.status === "unavailable"
+                  ? "unavailable"
+                  : "off"
+            }
           >
             {status.label}
           </StatusBadge>
@@ -1210,7 +1216,7 @@ export function ProviderConnectionPage({
                 }
                 disabled={state.busy}
               >
-                {config.provider === "claude_subscription" ? "Replace token" : "Replace API key"}
+                {config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
                 <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>

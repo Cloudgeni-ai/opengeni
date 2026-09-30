@@ -1281,9 +1281,19 @@ ordinary function tools and OpenGeni's text compaction remain available.
 Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
 (`5m`, `1h`, or `off`), `maxOutputTokens`, and `streamIdleTimeoutMs`. API keys use
 `x-api-key`; subscription tokens use Bearer authentication and the OAuth beta.
-Cache breakpoints cover the final tool, system block and eligible history block,
-without mutating stored history. Usage includes fresh input, cache reads, cache
-writes and output. Organization connections use conservative 200k context / 168k
+Up to four cache breakpoints cover tools, instructions, the prefix before the
+latest assistant reply, and current history. The previous prefix remains directly
+addressable when a large tool batch exceeds the server's 20-block lookback.
+Signed thinking is never marked; canonical history is unchanged. One TTL applies
+to every marker: mixed TTLs and `scope: global` are not implemented. This is not
+a guarantee of a hit: prefix changes, expiration and minimum cache sizes still apply.
+Usage includes fresh input, cache reads, cache writes and output. Per-response SDK
+usage preserves reported 5-minute and 1-hour creation counts separately; downstream
+durable telemetry and UI currently show aggregate writes. Registry pricing has one
+cache-write rate, which must match its configured TTL (do not use a 5-minute write
+price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
+billing; OpenGeni does not debit these tokens as credits.
+Organization connections use conservative 200k context / 168k
 input / 150k compaction limits and 32k maximum output; configurable registry
 providers can declare model-specific limits. The managed connection catalog enables
 reasoning only for the captured adaptive models `claude-opus-5-5` and
