@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0542_organization_usage_personal_workspaces.sql",
+          (migration) => migration.path === "0543_organization_usage_personal_workspaces.sql",
         )
-          ? "0542_organization_usage_personal_workspaces.sql"
+          ? "0543_organization_usage_personal_workspaces.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0541_usage_event_workspace_lock_order.sql",
               )
@@ -364,7 +364,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0541_usage_event_workspace_lock_order.sql",
     );
     const organizationUsagePersonalWorkspaces = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0542_organization_usage_personal_workspaces.sql",
+      (migration) => migration.path === "0543_organization_usage_personal_workspaces.sql",
     );
     const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0540_external_workspace_member_permission_updates.sql",
@@ -1032,7 +1032,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0541_usage_event_workspace_lock_order.sql" }
         : {}),
       ...(organizationUsagePersonalWorkspaces
-        ? { latestMigration: "0542_organization_usage_personal_workspaces.sql" }
+        ? { latestMigration: "0543_organization_usage_personal_workspaces.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -1067,7 +1067,7 @@ describe("release schema contract", () => {
             "0539_scheduled_admission_refusals.sql",
             "0540_external_workspace_member_permission_updates.sql",
             "0541_usage_event_workspace_lock_order.sql",
-            "0542_organization_usage_personal_workspaces.sql",
+            "0543_organization_usage_personal_workspaces.sql",
           ].includes(migration.path),
       ),
     };
@@ -2550,7 +2550,7 @@ describe("release schema contract", () => {
       "0539_scheduled_admission_refusals.sql",
       "0540_external_workspace_member_permission_updates.sql",
       "0541_usage_event_workspace_lock_order.sql",
-      "0542_organization_usage_personal_workspaces.sql",
+      "0543_organization_usage_personal_workspaces.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3085,7 +3085,7 @@ describe("release schema contract", () => {
       "0539_scheduled_admission_refusals.sql",
       "0540_external_workspace_member_permission_updates.sql",
       "0541_usage_event_workspace_lock_order.sql",
-      "0542_organization_usage_personal_workspaces.sql",
+      "0543_organization_usage_personal_workspaces.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -967,7 +967,7 @@ no Personal workspace is shared.
 
 Organization usage (`GET /v1/billing/usage-summary`, Organization settings >
 Billing & usage) is the one place billing readers see Personal workspaces, and
-only as amounts. Period totals always counted Personal usage; migration 0542
+only as amounts. Period totals always counted Personal usage; migration 0543
 adds `personalWorkspaces`: one row per member whose Personal workspace had
 visible usage in the period, keyed by that member's organization membership
 id, carrying the same metric totals as a shared workspace row. The rows never
