@@ -193,8 +193,8 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
       true,
     );
     const names = async () =>
-      (await agent.getAllTools({} as never)).map((tool) =>
-        tool.type === "function" ? tool.name : tool.providerData?.type,
+      (await agent.getAllTools({} as never)).map((entry) =>
+        entry.type === "function" ? entry.name : entry.providerData?.type,
       );
     expect(await names()).toEqual(["request_human_input"]);
     agent.tools.push(firstPartyTool("generate_video", "Deferred video"));
@@ -217,7 +217,7 @@ test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
     );
     expect(
       (await restored.getAllTools({} as never)).some(
-        (tool) => tool.type === "function" && tool.name === "tool_list",
+        (entry) => entry.type === "function" && entry.name === "tool_list",
       ),
     ).toBe(true);
   },
@@ -236,8 +236,8 @@ test("configured router does not expose an empty deferred server", async () => {
     true,
   );
   expect(
-    (await agent.getAllTools({} as never)).map((tool) =>
-      tool.type === "function" ? tool.name : tool.providerData?.type,
+    (await agent.getAllTools({} as never)).map((entry) =>
+      entry.type === "function" ? entry.name : entry.providerData?.type,
     ),
   ).toEqual(["request_human_input"]);
 });
