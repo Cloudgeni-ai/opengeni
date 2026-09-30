@@ -34,13 +34,3 @@ export function PrivateSessionIndicator() {
     </TooltipProvider>
   );
 }
-
-/** One quiet line on the new-chat page of a Personal workspace. */
-export function PrivateWorkspaceNote() {
-  return (
-    <p className="mt-3 flex items-center gap-1.5 px-0.5 text-xs text-fg-muted">
-      <LockIcon aria-hidden="true" className="size-3.5 shrink-0" />
-      Private: only you can see chats here.
-    </p>
-  );
-}

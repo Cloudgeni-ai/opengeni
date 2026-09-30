@@ -8,7 +8,7 @@ GlobalRegistrator.register();
   true;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
-const { PrivateSessionIndicator, PrivateWorkspaceNote, PRIVATE_SESSION_EXPLANATION } =
+const { PrivateSessionIndicator, PRIVATE_SESSION_EXPLANATION } =
   await import("./private-session-indicator");
 
 afterAll(() => GlobalRegistrator.unregister());
@@ -35,12 +35,6 @@ test("the header mark says Private and explains who can and can't see the chat",
   expect(PRIVATE_SESSION_EXPLANATION).toContain("usage amounts");
 });
 
-test("the new-chat note is one quiet line", async () => {
-  await act(async () => root.render(<PrivateWorkspaceNote />));
-  expect(container.textContent).toBe("Private: only you can see chats here.");
-  expect(container.querySelectorAll("p")).toHaveLength(1);
-});
-
 test("the header and new-chat page show them only in a Personal workspace", () => {
   const rail = readFileSync(new URL("../rail/rail-shell.tsx", import.meta.url), "utf8");
   expect(rail).toMatch(
@@ -48,4 +42,5 @@ test("the header and new-chat page show them only in a Personal workspace", () =
   );
   const index = readFileSync(new URL("../../routes/sessions-index.tsx", import.meta.url), "utf8");
   expect(index).toContain("{personalWorkspace ? <PrivateWorkspaceNote /> : null}");
+  expect(index).toContain("Private: only you can see chats here.");
 });

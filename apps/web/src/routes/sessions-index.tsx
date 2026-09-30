@@ -46,7 +46,7 @@ import {
   type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ChevronDownIcon, FolderIcon, PlusIcon, ServerCogIcon } from "lucide-react";
+import { ChevronDownIcon, FolderIcon, LockIcon, PlusIcon, ServerCogIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -67,7 +67,6 @@ import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { PrivateWorkspaceNote } from "@/components/session/private-session-indicator";
 import {
   RunsOnMenuBody,
   VisibilityMenuBody,
@@ -2643,5 +2642,15 @@ function PersonalResourceAccessInline(props: {
     <div className="border-t border-border/70 px-3 py-2.5">{content}</div>
   ) : (
     <div className="px-0.5">{content}</div>
+  );
+}
+
+/** One quiet line on the new-chat page of a Personal workspace: its chats are private. */
+function PrivateWorkspaceNote() {
+  return (
+    <p className="mt-3 flex items-center gap-1.5 px-0.5 text-xs text-fg-muted">
+      <LockIcon aria-hidden="true" className="size-3.5 shrink-0" />
+      Private: only you can see chats here.
+    </p>
   );
 }
