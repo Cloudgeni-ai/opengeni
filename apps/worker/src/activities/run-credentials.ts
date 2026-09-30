@@ -109,6 +109,9 @@ export function runCredentialModelNote(
 export async function bindRunCredentialResolver(
   input: RunCredentialResolutionContext,
 ): Promise<BoundRunCredentialResolver | null> {
+  // Connected Machines own their credentials. Even provider lookup/callback
+  // must not be performed for a turn executing on the user's machine.
+  if (input.effectiveSandboxBackend === "selfhosted") return null;
   const workspaceResolver = input.settings
     ? await workspaceCredentialProviderResolver(
         input.db,

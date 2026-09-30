@@ -402,6 +402,7 @@ try {
       "packages/config",
       "packages/contracts",
       "packages/network",
+      "packages/observability",
       "packages/tool-gateway",
       "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),

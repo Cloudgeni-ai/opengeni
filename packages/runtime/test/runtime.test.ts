@@ -5374,6 +5374,7 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
@@ -5411,17 +5412,30 @@ describe("runtime event normalization", () => {
     ]);
   });
 
-  test("preserves a custom Git HTTPS port in the manifest remote", () => {
-    const manifest = buildManifest(testSettings(), [
+  test("preserves a custom Git HTTPS port through deferred clone and explicit manifest materialization", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://git.example.com:8443/acme/app.git",
+      ref: "main",
+    };
+    const mountPath = "repos/git.example.com%3A8443/acme/app.git";
+    // Bare repositories wait for provider delivery. A directory entry reserves
+    // the same port-aware mount; the clone hook retains the exact remote URI.
+    const manifest = buildManifest(testSettings(), [resource]);
+    expect(manifest.entries[mountPath]).toMatchObject({ type: "dir" });
+    expect(repositoryCloneCommand([resource])).toContain(
+      `start_repository_clone '/workspace/${mountPath}' '${resource.uri}' 'main'`,
+    );
+    // Explicit platform selections retain the SDK materialization path.
+    const explicit = buildManifest(testSettings(), [
       {
-        kind: "repository",
-        uri: "https://git.example.com:8443/acme/app.git",
-        ref: "main",
+        ...resource,
+        connectionId: "explicit-platform-connection",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
+    expect(explicit.entries[mountPath]).toMatchObject({
       type: "git_repo",
-      repo: "https://git.example.com:8443/acme/app.git",
+      repo: resource.uri,
     });
   });
 
@@ -5537,10 +5551,12 @@ describe("runtime event normalization", () => {
     // origin/HEAD is best-effort (branch refs only); a PR ref, tag, or SHA must not
     // fail the clone because `remote set-head` rejects it.
     expect(command).toContain(
-      'if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+      'if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
     );
     expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
-    expect(command).toContain('if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then');
+    expect(command).toContain(
+      'if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+    );
     expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
     expect(command).toContain("Repository resource ready at $target");
@@ -5694,7 +5710,7 @@ describe("runtime event normalization", () => {
       true,
     );
     expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(
-      false,
+      true,
     );
 
     // Home backend IS selfhosted: gated with no caller change (active backend
@@ -5765,8 +5781,8 @@ describe("runtime event normalization", () => {
       .split("\n")
       .filter((line) => /^start_(optional_)?repository_clone /u.test(line));
     expect(invocations).toEqual([
-      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' ''",
-      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent'",
+      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' '' 'provider'",
+      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent' 'provider'",
     ]);
   });
 
@@ -6269,6 +6285,7 @@ describe("runtime event normalization", () => {
         ref: "main",
         mountPath: "repos/acme/private/README.md",
         subpath: "README.md",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({

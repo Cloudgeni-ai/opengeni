@@ -78,6 +78,8 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
+Task-tree [locking invariants](run-lifecycle.md).
+
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
 

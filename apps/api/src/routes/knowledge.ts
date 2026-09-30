@@ -44,6 +44,8 @@ import {
   reviewKnowledgeEntries,
   reviewAgentInstruction,
   listAgentInstructionReviews,
+  KnowledgeEntryIdRequiredError,
+  KnowledgeEntryIdTakenError,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -79,6 +81,18 @@ function knowledgeHttpError(error: unknown): never {
       code: error.code === "quota" ? "limit_exceeded" : "validation_failed",
       message: error.message,
       details: { code: error.code, keywordAvailable: true },
+    });
+  if (error instanceof KnowledgeEntryIdTakenError)
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      details: { code: error.code },
+    });
+  if (error instanceof KnowledgeEntryIdRequiredError)
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      details: { code: error.code },
     });
   if (error instanceof z.ZodError)
     throw new HTTPException(422, {

@@ -2,6 +2,7 @@ import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
 import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import {
   materializeRunCredentials,
+  repositoryHasExplicitGitConnection,
   clearRunCredentials,
   clearRunCredentialsForAttempt,
   refreshGitCredentialBindingTokenFiles,
@@ -145,9 +146,12 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     machinePrimary,
     groupBoxBackend,
   });
+  const platformGitResources = turnResources.filter(
+    (resource) => resource.kind !== "repository" || repositoryHasExplicitGitConnection(resource),
+  );
 
   const runCredentialResolver =
-    effectiveRunCredentialBackend === "none"
+    effectiveRunCredentialBackend === "none" || effectiveRunCredentialBackend === "selfhosted"
       ? null
       : await waitForTurnOperation(
           bindRunCredentialResolver({
@@ -332,7 +336,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   } = await waitForTurnOperation(
     sandboxEnvironmentForRun(
       sandboxEnvironmentSettings,
-      turnResources,
+      platformGitResources,
       // Rig default sets merged BELOW the session set (session wins); rig-less
       // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
       sandboxWorkspaceEnvironmentValues,
@@ -393,7 +397,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       return Promise.resolve(undefined);
     }
     runGitCredentialsMint ??= waitForTurnOperation(
-      mintRunGitCredentials(runSettings, turnResources, {
+      mintRunGitCredentials(runSettings, platformGitResources, {
         scope: connectionScope,
         ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
         gitCredentials: connectionCredentials?.gitCredentials,
@@ -427,7 +431,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         mint: async () => {
           const binding = await mintRunGitCredentialBinding(
             runSettings,
-            turnResources,
+            platformGitResources,
             initialBinding.provider,
             initialBinding.credentialBindingId,
             {

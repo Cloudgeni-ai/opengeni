@@ -26,6 +26,7 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { safeDatabaseErrorFacts } from "./persistence-errors";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import {
   fromPostgresLosslessJson,
@@ -76,16 +77,69 @@ async function inKnowledgeContext<T>(
   });
 }
 
+/** The supplied entry id belongs to an entry this caller cannot see or did not mean. */
+export class KnowledgeEntryIdTakenError extends Error {
+  readonly code = "knowledge_entry_id_taken";
+  constructor() {
+    super(
+      "This entryId already belongs to another Knowledge entry. Omit entryId to create a new entry, or pass an existing entry's id and current version to correct it.",
+    );
+    this.name = "KnowledgeEntryIdTakenError";
+  }
+}
+
+/** A correction must name its entry; only a create may leave the id to the host. */
+export class KnowledgeEntryIdRequiredError extends Error {
+  readonly code = "knowledge_entry_id_required";
+  constructor() {
+    super("entryId is required when expectedVersion is above 0. Omit it only to create an entry.");
+    this.name = "KnowledgeEntryIdRequiredError";
+  }
+}
+
+/**
+ * Stable per operation, so an exact retry of a create resolves the same entry and
+ * replays its receipt instead of creating a duplicate.
+ */
+export function knowledgeEntryIdForOperation(accountId: string, operationId: string): string {
+  const bytes = createHash("sha256")
+    .update(`opengeni:knowledge-entry:${accountId}:${operationId}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80; // RFC 9562 version 8 (custom)
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80; // RFC 9562 variant
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function resolveWriteEntryId(
+  context: KnowledgeContext,
+  request: { operationId: string; entryId?: string | undefined; expectedVersion: number },
+): string {
+  if (request.entryId) return request.entryId;
+  if (request.expectedVersion !== 0) throw new KnowledgeEntryIdRequiredError();
+  return knowledgeEntryIdForOperation(context.accountId, request.operationId);
+}
+
 async function apply(db: Database, context: KnowledgeContext, request: Record<string, unknown>) {
-  return inKnowledgeContext(db, context, async (tx) => {
-    const [row] = await rawRows<{ receipt: unknown }>(
-      tx,
-      sql`
+  try {
+    return await inKnowledgeContext(db, context, async (tx) => {
+      const [row] = await rawRows<{ receipt: unknown }>(
+        tx,
+        sql`
       SELECT knowledge_entry_apply(${context.accountId}::uuid,${context.workspaceId}::uuid,
         ${JSON.stringify(context.actor)}::jsonb,${JSON.stringify(request)}::jsonb) AS receipt`,
-    );
-    return KnowledgeEntryWriteReceipt.parse(row?.receipt);
-  });
+      );
+      return KnowledgeEntryWriteReceipt.parse(row?.receipt);
+    });
+  } catch (error) {
+    // An entry outside the caller's RLS scope still owns its primary key, so a
+    // colliding create surfaces as this unique violation, not as operation reuse.
+    if (safeDatabaseErrorFacts(error).constraint === "knowledge_entries_pkey") {
+      throw new KnowledgeEntryIdTakenError();
+    }
+    throw error;
+  }
 }
 
 /** Freeze before model execution; retries of the logical turn recover the same policy. */
@@ -117,6 +171,7 @@ export async function saveKnowledgeEntry(
   const request = KnowledgeEntrySaveRequest.parse(input);
   return apply(db, context, {
     ...request,
+    entryId: resolveWriteEntryId(context, request),
     operation: "save",
     entry: toPostgresLosslessJson(request.entry),
     codecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
@@ -130,8 +185,10 @@ export async function promoteTaskNoteToKnowledge(
   context: KnowledgeContext,
   input: KnowledgeTaskNotePromotionRequest,
 ) {
+  const request = KnowledgeTaskNotePromotionRequest.parse(input);
   return apply(db, context, {
-    ...KnowledgeTaskNotePromotionRequest.parse(input),
+    ...request,
+    entryId: resolveWriteEntryId(context, request),
     operation: "promote_note",
   });
 }

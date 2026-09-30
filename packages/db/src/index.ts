@@ -484,6 +484,7 @@ import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   creatorColumns,
   frozenInitiatorForCommandActor,
+  frozenScheduledOccurrenceInitiator,
   initiatorColumns,
   initiatorFromStorage,
   UNATTRIBUTED_LEGACY_INITIATOR,
@@ -71260,6 +71261,21 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            // A task's accepted service provenance is immutable, just like
+            // its execution policy. Never consult a mutable task or borrow
+            // the session creator's human for this occurrence.
+            if (delivered.updates.every((update) => update.kind === "scheduled_occurrence")) {
+              internalInitiator = frozenScheduledOccurrenceInitiator(
+                accepted.task,
+                internalInitiator,
+              );
+              if (delivered.event) {
+                delivered.event.payload = {
+                  ...(delivered.event.payload as Record<string, unknown>),
+                  initiator: internalInitiator.initiator,
+                };
+              }
+            }
             frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
               ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
               : null;
