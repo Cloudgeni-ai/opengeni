@@ -131,6 +131,52 @@ function topLevelMessages(container: HTMLElement): string[] {
 }
 
 describe("readable per-turn rows", () => {
+  test("settled details interleave full Markdown progress and tools while the final stays primary", async () => {
+    sequence = 0;
+    const events = [
+      event("agent.message.delta", { messageId: "first", text: "First **progress**" }),
+      ...tool("read", "exec_command"),
+      event("agent.message.delta", {
+        messageId: "second",
+        text: "Second [progress](https://example.com)",
+      }),
+      ...tool("verify", "exec_command"),
+      event("agent.message.delta", {
+        messageId: "final",
+        phase: "final_answer",
+        text: "Final response",
+      }),
+      event("turn.completed", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} turnSummary={{ rolling: true }} />,
+    );
+    try {
+      await flush();
+      expect(topLevelMessages(r.container)).toEqual(["Final response"]);
+      const trigger = statusTrigger(r.container);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(trigger.textContent).toContain("2 steps");
+      await act(async () => trigger.click());
+      const details = r.container.querySelector("[data-og-fold-content]")!;
+      expect(details.querySelector("strong")?.textContent).toBe("progress");
+      expect(details.querySelector("a")?.textContent).toBe("progress");
+      expect(
+        Array.from(details.querySelectorAll("[data-og-item], [data-og-wide-table-message]")).map(
+          (item) => item.textContent,
+        ),
+      ).toEqual([
+        expect.stringContaining("First progress"),
+        expect.stringContaining("read"),
+        expect.stringContaining("Second progress"),
+        expect.stringContaining("verify"),
+      ]);
+      expect(topLevelMessages(r.container)).toEqual(["Final response"]);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("progress keeps Markdown and distinct message rows while completed tools do not spin", async () => {
     const { first } = exchange();
     const r = await renderComponent(
@@ -175,10 +221,13 @@ describe("readable per-turn rows", () => {
         r.container.querySelector('[data-og-recorded-outcome="wait"] summary')?.textContent,
       ).toMatch(/^Waited for 1 agent · \d+s/);
       expect(topLevelMessages(r.container)).toEqual([
-        "Starting a worker for the count.",
         "The worker is still running.",
         "312 users signed up.",
       ]);
+      await act(async () => statusTrigger(r.container).click());
+      expect(r.container.querySelector("[data-og-fold-content]")?.textContent).toContain(
+        "Starting a worker for the count.",
+      );
     } finally {
       await r.unmount();
     }

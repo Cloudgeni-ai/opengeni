@@ -111,6 +111,122 @@ describe("readable timeline browser regression", () => {
   }
 
   for (const width of [390, 1280]) {
+    test(`manual reader keeps prose, selection and focus through settlement at ${width}px`, async () => {
+      const page = await openHarness("tail", width, width === 390);
+      try {
+        const finalStart = await page.evaluate(() => {
+          const driver = window.exchangeFoldHarness!;
+          const index = driver.indexOf("agent.message.delta", { messageId: "final" })[0]!;
+          driver.show(index);
+          return index;
+        });
+        await page.waitForTimeout(400);
+        const scroller = page.locator("[data-og-timeline-scroller]");
+        await scroller.hover();
+        await page.mouse.wheel(0, -250);
+        await page.waitForTimeout(150);
+        expect((await sample(page)).following).toBe(false);
+        const before = await page.evaluate(() => {
+          const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const paragraph = node.querySelector<HTMLElement>("[data-og-wide-table-message] p")!;
+          paragraph.dataset.readerProse = "true";
+          node.scrollTop +=
+            paragraph.getBoundingClientRect().top - node.getBoundingClientRect().top - 100;
+          const link = node.querySelector<HTMLAnchorElement>("[data-og-wide-table-message] a")!;
+          link.dataset.readerFocus = "true";
+          link.focus({ preventScroll: true });
+          const range = document.createRange();
+          range.selectNodeContents(paragraph);
+          window.getSelection()!.removeAllRanges();
+          window.getSelection()!.addRange(range);
+          return {
+            top: paragraph.getBoundingClientRect().top,
+            selection: window.getSelection()!.toString(),
+          };
+        });
+        for (const count of [
+          finalStart + 1,
+          await page.evaluate(() => window.exchangeFoldHarness!.total),
+        ]) {
+          await page.evaluate((value) => window.exchangeFoldHarness!.show(value), count);
+          await nextPaint(page);
+          await page.waitForTimeout(150);
+          const after = await page.evaluate(() => ({
+            top: document.querySelector("[data-reader-prose]")?.getBoundingClientRect().top,
+            selection: window.getSelection()!.toString(),
+            focused: document.activeElement?.hasAttribute("data-reader-focus"),
+          }));
+          expect(after.focused).toBe(true);
+          expect(after.selection).toBe(before.selection);
+          expect(Math.abs(after.top! - before.top)).toBeLessThanOrEqual(2);
+          expect((await sample(page)).following).toBe(false);
+        }
+        // Only an explicit disclosure action now moves protected prose inside.
+        const header = page.locator('[data-og-work-header="outer"]');
+        await header.click();
+        expect(await header.getAttribute("aria-expanded")).toBe("true");
+        expect(
+          await page.locator("[data-og-fold-content] [data-og-wide-table-message]").count(),
+        ).toBe(3);
+        await header.click();
+        await page.waitForTimeout(250);
+        expect(await page.locator("[data-og-wide-table-message]").count()).toBe(1);
+      } finally {
+        await page.context().close();
+      }
+    }, 30_000);
+
+    test(`expanded live tail retains controls and reader anchor at ${width}px`, async () => {
+      const page = await openHarness("tail", width, width === 390);
+      try {
+        const nextProgress = await page.evaluate(() => {
+          const driver = window.exchangeFoldHarness!;
+          const index = driver.indexOf("agent.message.delta", { messageId: "progress-2" })[0]!;
+          driver.show(index);
+          return index;
+        });
+        await page.waitForTimeout(350);
+        const header = page.locator('[data-og-work-header="outer"]');
+        await header.click();
+        await page.waitForTimeout(300);
+        const before = await page.evaluate(() => {
+          const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const section = node.querySelector<HTMLElement>("[data-og-work-section]")!;
+          const trigger = section.querySelector<HTMLButtonElement>(
+            '[data-og-work-header="outer"]',
+          )!;
+          trigger.dataset.retainedTrigger = "true";
+          trigger.focus({ preventScroll: true });
+          node.scrollTop +=
+            section.getBoundingClientRect().top - node.getBoundingClientRect().top + 100;
+          const row = [...section.querySelectorAll<HTMLElement>("[data-og-item]")].find(
+            (item) => item.getBoundingClientRect().top > node.getBoundingClientRect().top + 100,
+          )!;
+          row.dataset.retainedTool = "true";
+          return row.getBoundingClientRect().top;
+        });
+        await page.evaluate((count) => window.exchangeFoldHarness!.show(count), nextProgress + 1);
+        await nextPaint(page);
+        const after = await page.evaluate(() => ({
+          top: document.querySelector("[data-retained-tool]")?.getBoundingClientRect().top,
+          focused: document.activeElement?.hasAttribute("data-retained-trigger"),
+          open: document.querySelector("[data-retained-trigger]")?.getAttribute("aria-expanded"),
+        }));
+        expect(after.focused).toBe(true);
+        expect(after.open).toBe("true");
+        expect(Math.abs(after.top! - before)).toBeLessThanOrEqual(2);
+        await page.evaluate(() =>
+          window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+        );
+        await nextPaint(page);
+        expect(await header.getAttribute("data-retained-trigger")).toBe("true");
+        expect(await header.getAttribute("aria-expanded")).toBe("true");
+        expect((await sample(page)).following).toBe(false);
+      } finally {
+        await page.context().close();
+      }
+    }, 30_000);
+
     test(`legacy attention updates the owning work row at ${width}px`, async () => {
       const page = await openHarness("legacy-attention", width, width === 390);
       const evidenceDir = `${repoRoot}/.agent/evidence/timeline-legacy-work`;
@@ -255,7 +371,7 @@ describe("readable timeline browser regression", () => {
     }
   }
 
-  test("a long answer follows normally and every progress message remains readable", async () => {
+  test("a long answer follows normally, then settled progress remains readable in details", async () => {
     const page = await openHarness("notes");
     try {
       const total = await page.evaluate(() => window.exchangeFoldHarness!.total);
@@ -266,10 +382,12 @@ describe("readable timeline browser regression", () => {
         expect((await sample(page)).following).toBe(true);
       }
       const messages = page.locator("[data-og-wide-table-message]");
-      expect(await messages.count()).toBeGreaterThanOrEqual(4);
+      expect(await messages.count()).toBe(1);
       expect(await page.locator("[data-og-exchange-note]").count()).toBe(0);
       expect(await page.locator('[data-og-exchange-status="worked"]').count()).toBe(1);
       expect((await sample(page)).lastText).toContain("171 in total");
+      await page.locator('[data-og-work-header="outer"]').click();
+      expect(await messages.count()).toBeGreaterThanOrEqual(4);
     } finally {
       await page.context().close();
     }
@@ -438,6 +556,80 @@ describe("readable timeline browser regression", () => {
 
   for (const width of [1280, 390]) {
     for (const theme of ["dark", "light"]) {
+      test(`tail activity and settled chronology preview: ${width}px ${theme}`, async () => {
+        const page = await openHarness("tail", width, width === 390);
+        try {
+          await page.setViewportSize({ width, height: 900 });
+          if (theme === "light")
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+          // Exercise the same transition without motion as well as the normal
+          // desktop/mobile paths; no transition depends on animation callbacks.
+          if (width === 390 && theme === "light")
+            await page.emulateMedia({ reducedMotion: "reduce" });
+          const stages = await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            return {
+              waiting: driver.indexOf("session.status.changed")[0]!,
+              final: driver.indexOf("agent.message.delta", { messageId: "final" })[0]!,
+              total: driver.total,
+            };
+          });
+          const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+          const capture = async (stage: string) => {
+            await page.waitForTimeout(300);
+            expect(
+              await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+            ).toBe(false);
+            if (output) {
+              mkdirSync(output, { recursive: true });
+              await page.screenshot({ path: `${output}/tail-${width}-${theme}-${stage}.png` });
+            }
+          };
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.waiting);
+          await nextPaint(page);
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(3);
+          expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
+          expect(
+            await page.locator("[data-og-group-key]").last().getAttribute("data-og-group-key"),
+          ).toBe("work-turn-tail");
+          const header = page.locator('[data-og-work-header="outer"]');
+          await header.evaluate((node) => node.setAttribute("data-tail-identity", "same"));
+          await capture("live");
+          await page.evaluate(
+            (count) => window.exchangeFoldHarness!.show(count),
+            stages.waiting + 1,
+          );
+          await nextPaint(page);
+          expect(await page.locator('[data-og-exchange-status="waiting"]').count()).toBe(1);
+          expect(
+            await page.locator("[data-og-group-key]").last().getAttribute("data-og-group-key"),
+          ).toBe("work-turn-tail");
+          await capture("waiting");
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.final + 1);
+          await nextPaint(page);
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(4);
+          const duration = await header.textContent();
+          expect(duration).toContain("Worked for");
+          await capture("answering");
+          await page.evaluate((count) => window.exchangeFoldHarness!.show(count), stages.total);
+          await nextPaint(page);
+          expect(await header.getAttribute("data-tail-identity")).toBe("same");
+          expect(await header.textContent()).toBe(duration);
+          expect(await header.getAttribute("aria-expanded")).toBe("false");
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(1);
+          expect(await page.locator("[data-og-wide-table-message] table").count()).toBe(1);
+          await capture("settled");
+          await header.click();
+          expect(
+            await page.locator("[data-og-fold-content] [data-og-wide-table-message]").count(),
+          ).toBe(3);
+          expect(await header.textContent()).toContain("25 steps");
+          await capture("expanded");
+        } finally {
+          await page.context().close();
+        }
+      }, 30_000);
+
       test(`expanded work sticks only through its section: ${width}px ${theme}`, async () => {
         const page = await openHarness("sticky", width, width === 390);
         try {
@@ -564,7 +756,7 @@ describe("readable timeline browser regression", () => {
           await page.getByRole("button", { name: "Done", exact: true }).click();
           await page.waitForTimeout(350);
           expect(await page.locator('[data-og-exchange-status="worked"]').count()).toBe(2);
-          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(3);
+          expect(await page.locator("[data-og-wide-table-message]").count()).toBe(2);
           expect(await page.locator("[data-og-machine-input-batch][open]").count()).toBe(0);
           const worked = page
             .locator('[data-og-exchange-status="worked"]')

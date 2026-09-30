@@ -151,6 +151,80 @@ const workRows = (groups: TimelineGroup[]) =>
   groups.filter((group) => group.kind === "activity" && group.work);
 
 describe("readable per-turn grouping", () => {
+  test("live prose precedes one stable trailing work row, including text-only and waiting turns", () => {
+    sequence = 0;
+    const first = recordedDelta("First **progress**", "first");
+    const second = recordedDelta("Second progress", "second");
+    const live = [first, ...tool("read", "exec_command", "turn-1"), second];
+    for (const events of [
+      [first],
+      live,
+      [...live, event("session.status.changed", { status: "requires_action" })],
+    ]) {
+      const groups = fold(events);
+      expect(groups.at(-1)?.kind === "activity" && (groups.at(-1) as { id: string }).id).toBe(
+        "work-turn-1",
+      );
+      expect(workRows(groups)).toHaveLength(1);
+      expect(visibleProse(groups)).toEqual(
+        events.length === 1 ? ["First **progress**"] : ["First **progress**", "Second progress"],
+      );
+    }
+  });
+
+  test("explicit final streaming freezes duration without folding progress until settlement", () => {
+    sequence = 0;
+    const live = [
+      recordedDelta("First progress", "first"),
+      ...tool("read", "exec_command", "turn-1"),
+      recordedDelta("Second progress", "second"),
+    ];
+    const final = event("agent.message.delta", {
+      messageId: "final",
+      text: "Final response",
+      phase: "final_answer",
+    });
+    const streaming = fold([...live, final]);
+    expect(visibleProse(streaming)).toEqual([
+      "First progress",
+      "Second progress",
+      "Final response",
+    ]);
+    expect(kinds(streaming)).toEqual([
+      "agent-message",
+      "agent-message",
+      "activity",
+      "agent-message",
+    ]);
+    const settled = fold([...live, final, event("turn.completed", {})]);
+    expect(visibleProse(settled)).toEqual(["Final response"]);
+    const work = workRows(settled)[0]!;
+    expect(work.kind === "activity" && kinds(work.work!.details)).toEqual([
+      "agent-message",
+      "activity",
+      "agent-message",
+    ]);
+    expect(work.kind === "activity" && work.items.map((item) => item.kind)).toEqual(["tool-call"]);
+    expect(work.kind === "activity" && work.work!.responseStartedAt).toBe(final.occurredAt);
+  });
+
+  test("partial history folds only loaded progress and retains a cancelled partial response", () => {
+    sequence = 0;
+    const loaded = [
+      ...tool("read", "exec_command", "turn-1"),
+      recordedDelta("Loaded progress", "progress"),
+      ...tool("next", "exec_command", "turn-1"),
+      recordedDelta("Partial response", "partial"),
+    ];
+    const groups = fold([...loaded, event("turn.cancelled", {})]);
+    expect(visibleProse(groups)).toEqual(["Partial response"]);
+    const work = workRows(groups)[0]!;
+    expect(work.kind === "activity" && visibleProse(work.work!.details)).toEqual([
+      "Loaded progress",
+    ]);
+    expect(work.kind === "activity" && work.outcome).toBe("cancelled");
+  });
+
   test("legacy work follows attention and terminal status without turn IDs", () => {
     sequence = 0;
     const legacy = (type: string, payload: unknown) => event(type, payload, { turnId: null });
@@ -330,7 +404,7 @@ describe("readable per-turn grouping", () => {
     }
   }
 
-  test("every progress message and turn-ending reply survives machine resumption", () => {
+  test("settled progress stays in its own work history and every turn-ending reply survives resumption", () => {
     const x = delegatedExchange();
     const first = fold([x.prompt, ...x.first]);
     const resumed = fold([
@@ -341,9 +415,10 @@ describe("readable per-turn grouping", () => {
       ...x.answer,
       ...x.secondEnd,
     ]);
-    expect(visibleProse(first)).toEqual([
+    expect(visibleProse(first)).toEqual(["The worker is still running; I'll wait for its result."]);
+    const firstWork = workRows(first)[0];
+    expect(firstWork?.kind === "activity" && visibleProse(firstWork.work!.details)).toEqual([
       "I'll run the replica check in a worker.",
-      "The worker is still running; I'll wait for its result.",
     ]);
     expect(visibleProse(resumed)).toEqual([
       ...visibleProse(first),
@@ -456,6 +531,7 @@ describe("readable per-turn grouping", () => {
     ]);
     const row = workRows(groups)[0];
     expect(row?.kind === "activity" ? kinds(row.work!.details) : []).toEqual([
+      "activity",
       "context-compaction",
     ]);
     expect(visibleProse(groups)).toEqual(["Done"]);
@@ -490,7 +566,10 @@ describe("readable per-turn grouping", () => {
     ]);
     expect(workRows(groups)).toHaveLength(1);
     const row = workRows(groups)[0]!;
-    expect(row.kind === "activity" ? kinds(row.work!.details) : []).toEqual(["context-compaction"]);
+    expect(row.kind === "activity" ? kinds(row.work!.details) : []).toEqual([
+      "context-compaction",
+      "activity",
+    ]);
     expect(
       groups.filter((group) => group.kind === "item" && group.item.kind === "context-compaction"),
     ).toHaveLength(1);

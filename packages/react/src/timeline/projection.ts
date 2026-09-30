@@ -1768,7 +1768,7 @@ export function groupTimeline(
   return groups;
 }
 
-/** Prose and attention surfaces never enter a work fold. */
+/** Live prose stays primary; settled progress joins its own turn's work history. */
 function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
@@ -1776,6 +1776,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
+  const itemOrder = new Map(items.map((item, index) => [item.id, index]));
   let legacyTurn = "start";
   let currentTurn = legacyTurn;
   for (const item of items) {
@@ -1809,6 +1810,13 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
+      const previous = group.work!.details.at(-1);
+      const preparing = (entry: ActivityItem) =>
+        entry.kind === "startup-phase" || (entry.kind === "reasoning" && !entry.text.trim());
+      if (preparing(item) && previous?.kind === "activity" && previous.items.every(preparing))
+        previous.items.push(item);
+      else
+        group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "turn-end") {
       const group = turns.get(key);
@@ -1876,6 +1884,9 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         const prose = messages.get(key) ?? [];
         prose.push(item);
         messages.set(key, prose);
+        // A text-only turn still has one overall activity surface. An explicit
+        // final-only response does not manufacture an empty work disclosure.
+        if (item.phase !== "final_answer") workForTurn();
       }
     }
   }
@@ -1889,8 +1900,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   });
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
-  const responseRows = new Map<AgentMessageItem, Work>();
+  const beforeRows = new Map<TimelineGroup, Work>();
+  const afterRows = new Map<TimelineGroup, Work>();
   const movedRows = new Set<Work>();
+  const foldedProse = new Set<AgentMessageItem>();
   const positions = new Map<TimelineGroup | TimelineItem, number>();
   const nextBoundary = new Map<Work, number>();
   let boundary = groups.length;
@@ -1920,6 +1933,23 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       (settledAt
         ? (responseCandidates.at(-1) ?? prose.find((message) => message.phase === "final_answer"))
         : undefined);
+    if (settledAt) {
+      for (const message of responseCandidates) {
+        if (message === response) continue;
+        foldedProse.add(message);
+        group.work!.details.push({ kind: "item", item: message });
+      }
+    }
+    // Preserve event chronology, not completion timestamps or activity kinds.
+    group.work!.details.sort((a, b) => {
+      const first = (entry: TimelineGroup) =>
+        entry.kind === "item"
+          ? entry.item.id
+          : entry.kind === "activity"
+            ? entry.items[0]?.id
+            : undefined;
+      return (itemOrder.get(first(a) ?? "") ?? 0) - (itemOrder.get(first(b) ?? "") ?? 0);
+    });
     if (response) {
       const responseAt = response.startedAt ?? response.occurredAt;
       // A delayed completion-only receipt cannot extend a settled work clock.
@@ -1928,18 +1958,39 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
       if ((positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)) {
-        responseRows.set(response, group);
+        beforeRows.set(groups[positions.get(response)!]!, group);
+        movedRows.add(group);
+      }
+    } else if (!settledAt) {
+      // Keep the same row at the tail of this turn, after every live progress
+      // message and attention surface, without crossing a newer input/turn.
+      let tailIndex = (nextBoundary.get(group) ?? groups.length) - 1;
+      for (let index = (positions.get(group) ?? 0) + 1; index <= tailIndex; index += 1) {
+        const entry = groups[index]!;
+        if (
+          entry.kind === "item" &&
+          "turnId" in entry.item &&
+          entry.item.turnId &&
+          entry.item.turnId !== key
+        ) {
+          tailIndex = index - 1;
+          break;
+        }
+      }
+      const tail = groups[tailIndex];
+      if (tail && tail !== group) {
+        afterRows.set(tail, group);
         movedRows.add(group);
       }
     }
   }
   return groups.flatMap((group) => {
     if (group.kind === "activity" && movedRows.has(group)) return [];
-    const row =
-      group.kind === "item" && group.item.kind === "agent-message"
-        ? responseRows.get(group.item)
-        : undefined;
-    return row ? [row, group] : [group];
+    const hidden =
+      group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
+    const before = beforeRows.get(group);
+    const after = afterRows.get(group);
+    return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
   });
 }
 
