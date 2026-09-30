@@ -86,9 +86,17 @@ describe("API contract admission", () => {
     expect(browser.status).toBe(409);
     expect(await browser.json()).toMatchObject({ code: "API_CONTRACT_CHANGED" });
 
-    for (const headers of [
-      { authorization: "Bearer ogk_integration", [OPENGENI_API_CONTRACT_HEADER]: stale },
-      { authorization: "Bearer ogk_integration" },
+    for (const { headers, advertised } of [
+      {
+        headers: { authorization: "Bearer ogk_integration", [OPENGENI_API_CONTRACT_HEADER]: stale },
+        // A pinned SDK throws on any mismatched response revision, so a bearer
+        // that claimed a different revision receives no revision header.
+        advertised: null,
+      },
+      {
+        headers: { authorization: "Bearer ogk_integration" },
+        advertised: OPENGENI_API_CONTRACT_REVISION,
+      },
     ]) {
       const bearer = await app.request(path, {
         method: "POST",
@@ -98,7 +106,7 @@ describe("API contract admission", () => {
       // The request passes the contract fence and reaches authentication,
       // which the inert test dependencies cannot complete.
       expect(bearer.status).not.toBe(409);
-      expect(bearer.headers.get(OPENGENI_API_CONTRACT_HEADER)).toBe(OPENGENI_API_CONTRACT_REVISION);
+      expect(bearer.headers.get(OPENGENI_API_CONTRACT_HEADER)).toBe(advertised);
     }
   });
 });

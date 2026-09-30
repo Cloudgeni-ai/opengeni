@@ -199,6 +199,8 @@ const billingPortalSurfaceFiles = new Set([
   // Generated browser distribution of the canonical SDK client.
   "packages/sdk/src/site-browser-runtime.gen.ts",
   "packages/sdk/test/client-coverage.test.ts",
+  // Generated public API inventory: records the canonical route, never serves it.
+  "scripts/public-api/surface.gen.json",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {

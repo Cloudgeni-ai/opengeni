@@ -184,6 +184,7 @@ export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
   const projects = [
     "scripts/ci",
     "scripts/operator",
+    "scripts/public-api",
     "scripts/release",
     "scripts/agent-behavior-eval",
   ].filter((directory) => existsSync(join(directory, "tsconfig.json")));
