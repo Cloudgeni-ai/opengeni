@@ -5007,6 +5007,16 @@ export function configuredProviders(
  * select, lease, refresh, or expose a concrete credential; those runtime
  * operations remain owned by the credential allocator.
  */
+/** Exact upstream slugs of the active Codex catalog (or the built-in fallback list). */
+export function codexUpstreamModelSlugs(settings: Settings): string[] {
+  if (settings.resolvedCodexModelsJson === undefined) return [...CODEX_FALLBACK_MODEL_SLUGS];
+  return z
+    .array(CodexCatalogModelSchema)
+    .parse(JSON.parse(settings.resolvedCodexModelsJson))
+    .filter((model) => !model.retired)
+    .map((model) => model.upstreamModelId);
+}
+
 export function withCodexCatalogProvider(settings: Settings): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
   if (providers.some((provider) => provider.id === CODEX_PROVIDER_ID)) {
