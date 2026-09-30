@@ -42,8 +42,14 @@ Composition order (each part separated by a blank line):
    bindings.
 4. Skill index (only when it is not delivered in history).
 5. Workspace governance, then the historical memory block.
-6. `# Session instructions` (heading added so the precedence rule can point
-   at them), last.
+6. `# Session instructions`, last, headed by one sentence: "These
+   instructions were set for this session. Follow them over the default
+   behavior above, such as tone, length, and format." It gives the precedence
+   rule a concrete target where the instructions are. Added after the first
+   modular eval run, where one of three one-sentence runs ignored a session
+   style rule at the end of the prompt; with the heading, six of six followed
+   it. (Not part of the sentence diff, which composes no session
+   instructions.)
 
 Headings that moved or were added (layout only, not diffed):
 
@@ -95,6 +101,14 @@ text named it only inside link examples).
 + You work directly on its real filesystem, so treat existing files and processes as the owner's.
 ```
 
+Goal completion. In the first modular-none eval runs, two of nine goal runs
+verified the work, said the goal was complete, and ended without calling the
+(deferred) goal tool. The goal module now says so explicitly.
+
+```diff
++ Saying or verifying that the work is done does not complete the goal: call opengeni__goal_complete, and search for the goal tools first when they are not listed.
+```
+
 ## Conditional variants (capability or resource absent)
 
 These sentences replace or drop a legacy sentence only when the named
@@ -123,4 +137,6 @@ unchanged.
 - Renderer `markdown`: the File links section, the Connected Machine link
   examples, "Source-code navigation may still use workspace file links.",
   "Inline HTML stays in chat unless explicitly saved as a Site.", and Visuals
-  in chat are omitted; `renderer_markdown` adds "# Links and rendering".
+  in chat are omitted; `renderer_markdown` adds "# Links and rendering"
+  (plain web links only; workspace files by path in backticks when a sandbox
+  is attached).
