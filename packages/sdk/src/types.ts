@@ -3440,7 +3440,7 @@ export type ClientModel = {
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;
-  api: "responses" | "chat";
+  api: "responses" | "chat" | "anthropic-messages";
   source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | "openrouter" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
@@ -3448,7 +3448,7 @@ export type ClientModel = {
   deployment?:
     | {
         upstreamModelId: string;
-        wireApi: "responses" | "chat";
+        wireApi: "responses" | "chat" | "anthropic-messages";
       }
     | undefined;
   executionLimits?:
@@ -3556,7 +3556,11 @@ export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGateway
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
-export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+export type OrganizationModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
@@ -3570,6 +3574,7 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 
 export type RevokeOrganizationModelProviderConnectionRequest = {
@@ -4019,6 +4024,7 @@ export type ClientConfig = {
    */
   apiContractRevision: string;
   serverVersion?: string | undefined;
+  claudeSubscriptionEnabled?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -5606,6 +5612,11 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
+  /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
+   * Existing target/reusable sessions retain their own model and reasoning. */
+  agentConfigPatch?:
+    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */

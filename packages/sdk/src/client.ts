@@ -940,6 +940,8 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
 
 export class OpenGeniClient {
   protected externalActorHeader?: string;
+  protected serviceInitiatorHeader?: string | undefined;
+  protected serviceContextHeader?: string | undefined;
   private readonly baseUrl: string;
   protected readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
@@ -4746,6 +4748,50 @@ export class OpenGeniClient {
     );
   }
 
+  /** List workspace-owned Claude model slugs. */
+  async listWorkspaceClaudeCustomModels(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+    );
+  }
+
+  /** Add an immutable workspace-owned Claude model generation. */
+  async createWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models`,
+      request,
+    );
+  }
+
+  /** Retire a workspace-owned Claude model generation. */
+  async deleteWorkspaceClaudeCustomModel(
+    workspaceId: string,
+    providerKind: "anthropic" | "claude_subscription",
+    customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    )
+      throw new TypeError("customModelId must be a UUID");
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
   /** List organization-owned exact upstream model slugs. */
   async listOrganizationProviderCustomModels(
     organizationId: string,
@@ -8332,11 +8378,30 @@ export class OpenGeniClient {
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
+    const headerNames = Object.keys(headers).map((key) => key.toLowerCase());
+    const hasUser =
+      this.externalActorHeader !== undefined || headerNames.includes("x-opengeni-external-actor");
+    const hasService =
+      this.serviceInitiatorHeader !== undefined ||
+      headerNames.includes("x-opengeni-service-initiator") ||
+      headerNames.includes("x-opengeni-service-context");
+    if (hasUser && hasService)
+      throw new Error("asUser and asService attribution headers are mutually exclusive");
     if (this.externalActorHeader) {
       for (const key of Object.keys(headers)) {
         if (key.toLowerCase() === "x-opengeni-external-actor") delete headers[key];
       }
       headers["x-opengeni-external-actor"] = this.externalActorHeader;
+    }
+    if (this.serviceInitiatorHeader !== undefined) {
+      for (const key of Object.keys(headers)) {
+        const name = key.toLowerCase();
+        if (name === "x-opengeni-service-initiator" || name === "x-opengeni-service-context")
+          delete headers[key];
+      }
+      headers["x-opengeni-service-initiator"] = this.serviceInitiatorHeader;
+      if (this.serviceContextHeader !== undefined)
+        headers["x-opengeni-service-context"] = this.serviceContextHeader;
     }
     return headers;
   }
@@ -8537,7 +8602,13 @@ export class OpenGeniClient {
   async getModelConnectionAccess(target: {
     scope: "organizations" | "workspaces";
     scopeId: string;
-    kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+    kind:
+      | "codex"
+      | "supergrok"
+      | "vercel_gateway"
+      | "openrouter"
+      | "anthropic"
+      | "claude_subscription";
     connectionId: string;
   }): Promise<ModelConnectionAccessResponse> {
     return await this.requestJson(
@@ -8550,7 +8621,13 @@ export class OpenGeniClient {
     target: {
       scope: "organizations" | "workspaces";
       scopeId: string;
-      kind: "codex" | "supergrok" | "vercel_gateway" | "openrouter";
+      kind:
+        | "codex"
+        | "supergrok"
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription";
       connectionId: string;
     },
     policy: ModelConnectionAccessPolicy,
@@ -8759,13 +8836,14 @@ export class OpenGeniClient {
       if (abort.signal?.aborted) {
         throw abort.signal.reason ?? new DOMException("Request aborted", "AbortError");
       }
+      const headers = this.headers(correlationId);
       let response: FetchResponse;
       try {
         response = await awaitWithAbort(
           this.fetchImpl(this.url(path, query), {
             method,
             headers: {
-              ...this.headers(correlationId),
+              ...headers,
               Accept: "application/json",
               ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
             },
@@ -8812,12 +8890,13 @@ export class OpenGeniClient {
     options: OpenGeniRequestOptions & { accept?: string } = {},
   ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
         headers: {
-          ...this.headers(correlationId),
+          ...headers,
           Accept: options.accept ?? "application/octet-stream",
         },
         ...(options.signal ? { signal: options.signal } : {}),
@@ -8836,12 +8915,13 @@ export class OpenGeniClient {
   /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
   async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
+    const headers = this.headers(correlationId);
     let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path), {
         method,
         headers: {
-          ...this.headers(correlationId),
+          ...headers,
           Accept: "application/json",
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },

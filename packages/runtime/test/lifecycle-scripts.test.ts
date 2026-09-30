@@ -308,6 +308,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       // the runtime hooks put in the command text can admit the provisioning scripts.
       const sandboxSession = (home: string) =>
         hostShellSession(home, {
+          shell: "bash",
           cwd: workspace,
           env: {
             GIT_TERMINAL_PROMPT: "0",
@@ -377,6 +378,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       mkdirSync(workspace, { recursive: true });
       const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
       const session = hostShellSession(join(root, "home"), {
+        shell: "bash",
         cwd: workspace,
         env: {
           GIT_TERMINAL_PROMPT: "0",
@@ -484,6 +486,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       mkdirSync(workspace, { recursive: true });
       const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
       const session = hostShellSession(join(root, "home"), {
+        shell: "bash",
         cwd: workspace,
         env: {
           GIT_TERMINAL_PROMPT: "0",
@@ -592,13 +595,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     const lines = command.split("\n");
 
     expect(
-      lines.filter((line) =>
-        line.includes("'https|git.example|acme/repo') username='x-access-token'"),
+      lines.filter(
+        (line) =>
+          line.includes("'https|git.example|acme/repo') ") &&
+          line.includes("username='x-access-token'"),
       ),
     ).toHaveLength(1);
     expect(
-      lines.filter((line) =>
-        line.includes("'https|git.example|acme/repo.git') username='x-access-token'"),
+      lines.filter(
+        (line) =>
+          line.includes("'https|git.example|acme/repo.git') ") &&
+          line.includes("username='x-access-token'"),
       ),
     ).toHaveLength(1);
   });
@@ -1552,13 +1559,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       line.includes('git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"'),
     );
     const guardIndex = lines.findIndex((line) =>
-      line.includes('if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"'),
+      line.includes(
+        'if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"',
+      ),
     );
     const setHeadIndex = lines.findIndex((line) =>
       line.includes('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true'),
     );
     const checkoutIndex = lines.findIndex((line) =>
-      line.includes('if ! git -C "$tmp" checkout --detach FETCH_HEAD'),
+      line.includes('if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD'),
     );
 
     expect(fetchIndex).toBeGreaterThan(-1);

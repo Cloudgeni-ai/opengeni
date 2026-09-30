@@ -1,5 +1,5 @@
+import { ClaudeMark, AnthropicMark, OpenRouterMark, GrokMark } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
-import { RouteIcon, SparklesIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type ComponentProps, type SVGProps } from "react";
 
 import { ChatGptMark } from "@/components/chatgpt-mark";
@@ -20,7 +20,13 @@ export type ModelsScope =
    list, account page or form is showing.
    -------------------------------------------------------------------------- */
 
-export type ModelProviderId = "codex" | "supergrok" | "vercel" | "openrouter";
+export type ModelProviderId =
+  | "codex"
+  | "supergrok"
+  | "vercel"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -39,8 +45,10 @@ export function ProviderMark({
 }) {
   if (provider === "codex") return <ChatGptMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
-  if (provider === "supergrok") return <SparklesIcon aria-hidden="true" className={className} />;
-  return <RouteIcon aria-hidden="true" className={className} />;
+  if (provider === "claude_subscription") return <ClaudeMark className={className} />;
+  if (provider === "anthropic") return <AnthropicMark className={className} />;
+  if (provider === "supergrok") return <GrokMark className={className} />;
+  return <OpenRouterMark className={className} />;
 }
 
 /** The provider's logo on the shared tile. Size follows the list or page it sits in. */
@@ -70,6 +78,8 @@ export function payerShortLabel(row: { billingClass: string; providerLabel: stri
   switch (row.billingClass) {
     case "codex_subscription":
       return "Codex";
+    case "claude_subscription":
+      return "Claude";
     case "supergrok_subscription":
       return "SuperGrok";
     case "opengeni_credits":
@@ -87,6 +97,8 @@ export function payerLabel(billingClass: string, fallback?: string): string {
   switch (billingClass) {
     case "codex_subscription":
       return "Codex plan";
+    case "claude_subscription":
+      return "Claude plan";
     case "supergrok_subscription":
       return "SuperGrok plan";
     case "opengeni_credits":

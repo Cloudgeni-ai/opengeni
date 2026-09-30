@@ -6657,6 +6657,21 @@ describe("acceptsPromptCacheKeyForTurn", () => {
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
   });
+
+  test("passes stable session identity to native Claude without enabling unknown registry wires", () => {
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "claude-subscription-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "anthropic-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "anthropic-messages"))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
+  });
 });
 
 type RegistryProviderKind =

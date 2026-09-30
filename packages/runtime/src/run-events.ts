@@ -518,6 +518,14 @@ export function normalizeSdkEvent(
       });
       return out;
     }
+    if (
+      data?.type === "model" &&
+      data.event?.type === "anthropic.thinking.delta" &&
+      typeof data.event.delta === "string"
+    ) {
+      out.push({ type: "agent.reasoning.delta", payload: { text: data.event.delta } });
+      return out;
+    }
     if (data?.type === "response_done") {
       return out;
     }

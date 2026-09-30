@@ -34,6 +34,23 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Workspace configs read shared provider metadata at module load.
+              // Keep this pure data outside mutually importing settings routes.
+              name: "model-provider-metadata",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-metadata\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // Registration runs when lazy routes evaluate. Keep the loader's
+              // state and registration entry point together, outside route
+              // chunks that can import one another before state initializes.
+              name: "pierre-diffs-loader",
+              test: /packages[\\/]react[\\/]src[\\/](?:diffs\.ts|lib[\\/]pierre-diffs-loader\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Questions and command controls mount only when their session
               // surface is active. Keep their implementations behind those
               // lazy imports instead of recursively merging them into chat.

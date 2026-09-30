@@ -466,6 +466,62 @@ the product must persist its cross-reference before the initial turn starts,
 also preallocate `requestedSessionId` and store it with that same logical
 operation.
 
+## Automated work
+
+For product jobs, bots, and webhooks, keep the organization or workspace API key
+on the backend and use `client.asService(name, context?)`. It returns a new
+client of the same class without changing the original. Attribution is not
+permission: the API still checks the key's authority, and service work cannot
+impersonate a human or borrow their Personal workspace, personal Connections,
+Knowledge, or Variable Sets. Do not use a synthetic `asUser` identity for a job.
+
+The helper sends `x-opengeni-service-initiator` (a name matching
+`^[a-z0-9][a-z0-9:._-]{0,63}$`) and, when supplied,
+`x-opengeni-service-context` (a flat JSON object with string, finite-number, or
+boolean values, at most 2 KiB of serialized header bytes). Context is non-secret
+attribution, not credentials or a permissions request. `asService` and
+`asUser` / `asLinkedUser` are mutually exclusive; start each lane from the
+unscoped client. Reapplying `asService` replaces its name and context.
+The server rejects mixed user/service headers with 422. OpenGeni-owned
+provenance fields such as `via` and `label` are reserved context keys.
+Session create, Send, and Steer freeze this service principal with no initiating
+human; a scheduled task created in this lane freezes it for its occurrences.
+
+For a private repository owned by the product, configure a
+[workspace credential provider](workspace-integrations.md#credential-provider)
+once during provisioning, then select the repository in the job:
+
+```ts
+const { secret } = await client.putWorkspaceCredentialProvider(workspace.id, {
+  url: "https://product.example/opengeni/credentials",
+});
+await productSecrets.storeCredentialProviderSecret(workspace.id, secret);
+
+const job = client.asService("acme:reports", { jobId: jobRecord.id });
+const session = await job.createSession(workspace.id, {
+  initialMessage: "Read the repository and summarize the latest report changes.",
+  idempotencyKey: `reports:${jobRecord.id}`,
+  resources: [{
+    kind: "repository",
+    uri: "https://gitlab.com/acme/reports.git",
+    ref: "main",
+    provider: "gitlab",
+    access: "read",
+  }],
+  skills: productSkills,
+  tools: [],
+  firstPartyMcpTools: [],
+  bundledSkillIds: [],
+});
+```
+
+The product endpoint verifies the signed request and independently authorizes
+its exact workspace/session scope before returning short-lived `git` credentials
+for `gitlab.com` and an `expiresAt`. It must not treat the service name or context
+as authorization. Keep tokens out of the repository URI and prompt. Use managed
+compute for cloning; a Connected Machine owns its existing checkout and Git
+authentication, so OpenGeni does not clone repositories or inject Git tokens there.
+
 ## Skills are external product data
 
 Ordinary OpenGeni sessions include `builtin:opengeni-client` for product

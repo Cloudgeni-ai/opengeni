@@ -71,6 +71,12 @@ import {
   timelineAnchorCorrection,
   type TimelineAnchor,
 } from "./timeline-anchor";
+import { useReadingProgress } from "./timeline-reading-progress";
+import {
+  animateTimelineSettlement,
+  captureTimelineSettlement,
+  type TimelineSettlement,
+} from "./timeline-settlement";
 import {
   UserMessageBody,
   UserMessageDisclosureProvider,
@@ -630,10 +636,11 @@ export function MessageTimeline({
   const previousSourceIdsRef = useRef(new Set<string>());
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
+  const settlementRef = useRef<TimelineSettlement | null>(null);
   const olderPageBudgetRef = useRef(0);
   const [olderDemand, setOlderDemand] = useState(0);
   const readableTurns = turnSummary?.rolling === true;
-  const allGroups = useMemo(
+  const projectedGroups = useMemo(
     () => groupTimeline(resolvedItems, { readableTurns }),
     [resolvedItems, readableTurns],
   );
@@ -656,6 +663,10 @@ export function MessageTimeline({
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
+  const { groups: allGroups, release: releaseProgress } = useReadingProgress(
+    projectedGroups,
+    autoFollow && pinned && !hasNewer,
+  );
   const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
   const canSkipTipCatchupRef = useRef(false);
   const [bulkActive, setBulkActive] = useState(true);
@@ -900,6 +911,26 @@ export function MessageTimeline({
       setOlderPrefetchArmed(true);
     }
   }, [autoFollow, applyPinned, clearPendingReaderLeave, clearReaderIntent, stopFollow]);
+
+  useEffect(() => {
+    if (!readableTurns) return;
+    const node = scrollRef.current;
+    if (!node) return;
+    const onSelection = () => {
+      const selection = node.ownerDocument.getSelection();
+      if (
+        selection &&
+        !selection.isCollapsed &&
+        node.contains(selection.anchorNode) &&
+        node.contains(selection.focusNode)
+      ) {
+        releasePinFromReader();
+        disclosureKeepsUnpinnedRef.current = true;
+      }
+    };
+    node.ownerDocument.addEventListener("selectionchange", onSelection);
+    return () => node.ownerDocument.removeEventListener("selectionchange", onSelection);
+  }, [readableTurns, releasePinFromReader]);
 
   /**
    * Settled away from the tip while the camera is idle — Vimium / unfocused
@@ -1452,6 +1483,8 @@ export function MessageTimeline({
     previousSourceIdsRef.current = new Set(sourceItems?.map((item) => item.id));
     const readingAnchor = readingAnchorRef.current;
     readingAnchorRef.current = null;
+    const settlement = settlementRef.current;
+    settlementRef.current = null;
     const attempt = olderLoadAttemptRef.current;
     const committedZeroOverlapOlderReplacement = !!(
       attempt?.[2]?.committed &&
@@ -1578,6 +1611,22 @@ export function MessageTimeline({
           applyPinned(false);
         }
       }
+    } else if (!pinnedRef.current && readingAnchor && readableTurns) {
+      // A live work row moves behind newly streamed prose. Correct only the
+      // residual movement native anchoring did not absorb, using the reader's
+      // retained paragraph/control rather than the moving row's outer box.
+      const correction = timelineAnchorCorrection(node, readingAnchor);
+      if (correction !== null && Math.abs(correction) > 1) {
+        writeScrollTop(node, node.scrollTop + correction);
+      }
+      const focused = readingAnchor.find((anchor) => anchor.focused)?.element;
+      if (
+        focused &&
+        node.contains(focused) &&
+        node.ownerDocument.activeElement === node.ownerDocument.body
+      ) {
+        focused.focus({ preventScroll: true });
+      }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
       // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
       // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
@@ -1629,6 +1678,8 @@ export function MessageTimeline({
             node.scrollTop
           : null;
     }
+
+    if (settlement) animateTimelineSettlement(settlement);
 
     // Promise settlement is not itself permission to retry. A receipt-marked
     // accepted page retires its exact owner on this commit even when projection
@@ -2194,6 +2245,19 @@ export function MessageTimeline({
                             ? event.target.closest("button[aria-expanded]")
                             : null;
                         if (target) {
+                          if (target.hasAttribute("data-og-work-header")) {
+                            releaseProgress(
+                              target
+                                .closest("[data-og-group-key]")
+                                ?.getAttribute("data-og-group-key") ?? null,
+                            );
+                          }
+                          releasePinFromReader();
+                          disclosureKeepsUnpinnedRef.current = true;
+                        }
+                      }}
+                      onFocusCapture={(event) => {
+                        if (readableTurns && event.target !== event.currentTarget) {
                           releasePinFromReader();
                           disclosureKeepsUnpinnedRef.current = true;
                         }
@@ -2215,6 +2279,18 @@ export function MessageTimeline({
                           readingAnchorRef.current =
                             !pinnedRef.current && scrollRef.current
                               ? captureTimelineAnchor(scrollRef.current)
+                              : null;
+                          settlementRef.current =
+                            readableTurns &&
+                            autoFollow &&
+                            pinnedRef.current &&
+                            revealedRef.current &&
+                            !hasNewer &&
+                            !pendingReaderLeaveRef.current &&
+                            !disclosureKeepsUnpinnedRef.current &&
+                            !prefersReducedMotion() &&
+                            scrollRef.current
+                              ? captureTimelineSettlement(scrollRef.current, groups)
                               : null;
                         }}
                       >
@@ -2813,7 +2889,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
                     key={
                       !startupDismissed &&
                       group.kind === "activity" &&
-                      !group.work?.details?.length &&
+                      !group.work &&
                       group.items.every(
                         (item) =>
                           item.kind === "startup-phase" ||
@@ -2951,7 +3027,35 @@ const TimelineGroupView = memo(function TimelineGroupView({
   switch (group.kind) {
     case "activity":
       if (group.work) {
-        const end = group.work.responseStartedAt ?? group.work.endedAt;
+        const phases = group.items.filter((item) => item.kind === "startup-phase");
+        const preparing =
+          !startupDetails &&
+          !startupDismissed &&
+          !group.work.endedAt &&
+          !group.work.waiting &&
+          phases.length > 0 &&
+          group.items.every(
+            (item) =>
+              item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
+          ) &&
+          !phases.some((item) => item.status === "failed" || item.status === "cancelled");
+        if (preparing) {
+          // Preparation is primary, never hidden in an activity disclosure.
+          // Keep work.startedAt unchanged for the handoff and settled duration.
+          return (
+            <ActivityRail
+              items={group.items}
+              startupActive
+              bare
+              toolRegistry={toolRegistry}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
+            />
+          );
+        }
+        const end = group.work.endedAt;
         const status: TurnSummaryStatus = end
           ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
           : group.work.waiting
@@ -2969,40 +3073,41 @@ const TimelineGroupView = memo(function TimelineGroupView({
               };
         return (
           <TurnSummary
-            key={containsPresentedImage ? "primary-image" : "work"}
+            key="work"
             items={group.items}
             status={status}
             outcome={group.outcome}
             failureText={group.failureText}
             foldKey={group.id}
-            defaultOpen={containsPresentedImage || group.outcome === "failed" ? true : undefined}
+            defaultOpen={
+              containsPresentedImage ||
+              group.outcome === "failed" ||
+              phases.some((item) => item.status === "failed" || item.status === "cancelled")
+                ? true
+                : undefined
+            }
             facets={turnSummary?.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
           >
-            <TurnRailFrame>
-              <ActivityRail
-                items={group.items}
-                bare
-                toolRegistry={toolRegistry}
-                onOpenSession={onOpenSession}
-                onMemoryClick={onMemoryClick}
-                loadRetainedScreenshot={loadRetainedScreenshot}
-                loadRetainedArtifact={loadRetainedArtifact}
-              />
-              {renderFoldedGroups(group.work.details, {
-                renderMessageActions,
-                renderMessageText,
-                onOpenSession,
-                onMemoryClick,
-                onReconnect,
-                renderAuthNeeded,
-                resolveProviderLogo,
-                toolRegistry,
-                loadRetainedScreenshot,
-                loadRetainedArtifact,
-                loadVideoArtifactPlayback,
-                turnSummary,
-              })}
+            <TurnRailFrame compact>
+              {renderFoldedGroups(
+                group.work.details,
+                {
+                  renderMessageActions,
+                  renderMessageText,
+                  onOpenSession,
+                  onMemoryClick,
+                  onReconnect,
+                  renderAuthNeeded,
+                  resolveProviderLogo,
+                  toolRegistry,
+                  loadRetainedScreenshot,
+                  loadRetainedArtifact,
+                  loadVideoArtifactPlayback,
+                  turnSummary,
+                },
+                true,
+              )}
             </TurnRailFrame>
           </TurnSummary>
         );
@@ -3077,6 +3182,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           return (
             <ActivityRail
               items={group.items}
+              {...(startupDismissed ? { startupActive: false } : {})}
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
@@ -3249,12 +3355,16 @@ type FoldedGroupBehavior = {
 };
 
 /** Children of a folded turn or exchange, each on the shared rail. */
-function renderFoldedGroups(groups: readonly TimelineGroup[], behavior: FoldedGroupBehavior) {
+function renderFoldedGroups(
+  groups: readonly TimelineGroup[],
+  behavior: FoldedGroupBehavior,
+  readableWork = false,
+) {
   // Second-layer chips only when there are natural multi-cluster seams:
   // otherwise the outer turn chip alone is enough ("N steps" wrapping one
   // more "N steps" was the redundant double fold).
   const nestClusters = foldableActivityClusterCount(groups) >= 2;
-  return groups.map((child) => (
+  return groups.map((child, index) => (
     <TimelineGroupRenderBoundary
       key={timelineGroupKey(child)}
       resetKeys={[
@@ -3273,7 +3383,19 @@ function renderFoldedGroups(groups: readonly TimelineGroup[], behavior: FoldedGr
         behavior.turnSummary,
       ]}
     >
-      <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />
+      {readableWork ? (
+        <div
+          className={
+            index > 0 && (child.kind !== "activity" || groups[index - 1]?.kind !== "activity")
+              ? "mt-3"
+              : undefined
+          }
+        >
+          <TimelineGroupView {...behavior} group={child} insideTurn startupDismissed />
+        </div>
+      ) : (
+        <TimelineGroupView {...behavior} group={child} insideTurn nestClusterChips={nestClusters} />
+      )}
     </TimelineGroupRenderBoundary>
   ));
 }
@@ -3298,9 +3420,16 @@ function FoldBody({ children }: { children: ReactNode }) {
 
 /** Stable left rule for turn/activity bodies — always present so settle wrap
     never inserts or removes the rail chrome. */
-function TurnRailFrame({ children }: { children: ReactNode }) {
+function TurnRailFrame({ children, compact = false }: { children: ReactNode; compact?: boolean }) {
   return (
-    <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{children}</div>
+    <div
+      className={cn(
+        "flex flex-col border-l-2 border-og-border pl-3 sm:pl-4",
+        compact ? "gap-0.5" : "gap-4",
+      )}
+    >
+      {children}
+    </div>
   );
 }
 
