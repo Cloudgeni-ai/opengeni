@@ -2,7 +2,7 @@
  * refusal lifecycle. Historical fixtures withholding either prerequisite
  * must withhold and replay this entire ordered tail after it. */
 export const allowanceMigrationTail = [
-  "0549_usage_allowances.sql",
-  "0550_non_model_debit_attribution.sql",
-  "0551_video_allowance_refunds.sql",
+  "0552_usage_allowances.sql",
+  "0553_non_model_debit_attribution.sql",
+  "0554_video_allowance_refunds.sql",
 ] as const;

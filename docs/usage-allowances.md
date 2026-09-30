@@ -11,7 +11,7 @@ tenant-to-workspace mapping, and explicit external-member onboarding. Typed
 SDK details live in the [SDK reference](../packages/sdk/README.md); the
 allowance schemas live in `packages/contracts/src/usage-allowances.ts`.
 Storage/counter lifecycle: `packages/db/src/usage-allowances.ts` and
-`packages/db/drizzle/0549_usage_allowances.sql`; HTTP authority:
+`packages/db/drizzle/0552_usage_allowances.sql`; HTTP authority:
 `apps/api/src/routes/usage-allowances.ts`.
 
 Accounting reads frozen, content-free attribution receipts for accepted turns,
@@ -28,7 +28,7 @@ While disabled, those producer writes return HTTP 409. Authorized
 exact-version clear and `rule: null` recovery writes remain available; neither
 operation bypasses its normal authority or version checks.
 
-1. Apply migrations 0549–0551 together and provision the matching database roles.
+1. Apply migrations 0552–0554 together and provision the matching database roles.
 2. Upgrade **every API, control-worker, and turn-worker consumer** to the
    allowance-aware release before allowing producers to write new policies.
 3. Enable `OPENGENI_USAGE_ALLOWANCES_ENABLED` for the API producers, then

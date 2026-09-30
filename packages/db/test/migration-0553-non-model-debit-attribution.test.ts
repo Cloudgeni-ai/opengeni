@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 test("non-model attribution freezes jobs/documents and admits no creator-based legacy backfill", async () => {
   const source = await readFile(
-    new URL("../drizzle/0550_non_model_debit_attribution.sql", import.meta.url),
+    new URL("../drizzle/0553_non_model_debit_attribution.sql", import.meta.url),
     "utf8",
   );
   expect(source).toContain('NOT NULL DEFAULT \'{"kind":"unknown"}\'::jsonb');

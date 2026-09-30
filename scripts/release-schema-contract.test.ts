@@ -143,17 +143,17 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0551_video_allowance_refunds.sql",
+          (migration) => migration.path === "0554_video_allowance_refunds.sql",
         )
-          ? "0551_video_allowance_refunds.sql"
+          ? "0554_video_allowance_refunds.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0550_non_model_debit_attribution.sql",
+                (migration) => migration.path === "0553_non_model_debit_attribution.sql",
               )
-            ? "0550_non_model_debit_attribution.sql"
+            ? "0553_non_model_debit_attribution.sql"
             : sourceContract.migrations.some(
-                  (migration) => migration.path === "0549_usage_allowances.sql",
+                  (migration) => migration.path === "0552_usage_allowances.sql",
                 )
-              ? "0549_usage_allowances.sql"
+              ? "0552_usage_allowances.sql"
               : sourceContract.migrations.some(
                     (migration) => migration.path === "0548_lost_sandbox_group_continuity.sql",
                   )
@@ -428,13 +428,13 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0542_task_note_root_lock_mode.sql",
     );
     const usageAllowances = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0549_usage_allowances.sql",
+      (migration) => migration.path === "0552_usage_allowances.sql",
     );
     const nonModelDebitAttribution = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0550_non_model_debit_attribution.sql",
+      (migration) => migration.path === "0553_non_model_debit_attribution.sql",
     );
     const videoAllowanceRefunds = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0551_video_allowance_refunds.sql",
+      (migration) => migration.path === "0554_video_allowance_refunds.sql",
     );
     const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0540_external_workspace_member_permission_updates.sql",
@@ -1121,11 +1121,11 @@ describe("release schema contract", () => {
       ...(lostSandboxGroupContinuity
         ? { latestMigration: "0548_lost_sandbox_group_continuity.sql" }
         : {}),
-      ...(usageAllowances ? { latestMigration: "0549_usage_allowances.sql" } : {}),
+      ...(usageAllowances ? { latestMigration: "0552_usage_allowances.sql" } : {}),
       ...(nonModelDebitAttribution
-        ? { latestMigration: "0550_non_model_debit_attribution.sql" }
+        ? { latestMigration: "0553_non_model_debit_attribution.sql" }
         : {}),
-      ...(videoAllowanceRefunds ? { latestMigration: "0551_video_allowance_refunds.sql" } : {}),
+      ...(videoAllowanceRefunds ? { latestMigration: "0554_video_allowance_refunds.sql" } : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1165,9 +1165,9 @@ describe("release schema contract", () => {
             "0545_workspace_claude_models.sql",
             "0546_organization_integration_primitives.sql",
             "0548_lost_sandbox_group_continuity.sql",
-            "0549_usage_allowances.sql",
-            "0550_non_model_debit_attribution.sql",
-            "0551_video_allowance_refunds.sql",
+            "0552_usage_allowances.sql",
+            "0553_non_model_debit_attribution.sql",
+            "0554_video_allowance_refunds.sql",
           ].includes(migration.path),
       ),
     };
@@ -2656,9 +2656,9 @@ describe("release schema contract", () => {
       "0545_workspace_claude_models.sql",
       "0546_organization_integration_primitives.sql",
       "0548_lost_sandbox_group_continuity.sql",
-      "0549_usage_allowances.sql",
-      "0550_non_model_debit_attribution.sql",
-      "0551_video_allowance_refunds.sql",
+      "0552_usage_allowances.sql",
+      "0553_non_model_debit_attribution.sql",
+      "0554_video_allowance_refunds.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3199,9 +3199,9 @@ describe("release schema contract", () => {
       "0545_workspace_claude_models.sql",
       "0546_organization_integration_primitives.sql",
       "0548_lost_sandbox_group_continuity.sql",
-      "0549_usage_allowances.sql",
-      "0550_non_model_debit_attribution.sql",
-      "0551_video_allowance_refunds.sql",
+      "0552_usage_allowances.sql",
+      "0553_non_model_debit_attribution.sql",
+      "0554_video_allowance_refunds.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -291,7 +291,7 @@ describe("existing prepaid video allowance refunds", () => {
   }, 60_000);
 });
 
-test("0549 non-superuser FORCE-RLS owner can read exact debit and restore all allocations; app cannot call/write internals", async () => {
+test("0552 non-superuser FORCE-RLS owner can read exact debit and restore all allocations; app cannot call/write internals", async () => {
   const owner = await acquireOwnerMigratedTestDatabase("video-refund-owner");
   if (!owner) throw new Error("Owner-migrated PostgreSQL database required");
   let ownerApp: ReturnType<typeof createDb> | undefined;
