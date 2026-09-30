@@ -177,22 +177,25 @@ function Conversation({
         }}
         loadingOldest={feed.loadingOldest}
         onJumpToLatest={feed.jumpToLatest}
-        onJumpToLatestQuestion={() =>
-          feed.jumpToLatestQuestion({
-            onQueuedQuestion: async (turn, navigation) => {
-              await queue.refresh();
-              if (
-                !navigation.isCurrent() ||
-                scopeRef.current.client !== context.client ||
-                scopeRef.current.workspaceId !== context.workspaceId
-              )
-                return;
-              setQueueFocusTarget((previous) => ({
-                turnId: turn.id,
-                requestId: (previous?.requestId ?? 0) + 1,
-              }));
-            },
-          })
+        onJumpToLatestQuestion={
+          feed.initialHistoryReady
+            ? () =>
+                feed.jumpToLatestQuestion({
+                  onQueuedQuestion: async (turn, navigation) => {
+                    await queue.refresh();
+                    if (
+                      !navigation.isCurrent() ||
+                      scopeRef.current.client !== context.client ||
+                      scopeRef.current.workspaceId !== context.workspaceId
+                    )
+                      return;
+                    setQueueFocusTarget((previous) => ({
+                      turnId: turn.id,
+                      requestId: (previous?.requestId ?? 0) + 1,
+                    }));
+                  },
+                })
+            : undefined
         }
         onAnnotate={composer.addAnnotation}
       />
