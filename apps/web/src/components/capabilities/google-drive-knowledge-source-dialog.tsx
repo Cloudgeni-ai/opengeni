@@ -2,6 +2,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -122,7 +123,7 @@ export function GoogleDriveKnowledgeSourceDialog({
       } catch (error) {
         if (generation !== browseGeneration.current) return null;
         toast.error("Google Drive folder could not be opened", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
         return null;
       } finally {
@@ -268,7 +269,7 @@ export function GoogleDriveKnowledgeSourceDialog({
     } catch (error) {
       if (mutation.isCurrent()) {
         toast.error("Google Drive locations could not be saved", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       }
     } finally {

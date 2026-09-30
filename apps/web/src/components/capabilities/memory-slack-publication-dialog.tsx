@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -149,7 +150,7 @@ function MemorySlackPublicationSettings({
       applyConfiguration(config.current);
       setPublications(history.publications);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
+      setError(`Couldn't load Slack publication settings. ${userErrorText(loadError)}`);
     } finally {
       setLoading(false);
     }
@@ -186,8 +187,7 @@ function MemorySlackPublicationSettings({
         if (!cancelled) {
           setChannels([]);
           toast.error("Could not load eligible Slack channels", {
-            description:
-              channelError instanceof Error ? channelError.message : String(channelError),
+            description: userErrorText(channelError),
           });
         }
       })
@@ -221,7 +221,7 @@ function MemorySlackPublicationSettings({
       await refresh();
     } catch (saveError) {
       toast.error("Could not save Slack publication settings", {
-        description: saveError instanceof Error ? saveError.message : String(saveError),
+        description: userErrorText(saveError),
       });
     } finally {
       setSaving(false);
@@ -244,8 +244,8 @@ function MemorySlackPublicationSettings({
       );
       await refresh();
     } catch (actionError) {
-      toast.error("Publication state changed before the action completed", {
-        description: actionError instanceof Error ? actionError.message : String(actionError),
+      toast.error(`Couldn't ${action} this publication`, {
+        description: userErrorText(actionError),
       });
       await refresh();
     } finally {

@@ -10,6 +10,7 @@ import {
 } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import type {
   IntegrationAccessItem,
@@ -216,10 +217,10 @@ export function useApiIntegrationOAuthCallback({
       });
     })().catch((error) => {
       toast.error("Connected, but couldn't finish setup", {
-        description:
-          error instanceof Error
-            ? error.message
-            : "Retry from this service's row; the connection remains safe.",
+        description: userErrorText(
+          error,
+          "Retry from this service's row; the connection remains safe.",
+        ),
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -335,7 +336,7 @@ export function useApiIntegrationAccounts({
     } catch (error) {
       setBusy(false);
       toast.error("Couldn't start account connection", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -355,7 +356,7 @@ export function useApiIntegrationAccounts({
       setRemoveTarget({ instance, removesDefinition: preview.removesDefinition });
     } catch (error) {
       toast.error("Couldn't inspect removal impact", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setBusy(false);
@@ -385,7 +386,7 @@ export function useApiIntegrationAccounts({
       return true;
     } catch (error) {
       toast.error("Couldn't remove this account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {

@@ -148,14 +148,23 @@ test("caller, session and workspace changes reset choices and fence stale invent
 test("failed inventory blocks sending and retry recovers without forgetting exclusions", async () => {
   let fail = false;
   const client = clientFor(async () => {
-    if (fail) throw new Error("Cannot load accounts");
+    if (fail) {
+      throw Object.assign(
+        new Error("OpenGeni API 500: accounts store down Reference: req-accounts."),
+        {
+          status: 500,
+        },
+      );
+    }
     return accounts;
   });
   await act(async () => root.render(<Harness client={client} />));
   await act(async () => state.selectAccount("mail", ["two"]));
   fail = true;
   await act(async () => state.refresh());
-  expect(state.error).toBe("Cannot load accounts");
+  expect(state.error).toBe(
+    "Couldn't check connected accounts. Opengeni couldn't finish the request. Try again in a moment.",
+  );
   expect(state.selections).toEqual([]);
   fail = false;
   await act(async () => state.refresh());

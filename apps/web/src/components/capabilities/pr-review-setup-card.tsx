@@ -16,6 +16,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { findPickerRow, groupPickerRowsByBillingClass } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
@@ -75,7 +76,7 @@ export function PrReviewSetupCard(props: {
     let live = true;
     setLoading(true);
     void refresh()
-      .catch((reason) => live && setError(messageForError(reason)))
+      .catch((reason) => live && setError(messageForError("Couldn't load review setup", reason)))
       .finally(() => live && setLoading(false));
     return () => {
       live = false;
@@ -101,7 +102,7 @@ export function PrReviewSetupCard(props: {
       setAccessToken("");
       setWebhookSecret("");
     } catch (reason) {
-      setError(messageForError(reason));
+      setError(messageForError("Couldn't register the app", reason));
     } finally {
       setBusy(false);
     }
@@ -128,7 +129,7 @@ export function PrReviewSetupCard(props: {
       setProjectId("");
       setNewRepositoryModel("");
     } catch (reason) {
-      setError(messageForError(reason));
+      setError(messageForError("Couldn't add the repository", reason));
     } finally {
       setBusy(false);
     }
@@ -145,7 +146,7 @@ export function PrReviewSetupCard(props: {
         current.map((repository) => (repository.id === updated.id ? updated : repository)),
       );
     } catch (reason) {
-      setError(messageForError(reason));
+      setError(messageForError("Couldn't change the review model", reason));
     } finally {
       setSavingRepositoryIds((current) => {
         const next = new Set(current);
@@ -472,7 +473,7 @@ export function PrReviewSetupCard(props: {
             </p>
           </div>
           {modelCatalog.error ? (
-            <Notice tone="failed">Could not load review models: {modelCatalog.error}</Notice>
+            <Notice tone="failed">Couldn't load review models. {modelCatalog.error}</Notice>
           ) : null}
           <div className="grid gap-2">
             {repositories.map((repository) => {
@@ -530,7 +531,9 @@ export function PrReviewSetupCard(props: {
           onClose={() => setConnectRequest(null)}
           onComplete={() => {
             setConnectRequest(null);
-            void refresh().catch((reason) => setError(messageForError(reason)));
+            void refresh().catch((reason) =>
+              setError(messageForError("Couldn't load review setup", reason)),
+            );
           }}
         />
       ) : null}
@@ -575,6 +578,7 @@ function ReviewModelSelect(props: {
   );
 }
 
-function messageForError(reason: unknown): string {
-  return reason instanceof Error ? reason.message : "Opengeni Review Bot setup failed";
+/** What failed, then what to do: never the raw "OpenGeni API 4xx ... Reference" string. */
+function messageForError(what: string, reason: unknown): string {
+  return `${what}. ${userErrorText(reason)}`;
 }

@@ -29,6 +29,7 @@ import { useSlackInstallationDiscovery } from "@/components/capabilities/use-sla
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
@@ -451,7 +452,7 @@ export function useSlackIntegration({
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your Slack account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -495,7 +496,7 @@ export function useSlackIntegration({
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect the Opengeni Slack bot", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -522,7 +523,7 @@ export function useSlackIntegration({
       toast.success("Slack knowledge destination saved");
     } catch (error) {
       toast.error("Couldn't save the Slack knowledge destination", {
-        description: error instanceof Error ? error.message : "Try again.",
+        description: userErrorText(error),
       });
     } finally {
       setDestinationBusy(false);
@@ -620,7 +621,7 @@ export function useSlackIntegration({
       toast.success(enabled ? "Decision publication turned on" : "Decision publication turned off");
     } catch (error) {
       toast.error("Could not save Slack publication settings", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setPublicationBusy(false);

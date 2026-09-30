@@ -14,12 +14,14 @@ import {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
+import { apiErrorDetails, isPermissionDenied, userErrorText } from "@/lib/api-error";
 
 import type { GoogleDriveKnowledgeSourceDialogProps } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ErrorMessage } from "@/components/ui/error-message";
 import {
   Dialog,
   DialogContent,
@@ -105,7 +107,7 @@ export function IntegrationFacetsPanel({
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<IntegrationInstanceFacetsResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ cause: unknown } | null>(null);
   const [busyFacetKeys, setBusyFacetKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [editor, setEditor] = useState<FacetEntry | null>(null);
   const [googleDriveEditor, setGoogleDriveEditor] = useState<FacetEntry | null>(null);
@@ -214,7 +216,7 @@ export function IntegrationFacetsPanel({
         setError(null);
       } catch (loadError) {
         if (generation !== operationGeneration.current) return;
-        setError(loadError instanceof Error ? loadError.message : String(loadError));
+        setError({ cause: loadError });
       } finally {
         if (generation === operationGeneration.current) setLoading(false);
       }
@@ -302,7 +304,7 @@ export function IntegrationFacetsPanel({
     } catch (saveError) {
       if (!isCurrentMutation(token)) return;
       toast.error("Couldn't save this facet", {
-        description: saveError instanceof Error ? saveError.message : String(saveError),
+        description: userErrorText(saveError),
       });
     } finally {
       finishMutation(token);
@@ -339,8 +341,7 @@ export function IntegrationFacetsPanel({
     } catch (lifecycleError) {
       if (!isCurrentMutation(token)) return;
       toast.error(`Couldn't ${action} this facet`, {
-        description:
-          lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError),
+        description: userErrorText(lifecycleError),
       });
     } finally {
       finishMutation(token);
@@ -383,7 +384,7 @@ export function IntegrationFacetsPanel({
     } catch (removeError) {
       if (!isCurrentMutation(token)) return false;
       toast.error("Couldn't remove this facet", {
-        description: removeError instanceof Error ? removeError.message : String(removeError),
+        description: userErrorText(removeError),
       });
       return false;
     } finally {
@@ -427,13 +428,25 @@ export function IntegrationFacetsPanel({
             data-integration-facets={instance.instanceKey}
           >
             {error ? (
-              <div className="rounded-lg border border-border bg-surface p-3">
-                <p className="text-2xs leading-5 text-fg-muted">{error}</p>
-                <Button type="button" variant="ghost" size="xs" onClick={() => void load()}>
-                  <RefreshCwIcon />
-                  Retry
-                </Button>
-              </div>
+              isPermissionDenied(error.cause) ? (
+                <p className="text-2xs leading-5 text-fg-muted">
+                  You can't see this account's facets. Ask a workspace admin for access.
+                </p>
+              ) : (
+                <ErrorMessage
+                  variant="inline"
+                  title="Couldn't load facets."
+                  {...apiErrorDetails(error.cause)}
+                  action={
+                    <Button type="button" variant="ghost" size="xs" onClick={() => void load()}>
+                      <RefreshCwIcon />
+                      Try again
+                    </Button>
+                  }
+                >
+                  {userErrorText(error.cause)}
+                </ErrorMessage>
+              )
             ) : data ? (
               data.facets.map((entry) => (
                 <FacetRow

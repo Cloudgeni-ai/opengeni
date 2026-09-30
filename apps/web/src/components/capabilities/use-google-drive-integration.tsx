@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import {
   configuredGoogleDriveSources,
@@ -223,7 +224,7 @@ export function useGoogleDriveIntegration({
     } catch (error) {
       toast.error(
         action === "pause" ? "Google Drive could not be paused" : "Google Drive could not resume",
-        { description: error instanceof Error ? error.message : String(error) },
+        { description: userErrorText(error) },
       );
       await refresh();
     } finally {
@@ -248,7 +249,7 @@ export function useGoogleDriveIntegration({
       return true;
     } catch (error) {
       toast.error("Google Drive could not be disconnected", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -290,7 +291,7 @@ export function useGoogleDriveIntegration({
       toast.success(enabled ? "Google Drive sync turned on" : "Google Drive sync turned off");
     } catch (error) {
       toast.error("Google Drive sync could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       await refresh();
     } finally {

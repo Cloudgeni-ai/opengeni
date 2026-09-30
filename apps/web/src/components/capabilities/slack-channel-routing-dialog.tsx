@@ -2,6 +2,7 @@ import type { SlackChannelRoute, SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -155,7 +156,7 @@ function SlackChannelRoutingDialogBody({
         );
       } catch (caught) {
         if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : String(caught));
+          setError(`Couldn't load Slack channels. ${userErrorText(caught)}`);
           setLoadedRoutes(null);
         }
       } finally {
@@ -214,7 +215,7 @@ function SlackChannelRoutingDialogBody({
       onClose();
     } catch (caught) {
       toast.error("Couldn't save Slack channel routing", {
-        description: caught instanceof Error ? caught.message : String(caught),
+        description: userErrorText(caught),
       });
     } finally {
       setSaving(false);

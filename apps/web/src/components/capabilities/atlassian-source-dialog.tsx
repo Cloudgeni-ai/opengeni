@@ -1,6 +1,7 @@
 import { BookOpenIcon, Loader2Icon, PanelsTopLeftIcon, SearchIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { request as apiRequest } from "@/api";
 import { saveAtlassianSources } from "@/components/capabilities/atlassian-sources";
@@ -132,7 +133,7 @@ function AtlassianSourceDialogBody({
       } catch (error) {
         if (cancelled) return;
         toast.error("Atlassian sources could not be loaded", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       } finally {
         if (!cancelled) setBrowseBusy(false);
@@ -164,7 +165,7 @@ function AtlassianSourceDialogBody({
       });
     } catch (error) {
       toast.error("Atlassian sources could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       await onSaveFailed();
     } finally {

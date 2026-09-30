@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem, Session } from "@opengeni/sdk";
+import { userErrorText } from "@/lib/api-error";
 import { isWorkspacePermissionDenied } from "@/lib/permissions";
 import {
   selectedConnectionAccounts,
@@ -81,9 +82,7 @@ export function useConnectionAccounts(
           groups: [],
           error: accessDenied
             ? "You don't have permission to view connection accounts. Ask a workspace admin for connection access."
-            : failure instanceof Error
-              ? failure.message
-              : "Connection accounts could not be checked.",
+            : `Couldn't check connected accounts. ${userErrorText(failure)}`,
           accessDenied,
         });
       }

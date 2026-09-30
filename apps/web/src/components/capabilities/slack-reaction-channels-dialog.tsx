@@ -3,6 +3,7 @@ import type { SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -101,7 +102,7 @@ function SlackReactionChannelsDialogBody({
           setChannels([...new Map(collected.map((channel) => [channel.id, channel])).values()]);
         }
       } catch (error) {
-        if (!cancelled) setChannelsError(error instanceof Error ? error.message : String(error));
+        if (!cancelled) setChannelsError(`Couldn't load Slack channels. ${userErrorText(error)}`);
       } finally {
         if (!cancelled) setChannelsLoading(false);
       }

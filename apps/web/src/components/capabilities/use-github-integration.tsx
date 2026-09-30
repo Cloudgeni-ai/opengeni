@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
@@ -166,7 +167,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     } catch (error) {
       if (actionPolicyRequest.current !== request) return;
       toast.error("Could not update GitHub action approvals", {
-        description: error instanceof Error ? error.message : "Try again.",
+        description: userErrorText(error),
       });
     } finally {
       if (actionPolicyMutation.current === request) {
