@@ -33,7 +33,7 @@ type ProviderOk = Extract<CredentialProviderResponse, { status: "ok" }>;
 
 function gitCredentialLine(entry: NonNullable<ProviderOk["git"]>[number]): string {
   const username = encodeURIComponent(entry.username ?? "x-access-token");
-  return `https://${username}:${encodeURIComponent(entry.password)}@${entry.host}`;
+  return `https://${username}:${encodeURIComponent(entry.password)}@${entry.host.toLowerCase()}`;
 }
 
 /**

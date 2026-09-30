@@ -1,4 +1,8 @@
-import { getSessionAuthorityProjection, readActiveSandbox } from "@opengeni/db";
+import {
+  getSessionAuthorityProjection,
+  readActiveSandbox,
+  getWorkspaceCredentialProvider,
+} from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
@@ -1094,6 +1098,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // set. A Connected Machine receives no platform Git credential, so its
           // resources stay exactly as stored. Resolution never fails the turn;
           // an unusable bound repository stays bare and is reported visibly.
+          const hasCredentialProvider =
+            activeSandboxBackend !== "selfhosted" &&
+            (
+              await waitForTurnOperation(
+                getWorkspaceCredentialProvider(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                }),
+                cancellationSignal,
+                undefined,
+              )
+            )?.enabled === true;
           const boundResources = await waitForTurnOperation(
             applyTurnGitHubRepositoryBindings({
               db,
@@ -1101,6 +1117,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               activeSandboxBackend,
+              hasCredentialProvider,
               claimedTurnResources,
               claimedRuntimeResources,
               publish: async (events) => {

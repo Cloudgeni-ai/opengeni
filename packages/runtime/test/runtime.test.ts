@@ -5374,6 +5374,7 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
@@ -5694,7 +5695,7 @@ describe("runtime event normalization", () => {
       true,
     );
     expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(
-      false,
+      true,
     );
 
     // Home backend IS selfhosted: gated with no caller change (active backend
@@ -5765,8 +5766,8 @@ describe("runtime event normalization", () => {
       .split("\n")
       .filter((line) => /^start_(optional_)?repository_clone /u.test(line));
     expect(invocations).toEqual([
-      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' ''",
-      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent'",
+      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' '' 'provider'",
+      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent' 'provider'",
     ]);
   });
 
@@ -6269,6 +6270,7 @@ describe("runtime event normalization", () => {
         ref: "main",
         mountPath: "repos/acme/private/README.md",
         subpath: "README.md",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
