@@ -229,6 +229,10 @@ defaults on composer and omitted-tools Send follow-ups. Optional and deferred
 servers remain selected; frozen scheduled selections are not widened.
 A reused id at a different endpoint cannot receive credentials for your URL.
 Deployment MCPs, workspace connectors and local bridges are not eligible.
+Servers with `connectionRef` use native connection authentication only: they
+never enter the provider's target list or receive provider headers, including
+historical turns without account-binding snapshots. Provider headers cannot
+replace an authorized native account or disclose native-denied selections.
 Provider headers override same-named static headers
 case-insensitively while valid; renewal replaces the turn-local material.
 Header values are secret material: never placed in session events, history,

@@ -38,6 +38,8 @@ Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-acc
 owns effective turn refs: ordinary work uses session policy; scheduled work
 retains its frozen selection. Credential-provider targeting and MCP preparation
 consume those execution refs, never the queue's omitted-tools empty array.
+Connection-backed MCPs remain exclusively native-authenticated and are excluded
+from provider targeting and header application, even for historical work.
 
 ---
 
