@@ -463,7 +463,7 @@ Main column: DetailSection ...        | Quiet aside card:
   (`useFocusOnNavigation`). Back on the list, focus returns to the row that was opened.
 
 **Settings is a mode of the rail.** Entering settings (the rail footer's Settings, any workspace,
-organization or personal settings URL, and the Agents, Insights and runtime pages listed in the
+organization or personal settings URL, and the Insights and runtime pages listed in the
 settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
 (`components/settings/settings-sidebar.tsx`, sections from `settings-rail.tsx`): a back link that
 leaves settings ("Back to sessions"), then the one workspace picker (the same component and menu as
@@ -488,7 +488,7 @@ its scope ("Organization · Acme Robotics", since the picker is out of sight unt
 opens), and a Menu button that opens it in a drawer. Settings pages render full width beside
 the rail in the standard 960px column, with the section's page header; a sub-page (an account, a
 key, a person, a form) hides that header and declares its own back link and title. Pages that own
-their layout (Agents, Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
+their layout (Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
 reload and browser Back work, and its back link returns to the tab or list it was opened from.
 Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 `FlushFormPage` (or `FLUSH_FORM_PAGE_CLASS`) for `FormPage`, and the flush `AccessList`, so the

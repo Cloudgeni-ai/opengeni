@@ -763,7 +763,6 @@ export function RootRouteComponent() {
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
-      pathname === "/dev/agent-topology" ||
       pathname === "/dev/onboarding" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =

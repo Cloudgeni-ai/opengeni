@@ -8,7 +8,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
-  BotIcon,
   ContainerIcon,
   GraduationCapIcon,
   KeyRoundIcon,
@@ -103,12 +102,6 @@ const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
 
 // Workspace dashboards in the settings rail. They open as their own pages.
 export const ACTIVITY_PAGES = [
-  {
-    to: "/workspaces/$workspaceId/agents" as const,
-    label: "Agents",
-    icon: BotIcon,
-    requiresAdmin: false,
-  },
   {
     to: "/workspaces/$workspaceId/insights" as const,
     label: "Insights",

@@ -31,7 +31,6 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
 ];
 
 const WORKSPACE_PAGE_TARGETS = [
-  "/workspaces/$workspaceId/agents",
   "/workspaces/$workspaceId/insights",
   "/workspaces/$workspaceId/variable-sets",
   "/workspaces/$workspaceId/rigs",

@@ -45,7 +45,7 @@ once that lookup has finished.
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
 `organization`, and `files`; a session page also carries `session_id`.
-`environments` and `capabilities` are legacy redirects, so they appear only
+`environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),
 `session-link`, `identity-link`, `checkout-return` (`/billing`),

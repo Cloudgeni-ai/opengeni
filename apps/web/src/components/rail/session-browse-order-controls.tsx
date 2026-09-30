@@ -25,6 +25,7 @@ const SORTS: Record<SessionBrowseSortBy, string> = {
 };
 const STATUSES: Record<SessionBrowseStatus, string> = {
   active: "Active",
+  "needs-you": "Needs you",
   archived: "Archived",
   all: "All",
 };
@@ -33,11 +34,14 @@ function ViewSubmenu<T extends string>({
   label,
   value,
   choices,
+  counts,
   onChange,
 }: {
   label: string;
   value: T;
   choices: Record<T, string>;
+  /** A quiet number beside a choice, shown only when positive. */
+  counts?: Partial<Record<T, number>>;
   onChange: (value: T) => void;
 }) {
   return (
@@ -55,6 +59,11 @@ function ViewSubmenu<T extends string>({
           {(Object.keys(choices) as T[]).map((choice) => (
             <DropdownMenuRadioItem key={choice} value={choice}>
               {choices[choice]}
+              {counts?.[choice] ? (
+                <DropdownMenuMeta aria-label={`${counts[choice]} waiting`}>
+                  {counts[choice]}
+                </DropdownMenuMeta>
+              ) : null}
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
@@ -70,6 +79,7 @@ export function SessionBrowseOrderControls({
   onSortByChange,
   status,
   onStatusChange,
+  needsYouCount = 0,
   showEmptyGroups,
   onShowEmptyGroupsChange,
 }: {
@@ -79,12 +89,20 @@ export function SessionBrowseOrderControls({
   onSortByChange: (value: SessionBrowseSortBy) => void;
   status: SessionBrowseStatus;
   onStatusChange: (value: SessionBrowseStatus) => void;
+  /** Loaded workstreams waiting on the person, counted beside "Needs you". */
+  needsYouCount?: number;
   showEmptyGroups: boolean;
   onShowEmptyGroupsChange: (value: boolean) => void;
 }) {
   return (
     <>
-      <ViewSubmenu label="Status" value={status} choices={STATUSES} onChange={onStatusChange} />
+      <ViewSubmenu
+        label="Status"
+        value={status}
+        choices={STATUSES}
+        counts={{ "needs-you": needsYouCount }}
+        onChange={onStatusChange}
+      />
       <DropdownMenuSeparator />
       <ViewSubmenu label="Group by" value={groupBy} choices={GROUPS} onChange={onGroupByChange} />
       <ViewSubmenu label="Sort by" value={sortBy} choices={SORTS} onChange={onSortByChange} />

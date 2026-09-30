@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "re
 import {
   ArrowRightIcon,
   ArrowUpRightIcon,
-  BotIcon,
   Building2Icon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -58,7 +57,6 @@ export type SettingsPageId =
   | "agent-learning"
   | "capabilities"
   | "danger-zone"
-  | "agents"
   | "insights"
   | "memory";
 
@@ -146,13 +144,6 @@ function destinations(workspaceName: string): Record<SettingsPageId, Destination
       icon: TriangleAlertIcon,
       description: "Delete this workspace.",
     },
-    agents: {
-      id: "agents",
-      label: "Agents",
-      icon: BotIcon,
-      description: "Every workstream in this workspace, live.",
-      note: "Agents is a live view of work, not a setting. Question 5 moves it to the main rail, under More.",
-    },
     insights: {
       id: "insights",
       label: "Insights",
@@ -202,7 +193,7 @@ function settingsGroups({
         ...danger,
       ],
     },
-    { label: "Workspace activity", items: ["agents", "insights", "memory"] },
+    { label: "Workspace activity", items: ["insights", "memory"] },
     runtime,
   ];
 }

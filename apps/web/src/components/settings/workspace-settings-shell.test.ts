@@ -198,7 +198,6 @@ describe("settings rail", () => {
         "Models",
         "API keys",
         "Developer",
-        "Agents",
         "Insights",
         "Variable sets",
         "Sandbox environments",
@@ -212,7 +211,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([7, 3]);
+      ).toEqual([6, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -261,7 +260,7 @@ describe("settings rail", () => {
       // Two pages stay one group, not two lone rows.
       expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
       // Insights needs workspace admin.
-      expect(linkLabels(view.section("workspace"))).toContain("Agents");
+      expect(linkLabels(view.section("workspace"))).toContain("General");
       expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
     } finally {
       await view.unmount();
@@ -378,7 +377,7 @@ describe("settings rail", () => {
     }
   });
 
-  test("settings, the Agents and Insights dashboards, runtime pages and organization pages open in settings mode", () => {
+  test("settings, the Insights dashboard, runtime pages and organization pages open in settings mode", () => {
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId, "api-keys")).toEqual({
       kind: "settings",
       section: "api-keys",
@@ -400,7 +399,7 @@ describe("settings rail", () => {
       kind: "organization",
       section: null,
     });
-    for (const route of ["agents", "insights", "variable-sets", "rigs", "machines"]) {
+    for (const route of ["insights", "variable-sets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
@@ -415,7 +414,6 @@ describe("settings rail", () => {
       "state",
       "schedules",
       "artifacts",
-      "priority",
       "rigs-archive",
       "organization-archive",
     ]) {
@@ -465,19 +463,19 @@ describe("settings rail", () => {
     }
   });
 
-  test("Agents keeps the settings rail, with Agents current and a way back to sessions", async () => {
+  test("Insights keeps the settings rail, with Insights current and a way back to sessions", async () => {
     workspacePermissions = ["workspace:admin"];
-    const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/agents" });
+    const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/insights" });
     try {
       const rail = view.rail();
       expect(rail).not.toBeNull();
-      expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Agents");
+      expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Insights");
       const back = Array.from(rail.querySelectorAll("a")).find(
         (link) => link.textContent === "Back to sessions",
       );
       expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
       // The dashboard brings its own page; the shell adds no settings header.
-      const content = view.container.querySelector('section[aria-label="Agents"]');
+      const content = view.container.querySelector('section[aria-label="Insights"]');
       expect(content).not.toBeNull();
       expect(content?.querySelector("h1")).toBeNull();
       expect(content?.textContent).toContain("Settings content");

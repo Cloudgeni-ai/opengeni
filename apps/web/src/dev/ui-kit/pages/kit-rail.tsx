@@ -1,5 +1,5 @@
 import type { MouseEvent } from "react";
-import { SendIcon, SlidersHorizontalIcon, SquarePenIcon } from "lucide-react";
+import { SlidersHorizontalIcon, SquarePenIcon } from "lucide-react";
 
 import { WorkspaceConfigGlyph } from "@/components/rail/workspace-config-link";
 import { PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
@@ -7,7 +7,7 @@ import { NavItem, type NavItemSize } from "@/components/ui/settings-nav";
 
 /* ----------------------------------------------------------------------------
    The main rail's destinations, as the product ships them (components/rail/
-   primary-nav.tsx and workspace-nav.tsx): New session, For you, Capabilities,
+   primary-nav.tsx and workspace-nav.tsx): New session, Capabilities,
    Knowledge, Schedules, Artifacts, then Settings. Labels, order and
    icons come from the real catalog. Settings opens in the content area.
    -------------------------------------------------------------------------- */
@@ -21,7 +21,7 @@ const DESTINATION_IDS = {
 
 type RailDestinationId = (typeof DESTINATION_IDS)[keyof typeof DESTINATION_IDS];
 
-export type KitRailId = "new-session" | "for-you" | RailDestinationId | "settings";
+export type KitRailId = "new-session" | RailDestinationId | "settings";
 
 const DESTINATIONS = PRIMARY_WORKSPACE_ITEMS.flatMap((item) => {
   const id = DESTINATION_IDS[item.to as keyof typeof DESTINATION_IDS];
@@ -31,7 +31,6 @@ const DESTINATIONS = PRIMARY_WORKSPACE_ITEMS.flatMap((item) => {
 /** The label a rail id shows, for toasts and page titles. */
 export function kitRailLabel(id: KitRailId): string {
   if (id === "new-session") return "New session";
-  if (id === "for-you") return "For you";
   if (id === "settings") return "Settings";
   return DESTINATIONS.find((item) => item.id === id)?.label ?? id;
 }
@@ -41,8 +40,6 @@ export interface KitRailItemsProps {
   collapsed?: boolean;
   /** Pending reviews: a dot on Knowledge. */
   knowledgeAttention?: number;
-  /** For you's "needs you" count. */
-  forYouCount?: number;
   onNavigate?: (id: KitRailId) => void;
   size?: NavItemSize;
 }
@@ -52,7 +49,6 @@ export function KitRailItems({
   active = null,
   collapsed = false,
   knowledgeAttention = 0,
-  forYouCount = 2,
   onNavigate,
   size,
 }: KitRailItemsProps) {
@@ -69,16 +65,6 @@ export function KitRailItems({
         icon={<SquarePenIcon />}
         label="New session"
         active={active === "new-session"}
-        collapsed={collapsed}
-        size={size}
-      />
-      <NavItem
-        href="#for-you"
-        onClick={go("for-you")}
-        icon={<SendIcon />}
-        label="For you"
-        badge={forYouCount > 0 ? String(forYouCount) : undefined}
-        active={active === "for-you"}
         collapsed={collapsed}
         size={size}
       />
