@@ -216,6 +216,59 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     ).toBe(false);
     expect(actual.turn?.status).toBe("completed");
   }, 60_000);
+  test("review: empty final after completed hosted search receives the handoff", async () => {
+    const actual = await run(
+      [
+        {
+          output: [
+            {
+              type: "hosted_tool_call",
+              id: "hosted-search-review",
+              name: "web_search_call",
+              status: "completed",
+              providerData: { action: { type: "search", query: "review" } },
+            } as ReturnType<typeof assistantMessage>,
+            assistantMessage(""),
+          ],
+        },
+        { outputText: "Search result delivered." },
+      ],
+      false,
+    );
+    expect(actual.model.calls).toBe(2);
+    expect(
+      hasFinalReplyNudge(
+        actual.history.map((row) => row.item),
+        actual.result.turnId,
+      ),
+    ).toBe(true);
+  }, 60_000);
+  test("unfinished hosted activity alone does not qualify for a final-reply handoff", async () => {
+    const actual = await run(
+      [
+        {
+          output: [
+            {
+              type: "hosted_tool_call",
+              id: "hosted-unfinished",
+              name: "web_search_call",
+              status: "failed",
+              providerData: { action: { type: "search", query: "unfinished" } },
+            } as ReturnType<typeof assistantMessage>,
+            assistantMessage(""),
+          ],
+        },
+      ],
+      false,
+    );
+    expect(actual.model.calls).toBe(1);
+    expect(
+      hasFinalReplyNudge(
+        actual.history.map((row) => row.item),
+        actual.result.turnId,
+      ),
+    ).toBe(false);
+  }, 60_000);
   test("an empty final after a tool is corrected without replaying the tool", async () => {
     const actual = await run(
       [
@@ -370,6 +423,39 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     expect(result.status).toBe("idle");
     expect(actual.model.calls).toBe(4);
     expect(actual.toolCalls).toBe(1);
+  }, 60_000);
+  test("a completed hosted tool survives provider recovery as final-reply eligibility", async () => {
+    const actual = await run(
+      [
+        {
+          output: [
+            {
+              type: "hosted_tool_call",
+              id: "hosted-recovery",
+              name: "web_search_call",
+              status: "completed",
+              providerData: { action: { type: "search", query: "recovery" } },
+            } as ReturnType<typeof assistantMessage>,
+          ],
+        },
+        { error: Object.assign(new Error("Service unavailable"), { status: 503 }) },
+        { output: [assistantMessage("")] },
+        { outputText: "Recovered hosted result." },
+      ],
+      false,
+    );
+    expect(actual.result.status).toBe("recovering");
+    const result = await actual.activities.runAgentTurn({
+      accountId: actual.grant.accountId,
+      workspaceId: actual.grant.workspaceId!,
+      sessionId: actual.session.id,
+      workflowId: `session-${actual.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(result.status).toBe("idle");
+    expect(actual.model.calls).toBe(4);
   }, 60_000);
   test("an unrelated later goal cannot change a no-goal turn's handoff eligibility", async () => {
     const actual = await run([{ output: [assistantMessage("")] }], false, true);

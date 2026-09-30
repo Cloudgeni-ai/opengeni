@@ -97,22 +97,67 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     request: ModelRequest,
     stream: boolean,
   ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
-    // The pinned SDK's runtime supports both modes, but its declaration exposes
-    // only the non-streaming overload. Do not rebuild its request/transport here.
-    const response = await super._fetchResponse(request, stream as false);
-    if (!stream || !this.ownsResponsesTerminalClassification()) return response;
+    if (!stream || !this.ownsResponsesTerminalClassification()) {
+      // Subscription transports retain the SDK's request-id and error handling.
+      return await super._fetchResponse(request, stream as false);
+    }
+    // Reuse the SDK's full request conversion, but retain its HTTP receipt
+    // before the SDK's stream wrapper discards the response headers.
+    const built = this._buildResponsesCreateRequest(request, true);
+    const internal = (request as ModelRequest & { _internal?: { runnerManagedRetry?: boolean } })
+      ._internal;
+    const pending = this._client.responses.create(
+      built.requestData as OpenAI.Responses.ResponseCreateParamsStreaming,
+      {
+        headers: built.sdkRequestHeaders,
+        signal: built.signal,
+        ...(built.transportExtraQuery ? { query: built.transportExtraQuery } : {}),
+        ...(internal?.runnerManagedRetry === true ? { maxRetries: 0 } : {}),
+      },
+    );
+    if (typeof pending.withResponse !== "function") {
+      // The SDK also permits custom clients returning only the stream promise.
+      // Such clients cannot supply HTTP evidence, but must remain usable.
+      return this.classifiedResponseStream(await pending, new Headers(), null);
+    }
+    const receipt = await pending.withResponse();
     return this.classifiedResponseStream(
-      response as unknown as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+      receipt.data,
+      receipt.response.headers,
+      receipt.request_id,
     );
   }
 
   private async *classifiedResponseStream(
     stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+    headers: Headers,
+    requestId: string | null,
   ): AsyncIterable<OpenAI.Responses.ResponseStreamEvent> {
     try {
       for await (const event of stream) {
-        const failure = responsesStreamingTerminalError(event);
+        const failure = responsesStreamingTerminalError(event, headers);
         if (failure) throw failure;
+        // response.done is supported by the pinned terminal reducer but absent
+        // from the OpenAI wire declaration.
+        const eventType: string = event.type;
+        if (
+          requestId &&
+          (eventType === "response.completed" || eventType === "response.done") &&
+          "response" in event &&
+          event.response &&
+          !("_request_id" in event.response)
+        ) {
+          // Match the SDK's successful-terminal request-id attachment without
+          // making transport metadata enumerable in provider/model data.
+          try {
+            Object.defineProperty(event.response, "_request_id", {
+              value: requestId,
+              enumerable: false,
+            });
+          } catch {
+            // Frozen custom response objects remain usable, as in the SDK.
+          }
+        }
         yield event;
       }
     } catch (error) {
@@ -120,7 +165,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
       // Convert inside the stream, before the Agents SDK's span error handler,
       // so even enabled model tracing receives only the structural message.
       if (error instanceof APIError && error.status === undefined && error.error) {
-        throw new ResponsesStreamingTerminalError("response.error", error.error, error.headers);
+        throw new ResponsesStreamingTerminalError("response.error", error.error, headers);
       }
       throw error;
     }

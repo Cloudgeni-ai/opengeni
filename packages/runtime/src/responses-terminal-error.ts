@@ -64,6 +64,7 @@ export class ResponsesStreamingTerminalError extends Error {
   readonly code: string | undefined;
   readonly type: string | undefined;
   readonly detail: string;
+  readonly headers: Headers;
   readonly retryAfterSeconds: number | undefined;
   readonly category: "safety" | "request" | "rate_limit" | "unavailable" | "unknown";
 
@@ -78,8 +79,13 @@ export class ResponsesStreamingTerminalError extends Error {
     this.code = boundedField(error?.code, FIELD_MAX_BYTES);
     this.type = boundedField(error?.type, FIELD_MAX_BYTES);
     this.detail = boundedField(error?.message ?? source, DIAGNOSTIC_MAX_BYTES) ?? this.message;
+    // Retain only the bounded retry header, never cookies or arbitrary provider
+    // headers. Classification and durable recovery can use the same evidence.
+    this.headers = new Headers();
+    const retryAfter = boundedField(headers?.get("retry-after"), FIELD_MAX_BYTES);
+    if (retryAfter !== undefined) this.headers.set("retry-after", retryAfter);
     const directSeconds = Number(error?.retry_after_seconds ?? error?.retryAfterSeconds);
-    const header = headers?.get("retry-after");
+    const header = this.headers.get("retry-after");
     const headerSeconds = header ? Number(header) : Number.NaN;
     const headerDate = header && !Number.isFinite(headerSeconds) ? Date.parse(header) : Number.NaN;
     const seconds = Number.isFinite(directSeconds)
@@ -96,20 +102,23 @@ export class ResponsesStreamingTerminalError extends Error {
     // Type-only envelopes may classify, but an explicit unknown code must not
     // gain retry authority from a broad server_error type. Refusal types veto.
     const recoveryCode = codes[0] || codes[1];
-    this.category = matches(SAFETY_CODES)
-      ? "safety"
-      : matches(REQUEST_CODES)
-        ? "request"
-        : recoveryCode !== undefined && RATE_CODES.has(recoveryCode)
-          ? "rate_limit"
-          : recoveryCode !== undefined && UNAVAILABLE_CODES.has(recoveryCode)
-            ? "unavailable"
-            : "unknown";
+    this.category =
+      matches(SAFETY_CODES) ||
+      /\bthis request was blocked by our safety systems\b/i.test(this.detail)
+        ? "safety"
+        : matches(REQUEST_CODES)
+          ? "request"
+          : recoveryCode !== undefined && RATE_CODES.has(recoveryCode)
+            ? "rate_limit"
+            : recoveryCode !== undefined && UNAVAILABLE_CODES.has(recoveryCode)
+              ? "unavailable"
+              : "unknown";
   }
 }
 
 export function responsesStreamingTerminalError(
   event: unknown,
+  headers?: Headers,
 ): ResponsesStreamingTerminalError | undefined {
   const value = record(event);
   if (
@@ -122,5 +131,6 @@ export function responsesStreamingTerminalError(
   return new ResponsesStreamingTerminalError(
     value.type,
     value.error ?? record(value.response)?.error ?? value,
+    headers,
   );
 }

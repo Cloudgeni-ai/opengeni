@@ -3,6 +3,7 @@ import { ResponsesStreamingTerminalError } from "@opengeni/runtime";
 import {
   agentRunFailurePayload,
   classifyCodexCredentialFailure,
+  classifyContextWindowOverflowError,
   classifyXaiCredentialFailure,
   isTransientProviderError,
   providerRecoveryExhaustedFailure,
@@ -12,6 +13,44 @@ import {
 } from "../src/activities/agent-turn/errors";
 
 describe("Responses terminal failure settlement", () => {
+  test("recognized safety diagnostic vetoes server recovery and context compaction", () => {
+    for (const eventType of ["response.failed", "response.error"] as const) {
+      const detail =
+        "This request was blocked by our safety systems. Your input exceeds the context window.";
+      const error = new ResponsesStreamingTerminalError(eventType, {
+        code: "server_error",
+        message: detail,
+      });
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "provider_safety_refusal",
+        retryable: false,
+        detail,
+      });
+      expect(isTransientProviderError(error)).toBe(false);
+      expect(classifyContextWindowOverflowError(error)).toBeNull();
+      expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(classifyXaiCredentialFailure(error)).toBeNull();
+      expect(JSON.stringify(safeErrorDiagnostic(error))).not.toContain(detail);
+    }
+  });
+
+  test("bounded diagnostic-only context overflow remains recognizable through cause wrappers", () => {
+    const detail = "  Your input exceeds the context window of this model.\n";
+    const error = new ResponsesStreamingTerminalError("response.error", {
+      code: "invalid_prompt",
+      message: detail,
+    });
+    for (const source of [error, new Error("outer wrapper", { cause: error })]) {
+      expect(classifyContextWindowOverflowError(source)).toMatchObject({ detail });
+    }
+    expect(
+      classifyContextWindowOverflowError({
+        detail: "Your input exceeds the context window of this model.",
+        message: "unrelated application error",
+      }),
+    ).toBeNull();
+  });
+
   for (const eventType of ["response.failed", "response.error"] as const) {
     for (const [code, failureCode, retryable] of [
       ["server_error", "provider_unavailable", true],

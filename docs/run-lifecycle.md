@@ -61,6 +61,10 @@ child-result wakes; active goals retain normal continuation eligibility.
 This bounds only the handoff correction, not legitimate
 run length or tool work, and introduces no Temporal retry or history rewrite.
 Explicit `wait_for_input`, approvals, and maintenance compaction remain exempt.
+Completed hosted-tool history also establishes handoff eligibility, including
+after attempt recovery. The durable developer reminder stays exact; Chat
+requests project its structured text to a Chat-native system string without
+rewriting stored history.
 
 Each accepted turn also freezes a content-free **surface**
 (`session_turns.surface`, `SessionTurnSurface` in
@@ -745,6 +749,10 @@ remain terminal even when their diagnostic mentions transient failures. The
 failure/recovery `detail` preserves the exact provider message through 4 KiB;
 larger messages keep a UTF-8-safe prefix and explicit truncation marker. SDK
 error messages, tracing and worker public diagnostics stay structural.
+Recognized safety diagnostics veto transient recovery regardless of a broad
+server-error code; bounded terminal detail still participates in context-overflow
+classification. Streamed terminals retain bounded Retry-After evidence before
+the SDK discards the HTTP receipt, including long quota-reset hints.
 An explicit provider retry hint is a lower bound. Rate limits wait for the
 longer of the provider's `Retry-After` (60 s when absent) and an escalating floor
 of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without

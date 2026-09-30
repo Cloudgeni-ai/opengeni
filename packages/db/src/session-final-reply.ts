@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { type Database, withWorkspaceRls, withWorkspaceSessionActivityRls } from "./index";
+import { type Database, withWorkspaceRls, withWorkspaceSessionActivityRls } from "./database";
 import * as schema from "./schema";
 
 /** Accepted goal authority plus causal turn facts, never the mutable goal head. */
@@ -26,8 +26,16 @@ export async function sessionTurnFinalReplyFacts(
           where ${schema.sessionHistoryItems.workspaceId} = ${workspaceId}
             and ${schema.sessionHistoryItems.sessionId} = ${sessionId}
             and ${schema.sessionHistoryItems.turnId} = ${turnId}
-            and ${schema.sessionHistoryItems.item}->>'type' in
-              ('function_call_result', 'shell_call_output', 'computer_call_result')
+            and (
+              ${schema.sessionHistoryItems.item}->>'type' in
+                ('function_call_result', 'shell_call_output', 'computer_call_result')
+              or (
+                ${schema.sessionHistoryItems.item}->>'type' in
+                  ('hosted_tool_call', 'web_search_call', 'file_search_call',
+                   'code_interpreter_call', 'image_generation_call')
+                and ${schema.sessionHistoryItems.item}->>'status' = 'completed'
+              )
+            )
         )`,
         completedGoal: sql<boolean>`coalesce(${schema.sessionTurns.goalSnapshot}->>'state' = 'completed', false) or ${eventExists("goal.completed")}`,
       })

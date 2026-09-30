@@ -730,6 +730,7 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
 export function classifyContextWindowOverflowError(
   error: unknown,
 ): { message: string; code?: string; detail?: string } | null {
+  if (isProviderSafetyRefusal(error)) return null;
   const fields = collectErrorStrings(error);
   const matched = fields.find(
     (value) =>
@@ -796,6 +797,9 @@ export function collectErrorStrings(value: unknown, seen = new WeakSet<object>()
   }
   seen.add(value);
   const out: string[] = [];
+  // This diagnostic is already provider-owned and byte-bounded. Do not widen
+  // generic detail traversal to arbitrary application payloads.
+  if (value instanceof ResponsesStreamingTerminalError) out.push(value.detail);
   const record = value as Record<string, unknown>;
   for (const key of ["message", "code", "type", "name", "param"]) {
     const field = record[key];

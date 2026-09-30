@@ -19,6 +19,140 @@ const terminalCases = [
 ] as const;
 
 describe("ordinary Responses streamed provider terminals", () => {
+  test("a custom client without an HTTP receipt keeps streamed terminal classification", async () => {
+    const client = new OpenAI({ apiKey: "fixture" });
+    const create = spyOn(client.responses, "create").mockImplementation(
+      () =>
+        Promise.resolve(
+          (async function* () {
+            yield {
+              type: "response.failed",
+              response: {
+                error: { code: "server_error", message: "custom-client diagnostic" },
+              },
+            };
+          })(),
+        ) as never,
+    );
+    try {
+      const model = new OpenGeniResponsesModel(client, "fixture", {
+        id: "openai",
+        label: "OpenAI",
+        kind: "api-key",
+        api: "responses",
+        builtin: true,
+      });
+      let failure: unknown;
+      try {
+        for await (const _event of model.getStreamedResponse({
+          input: "hello",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        })) {
+        }
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        category: "unavailable",
+        detail: "custom-client diagnostic",
+      });
+      expect(create).toHaveBeenCalledTimes(1);
+    } finally {
+      create.mockRestore();
+    }
+  });
+
+  test("yielded and parser-rejected terminals retain only HTTP retry headers", async () => {
+    for (const eventType of ["response.failed", "response.error"] as const) {
+      for (const parserRejected of [false, true]) {
+        const providerError = { code: "rate_limit_exceeded", message: "exact rate diagnostic" };
+        const event = parserRejected
+          ? { type: eventType, error: providerError }
+          : { type: eventType, response: { status: "failed", error: providerError } };
+        const model = new OpenGeniResponsesModel(
+          new OpenAI({
+            apiKey: "fixture",
+            fetch: async () =>
+              new Response(`data: ${JSON.stringify(event)}\n\n`, {
+                headers: {
+                  "content-type": "text/event-stream",
+                  "retry-after": "1800",
+                  "set-cookie": "private-fixture-cookie",
+                  "x-private-provider-header": "not retained",
+                },
+              }),
+          }),
+          "fixture",
+          {
+            id: "azure",
+            label: "Azure",
+            kind: "api-key",
+            api: "responses",
+            builtin: true,
+          },
+        );
+        let failure: unknown;
+        try {
+          for await (const _event of model.getStreamedResponse({
+            input: "hello",
+            modelSettings: {},
+            tools: [],
+            handoffs: [],
+            outputType: "text",
+            tracing: false,
+          })) {
+          }
+        } catch (error) {
+          failure = error;
+        }
+        expect(failure).toBeInstanceOf(ResponsesStreamingTerminalError);
+        const observed = failure as ResponsesStreamingTerminalError;
+        expect(observed.retryAfterSeconds).toBe(1800);
+        expect([...observed.headers]).toEqual([["retry-after", "1800"]]);
+        expect(observed.detail).toBe(providerError.message);
+        expect(JSON.stringify(observed)).not.toContain("private-fixture-cookie");
+      }
+    }
+  });
+
+  test("successful terminals retain the SDK request ID without enumerable transport data", async () => {
+    const model = new OpenGeniResponsesModel(
+      new OpenAI({
+        apiKey: "fixture",
+        fetch: async () =>
+          new Response(
+            'data: {"type":"response.completed","response":{"id":"resp_test","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}\n\n',
+            { headers: { "content-type": "text/event-stream", "x-request-id": "request-fixture" } },
+          ),
+      }),
+      "fixture",
+      {
+        id: "openai",
+        label: "OpenAI",
+        kind: "api-key",
+        api: "responses",
+        builtin: true,
+      },
+    );
+    let response: unknown;
+    for await (const event of model.getStreamedResponse({
+      input: "hello",
+      modelSettings: {},
+      tools: [],
+      handoffs: [],
+      outputType: "text",
+      tracing: false,
+    })) {
+      if (event.type === "response_done") response = event.response;
+    }
+    expect(response).toMatchObject({ requestId: "request-fixture" });
+    expect(JSON.stringify(response)).not.toContain("_request_id");
+  });
+
   for (const providerId of ["openai", "azure"] as const) {
     for (const eventType of ["response.failed", "response.error"] as const) {
       for (const [code, category] of terminalCases) {

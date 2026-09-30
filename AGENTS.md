@@ -553,6 +553,9 @@ history rewrite, run-length cap, or Temporal retry. Input/approval waits and
 maintenance are exempt. A second empty final completes with
 `emptyFinalReply: true` and an informational timeline/SDK notice; it never
 fails or pauses the goal or defers later child-result wakes.
+Completed hosted tools qualify for that handoff across recovery. Structured
+developer/system text is converted to Chat-native text only in the request-local
+view; canonical reminders and history remain unchanged.
 
 Claude Messages changes: read `docs/model-providers.md#native-claude-messages`
 and `packages/runtime/src/anthropic-messages.ts`. Run the native adapter tests
