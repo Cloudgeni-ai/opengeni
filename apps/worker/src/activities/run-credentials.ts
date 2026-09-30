@@ -20,7 +20,7 @@ export type RunCredentialResolutionContext = {
   accountId: string;
   workspaceId: string;
   session: Session;
-  turn: SessionTurn;
+  turn: SessionTurn & { initiatingHumanSubjectId?: string | null };
   attemptId: string;
   effectiveSandboxBackend: SandboxBackend;
   variableSet: { id: string; name: string } | null;
@@ -114,10 +114,14 @@ export async function bindRunCredentialResolver(
         input.db,
         input.settings,
         { accountId: input.accountId, workspaceId: input.workspaceId },
-        input.initiatingHumanSubjectId ?? null,
+        input.turn.initiatingHumanSubjectId ?? null,
       )
     : null;
-  const resolver = workspaceResolver ?? input.connectionCredentials?.runCredentials;
+  const resolver =
+    workspaceResolver ??
+    (input.effectiveSandboxBackend === "none"
+      ? undefined
+      : input.connectionCredentials?.runCredentials);
   if (!resolver) return null;
   const rootSessionId = await getSessionRootId(input.db, input.workspaceId, input.session.id);
   if (!rootSessionId) {

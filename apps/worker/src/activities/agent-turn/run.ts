@@ -1168,6 +1168,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const {
             runCredentialResolver,
+            runMcpCredentials,
             establishPolicy,
             initialRunCredentialMaterial,
             runCredentialsNote,
@@ -1291,6 +1292,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
+            runMcpCredentials,
             input,
             catalogSourceSettings,
             db,

@@ -257,6 +257,7 @@ test("attempt MCP calls advertise the trusted turn identity in _meta.opengeni", 
   const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "identity" }], {
     ...scope,
     initiatingHumanSubjectId: "user:alice",
+    initiatingHumanExternalIdentity: { source: "product", externalId: "alice" },
   });
   try {
     const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
@@ -286,6 +287,7 @@ test("attempt MCP calls advertise the trusted turn identity in _meta.opengeni", 
       turnId: scope.turnId,
       attemptId: scope.attemptId,
       initiatingHumanSubjectId: "user:alice",
+      initiatingHumanExternalIdentity: { source: "product", externalId: "alice" },
     };
     expect(seen).toEqual([expected, expected]);
   } finally {

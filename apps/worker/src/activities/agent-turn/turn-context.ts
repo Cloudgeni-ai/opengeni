@@ -113,6 +113,8 @@ export type SandboxRuntimeState = {
 };
 
 export type RenewalState = {
+  /** Secret-only local state; closed on every attempt finalization path. */
+  runMcpCredentials?: { close(): void };
   gitCredentialRenewals: GitCredentialRenewalController[];
   gitCredentialRenewalClosed: boolean;
   runCredentialRenewal: RunCredentialRenewalController | null;

@@ -113,7 +113,7 @@ async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
       : null,
     ...scope,
     session,
-    turn: turn(),
+    turn: { ...turn(), initiatingHumanSubjectId: "user:owner" },
     attemptId: crypto.randomUUID(),
     effectiveSandboxBackend: "docker",
     variableSet: null,

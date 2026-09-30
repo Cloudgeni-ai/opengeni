@@ -1,6 +1,7 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
+  resolveInitiatingHuman,
   beginConnectorActionExecution,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
@@ -28,6 +29,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   type OpenGeniRuntime,
+  type RunMcpCredentials,
   type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorActionPolicyHooks,
@@ -187,6 +189,7 @@ export type PrepareTurnToolRuntimeDeps = {
   throwIfTurnCancelled: () => void;
   /** Present when this turn resolves host-managed run credentials. */
   runCredentialRenewals?: RenewalState | undefined;
+  runMcpCredentials?: RunMcpCredentials;
 };
 
 export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
@@ -1075,6 +1078,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       },
     });
   };
+  const initiatingHuman = await waitForTurnOperation(
+    resolveInitiatingHuman(db, deps.connectionScope, turn.initiatingHumanSubjectId ?? null),
+    cancellationSignal,
+    undefined,
+  );
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
@@ -1091,7 +1099,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         subjectId: "worker:first-party-mcp",
         subjectLabel: "OpenGeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
-        initiatingHumanSubjectId: deps.fileAuthoritySubjectId,
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
+        initiatingHumanExternalIdentity: initiatingHuman?.externalIdentity ?? null,
+        ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),

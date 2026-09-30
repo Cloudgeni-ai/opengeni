@@ -11,6 +11,7 @@ import {
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  RunMcpCredentials,
 } from "@opengeni/runtime";
 import { codemodeWorkspaceUrl, type Settings } from "@opengeni/config";
 import {
@@ -29,6 +30,7 @@ import { startGitCredentialRenewalLoop } from "../git-credential-renewal";
 import {
   RUN_CREDENTIAL_EXPIRY_LEAD_MS,
   startRunCredentialRenewalLoop,
+  runCredentialRenewalExpiry,
 } from "../run-credential-renewal";
 import {
   CODEMODE_TOKEN_EXPIRY_LEAD_MS,
@@ -146,31 +148,28 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     groupBoxBackend,
   });
 
-  const runCredentialResolver =
-    effectiveRunCredentialBackend === "none"
-      ? null
-      : await waitForTurnOperation(
-          bindRunCredentialResolver({
-            db,
-            settings,
-            initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
-            connectionCredentials: connectionCredentials ?? null,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            session,
-            turn,
-            attemptId: input.attemptId,
-            effectiveSandboxBackend: effectiveRunCredentialBackend,
-            variableSet: workspaceVariableSet
-              ? {
-                  id: workspaceVariableSet.id,
-                  name: workspaceVariableSet.name,
-                }
-              : null,
-          }),
-          cancellationSignal,
-          undefined,
-        );
+  const runCredentialResolver = await waitForTurnOperation(
+    bindRunCredentialResolver({
+      db,
+      settings,
+      initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
+      connectionCredentials: connectionCredentials ?? null,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      session,
+      turn,
+      attemptId: input.attemptId,
+      effectiveSandboxBackend: effectiveRunCredentialBackend,
+      variableSet: workspaceVariableSet
+        ? {
+            id: workspaceVariableSet.id,
+            name: workspaceVariableSet.name,
+          }
+        : null,
+    }),
+    cancellationSignal,
+    undefined,
+  );
   const establishDecision = sandboxEstablishPolicyDecision({
     lazyEnabled: lazyProvisionEnabled(settings),
     machinePrimary,
@@ -190,8 +189,9 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // Resolve once before model preparation so partial/auth-needed host state
   // is available as bounded model context and reconnect UI even when an
   // on-demand turn never provisions a box. Resolution alone performs no
-  // sandbox write or renewal; both paths reuse this exact material and the
-  // lazy path materializes it only inside its first-operation single-flight.
+  // sandbox write. The worker-local renewal below supports remote MCPs before
+  // discovery; a lazy sandbox materializes the latest resolved material only
+  // inside its first-operation single-flight.
   const initialRunCredentialMaterial = runCredentialResolver
     ? await waitForTurnOperation(
         runCredentialResolver.resolve({
@@ -202,6 +202,12 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         undefined,
       )
     : null;
+  const runMcpCredentials = new RunMcpCredentials(session.mcpServers ?? [], {
+    ...(cancellationSignal ? { signal: cancellationSignal } : {}),
+  });
+  renewals.runMcpCredentials = runMcpCredentials;
+  runMcpCredentials.replace(initialRunCredentialMaterial);
+  let currentRunCredentialMaterial = initialRunCredentialMaterial;
   if (initialRunCredentialMaterial) {
     for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
       renewals.publishedRunCredentialNotices.add(JSON.stringify(payload));
@@ -608,7 +614,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   }
 
   const attachRunCredentialRenewal = async (
-    credentialSession: RunCredentialCommandSession,
+    credentialSession: RunCredentialCommandSession | undefined,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
   ): Promise<void> => {
@@ -617,7 +623,8 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     renewals.runCredentialRenewal = null;
     await previous?.stop();
     if (renewals.runCredentialRenewalClosed) return;
-    renewals.runCredentialSession = credentialSession;
+    renewals.runCredentialSession = credentialSession ?? null;
+    initialMaterial = currentRunCredentialMaterial;
 
     const requireTargetSandbox = (): ResumedTurnSandbox => {
       const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
@@ -627,7 +634,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       return targetSandbox;
     };
 
-    if (!initialMaterial) {
+    if (!initialMaterial && credentialSession) {
       await runWorkspaceMutationForSandbox(
         requireTargetSandbox(),
         "runCredentialClear",
@@ -644,49 +651,60 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       );
       return;
     }
+    if (!initialMaterial) return;
 
     const write = async (
       material: NormalizedRunCredentialMaterial | null,
       pruneOtherAttempts = false,
     ): Promise<void> => {
+      throwIfTurnOperationCancelled(cancellationSignal);
+      const applyMcpCredentials = runMcpCredentials.prepare(material);
       if (!material) {
-        await runWorkspaceMutationForSandbox(
-          requireTargetSandbox(),
-          "runCredentialAttemptClear",
-          async () =>
-            await clearRunCredentialsForAttempt(credentialSession, {
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-            }),
-        );
+        if (credentialSession)
+          await runWorkspaceMutationForSandbox(
+            requireTargetSandbox(),
+            "runCredentialAttemptClear",
+            async () =>
+              await clearRunCredentialsForAttempt(credentialSession, {
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                executionGeneration: attempt.executionGeneration,
+              }),
+          );
+        throwIfTurnOperationCancelled(cancellationSignal);
+        applyMcpCredentials();
+        currentRunCredentialMaterial = material;
         return;
       }
 
-      await runWorkspaceMutationForSandbox(
-        requireTargetSandbox(),
-        "runCredentialMaterialization",
-        async () =>
-          await materializeRunCredentials(credentialSession, material, {
-            sessionId: input.sessionId,
-            attemptId: input.attemptId,
-            executionGeneration: attempt.executionGeneration,
-            ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
-            ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
-            ...(material.authNeeded.length > 0 &&
-            Object.keys(material.environment).length === 0 &&
-            material.files.length === 0
-              ? { prunePreviousGenerations: true }
-              : {}),
-            ...(eventing.toolCancellationFenceRef.current
-              ? {
-                  commandRunner: eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                    eventing.toolCancellationFenceRef.current,
-                  ),
-                }
-              : {}),
-          }),
-      );
+      if (credentialSession)
+        await runWorkspaceMutationForSandbox(
+          requireTargetSandbox(),
+          "runCredentialMaterialization",
+          async () =>
+            await materializeRunCredentials(credentialSession, material, {
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
+              ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
+              ...(material.authNeeded.length > 0 &&
+              Object.keys(material.environment).length === 0 &&
+              material.files.length === 0
+                ? { prunePreviousGenerations: true }
+                : {}),
+              ...(eventing.toolCancellationFenceRef.current
+                ? {
+                    commandRunner: eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
+                      eventing.toolCancellationFenceRef.current,
+                    ),
+                  }
+                : {}),
+            }),
+        );
+      throwIfTurnOperationCancelled(cancellationSignal);
+      applyMcpCredentials();
+      currentRunCredentialMaterial = material;
       for (const payload of runCredentialAuthNeededPayloads(material)) {
         const key = JSON.stringify(payload);
         if (renewals.publishedRunCredentialNotices.has(key)) continue;
@@ -695,18 +713,13 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       }
     };
 
-    const initialExpiryMs = initialMaterial.expiresAt?.getTime() ?? null;
-    const seed =
-      initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
-        ? await runCredentialResolver.resolve({
-            purpose: "provision",
-            forceRefresh: true,
-          })
-        : initialMaterial;
-    await write(seed, true);
+    // Preserve the last good material even when an early refresh fails. Such
+    // refreshes are renewals, not fresh provisions that degrade to empty
+    // auth-needed state on a provider transport failure.
+    await write(initialMaterial, true);
     if (renewals.runCredentialRenewalClosed) return;
     const controller = startRunCredentialRenewalLoop({
-      initialExpiresAt: seed?.expiresAt ?? null,
+      initialExpiresAt: runCredentialRenewalExpiry(initialMaterial),
       resolve: async () =>
         await runCredentialResolver.resolve({
           purpose: "renewal",
@@ -741,9 +754,22 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       return;
     }
     renewals.runCredentialRenewal = controller;
+    const initialExpiryMs = runCredentialRenewalExpiry(initialMaterial)?.getTime() ?? null;
+    if (initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS) {
+      await controller.refreshNow();
+      throwIfTurnOperationCancelled(cancellationSignal);
+    }
   };
 
+  // Remote MCP-only turns may never establish a sandbox. Start the same
+  // single-flight, finalization-owned loop before transport discovery; attaching
+  // a sandbox later replaces its writer, not its credential authority.
+  if (initialRunCredentialMaterial) {
+    await attachRunCredentialRenewal(undefined, initialRunCredentialMaterial);
+  }
+
   return {
+    runMcpCredentials,
     runCredentialResolver,
     establishPolicy,
     initialRunCredentialMaterial,

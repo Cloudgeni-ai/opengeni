@@ -4,6 +4,8 @@ import {
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
+import { RunMcpCredentials } from "./mcp-run-credentials";
+export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
@@ -3989,6 +3991,9 @@ export type PrepareToolsOptions = {
   // The turn's frozen causal human, advertised to MCP servers in the
   // `_meta.opengeni` identity of every tools/call. Informational, never authority.
   initiatingHumanSubjectId?: string | null;
+  initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
+  /** Renewable, attempt-local headers; never copied into the MCP registry. */
+  runMcpCredentials?: RunMcpCredentials;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -4337,6 +4342,15 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  options.runMcpCredentials?.assertRemoteTargets(
+    settings.mcpServers.filter(
+      (config) =>
+        tools.some((tool) => tool.id === config.id) &&
+        !localRegistry.has(config.id) &&
+        !isFirstPartyMcpServer(settings, config) &&
+        !isCodexAppsMcpServer(config),
+    ),
+  );
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // Codex Apps retains its sanitizer-specific Bun fetch path. Ordinary MCP
   // traffic uses @opengeni/network's explicit undici.request() adapter under
@@ -4407,7 +4421,7 @@ export async function prepareAgentTools(
         const baseFetch = isCodexAppsMcpServer(config)
           ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
           : mcpFetchImpl;
-        const guardedFetch = guardedMcpFetch(
+        const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
@@ -4419,6 +4433,33 @@ export async function prepareAgentTools(
                 : {}),
           },
         );
+        const guardedFetch: typeof guardedTransport = async (input, init) => {
+          const requestInit = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          let response: Response;
+          try {
+            response = await guardedTransport(input, requestInit);
+          } catch (error) {
+            if (!options.runMcpCredentials?.has(config.id)) throw error;
+            // Transport failures may echo request headers in their message or
+            // cause chain. This exception can reach required-tool history.
+            throw new Error("MCP credentialed transport request failed");
+          }
+          if (!response.ok && options.runMcpCredentials?.has(config.id)) {
+            await response.body?.cancel().catch(() => undefined);
+            return new Response("MCP credentialed transport request failed", {
+              status: response.status,
+              // Keep only the structural denial. Provider-controlled scope,
+              // resource, realm and descriptions may echo request secrets,
+              // and the broker publishes scope/resource in auth-needed events.
+              headers:
+                parseWwwAuthenticate(response.headers.get("www-authenticate")).error ===
+                "insufficient_scope"
+                  ? { "www-authenticate": 'Bearer error="insufficient_scope"' }
+                  : {},
+            });
+          }
+          return response;
+        };
         const optional = tool.optional === true;
         const fetchImpl = isCodexAppsMcpServer(config)
           ? codexAppsAuthFetch(guardedFetch, settings, options)
@@ -4511,6 +4552,7 @@ export async function prepareAgentTools(
                 }
               : {}),
           });
+        if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
           new PrefixedMcpServer(
             innerServer,
@@ -4917,6 +4959,7 @@ async function prepareAttemptToolEnvironment(
     turnId: scope.turnId,
     attemptId: scope.attemptId,
     initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
+    initiatingHumanExternalIdentity: options.initiatingHumanExternalIdentity ?? null,
   });
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
@@ -5169,6 +5212,7 @@ export type McpCallIdentity = {
   turnId: string;
   attemptId: string;
   initiatingHumanSubjectId: string | null;
+  initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
 };
 
 async function prepareToolGatewayDefinitionsFromServers(

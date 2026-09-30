@@ -9,7 +9,8 @@ import {
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
-  getWorkspaceCredentialProvider,
+  resolveWorkspaceCredentialProvider,
+  resolveInitiatingHuman,
   type Database,
 } from "@opengeni/db";
 import { pinnedFetch, type OutboundNetworkSettings } from "@opengeni/network";
@@ -71,6 +72,7 @@ export function withGitCredentialHelper(response: ProviderOk): ProviderOk {
 export function credentialProviderRequestBody(
   input: RunCredentialsRequest,
   initiatingHumanSubjectId: string | null,
+  initiatingHuman: CredentialProviderRequest["initiatingHuman"] = null,
 ): CredentialProviderRequest {
   return {
     type: "credentials.request",
@@ -85,6 +87,7 @@ export function credentialProviderRequestBody(
     attemptId: input.attemptId,
     initiator: { kind: input.initiator.kind, subjectId: input.initiator.subjectId },
     initiatingHumanSubjectId,
+    initiatingHuman,
     sandboxBackend: input.effectiveSandboxBackend,
     sandboxOs: input.sandboxOs,
   };
@@ -131,6 +134,8 @@ async function readBoundedText(response: Response): Promise<string> {
 
 export type WorkspaceCredentialProviderDeps = {
   fetch?: typeof pinnedFetch;
+  resolveProvider?: typeof resolveWorkspaceCredentialProvider;
+  resolveHuman?: typeof resolveInitiatingHuman;
 };
 
 /**
@@ -146,8 +151,13 @@ export async function workspaceCredentialProviderResolver(
   initiatingHumanSubjectId: string | null,
   deps: WorkspaceCredentialProviderDeps = {},
 ): Promise<WorkspaceRunCredentialResolver | null> {
-  const row = await getWorkspaceCredentialProvider(db, scope);
+  const row = await (deps.resolveProvider ?? resolveWorkspaceCredentialProvider)(db, scope);
   if (!row?.enabled) return null;
+  const initiatingHuman = await (deps.resolveHuman ?? resolveInitiatingHuman)(
+    db,
+    scope,
+    initiatingHumanSubjectId,
+  );
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new CredentialProviderError(
@@ -163,7 +173,9 @@ export async function workspaceCredentialProviderResolver(
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
     };
-    const body = JSON.stringify(credentialProviderRequestBody(input, initiatingHumanSubjectId));
+    const body = JSON.stringify(
+      credentialProviderRequestBody(input, initiatingHumanSubjectId, initiatingHuman),
+    );
     let status: number;
     let text: string;
     try {
