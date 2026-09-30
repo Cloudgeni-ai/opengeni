@@ -19,7 +19,6 @@ import {
 } from "react";
 
 import { RelatedWorkAdvisory } from "@/components/related-work-advisory";
-import { errorParts } from "@/components/variable-sets/variable-set-model";
 import { Button } from "@/components/ui/button";
 import { ContentPage } from "@/components/ui/content-layout";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
@@ -45,15 +44,18 @@ import {
   layoutAgentTopologyDiagram,
   limitAgentTopology,
   mergeAgentTopologySessions,
+  nextAgentTopologyBranchPage,
   normalizeAgentTopologySessions,
   selectAgentTopologyBranchesToLoad,
   staleLiveRootIds,
   summarizeAgentTopology,
   withoutAgentTopologyRoots,
+  type AgentTopologyBranchPage,
   type AgentTopologyFilter,
   type AgentTopologyNode,
   type AgentTopologySummary,
 } from "@/lib/agent-topology";
+import { apiErrorAdvice, apiErrorDetails, isPermissionDenied } from "@/lib/api-error";
 import { sessionStatusLabel } from "@/lib/session-rail";
 import { cn } from "@/lib/utils";
 import { OpenGeniApiError, type AgentTopologySession } from "@opengeni/sdk";
@@ -84,14 +86,6 @@ type AgentTopologyData = {
   hasMore: boolean;
   nextCursor: string | null;
   humanAdvisoriesEnabled: boolean;
-  error: Error | null;
-};
-
-type AgentTopologyBranchPage = {
-  loading: boolean;
-  total: number;
-  hasMore: boolean;
-  nextCursor: string | null;
   error: Error | null;
 };
 
@@ -170,43 +164,54 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
       try {
         const search = query.trim();
         const readLive = !search && !cursor;
-        const [page, live, failed] = await Promise.all([
+        // The live and recently failed reads only add to the page: when one of
+        // them fails the page still shows, and the next refresh reads them again.
+        const [page, [liveRead, failedRead]] = await Promise.all([
           context.client.listAgentTopology(workspaceId, {
             limit: ROOT_PAGE_LIMIT,
             ...(cursor ? { cursor } : {}),
             ...(search ? { search } : { parentSessionId: null }),
           }),
-          readLive
-            ? context.client.listAgentTopology(workspaceId, {
-                parentSessionId: null,
-                statuses: [...LIVE_AGENT_STATUSES, "requires_action"],
-                limit: LIVE_ROOT_LIMIT,
-              })
-            : null,
-          readLive
-            ? context.client.listAgentTopology(workspaceId, {
-                parentSessionId: null,
-                statuses: ["failed"],
-                recentHours: RECENT_FAILURE_HOURS,
-                limit: LIVE_ROOT_LIMIT,
-              })
-            : null,
+          Promise.allSettled([
+            readLive
+              ? context.client.listAgentTopology(workspaceId, {
+                  parentSessionId: null,
+                  statuses: [...LIVE_AGENT_STATUSES, "requires_action"],
+                  limit: LIVE_ROOT_LIMIT,
+                })
+              : null,
+            readLive
+              ? context.client.listAgentTopology(workspaceId, {
+                  parentSessionId: null,
+                  statuses: ["failed"],
+                  recentHours: RECENT_FAILURE_HOURS,
+                  limit: LIVE_ROOT_LIMIT,
+                })
+              : null,
+          ]),
         ]);
         if (generation !== dataGeneration.current || rootRequest.current !== request) return;
+        const live = liveRead.status === "fulfilled" ? liveRead.value : null;
+        const failed = failedRead.status === "fulfilled" ? failedRead.value : null;
         const pageIds = page.sessions.map((session) => session.id);
         if (cursor) for (const id of pageIds) pagedRoots.current.add(id);
         let stale = new Set<string>();
-        const liveSessions = live && failed ? [...live.sessions, ...failed.sessions] : [];
+        const liveSessions = [...(live?.sessions ?? []), ...(failed?.sessions ?? [])];
+        const liveOnlyIds = liveSessions
+          .map((session) => session.id)
+          .filter((id) => !pageIds.includes(id));
         if (live && failed) {
-          const nextLiveOnly = new Set(
-            liveSessions.map((session) => session.id).filter((id) => !pageIds.includes(id)),
-          );
+          const nextLiveOnly = new Set(liveOnlyIds);
           stale = staleLiveRootIds(
             liveOnlyRoots.current,
             new Set([...pageIds, ...nextLiveOnly]),
             pagedRoots.current,
           );
           liveOnlyRoots.current = nextLiveOnly;
+        } else if (liveOnlyIds.length > 0) {
+          // Without both answers nothing is known to be stale; what did arrive
+          // stays tracked so a later complete refresh can retire it.
+          liveOnlyRoots.current = new Set([...liveOnlyRoots.current, ...liveOnlyIds]);
         }
         setData((current) => {
           // Keep already paged roots during the first-page refresh. Query and
@@ -250,9 +255,12 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
     [context.client, query, workspaceId],
   );
 
+  // Another workspace starts from its own browse view. A search left on would
+  // keep the header numbers (which only a browse read sets) loading for good.
   useEffect(() => {
     setSummary(null);
     setFilter("all");
+    setQuery("");
   }, [workspaceId]);
 
   const loadChildren = useCallback(
@@ -271,6 +279,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
               hasMore: false,
               nextCursor: null,
               error: null,
+              paged: false,
             }),
             loading: true,
             error: null,
@@ -304,13 +313,10 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           ),
         }));
         setBranchPages((current) =>
-          new Map(current).set(parentSessionId, {
-            loading: false,
-            total: page.total,
-            hasMore: page.hasMore,
-            nextCursor: page.nextCursor,
-            error: null,
-          }),
+          new Map(current).set(
+            parentSessionId,
+            nextAgentTopologyBranchPage(current.get(parentSessionId), page, { cursor, quiet }),
+          ),
         );
       } catch (error) {
         if (
@@ -325,6 +331,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
               total: 0,
               hasMore: false,
               nextCursor: null,
+              paged: false,
             }),
             loading: false,
             error: error instanceof Error ? error : new Error(String(error)),
@@ -496,9 +503,11 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
     const page = branchPages.get(node.session.id);
     if (page?.loading) return { kind: "loading" };
     if (page?.error) {
+      // A failed "Show more" keeps its cursor: try that page again, not page one.
+      const cursor = page.nextCursor ?? undefined;
       return {
         kind: "error",
-        onRetry: () => void loadChildren(node.session.id),
+        onRetry: () => void loadChildren(node.session.id, cursor),
       };
     }
     if (page?.nextCursor) {
@@ -520,24 +529,22 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
   if (data.loading) {
     body = <AgentOutlineSkeleton />;
   } else if (data.error && data.sessions.length === 0) {
-    const parts = errorParts(data.error);
     body = (
       <ErrorMessage
         variant="block"
         align="center"
         title="Couldn't load agents"
-        reference={parts.reference}
-        details={[
-          ...(parts.status ? [{ label: "Status", value: String(parts.status) }] : []),
-          { label: "Message", value: parts.message },
-        ]}
+        {...apiErrorDetails(data.error)}
         action={
-          <Button type="button" variant="outline" size="sm" onClick={() => void refresh()}>
-            Try again
-          </Button>
+          // Trying again can't grant a missing permission.
+          isPermissionDenied(data.error) ? undefined : (
+            <Button type="button" variant="outline" size="sm" onClick={() => void refresh()}>
+              Try again
+            </Button>
+          )
         }
       >
-        Check your connection, then try again.
+        {apiErrorAdvice(data.error)}
       </ErrorMessage>
     );
   } else if (nothingAtAll) {
@@ -584,6 +591,9 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
             workspaceId={workspaceId}
             collapsed={collapsed}
             onToggle={toggleCollapsed}
+            footerFor={(node) =>
+              diagramFooter(branchFooter(node), hiddenBelow(node, limitedTopology.hiddenByParent))
+            }
           />
         )}
         {limitedTopology.hiddenCount > 0 ? (
@@ -917,6 +927,13 @@ type BranchFooter =
   | { kind: "loading" }
   | { kind: "error"; onRetry: () => void }
   | { kind: "more"; count: number; onLoad: () => void };
+
+/** What the tree says under an open branch: its paging state and the agents the render cap left out. */
+type DiagramFooter = { branch: BranchFooter | null; hidden: number };
+
+function diagramFooter(branch: BranchFooter | null, hidden: number): DiagramFooter | null {
+  return branch || hidden > 0 ? { branch, hidden } : null;
+}
 
 type OutlineRow =
   | {
@@ -1259,11 +1276,14 @@ function AgentDiagram({
   workspaceId,
   collapsed,
   onToggle,
+  footerFor,
 }: {
   roots: AgentTopologyNode[];
   workspaceId: string;
   collapsed: ReadonlySet<string>;
   onToggle: (sessionId: string) => void;
+  /** The line under an open branch: loading, failed, more to show, or left out. */
+  footerFor: (node: AgentTopologyNode) => DiagramFooter | null;
 }) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [availableWidth, setAvailableWidth] = useState<number | null>(null);
@@ -1280,9 +1300,23 @@ function AgentDiagram({
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
+  const footers = new Map<string, DiagramFooter>();
+  const collectFooters = (nodes: AgentTopologyNode[]) => {
+    for (const node of nodes) {
+      const hasChildren = node.session.children.directChildren > 0 || node.children.length > 0;
+      if (!hasChildren || collapsed.has(node.session.id)) continue;
+      const footer = footerFor(node);
+      if (footer) footers.set(node.session.id, footer);
+      collectFooters(node.children);
+    }
+  };
+  collectFooters(roots);
+  // The slots only move when the set of branches with a footer changes.
+  const footerKey = [...footers.keys()].join(",");
+  const footerIds = useMemo(() => new Set(footerKey ? footerKey.split(",") : []), [footerKey]);
   const layout = useMemo(
-    () => layoutAgentTopologyDiagram(roots, collapsed, availableWidth ?? undefined),
-    [availableWidth, collapsed, roots],
+    () => layoutAgentTopologyDiagram(roots, collapsed, availableWidth ?? undefined, footerIds),
+    [availableWidth, collapsed, footerIds, roots],
   );
   const positions = useMemo(
     () => new Map(layout.nodes.map((item) => [item.node.session.id, item])),
@@ -1323,7 +1357,10 @@ function AgentDiagram({
             height={layout.height}
             aria-hidden
           >
-            {layout.nodes.map((item) => {
+            {[
+              ...layout.nodes.map((item) => ({ ...item, key: item.node.session.id })),
+              ...layout.footers.map((item) => ({ ...item, key: `${item.parentId}:footer` })),
+            ].map((item) => {
               if (!item.parentId) return null;
               const parent = positions.get(item.parentId);
               if (!parent) return null;
@@ -1334,7 +1371,7 @@ function AgentDiagram({
               const middleY = fromY + (toY - fromY) / 2;
               return (
                 <path
-                  key={`${item.parentId}:${item.node.session.id}`}
+                  key={`${item.parentId}:${item.key}`}
                   d={`M ${fromX} ${fromY} V ${middleY} H ${toX} V ${toY}`}
                   fill="none"
                   stroke="currentColor"
@@ -1392,6 +1429,31 @@ function AgentDiagram({
                       />
                     ) : null}
                   </div>
+                </li>
+              );
+            })}
+            {layout.footers.map(({ parentId, depth, x, y }) => {
+              const footer = footers.get(parentId);
+              if (!footer) return null;
+              return (
+                <li
+                  key={`${parentId}:footer`}
+                  aria-level={depth + 1}
+                  data-agent-branch-footer={parentId}
+                  className="absolute flex flex-col items-start justify-center gap-1 rounded-[10px] border border-dashed border-border px-3 py-2.5 text-xs leading-4.5"
+                  style={{
+                    left: x,
+                    top: y,
+                    width: layout.nodeWidth,
+                    height: AGENT_DIAGRAM_NODE_HEIGHT,
+                  }}
+                >
+                  {footer.branch ? <OutlineFooter footer={footer.branch} /> : null}
+                  {footer.hidden > 0 ? (
+                    <span className="text-fg-subtle">
+                      {footer.hidden.toLocaleString()} more not shown
+                    </span>
+                  ) : null}
                 </li>
               );
             })}
@@ -1490,6 +1552,9 @@ export function AgentTopologyPreviewRoute() {
               workspaceId={workspaceId}
               collapsed={collapsed}
               onToggle={toggleCollapsed}
+              footerFor={(node) =>
+                diagramFooter(null, hiddenBelow(node, limitedTopology.hiddenByParent))
+              }
             />
           )}
         </div>

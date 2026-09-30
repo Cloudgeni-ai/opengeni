@@ -40,6 +40,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ToolbarSummary } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
+import { apiErrorFacts } from "@/lib/api-error";
 import { canManageWorkspaceSettings, hasAccountPermission } from "@/lib/permissions";
 
 import { errorText } from "./knowledge-data";
@@ -559,7 +560,8 @@ export function ReviewTab({
       <ReviewItemPage
         workspaceId={workspaceId}
         flow={flow}
-        loading={queue.loading}
+        queue={queue}
+        openKey={openKey}
         onBack={() => setOpenKey(null)}
         onOpenEntry={onOpenEntry}
       />
@@ -581,8 +583,14 @@ export function ReviewTab({
 export interface ReviewItemPageProps {
   workspaceId: string;
   flow: ReviewFlow;
-  /** The queue is still loading, so a missing change may yet appear. */
-  loading: boolean;
+  /**
+   * The queue the change is looked up in. While it loads a missing change may
+   * yet appear; when it failed or holds only the first page, a missing change
+   * is not proof that it was decided.
+   */
+  queue: Pick<ReviewQueue, "loading" | "error" | "partial" | "reload">;
+  /** The change the page is for, from the URL or local state. */
+  openKey: string;
   onBack: () => void;
   onOpenEntry: (id: string) => void;
 }
@@ -591,44 +599,89 @@ export interface ReviewItemPageProps {
 export function ReviewItemPage({
   workspaceId,
   flow,
-  loading,
+  queue,
+  openKey,
   onBack,
   onOpenEntry,
 }: ReviewItemPageProps) {
-  const item = flow.selected;
+  const listed = flow.selected;
+  // Not in the loaded queue, which may not hold every change: read it directly.
+  const direct = useDirectReviewItem(
+    workspaceId,
+    listed || queue.loading || !(queue.partial || queue.error) ? null : openKey,
+  );
+  const item = listed ?? direct.item;
   const back = { label: "Review", onClick: onBack };
   if (!item) {
-    return (
-      <DetailPage back={back}>
-        {loading ? (
-          <PageSkeleton />
-        ) : (
-          <EmptyState
-            variant="page"
-            icon={<InboxIcon />}
-            title="This change isn't waiting any more"
-            description="Someone may have approved or rejected it already, or the agent replaced it with a newer one."
-            action={
-              <Button type="button" onClick={onBack} className="pointer-coarse:h-11">
-                Back to Review
-              </Button>
-            }
-          />
-        )}
-      </DetailPage>
+    const backButton = (
+      <Button type="button" onClick={onBack} className="pointer-coarse:h-11">
+        Back to Review
+      </Button>
     );
+    const retry = (reload: () => void) => (
+      <Button type="button" size="sm" variant="outline" onClick={reload}>
+        Try again
+      </Button>
+    );
+    let body: ReactNode;
+    if (queue.loading || direct.loading) {
+      body = <PageSkeleton />;
+    } else if (direct.checked && !direct.error) {
+      // Read directly: it really is no longer waiting.
+      body = <NoLongerWaiting action={backButton} />;
+    } else if (direct.error) {
+      body = (
+        <Notice
+          tone="failed"
+          title="Couldn't load this change"
+          action={retry(() => {
+            direct.reload();
+            if (queue.error) queue.reload();
+          })}
+          actionLayout="responsive"
+        >
+          {direct.error}
+        </Notice>
+      );
+    } else if (queue.error) {
+      body = (
+        <Notice
+          tone="failed"
+          title="Couldn't load the changes waiting for review"
+          action={retry(queue.reload)}
+          actionLayout="responsive"
+        >
+          {queue.error}
+        </Notice>
+      );
+    } else if (queue.partial) {
+      body = (
+        <EmptyState
+          variant="page"
+          icon={<InboxIcon />}
+          title="This change isn't in the list yet"
+          description="More changes are waiting than the list shows at once. It shows up in Review as you work through the others."
+          action={backButton}
+        />
+      );
+    } else {
+      body = <NoLongerWaiting action={backButton} />;
+    }
+    return <DetailPage back={back}>{body}</DetailPage>;
   }
   const batchId = item.kind === "knowledge" ? item.batch.id : null;
-  const batch = batchId
-    ? flow.items.filter((each) => each.kind === "knowledge" && each.batch.id === batchId)
-    : [];
+  const batch =
+    listed && batchId
+      ? flow.items.filter((each) => each.kind === "knowledge" && each.batch.id === batchId)
+      : [];
   return (
     <DetailPage back={back}>
       <ReviewDetail
         key={item.key}
         workspaceId={workspaceId}
         item={item}
-        remaining={flow.items.length}
+        // A change read directly is not in the list, but still waits.
+        remaining={listed ? flow.items.length : flow.items.length + 1}
         batch={batch.length > 1 ? batch : []}
         onDone={() => flow.decided(item)}
         onBatchDone={flow.decidedMany}
@@ -637,6 +690,101 @@ export function ReviewItemPage({
       />
     </DetailPage>
   );
+}
+
+function NoLongerWaiting({ action }: { action: ReactNode }) {
+  return (
+    <EmptyState
+      variant="page"
+      icon={<InboxIcon />}
+      title="This change isn't waiting any more"
+      description="Someone may have approved or rejected it already, or the agent replaced it with a newer one."
+      action={action}
+    />
+  );
+}
+
+/** A knowledge change as the queue would list it, from a direct read of its pending revision. */
+function reviewItemFromRecord(record: KnowledgeEntryRecord): ReviewItem {
+  const { revision, ...rest } = record;
+  const { entry, ...summary } = revision;
+  const origin: Origin = revision.createdBySessionId
+    ? { kind: "chat", name: "a chat", sessionId: revision.createdBySessionId, unnamed: true }
+    : { kind: "none", name: "Earlier changes" };
+  return {
+    kind: "knowledge",
+    key: `knowledge:${record.id}`,
+    title: entry.title,
+    createdAt: revision.createdAt,
+    origin,
+    batch: {
+      id: revision.reviewBatchId ?? record.id,
+      sessionId: revision.createdBySessionId,
+      scheduledTaskId: null,
+      scheduledTaskRunId: null,
+      title: null,
+      scope: record.scope,
+      pendingCount: 1,
+      createdAt: revision.createdAt,
+    },
+    entry: {
+      ...rest,
+      excerpts: [],
+      revision: {
+        ...summary,
+        title: entry.title,
+        kind: entry.kind,
+        preview: entry.content.slice(0, 280),
+        groupIds: entry.groupIds,
+        sourceKind: entry.source?.kind ?? null,
+      },
+    },
+  };
+}
+
+/**
+ * Reads one change that the loaded queue doesn't hold. Only knowledge has a
+ * read for a single pending change; for instructions and skills `checked`
+ * stays false and the page says what it can without claiming it is gone.
+ */
+function useDirectReviewItem(workspaceId: string, key: string | null) {
+  const { client } = useAppContext();
+  const entryId = key?.startsWith("knowledge:") ? key.slice("knowledge:".length) : null;
+  const [state, setState] = useState<{
+    key: string;
+    item: ReviewItem | null;
+    error: string | null;
+  } | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (!key || !entryId) return;
+    let current = true;
+    setState(null);
+    client
+      .getKnowledgeEntry(workspaceId, entryId, { view: "needs_review" })
+      .then((record) => {
+        if (!current) return;
+        const pending = record.revision.outcome === "pending";
+        setState({ key, item: pending ? reviewItemFromRecord(record) : null, error: null });
+      })
+      .catch((reason: unknown) => {
+        if (!current) return;
+        // Not found as a pending change: nothing waits under this key.
+        if (apiErrorFacts(reason).status === 404) setState({ key, item: null, error: null });
+        else setState({ key, item: null, error: errorText(reason) });
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, workspaceId, key, entryId, retry]);
+  const settled = key && entryId && state?.key === key ? state : null;
+  return {
+    loading: Boolean(key && entryId) && !settled,
+    checked: Boolean(settled),
+    item: settled?.item ?? null,
+    error: settled?.error ?? null,
+    reload: () => setRetry((value) => value + 1),
+  };
 }
 
 function PageSkeleton() {

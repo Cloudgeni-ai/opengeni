@@ -6,8 +6,8 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import type { KnowledgeEntryRecord } from "@opengeni/sdk";
-import { act } from "react";
+import { OpenGeniApiError, type KnowledgeEntryRecord } from "@opengeni/sdk";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ReviewItem, ReviewQueue } from "./knowledge-review";
 
@@ -102,7 +102,9 @@ function queue(): ReviewQueue {
 const decisions: { entryId: string; decision: string; content?: string }[] = [];
 const client = {
   async getKnowledgeEntry(_workspace: string, id: string) {
-    return records.find((each) => each.id === id)!;
+    const found = records.find((each) => each.id === id);
+    if (!found) throw new OpenGeniApiError(404, "");
+    return found;
   },
   async reviewKnowledgeEntry(
     _workspace: string,
@@ -117,7 +119,7 @@ const client = {
   },
 };
 mock.module("@/context", () => ({ useAppContext: () => ({ client }) }));
-const { ReviewTab } = await import("./knowledge-review");
+const { ReviewItemPage, ReviewTab, useReviewFlow } = await import("./knowledge-review");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -221,5 +223,111 @@ test("approve and next, edit before approving, and reject walk the list to its e
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+function DeepLink({ queue: value, openKey }: { queue: ReviewQueue; openKey: string }) {
+  const flow = useReviewFlow({ queue: value, openKey, open: () => {}, onChanged: () => {} });
+  return (
+    <ReviewItemPage
+      workspaceId={workspaceId}
+      flow={flow}
+      queue={value}
+      openKey={openKey}
+      onBack={() => {}}
+      onOpenEntry={() => {}}
+    />
+  );
+}
+
+async function renderRouted(node: () => ReactNode) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const router = createRouter({
+    routeTree: createRootRoute({ component: node }),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await act(async () => {
+    await router.load();
+    root.render(<RouterProvider router={router} />);
+  });
+  await settle();
+  return {
+    container,
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+/** A queue that holds only its first page, or failed to load. */
+function emptyQueue(state: {
+  partial?: boolean;
+  error?: string;
+  reload?: () => void;
+}): ReviewQueue {
+  return {
+    items: [],
+    groups: [],
+    count: 0,
+    partial: state.partial ?? false,
+    loading: false,
+    error: state.error ?? null,
+    reload: state.reload ?? (() => {}),
+  };
+}
+
+test("a link to a change past the first page opens it by reading it directly", async () => {
+  const value = emptyQueue({ partial: true });
+  const view = await renderRouted(() => <DeepLink queue={value} openKey={`knowledge:${ids[1]}`} />);
+  try {
+    expect(view.container.querySelector("h1")?.textContent).toBe("Proposal 2");
+    expect(view.container.textContent).toContain("What proposal 2 says");
+    expect(view.container.textContent).not.toContain("isn't waiting any more");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a change read directly and not found is really no longer waiting", async () => {
+  const value = emptyQueue({ partial: true });
+  const view = await renderRouted(() => (
+    <DeepLink queue={value} openKey="knowledge:00000000-0000-4000-8000-000000000099" />
+  ));
+  try {
+    expect(view.container.textContent).toContain("This change isn't waiting any more");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a change that can't be read directly and isn't on the first page is not called gone", async () => {
+  const value = emptyQueue({ partial: true });
+  const view = await renderRouted(() => (
+    <DeepLink queue={value} openKey="skill:00000000-0000-4000-8000-000000000099" />
+  ));
+  try {
+    expect(view.container.textContent).toContain("This change isn't in the list yet");
+    expect(view.container.textContent).not.toContain("isn't waiting any more");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed queue says so and offers to try again instead of calling the change gone", async () => {
+  let reloads = 0;
+  const value = emptyQueue({ error: "Try again in a moment.", reload: () => (reloads += 1) });
+  const view = await renderRouted(() => (
+    <DeepLink queue={value} openKey="instruction:00000000-0000-4000-8000-000000000099" />
+  ));
+  try {
+    expect(view.container.textContent).toContain("Couldn't load the changes waiting for review");
+    expect(view.container.textContent).not.toContain("isn't waiting any more");
+    await act(async () => button(view.container, "Try again")!.click());
+    expect(reloads).toBe(1);
+  } finally {
+    await view.unmount();
   }
 });

@@ -1,13 +1,18 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { AgentTopologyPageResponse, AgentTopologySession } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type AgentTopologyPageResponse,
+  type AgentTopologySession,
+} from "@opengeni/sdk";
 import {
   createMemoryHistory,
   createRootRoute,
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { act } from "react";
+import { act, useState } from "react";
+import { apiErrorAdvice } from "@/lib/api-error";
 import { createRoot } from "react-dom/client";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -74,6 +79,8 @@ let roots: AgentTopologySession[] = [];
 let olderLive: AgentTopologySession[] = [];
 let children = new Map<string, AgentTopologySession[]>();
 let failure: Error | null = null;
+/** Fails only the reads it returns an error for. */
+let failWhen: (options: ListOptions) => Error | null = () => null;
 let advisories = true;
 const calls: ListOptions[] = [];
 
@@ -90,6 +97,8 @@ function page(sessions: AgentTopologySession[]): AgentTopologyPageResponse {
 const listAgentTopology = mock(async (_workspaceId: string, options: ListOptions) => {
   calls.push(options);
   if (failure) throw failure;
+  const failed = failWhen(options);
+  if (failed) throw failed;
   if (options.parentSessionId) return page(children.get(options.parentSessionId) ?? []);
   if (options.statuses?.includes("failed")) {
     return page(
@@ -128,6 +137,7 @@ afterAll(() => GlobalRegistrator.unregister());
 
 beforeEach(() => {
   failure = null;
+  failWhen = () => null;
   advisories = true;
   calls.length = 0;
   olderLive = [];
@@ -179,8 +189,14 @@ beforeEach(() => {
 
 async function renderPage() {
   const { AgentsRoute } = await import("./agents");
+  let switchTo: (id: string) => void = () => {};
+  function Page() {
+    const [id, setId] = useState(workspaceId);
+    switchTo = setId;
+    return <AgentsRoute workspaceId={id} />;
+  }
   const router = createRouter({
-    routeTree: createRootRoute({ component: () => <AgentsRoute workspaceId={workspaceId} /> }),
+    routeTree: createRootRoute({ component: Page }),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   const container = document.createElement("div");
@@ -193,6 +209,10 @@ async function renderPage() {
   await settle();
   return {
     container,
+    async switchWorkspace(id: string) {
+      await act(async () => switchTo(id));
+      await settle();
+    },
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -217,6 +237,25 @@ function rowTitles(container: HTMLElement): string[] {
 async function click(element: Element | null | undefined) {
   if (!element) throw new Error("missing element");
   await act(async () => (element as HTMLElement).click());
+  await settle();
+}
+
+async function type(input: HTMLInputElement | null, value: string) {
+  if (!input) throw new Error("missing input");
+  await act(async () => {
+    input.value = value;
+    // happy-dom doesn't drive React's change tracking; call the handler as React would.
+    const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+    (input as unknown as Record<string, { onChange: (event: { target: unknown }) => void }>)[
+      propsKey
+    ]!.onChange({ target: input });
+  });
+}
+
+async function wait(ms: number) {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  });
   await settle();
 }
 
@@ -375,4 +414,69 @@ test("related-work evidence opens under its row, never as a box in every row", a
   const hidden = await renderPage();
   expect(button(hidden.container, /Possible related work/)).toBeUndefined();
   await hidden.unmount();
+});
+
+test("a first load the viewer isn't allowed says who can help, and offers no Try again", async () => {
+  failure = new OpenGeniApiError(403, "missing permission: sessions:read");
+  const view = await renderPage();
+  expect(view.container.textContent).toContain("Couldn't load agents");
+  expect(view.container.textContent).toContain(apiErrorAdvice(failure));
+  expect(view.container.textContent).not.toContain("Check your connection");
+  expect(button(view.container, /^Try again$/)).toBeUndefined();
+  await view.unmount();
+});
+
+test("a failed first load gives the advice for that failure and a way to try again", async () => {
+  failure = new OpenGeniApiError(503, "upstream unavailable");
+  const view = await renderPage();
+  expect(view.container.textContent).toContain(apiErrorAdvice(failure));
+  expect(view.container.textContent).not.toContain("Check your connection");
+  failure = null;
+  await click(button(view.container, /^Try again$/));
+  expect(rowTitles(view.container)).toContain("Merge the state split");
+  await view.unmount();
+});
+
+test("the page shows when only the live or recently failed read fails", async () => {
+  olderLive = [agent("old-approval", { title: "Old approval", status: "requires_action" })];
+  failWhen = (options) =>
+    options.statuses?.includes("failed") ? new Error("recent failures unavailable") : null;
+  const view = await renderPage();
+  expect(view.container.textContent).not.toContain("Couldn't load agents");
+  expect(view.container.textContent).not.toContain("Couldn't refresh agents");
+  // The first page and the live read that did answer both show.
+  expect(rowTitles(view.container)).toContain("Merge the state split");
+  expect(rowTitles(view.container)).toContain("Old approval");
+  await view.unmount();
+});
+
+test("in the tree, a branch that failed to load says so and can try again", async () => {
+  failWhen = (options) =>
+    options.parentSessionId === "refactor" ? new Error("branch unavailable") : null;
+  const view = await renderPage();
+  await click(view.container.querySelector('[role=radio][aria-label="Tree"]'));
+  const footer = () => view.container.querySelector('[data-agent-branch-footer="refactor"]');
+  expect(footer()?.textContent).toContain("Couldn't load these agents.");
+  expect(view.container.querySelector('[data-agent-node="refactor-tests"]')).toBeNull();
+
+  failWhen = () => null;
+  await click(button(footer() as HTMLElement, /^Try again$/));
+  expect(view.container.querySelector('[data-agent-node="refactor-tests"]')).not.toBeNull();
+  expect(footer()).toBeNull();
+  await view.unmount();
+});
+
+test("switching workspace during a search starts that workspace unsearched", async () => {
+  const view = await renderPage();
+  await type(view.container.querySelector<HTMLInputElement>("input[type=search]"), "refactor");
+  await wait(300);
+  expect(calls.some((call) => call.search === "refactor")).toBe(true);
+
+  await view.switchWorkspace("22222222-2222-4222-8222-222222222222");
+  expect(view.container.querySelector<HTMLInputElement>("input[type=search]")?.value).toBe("");
+  // The header numbers come back instead of loading for good.
+  expect(view.container.querySelector("[data-agent-summary]")?.textContent).toBe(
+    "2 need you·2 running·1 failed in the last day",
+  );
+  await view.unmount();
 });

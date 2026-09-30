@@ -324,7 +324,8 @@ export function KnowledgePage({
         <ReviewItemPage
           workspaceId={workspaceId}
           flow={review}
-          loading={queue.loading}
+          queue={queue}
+          openKey={search.proposal}
           onBack={() => nav.showTab("review")}
           onOpenEntry={(id) => nav.openEntry(id, { from: "review" })}
         />

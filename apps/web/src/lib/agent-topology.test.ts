@@ -11,6 +11,7 @@ import {
   layoutAgentTopologyDiagram,
   limitAgentTopology,
   mergeAgentTopologySessions,
+  nextAgentTopologyBranchPage,
   normalizeAgentTopologySession,
   selectAgentTopologyBranchesToLoad,
   staleLiveRootIds,
@@ -377,5 +378,82 @@ describe("agent topology", () => {
     const rootPosition = layout.nodes.find((item) => item.node.session.id === "root")!;
     const priorityPosition = layout.nodes.find((item) => item.node.session.id === "child-0")!;
     expect(priorityPosition.x).toBe(rootPosition.x);
+  });
+
+  test("an open branch with a footer gets a slot after its children, and one while empty", () => {
+    const root = session("root");
+    const children = Array.from({ length: 2 }, (_, index) =>
+      session(`child-${index}`, { parentSessionId: "root" }),
+    );
+    const forest = buildAgentTopology([root, ...children]);
+    const layout = layoutAgentTopologyDiagram(forest, new Set(), undefined, new Set(["root"]));
+    const footer = layout.footers[0]!;
+    expect(layout.footers).toHaveLength(1);
+    expect(footer).toMatchObject({ parentId: "root", depth: 1 });
+    const childSlots = layout.nodes.filter((item) => item.parentId === "root");
+    expect(childSlots.every((child) => child.y === footer.y)).toBe(true);
+    // After every child, never on top of one.
+    expect(footer.x).toBeGreaterThan(Math.max(...childSlots.map((child) => child.x)));
+
+    // A branch still loading has no children yet: the footer alone is its second level.
+    const loading = layoutAgentTopologyDiagram(
+      buildAgentTopology([root]),
+      new Set(),
+      undefined,
+      new Set(["root"]),
+    );
+    expect(loading.footers).toHaveLength(1);
+    expect(loading.height).toBeGreaterThan(AGENT_DIAGRAM_NODE_HEIGHT * 2);
+
+    // A folded branch shows no footer.
+    expect(
+      layoutAgentTopologyDiagram(forest, new Set(["root"]), undefined, new Set(["root"])).footers,
+    ).toEqual([]);
+  });
+
+  test("a quiet refresh keeps the cursor of a branch already paged past page one", () => {
+    const first = nextAgentTopologyBranchPage(
+      undefined,
+      { total: 250, hasMore: true, nextCursor: "page-2" },
+      { quiet: false },
+    );
+    expect(first).toMatchObject({ nextCursor: "page-2", paged: false });
+    const second = nextAgentTopologyBranchPage(
+      first,
+      { total: 250, hasMore: true, nextCursor: "page-3" },
+      { cursor: "page-2", quiet: false },
+    );
+    expect(second).toMatchObject({ nextCursor: "page-3", paged: true });
+
+    // Re-reading page one must not hand back page two's cursor.
+    const refreshed = nextAgentTopologyBranchPage(
+      second,
+      { total: 251, hasMore: true, nextCursor: "page-2" },
+      { quiet: true },
+    );
+    expect(refreshed).toMatchObject({ nextCursor: "page-3", hasMore: true, total: 251 });
+
+    // Every page loaded: "Show more" stays gone after a refresh.
+    const done = nextAgentTopologyBranchPage(
+      second,
+      { total: 250, hasMore: false, nextCursor: null },
+      { cursor: "page-3", quiet: false },
+    );
+    expect(
+      nextAgentTopologyBranchPage(
+        done,
+        { total: 250, hasMore: true, nextCursor: "page-2" },
+        { quiet: true },
+      ),
+    ).toMatchObject({ nextCursor: null, hasMore: false });
+
+    // A branch on its first page takes the refreshed first page as is.
+    expect(
+      nextAgentTopologyBranchPage(
+        first,
+        { total: 260, hasMore: true, nextCursor: "page-2b" },
+        { quiet: true },
+      ),
+    ).toMatchObject({ nextCursor: "page-2b", total: 260, paged: false });
   });
 });

@@ -51,8 +51,17 @@ export type AgentTopologyDiagramNode = {
   y: number;
 };
 
+/** The slot under an open branch that says it is loading, failed, or has more. */
+export type AgentTopologyDiagramFooter = {
+  parentId: string;
+  depth: number;
+  x: number;
+  y: number;
+};
+
 export type AgentTopologyDiagramLayout = {
   nodes: AgentTopologyDiagramNode[];
+  footers: AgentTopologyDiagramFooter[];
   width: number;
   height: number;
   /** Card width: columns stretch to fill the available width. */
@@ -210,6 +219,40 @@ export function withoutAgentTopologyRoots(
   return sessions.filter(
     (session) => !rootIds.has(session.id) && !rootIds.has(session.rootSessionId),
   );
+}
+
+/** Paging state of one loaded branch of spawned agents. */
+export type AgentTopologyBranchPage = {
+  loading: boolean;
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  error: Error | null;
+  /** A page after the first was loaded ("Show more"). */
+  paged: boolean;
+};
+
+/**
+ * A branch's paging state after a successful read. A quiet refresh re-reads
+ * only the first page, so a branch already paged past it keeps its cursor:
+ * taking page one's cursor would bring "Show more" back and re-read page two.
+ */
+export function nextAgentTopologyBranchPage(
+  current: AgentTopologyBranchPage | undefined,
+  page: { total: number; hasMore: boolean; nextCursor: string | null },
+  read: { cursor?: string | undefined; quiet: boolean },
+): AgentTopologyBranchPage {
+  if (read.quiet && !read.cursor && current?.paged) {
+    return { ...current, loading: false, error: null, total: page.total };
+  }
+  return {
+    loading: false,
+    total: page.total,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    error: null,
+    paged: Boolean(read.cursor),
+  };
 }
 
 export function canStartAgentTopologyRootRead(requestInFlight: boolean): boolean {
@@ -411,12 +454,17 @@ export function limitAgentTopology(
  * Position a visible forest as compact top-down trees. Each workstream keeps
  * its own subtree; workstreams sit side by side and wrap into a new band when
  * the next one would not fit in `maxWidth` (one band when it is omitted).
+ * An open branch in `footers` gets one more slot after its children, for a
+ * line that says it is loading, failed, or has more agents than shown.
  */
 export function layoutAgentTopologyDiagram(
   roots: AgentTopologyNode[],
   collapsed: ReadonlySet<string>,
   maxWidth: number = Number.POSITIVE_INFINITY,
+  footers: ReadonlySet<string> = new Set(),
 ): AgentTopologyDiagramLayout {
+  const hasFooter = (node: AgentTopologyNode) =>
+    footers.has(node.session.id) && !collapsed.has(node.session.id);
   const centerPriority = (children: AgentTopologyNode[]): AgentTopologyNode[] => {
     if (children.length < 3) return children;
     const slots = new Array<AgentTopologyNode>(children.length);
@@ -437,13 +485,15 @@ export function layoutAgentTopologyDiagram(
   const measure = (node: AgentTopologyNode): number => {
     const visibleChildren = collapsed.has(node.session.id) ? [] : node.children;
     let deepest = 0;
+    const footerUnits = hasFooter(node) ? 1 : 0;
+    if (footerUnits) deepest = 1;
     const width = Math.max(
       1,
       visibleChildren.reduce((sum, child) => {
         const childUnits = measure(child);
         deepest = Math.max(deepest, 1 + (depths.get(child.session.id) ?? 0));
         return sum + childUnits;
-      }, 0),
+      }, footerUnits),
     );
     units.set(node.session.id, width);
     depths.set(node.session.id, deepest);
@@ -473,6 +523,7 @@ export function layoutAgentTopologyDiagram(
   const alignStart = columns === 1;
   const levelHeight = AGENT_DIAGRAM_NODE_HEIGHT + AGENT_DIAGRAM_ROW_GAP;
   const nodes: AgentTopologyDiagramNode[] = [];
+  const footerSlots: AgentTopologyDiagramFooter[] = [];
   const place = (
     node: AgentTopologyNode,
     parentId: string | null,
@@ -494,6 +545,15 @@ export function layoutAgentTopologyDiagram(
     for (const child of alignStart ? node.children : centerPriority(node.children)) {
       place(child, node.session.id, originX, childOffset, originY, depth + 1);
       childOffset += units.get(child.session.id) ?? 1;
+    }
+    // The footer comes after every child: it reads as the end of the branch.
+    if (hasFooter(node)) {
+      footerSlots.push({
+        parentId: node.session.id,
+        depth: depth + 1,
+        x: originX + childOffset * pitch,
+        y: originY + (depth + 1) * levelHeight,
+      });
     }
   };
 
@@ -517,6 +577,7 @@ export function layoutAgentTopologyDiagram(
   }
   return {
     nodes,
+    footers: footerSlots,
     width: Math.ceil(
       AGENT_DIAGRAM_PADDING * 2 + Math.max(widest, pitch) - AGENT_DIAGRAM_COLUMN_GAP,
     ),
