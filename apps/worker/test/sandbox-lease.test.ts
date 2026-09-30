@@ -6602,6 +6602,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         sessionState: { providerState: { sandboxId: instanceId } },
       },
     });
+    // Created a day ago; its stamped provider deadline is what just passed.
+    await admin`update sandbox_leases set provider_created_at = now() - interval '26 hours',
+      provider_deadline_at = now() - interval '2 hours'
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
     const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
     const { reapSandboxLeases } = createSandboxLeaseActivities(
       reaperServices(REAPER_SETTINGS, observability),
@@ -6622,6 +6626,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       },
     });
     expect(lost?.recovery.lateArchiveCapture).toBeTruthy();
+    expect(lost?.resumeState?.opengeniProviderLoss).toMatchObject({
+      source: "drain_probe",
+      instanceId,
+      lostEpoch: 21,
+    });
 
     await initializeSessionStartAtomically(db, {
       accountId: ws.accountId,

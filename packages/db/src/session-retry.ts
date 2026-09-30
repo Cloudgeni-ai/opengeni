@@ -201,7 +201,7 @@ async function retryFailedSessionInTransaction(
         -- A row stranded by an older terminal turn whose attempt settled cannot
         -- be resumed by reopening this turn; live ones still block.
         or exists (select 1 from session_turns owner_turn where owner_turn.workspace_id = pending.workspace_id and owner_turn.id = pending.turn_id
-          and owner_turn.status in ('running', 'recovering', 'requires_action', 'waiting_capacity'))
+          and owner_turn.status not in ('completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit'))
         or exists (select 1 from session_turn_attempts owner where owner.workspace_id = pending.workspace_id and owner.id = pending.attempt_id
           and (owner.state <> 'closed' or (owner.quiesced_at is null and exists (select 1 from session_attempt_interruptions interruption where interruption.attempt_id = owner.id))))))
     or exists (select 1 from session_events tool_event where tool_event.workspace_id = ${workspaceId} and tool_event.session_id = ${sessionId} and tool_event.turn_id = ${turn.id}

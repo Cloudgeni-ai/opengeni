@@ -108,7 +108,7 @@ test("shared checkpoint and empty-workspace warnings never claim success, counts
   });
   const fresh = freshWorkspaceSandboxRecoveryDiscontinuity(recovery);
   expect(fresh).toContain("lost at 2026-09-17T06:24:31.000Z");
-  expect(fresh).toContain("no recoverable checkpoint exists");
+  expect(fresh).toContain("no checkpoint OpenGeni can restore automatically");
   expect(fresh).toContain("new empty workspace");
   expect(fresh).toContain("do not assume they exist");
   expect(fresh).toContain("External effects are not undone");

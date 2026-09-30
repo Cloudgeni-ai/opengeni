@@ -239,9 +239,11 @@ function expectFailedArchiveRestore(
   expect(lease).not.toBeNull();
   expect(lease?.liveness).toBe("cold");
   expect(lease?.instanceId).toBeNull();
+  // A failed replacement never masquerades as provider loss evidence.
   expect(lease?.recovery.provider).toMatchObject({
-    status: "missing",
+    status: "not_created",
     instanceId: null,
+    diagnostic: "replacement_failed",
   });
   expect(lease?.recovery.restore).toMatchObject({
     status: "unrecoverable",

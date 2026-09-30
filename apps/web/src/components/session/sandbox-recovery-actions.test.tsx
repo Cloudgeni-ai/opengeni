@@ -143,7 +143,7 @@ for (const lane of ["checkpoint", "fresh_workspace"] as const) {
       );
     } else {
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. Previous sandbox files were lost.",
+        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
       );
       expect(container.textContent).not.toContain("checkpoint from");
     }
@@ -165,6 +165,9 @@ for (const [reason, copy] of [
     "retry_tool_outcome_unresolved",
     "Send a new message to continue; the lost sandbox then recovers automatically.",
   ],
+  ["restore_retry_backoff", "OpenGeni will try the checkpoint again shortly"],
+  ["restore_retry_exhausted", "The checkpoint is kept; ask your operator to review this session."],
+  ["provider_lifetime_unexpired", "once the lost sandbox's provider lifetime has ended"],
 ] as const) {
   test(`${reason} explains why Retry is not offered and what to do`, async () => {
     const container = await render({

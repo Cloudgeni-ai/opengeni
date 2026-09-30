@@ -72,6 +72,14 @@ export function sandboxRecoveryBlocker(reason: string): string {
       "Checkpoint consent is available only when this session does not share its sandbox. Ask your operator to review this session.",
     shared_sandbox_member_active:
       "Another session sharing this sandbox is still running or waiting for input. Retry becomes available once it settles.",
+    restore_retry_backoff:
+      "The last checkpoint restore failed. OpenGeni will try the checkpoint again shortly; check back in a few minutes.",
+    restore_retry_exhausted:
+      "Restoring the checkpoint failed repeatedly. The checkpoint is kept; ask your operator to review this session.",
+    provider_lifetime_unexpired:
+      "No checkpoint can be restored automatically. OpenGeni continues with an empty workspace once the lost sandbox's provider lifetime has ended; check back later.",
+    automatic_recovery_pending:
+      "OpenGeni is already recovering this sandbox automatically. Retry to continue.",
     retry_tool_outcome_unresolved:
       "A tool call in the failed turn has no recorded outcome, so Retry cannot safely reopen it. Send a new message to continue; the lost sandbox then recovers automatically.",
     checkpoint_unavailable: "No recoverable checkpoint is available.",
@@ -85,7 +93,8 @@ export function sandboxRecoveryBlocker(reason: string): string {
     session_not_quiescent: "This session is active or cancelled and cannot accept recovery.",
     execution_unresolved:
       "Execution may still be active. Recovery must wait until its outcome is settled.",
-    capture_unresolved: "A checkpoint capture is still unresolved.",
+    capture_unresolved:
+      "A checkpoint capture is still unresolved. Recovery can continue once it settles; check back later.",
     restore_failed: "Restoration failed. Operator review is required; no commands were replayed.",
     consent_stale:
       "The accepted checkpoint consent is no longer current. Operator review is required.",
@@ -99,7 +108,7 @@ export function sandboxRecoveryBlocker(reason: string): string {
 /** What an automatic Retry will do after the managed sandbox was lost. */
 export function automaticRecoveryRetryNotice(projection: SandboxRecoveryProjection): string {
   if (projection.automaticLane === "fresh_workspace") {
-    return "Retry will continue with an empty workspace. Previous sandbox files were lost.";
+    return "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.";
   }
   const capturedAt = projection.checkpoint?.capturedAt;
   return capturedAt

@@ -7,6 +7,7 @@ import {
   failSandboxRematerialization,
   failWarmingToCold,
   markSandboxRestoreVerifying,
+  sessionHoldsFreshWorkspaceRecovery,
   recordWarmingSandboxCreated,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
@@ -140,15 +141,25 @@ export async function establishApiSandboxSpawner(input: {
   // EMPTY box: hydrate nothing, including a per-session legacy archive, and
   // never resume a prior provider identity. Commit verifies the decision.
   const freshWorkspaceRecoveryId = input.acquiredLease.freshWorkspaceRecoveryId ?? null;
+  // Backstop: a session already told its workspace is empty never gets a
+  // legacy per-session archive back, even if the lease marker was lost.
+  const legacyFallbackRefused =
+    !freshWorkspaceRecoveryId &&
+    input.acquiredLease.recovery.archive.status === "none" &&
+    hasWorkspaceArchive(input.fallbackEnvelope) &&
+    (await sessionHoldsFreshWorkspaceRecovery(input.db, input.workspaceId, input.sessionId));
   const fallbackArchiveEnvelope =
     !freshWorkspaceRecoveryId &&
+    !legacyFallbackRefused &&
     input.acquiredLease.recovery.archive.status === "none" &&
     hasWorkspaceArchive(input.fallbackEnvelope)
       ? withoutSandboxProviderIdentity(input.fallbackEnvelope)
       : null;
   let spawnEnvelope = freshWorkspaceRecoveryId
     ? null
-    : (fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope);
+    : legacyFallbackRefused
+      ? (input.acquiredLease.resumeState ?? null)
+      : (fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope);
   const archiveSource =
     input.acquiredLease.recovery.archive.status === "none"
       ? fallbackArchiveEnvelope

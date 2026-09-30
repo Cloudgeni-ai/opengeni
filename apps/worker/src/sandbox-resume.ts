@@ -33,6 +33,7 @@ import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   failSandboxRematerialization,
@@ -1592,15 +1593,25 @@ async function resumeBoxForTurnOnce(
       // Select the fallback only when the lease has no archive truth at all. A
       // lease-carried unverified/invalid archive must fail closed rather than
       // silently substituting another revision.
+      // Backstop: a session already told its workspace is empty never gets a
+      // legacy per-session archive back, even if the lease marker was lost.
+      const legacyFallbackRefused =
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status === "none" &&
+        workspaceArchiveFieldsFromEnvelope(envelope) !== null &&
+        (await sessionHoldsFreshWorkspaceRecovery(db, ids.workspaceId, ids.sessionId));
       const fallbackArchiveEnvelope =
         !freshWorkspaceRecoveryId &&
+        !legacyFallbackRefused &&
         acquired.lease.recovery.archive.status === "none" &&
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutSandboxProviderIdentity(envelope)
           : null;
       let spawnEnvelope = freshWorkspaceRecoveryId
         ? null
-        : (fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope);
+        : legacyFallbackRefused
+          ? (acquired.lease.resumeState ?? null)
+          : (fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope);
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope

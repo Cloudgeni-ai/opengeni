@@ -209,17 +209,24 @@ new lanes, so affected sessions stay blocked until the new images serve them.
 Rollback of images after a fresh-workspace decision is limited to v3-warning
 builds for those sessions; do not roll the migration back.
 
-After definitive Modal loss the worker decides, for the complete quiescent
-sandbox group, either the latest verified checkpoint (outcomes `selected` and
-`selected_shared`) or, when none is usable, continuation on a new EMPTY
-workspace (`fresh_workspace`). Both write one permanent warning receipt per group
-member; the empty-workspace receipt requires warning protocol v3 at claim. The
-lost archive fields and checkpoint references stay on the lease for review.
-Sessions stuck before this release qualify on their next turn or Retry; a lease
-whose drain capture was in flight when the box vanished waits out the one-hour
-lifecycle ceiling before continuing empty. `OpenGeniModalFreshWorkspaceContinuity`
-warns on each empty-workspace decision; see [run lifecycle](run-lifecycle.md) and
-the Sandbox Health dashboard notes.
+After definitive Modal loss (the reaper's missing-before-capture commit or an
+exact warm-instance `NOT_FOUND`, never a failed replacement box) the worker
+decides, for the complete quiescent sandbox group, either the latest verified
+checkpoint (outcomes `selected` and `selected_shared`) or, when none can be
+restored automatically, continuation on a new EMPTY workspace
+(`fresh_workspace`). Both write one permanent warning receipt per group member;
+the empty-workspace receipt requires warning protocol v3 at claim. The empty
+workspace additionally waits until the lost box is past its hard provider
+lifetime (its stamped deadline plus one hour, else loss plus 24 hours). Only a
+definitive integrity failure abandons a checkpoint; other restore failures retry
+with backoff and then wait for an operator. A complete archive is never
+bypassed. The lost archive fields and checkpoint references stay on the lease
+for review. Sessions stuck before this release qualify on their next turn or
+Retry when their loss is provable from the row or its loss audit; a capture
+that was in flight when the box vanished may publish only within one hour, and
+decisions wait for that window. `OpenGeniModalFreshWorkspaceContinuity` warns
+on each empty-workspace decision; see [run lifecycle](run-lifecycle.md) and the
+Sandbox Health dashboard notes.
 
 ## Selective Knowledge source discovery (0469)
 

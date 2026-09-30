@@ -46281,15 +46281,90 @@ function pendingFreshWorkspaceRecovery(
   return marker?.status === "accepted" ? marker : null;
 }
 
+/** Durable evidence that the exact provider object of this lease lineage was
+ * definitively lost. Only the two loss transitions write it (the reaper's
+ * missing-before-capture cold commit and an exact warm-instance NOT_FOUND);
+ * replacement failures carry it forward but never create it, and a verified
+ * warm publication ends the lineage. */
+const PROVIDER_LOSS_KEY = "opengeniProviderLoss";
+const PROVIDER_NOT_FOUND_BEFORE_CAPTURE = "provider_not_found_before_workspace_capture";
+/** A failed or reset replacement box: not evidence about the lost workspace. */
+const REPLACEMENT_FAILED_DIAGNOSTIC = "replacement_failed";
+
+type ProviderLossRecord = {
+  version: 1;
+  source: "drain_probe" | "warm_resume";
+  leaseId: string;
+  lostEpoch: number;
+  instanceId: string | null;
+  workspaceGeneration: number;
+  observedAt: string;
+  /** The lost object's recorded hard provider deadline, when known. */
+  providerDeadlineAt: string | null;
+};
+
+function providerLossRecord(
+  resumeState: Record<string, unknown> | null | undefined,
+): ProviderLossRecord | null {
+  const value = resumeState?.[PROVIDER_LOSS_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return record.version === 1 &&
+    (record.source === "drain_probe" || record.source === "warm_resume") &&
+    typeof record.leaseId === "string" &&
+    typeof record.lostEpoch === "number" &&
+    Number.isSafeInteger(record.lostEpoch) &&
+    (typeof record.instanceId === "string" || record.instanceId === null) &&
+    typeof record.workspaceGeneration === "number" &&
+    Number.isSafeInteger(record.workspaceGeneration) &&
+    typeof record.observedAt === "string" &&
+    Number.isFinite(Date.parse(record.observedAt)) &&
+    (record.providerDeadlineAt === null ||
+      (typeof record.providerDeadlineAt === "string" &&
+        Number.isFinite(Date.parse(record.providerDeadlineAt))))
+    ? (record as ProviderLossRecord)
+    : null;
+}
+
+function timestampIso(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+/** The loss record a definitive loss transition commits for `row`. */
+function providerLossRecordForLostRow(
+  row: LeaseRow,
+  source: ProviderLossRecord["source"],
+  observedAt: string,
+): ProviderLossRecord {
+  return {
+    version: 1,
+    source,
+    leaseId: row.id,
+    lostEpoch: Number(row.lease_epoch),
+    instanceId: row.instance_id,
+    workspaceGeneration: Number(row.workspace_generation),
+    observedAt,
+    providerDeadlineAt: timestampIso(row.provider_deadline_at),
+  };
+}
+
 function resumeStateWithPreservedArchives(
   resumeState: Record<string, unknown> | null,
   archiveSource: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   const preserved = resumeStateWithPreservedArchiveFields(resumeState, archiveSource);
-  // A pending empty-workspace decision is not archive truth, so it survives
-  // even when the lost lease had no archive at all.
+  // A pending empty-workspace decision and the loss evidence behind it are not
+  // archive truth, so they survive even when the lost lease had no archive.
   const fresh = pendingFreshWorkspaceRecovery(archiveSource);
-  return fresh ? { ...(preserved ?? {}), [FRESH_WORKSPACE_RECOVERY_KEY]: fresh } : preserved;
+  const loss = providerLossRecord(archiveSource);
+  if (!fresh && !loss) return preserved;
+  return {
+    ...(preserved ?? {}),
+    ...(fresh ? { [FRESH_WORKSPACE_RECOVERY_KEY]: fresh } : {}),
+    ...(loss ? { [PROVIDER_LOSS_KEY]: loss } : {}),
+  };
 }
 
 function resumeStateWithPreservedArchiveFields(
@@ -46338,7 +46413,9 @@ function resumeStateWithPreservedArchiveFields(
 function archiveOnlyResumeState(
   row: LeaseRow,
   recovery: SandboxRecoveryState,
+  providerLoss?: ProviderLossRecord,
 ): Record<string, unknown> {
+  const carriedLoss = providerLoss ?? providerLossRecord(row.resume_state);
   const current =
     row.resume_state && typeof row.resume_state === "object" ? row.resume_state : undefined;
   const currentSession =
@@ -46375,6 +46452,7 @@ function archiveOnlyResumeState(
     ...(pendingFreshWorkspaceRecovery(current)
       ? { [FRESH_WORKSPACE_RECOVERY_KEY]: pendingFreshWorkspaceRecovery(current) }
       : {}),
+    ...(carriedLoss ? { [PROVIDER_LOSS_KEY]: carriedLoss } : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -46462,10 +46540,14 @@ function continuityRecoveryEquals(
 function recoveryResumeState(
   row: LeaseRow,
   recovery: SandboxRecoveryState,
+  providerLoss?: ProviderLossRecord,
 ): Record<string, unknown> {
   return recovery.continuity
-    ? resumeStateWithRecovery(row.resume_state, recovery)
-    : archiveOnlyResumeState(row, recovery);
+    ? {
+        ...resumeStateWithRecovery(row.resume_state, recovery),
+        ...(providerLoss ? { [PROVIDER_LOSS_KEY]: providerLoss } : {}),
+      }
+    : archiveOnlyResumeState(row, recovery, providerLoss);
 }
 
 function archiveProjectionFromResumeState(
@@ -47222,10 +47304,38 @@ async function completeRecoveryGroupCount(
  * created. Never a human, delegated principal or agent authority. */
 const AUTOMATIC_SANDBOX_RECOVERY_SUBJECT = "opengeni:automatic-sandbox-recovery";
 const FRESH_WORKSPACE_RECOVERY_ACTION = "sandbox.fresh_workspace_recovery.authorized";
-/** One initial automatic restore of a checkpoint plus one retry after a
- * non-definitive failure (provider capacity, worker death). A definitive
- * restore failure or a second failure continues on an empty workspace. */
-const MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS = 2;
+/** Automatic restores of one checkpoint before an operator must decide. Only
+ * a definitive integrity failure of that exact checkpoint abandons it. */
+const MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS = 6;
+/** Wait after the k-th failed automatic restore before the next decision. */
+const AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS = [
+  60_000,
+  5 * 60_000,
+  15 * 60_000,
+  60 * 60_000,
+  4 * 60 * 60_000,
+] as const;
+/** Failure codes that prove the exact selected checkpoint itself can never be
+ * restored (its bytes, descriptor or registered artifact are wrong). Provider,
+ * binding, capacity, commit and worker failures are deliberately absent. */
+const DEFINITIVE_CHECKPOINT_FAILURES: ReadonlySet<string> = new Set([
+  "archive_metadata_missing",
+  "archive_metadata_invalid",
+  "archive_base64_invalid",
+  "archive_hash_mismatch",
+  "checkpoint_artifact_invalid",
+]);
+/** OpenGeni validates OPENGENI_MODAL_TIMEOUT_SECONDS to at most 24h, Modal's
+ * own hard cap, and Modal lifetimes are never renewed. */
+const MODAL_SANDBOX_MAX_LIFETIME_MS = 24 * 60 * 60_000;
+/** A recorded deadline is stamped from the create call's start; the provider
+ * object may come up to the warming budget later. */
+const PROVIDER_CREATE_DEADLINE_GRACE_MS = 60 * 60_000;
+/** persistDrainSnapshot refuses a cold late publication after this window. */
+const LATE_CAPTURE_PUBLICATION_WINDOW_MS = SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS;
+/** Decisions wait slightly longer than publication so host clock skew can
+ * never let a late archive land after a decision. */
+const LATE_CAPTURE_DECISION_DELAY_MS = LATE_CAPTURE_PUBLICATION_WINDOW_MS + 5 * 60_000;
 
 type AutomaticCheckpointMarker = {
   operationId: string;
@@ -47342,7 +47452,8 @@ async function sandboxGroupRecoveryBlockersTx(
                     where interruption.attempt_id = owner.id))))
               or exists(select 1 from session_turns turn
                 where turn.workspace_id = pending.workspace_id and turn.id = pending.turn_id
-                  and turn.status in ('running', 'recovering', 'requires_action', 'waiting_capacity')))
+                  and turn.status not in
+                    ('completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit')))
         )
         select
           exists(select 1 from sandbox_lease_holders where lease_id = ${input.row.id})
@@ -47429,7 +47540,8 @@ async function freshWorkspaceAuthorizationTx(
   lostAt: string;
 } | null> {
   const marker = pendingFreshWorkspaceRecovery(row.resume_state);
-  if (!marker) return null;
+  // Human consent and the empty-workspace decision are mutually exclusive.
+  if (!marker || row.public_recovery !== null) return null;
   const [audit] = await tx
     .select({ metadata: schema.auditEvents.metadata })
     .from(schema.auditEvents)
@@ -47476,6 +47588,8 @@ type AutomaticRecoveryLane =
       operationId: string | null;
       initiatingSessionId: string | null;
       attempt: number;
+      /** Present for a new decision; the lease records it with the decision. */
+      loss?: ProviderLossRecord;
     }
   | {
       kind: "fresh_workspace";
@@ -47484,14 +47598,19 @@ type AutomaticRecoveryLane =
       initiatingSessionId: string | null;
       reason: SandboxFreshWorkspaceReason;
       lostAt: string;
+      /** Present for a new decision; the lease records it with the decision. */
+      loss?: ProviderLossRecord;
     }
   | {
       kind: "unavailable";
       reason:
         | "not_applicable"
         | "not_required"
-        | "provider_unconfirmed"
+        | "loss_unconfirmed"
         | "capture_unresolved"
+        | "restore_retry_backoff"
+        | "restore_retry_exhausted"
+        | "provider_lifetime_unexpired"
         | "authorization_pending"
         | "authorization_invalid";
     };
@@ -47571,6 +47690,15 @@ async function automaticRecoveryLaneTx(
     (row.provider_create_attempt != null && row.provider_create_attempt.instanceId === null)
   )
     return { kind: "unavailable", reason: "not_applicable" };
+  // A complete archive (or one at the workspace generation) belongs to the
+  // ordinary restore path, whose failures stop for an operator. Never select
+  // a historical checkpoint over it, and never discard it for an empty box.
+  const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  if (
+    hasCompleteWorkspaceArchive(row) ||
+    (archiveGeneration !== null && archiveGeneration >= Number(row.workspace_generation))
+  )
+    return { kind: "unavailable", reason: "not_required" };
   const automaticFailed = automatic?.status === "failed";
   const blocked =
     (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
@@ -47578,55 +47706,149 @@ async function automaticRecoveryLaneTx(
   // The spawner restores only a complete archive or an explicitly authorized
   // one. An incomplete archive is a dead end whatever its restore label says
   // (a reset `pending`, a retryable failure, or a failed system restore).
-  const archiveIncomplete = recovery.archive.status !== "none" && !hasCompleteWorkspaceArchive(row);
   const deadEnd =
     blocked ||
-    (archiveIncomplete &&
+    (recovery.archive.status !== "none" &&
       (recovery.restore.status === "degraded" || recovery.restore.status === "pending"));
   if (!deadEnd) return { kind: "unavailable", reason: "not_required" };
-  if (recovery.provider.status !== "missing")
-    return { kind: "unavailable", reason: "provider_unconfirmed" };
+  const loss = await providerLossEvidenceTx(tx, row, recovery);
+  if (!loss) return { kind: "unavailable", reason: "loss_unconfirmed" };
   if ((await authorizedHistoricalArchiveGeneration(tx, row)) !== null)
     return { kind: "unavailable", reason: "authorization_pending" };
-  const attempt = automaticFailed ? automatic.attempt + 1 : 1;
-  const checkpointCandidate = automaticFailed
-    ? recovery.restore.status !== "unrecoverable" && attempt <= MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS
-    : recovery.restore.status === "degraded" || recovery.restore.status === "pending";
-  if (checkpointCandidate) {
-    const selection = await verifiedAutomaticCheckpointSelectionTx(tx, row, session, recovery);
-    if (selection)
-      return {
-        kind: "checkpoint",
-        state: "available",
-        selection,
-        operationId: null,
-        initiatingSessionId: null,
-        attempt,
-      };
-  }
   // A drain capture that was in flight when the provider vanished may still
-  // publish the exact lost generation. Never trade that for an empty
-  // workspace until the longest configurable capture budget has elapsed.
+  // publish the exact lost generation until its durable publication deadline
+  // (enforced by persistDrainSnapshot). Neither lane may pre-empt it.
   const late = recovery.lateArchiveCapture;
-  if (late && Date.now() - Date.parse(late.recordedAt) < SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS)
+  const now = Date.now();
+  if (late && now < Date.parse(late.recordedAt) + LATE_CAPTURE_DECISION_DELAY_MS)
     return { kind: "unavailable", reason: "capture_unresolved" };
-  const reason: SandboxFreshWorkspaceReason =
-    automaticFailed ||
-    (recovery.restore.status === "unrecoverable" && recovery.archive.status !== "none")
-      ? "checkpoint_restore_failed"
-      : recovery.archive.status === "none"
-        ? "archive_unavailable"
-        : recovery.archive.status === "available"
-          ? "checkpoint_unrestorable"
-          : "archive_unverified";
+
+  // Only a definitive integrity failure of the exact checkpoint abandons it.
+  // Retryable or ambiguous failures (provider capacity, worker death, a
+  // rejected commit, a changed provider binding) keep the checkpoint lane.
+  const definitiveCheckpointFailure =
+    (recovery.restore.status === "degraded" || recovery.restore.status === "unrecoverable") &&
+    DEFINITIVE_CHECKPOINT_FAILURES.has(recovery.restore.failureCode ?? "");
+  const selection = definitiveCheckpointFailure
+    ? null
+    : await verifiedAutomaticCheckpointSelectionTx(tx, row, session, recovery);
+  if (selection) {
+    const attempt = automaticFailed ? automatic.attempt + 1 : 1;
+    if (automaticFailed) {
+      // Bounded retries with backoff, then an operator decides. A verified
+      // checkpoint is never discarded because restoring it kept failing.
+      if (attempt > MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS)
+        return { kind: "unavailable", reason: "restore_retry_exhausted" };
+      const failedAt = Date.parse(
+        isoTimestamp(recovery.restore.completedAt, recovery.provider.observedAt),
+      );
+      const backoffMs =
+        AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS[
+          Math.min(automatic.attempt, AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS.length) - 1
+        ]!;
+      if (now < failedAt + backoffMs)
+        return { kind: "unavailable", reason: "restore_retry_backoff" };
+    }
+    return {
+      kind: "checkpoint",
+      state: "available",
+      selection,
+      operationId: null,
+      initiatingSessionId: null,
+      attempt,
+      loss,
+    };
+  }
+  // No checkpoint OpenGeni can restore automatically. An empty workspace is
+  // irreversible for the running sandbox, so it additionally waits until the
+  // lost object is past its hard provider lifetime: no Modal sandbox outlives
+  // it in any workspace, so a misconfigured credential or namespace cannot
+  // turn a live box into a false loss here.
+  const lifetimeEndsAt = loss.providerDeadlineAt
+    ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
+    : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  if (now < lifetimeEndsAt) return { kind: "unavailable", reason: "provider_lifetime_unexpired" };
+  const reason: SandboxFreshWorkspaceReason = definitiveCheckpointFailure
+    ? "checkpoint_restore_failed"
+    : recovery.archive.status === "none"
+      ? "archive_unavailable"
+      : recovery.archive.status === "available"
+        ? "checkpoint_unrestorable"
+        : "archive_unverified";
   return {
     kind: "fresh_workspace",
     state: "available",
     operationId: null,
     initiatingSessionId: null,
     reason,
-    lostAt: isoTimestamp(recovery.provider.observedAt, recovery.restore.completedAt),
+    lostAt: isoTimestamp(loss.observedAt),
+    loss,
   };
+}
+
+/** The durable proof that this lease lineage's provider object was lost.
+ * Replacement failures and ambiguous provider states are never proof. Rows
+ * committed before this release qualify from their own loss transition's
+ * exact shape or from the committed reaper loss audit. */
+async function providerLossEvidenceTx(
+  tx: Database,
+  row: LeaseRow,
+  recovery: SandboxRecoveryState,
+): Promise<ProviderLossRecord | null> {
+  if (recovery.provider.status !== "missing" && recovery.provider.status !== "not_created")
+    return null;
+  const recorded = providerLossRecord(row.resume_state);
+  if (recorded)
+    return recorded.leaseId === row.id &&
+      recorded.workspaceGeneration === Number(row.workspace_generation)
+      ? recorded
+      : null;
+  const legacy = (
+    source: ProviderLossRecord["source"],
+    observedAt: string,
+  ): ProviderLossRecord => ({
+    version: 1,
+    source,
+    leaseId: row.id,
+    lostEpoch: Math.max(0, Number(row.lease_epoch) - 1),
+    instanceId: recovery.provider.instanceId,
+    workspaceGeneration: Number(row.workspace_generation),
+    observedAt,
+    providerDeadlineAt: null,
+  });
+  if (recovery.provider.status === "missing" && recovery.provider.observedAt) {
+    // confirmDrainCold: the reaper's exact missing-before-capture commit.
+    if (recovery.provider.diagnostic === PROVIDER_NOT_FOUND_BEFORE_CAPTURE)
+      return legacy("drain_probe", recovery.provider.observedAt);
+    // markWarmLeaseInstanceLost is the only writer of `missing` that leaves
+    // the restore unsettled; replacement failures always stamp completion.
+    if (
+      recovery.restore.completedAt === null &&
+      recovery.restore.rematerializationId === null &&
+      recovery.provider.diagnostic !== REPLACEMENT_FAILED_DIAGNOSTIC
+    )
+      return legacy("warm_resume", recovery.provider.observedAt);
+  }
+  // A replacement attempt overwrote the provider record. The committed reaper
+  // audit still names this exact lease and unchanged workspace generation,
+  // unless a verified automatic restore already ended that lineage.
+  if (automaticCheckpointMarker(row.resume_state)?.status === "verified") return null;
+  const [audit] = await tx
+    .select({ occurredAt: schema.auditEvents.occurredAt })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.accountId, row.account_id),
+        eq(schema.auditEvents.workspaceId, row.workspace_id),
+        eq(schema.auditEvents.targetId, row.sandbox_group_id),
+        eq(schema.auditEvents.action, "sandbox.provider_missing_before_capture"),
+        sql`${schema.auditEvents.metadata}->>'leaseId' = ${row.id}`,
+        sql`(${schema.auditEvents.metadata}->>'workspaceGeneration')::bigint = ${Number(row.workspace_generation)}`,
+      ),
+    )
+    .orderBy(desc(schema.auditEvents.occurredAt))
+    .limit(1);
+  return audit ? legacy("drain_probe", audit.occurredAt.toISOString()) : null;
 }
 
 /** Public projection reasons for an automatic lane that is structurally
@@ -47767,8 +47989,21 @@ async function projectPublicSandboxRecovery(
         automaticLane: lane.kind,
       };
     }
-    if (lane.reason === "capture_unresolved") return unavailable("capture_unresolved");
+    // The system will proceed by itself (or an operator must); explain which.
+    if (
+      lane.reason === "capture_unresolved" ||
+      lane.reason === "restore_retry_backoff" ||
+      lane.reason === "restore_retry_exhausted" ||
+      lane.reason === "provider_lifetime_unexpired"
+    )
+      return unavailable(lane.reason);
   }
+  // A system decision already owns this lease; consent may not compete with it.
+  if (
+    pendingFreshWorkspaceRecovery(row.resume_state) ||
+    automaticCheckpointMarker(row.resume_state)?.status === "accepted"
+  )
+    return unavailable("automatic_recovery_pending");
   if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) !== 1)
     return { ...unavailable("singleton_required"), status: "unsupported" };
   const recovery = recoveryStateFromLeaseRow(row);
@@ -48096,12 +48331,15 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
         where session.account_id = ${input.accountId}
           and session.workspace_id = ${input.workspaceId}
           and session.id = ${input.sessionId}
-          and lease.liveness = 'cold'
-          and ((lease.resume_state #>> '{opengeniRecovery,provider,status}' = 'missing'
+          and ((lease.liveness = 'cold'
+              and lease.resume_state #>> '{opengeniRecovery,provider,status}' in ('missing', 'not_created')
               and lease.resume_state #>> '{opengeniRecovery,restore,status}' in
                 ('degraded', 'unrecoverable', 'pending'))
-            or lease.resume_state #>> '{opengeniAutomaticCheckpointRecovery,status}' = 'accepted'
-            or lease.resume_state #>> '{opengeniFreshWorkspaceRecovery,status}' = 'accepted')) as present`,
+            -- A pending decision still delivers receipts to members that
+            -- joined after it, including while its box is being created.
+            or (lease.liveness in ('cold', 'warming') and (
+              lease.resume_state #>> '{opengeniAutomaticCheckpointRecovery,status}' = 'accepted'
+              or lease.resume_state #>> '{opengeniFreshWorkspaceRecovery,status}' = 'accepted')))) as present`,
     );
     if (!candidate?.present) return { status: "not_eligible" };
     await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
@@ -48228,6 +48466,7 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
               providerMissingBeforeCapture: true,
               groupSessionCount: members.length,
               attempt: lane.attempt,
+              ...(lane.loss ? { providerLoss: lane.loss } : {}),
               ...(priorAutomatic ? { supersededAutomaticRecovery: priorAutomatic } : {}),
             },
           },
@@ -48248,17 +48487,19 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
         actor,
         members,
       });
+      // The decision also pins its loss evidence, so a failed restore of the
+      // selected checkpoint cannot erase why this lineage is recoverable.
       await tx.execute(sql`update sandbox_leases set
-        resume_state = jsonb_set(
-          jsonb_set(coalesce(resume_state, '{}'::jsonb),
-            '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(operationId)}::jsonb),
-          '{opengeniAutomaticCheckpointRecovery}',
-          ${JSON.stringify({
+        resume_state = coalesce(resume_state, '{}'::jsonb) || ${JSON.stringify({
+          opengeniHistoricalArchiveRecoveryId: operationId,
+          opengeniAutomaticCheckpointRecovery: {
             operationId,
             sessionId: input.sessionId,
             status: "accepted",
             attempt: lane.attempt,
-          })}::jsonb),
+          },
+          ...(lane.loss ? { [PROVIDER_LOSS_KEY]: lane.loss } : {}),
+        })}::jsonb,
         updated_at = now()
         where id = ${row.id} and liveness = 'cold' and lease_epoch = ${selection.leaseEpoch}`);
       return result("authorized", operationId);
@@ -48297,6 +48538,10 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
             archiveRevision: recovery.archive.current?.revision ?? null,
             currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
             previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
+            ...(lane.loss ? { providerLoss: lane.loss } : {}),
+            ...(recovery.lateArchiveCapture
+              ? { retiredLateArchiveCapture: recovery.lateArchiveCapture }
+              : {}),
             ...(priorAutomatic ? { supersededAutomaticRecovery: priorAutomatic } : {}),
           },
         },
@@ -48324,13 +48569,37 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
       status: "accepted",
       authorizedAt: new Date().toISOString(),
     };
+    // The decision retires any late-capture receipt in the same commit, so a
+    // capture of the lost generation can no longer land behind the empty box.
     await tx.execute(sql`update sandbox_leases set
-      resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
-        '{opengeniFreshWorkspaceRecovery}', ${JSON.stringify(marker)}::jsonb),
+      resume_state = (coalesce(resume_state, '{}'::jsonb) #- '{opengeniRecovery,lateArchiveCapture}')
+        || ${JSON.stringify({
+          [FRESH_WORKSPACE_RECOVERY_KEY]: marker,
+          ...(lane.loss ? { [PROVIDER_LOSS_KEY]: lane.loss } : {}),
+        })}::jsonb,
       resume_backend_id = coalesce(resume_backend_id, backend),
       updated_at = now()
       where id = ${row.id} and liveness = 'cold' and lease_epoch = ${Number(row.lease_epoch)}`);
     return result("authorized", operationId);
+  });
+}
+
+/** True once any empty-workspace decision was delivered to this session. A
+ * spawner must then never restore a per-session legacy archive: that session
+ * was told its pre-loss files are gone, whatever the lease marker says now. */
+export async function sessionHoldsFreshWorkspaceRecovery(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  return withWorkspaceRls(db, workspaceId, async (tx) => {
+    const [row] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists(select 1 from session_command_receipts
+        where workspace_id = ${workspaceId} and target_session_id = ${sessionId}
+          and action = 'sandbox.recovery.fresh_workspace') as present`,
+    );
+    return row?.present === true;
   });
 }
 
@@ -49076,10 +49345,13 @@ export async function failSandboxRematerialization(
             ? "degraded"
             : "unrecoverable";
         const recovery: SandboxRecoveryState = {
+          // The failed replacement is not evidence about the lost workspace:
+          // loss is recorded only by the loss transitions themselves.
           provider: {
-            status: "missing",
+            status: "not_created",
             instanceId: row.instance_id,
             observedAt: new Date().toISOString(),
+            diagnostic: REPLACEMENT_FAILED_DIAGNOSTIC,
           },
           archive: current.archive,
           restore: {
@@ -49470,6 +49742,9 @@ export async function commitWarmingToWarm(
           recovery,
         );
         if (automaticVerified) delete completedResumeState.opengeniHistoricalArchiveRecoveryId;
+        // A verified warm box ends the lost lineage; its loss evidence cannot
+        // describe any later loss of this new provider object.
+        delete completedResumeState[PROVIDER_LOSS_KEY];
         if (freshWorkspace && pendingFresh) {
           // The lost workspace's archive fields and checkpoint references stay
           // for forensics until ordinary capture rotation supersedes them. Any
@@ -51687,7 +51962,11 @@ export async function markWarmLeaseInstanceLost(
           },
           ...(continuity ? { continuity } : {}),
         };
-        const coldResumeState = recoveryResumeState(current, recovery);
+        const coldResumeState = recoveryResumeState(
+          current,
+          recovery,
+          providerLossRecordForLostRow(current, "warm_resume", observedAt),
+        );
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
@@ -51987,10 +52266,13 @@ export async function failWarmingToCold(
               ? "degraded"
               : "unrecoverable";
         const recovery: SandboxRecoveryState = {
+          // A failed replacement box proves nothing about the lost workspace;
+          // durable loss evidence is carried separately, never minted here.
           provider: {
-            status: "missing",
+            status: "not_created",
             instanceId: row.instance_id,
             observedAt: now,
+            diagnostic: REPLACEMENT_FAILED_DIAGNOSTIC,
           },
           archive: current.archive,
           restore: {
@@ -53735,12 +54017,15 @@ export async function confirmDrainCold(
                 recordedAt: now,
               }
             : null;
+        // A pending empty-workspace decision whose box drained before warm
+        // publication stays a blocked lost workspace, never a clean new lease.
+        const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
         const restoreStatus: SandboxRestoreStatus =
           current.archive.status === "available" && archiveComplete
             ? "pending"
             : hasArchive
               ? "degraded"
-              : input.providerMissingBeforeCapture
+              : input.providerMissingBeforeCapture || freshPending
                 ? "unrecoverable"
                 : "not_required";
         const recovery: SandboxRecoveryState = {
@@ -53787,7 +54072,15 @@ export async function confirmDrainCold(
         };
         const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
         const resumeStateJson = preserveRecovery
-          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+          ? JSON.stringify(
+              archiveOnlyResumeState(
+                row,
+                recovery,
+                input.providerMissingBeforeCapture
+                  ? providerLossRecordForLostRow(row, "drain_probe", now)
+                  : undefined,
+              ),
+            )
           : null;
         // Migration 0184 also enforces exact teardown ownership at the table
         // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
@@ -58791,6 +59084,11 @@ export async function persistDrainSnapshot(
         lateReceipt.sourceInstanceId === input.expectedInstanceId &&
         lateReceipt.sourceWorkspaceGeneration === input.expectedWorkspaceGeneration &&
         lateReceipt.providerRequestId === input.providerRequestId &&
+        // Durable publication deadline: automatic recovery decisions wait out
+        // this window, so an archive can never land behind one.
+        Date.now() < Date.parse(lateReceipt.recordedAt) + LATE_CAPTURE_PUBLICATION_WINDOW_MS &&
+        !pendingFreshWorkspaceRecovery(row.resume_state) &&
+        automaticCheckpointMarker(row.resume_state)?.status !== "accepted" &&
         !row.unsettled_mutation;
       if (!activePublication && !coldLatePublication) {
         return { wrote: false, archiveRevision: null, ...candidateFields };

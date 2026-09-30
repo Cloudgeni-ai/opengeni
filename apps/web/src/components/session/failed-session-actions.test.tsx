@@ -442,7 +442,7 @@ test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as c
     }
     if (route === "fresh_workspace")
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. Previous sandbox files were lost.",
+        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
       );
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");
