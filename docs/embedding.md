@@ -84,7 +84,10 @@ session working directory without following symlinks.
 open editable artifacts and Sites in a host container through the proxy's
 opt-in `artifacts: true`. The proxy checks exact session associations on every
 request and refreshes effective workspace grants for the browser cache
-partition. Its Site HTML delivery streams with cancellation and a 25 MiB
+partition. Live source authority is rechecked in the mutation commit transaction;
+lease expiry runs independently of pending authorization. Older APIs omit only
+artifact capability, leaving conversation bootstrap available.
+Its Site HTML delivery streams with cancellation and a 25 MiB
 actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
 Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from

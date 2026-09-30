@@ -800,6 +800,8 @@ overrides the derived URL). Tickets minted through the proxy bind the source
 session, whose authority the API also revalidates while connected.
 Sockets bound this way have a 15-second lease from ticket issuance and reconnect
 through the proxy, so its product-level `authorizeSession` also checks renewal.
+The deadline runs independently of authorization; source authority is checked
+again inside the mutation commit transaction after kernel computation.
 Unbound console tickets keep their existing socket lifecycle. Client
 config resolves fresh effective workspace permissions (including external
 users and organization-key ceilings) and advertises the user's browser cache
@@ -808,6 +810,10 @@ its own proxy adds the same capability to
 its `/v1/config/client` response with `artifactViewerCapability({ client:
 og.asUser(user, { source }), workspaceId, source })` from `@opengeni/sdk`, and
 forwards the same artifact routes under its own authorization.
+
+When an older API lacks the effective-grant endpoint, the proxy omits artifact
+capability from config but still boots the conversation. Artifact requests fail
+closed; a subsequent config read can discover upgraded API support.
 
 The server-only helpers for exact association, effective grant and streaming
 HTML reads live on `@opengeni/sdk/session-proxy`, not the browser client.

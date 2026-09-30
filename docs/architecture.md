@@ -543,7 +543,7 @@ Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
 
 `embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
-narrow. `/session-proxy` adds grants, exact authorization, session-bound
+narrow. `/session-proxy` adds grants, transactional source authorization, session-bound
 tickets, bounded streaming ([embedding](embedding.md)).
 
 ### 3.11 Work discovery remains advisory and permission-first

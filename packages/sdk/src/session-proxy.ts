@@ -358,18 +358,28 @@ export function createSessionProxyHandler(
             query,
             call,
           );
-          const artifacts = editableLiveUrl
-            ? {
+          let artifacts: Awaited<ReturnType<typeof artifactViewerCapability>> | null = null;
+          if (editableLiveUrl) {
+            try {
+              // Successful effective-grant resolution negotiates the viewer's
+              // narrow API support. Older APIs do not have this endpoint: that
+              // 404 disables only artifacts, not ordinary conversation config.
+              artifacts = {
                 editableLiveUrl,
                 cachePartition: await cachePartition(
                   await getSessionProxyWorkspaceGrant(client, workspaceId, call),
                   workspaceId,
                   source,
                 ),
-              }
-            : null;
+              };
+            } catch (error) {
+              if (!(error instanceof OpenGeniApiError) || error.status !== 404) throw error;
+            }
+          }
+          // Upstream proxy capabilities never authorize this host's routes.
+          const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
           return json({
-            ...config,
+            ...conversationConfig,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
             sandboxFiles: sandboxFilesEnabled,
             ...(artifacts ? { artifacts } : {}),

@@ -4,7 +4,6 @@
 "@opengeni/api-router": minor
 "@opengeni/db": patch
 "@opengeni/core": patch
-"@opengeni/testing": patch
 ---
 
 Fix embedded artifact viewing for external users by resolving fresh effective workspace grants, checking exact session associations on every request, and binding live editor tickets to their source session. Keep editor authority and reconnect reads current when clients or sessions change, and allow retrying temporary viewer configuration failures.

@@ -160,6 +160,115 @@ async function rejection(promise: Promise<unknown>): Promise<OpenGeniApiError> {
 }
 
 describe("createSessionProxyHandler", () => {
+  test("upstream capabilities cannot enable artifacts on this product proxy", async () => {
+    for (const enabled of [false, true]) {
+      const upstream = upstreamServer();
+      const service = new OpenGeniClient({
+        baseUrl: API,
+        apiKey: "og_org_key",
+        fetch: async (input, init) => {
+          const path = new URL(input instanceof Request ? input.url : input).pathname;
+          if (path === "/v1/config/client")
+            return Response.json({
+              apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+              artifacts: {
+                editableLiveUrl: "wss://untrusted.example/",
+                cachePartition: {
+                  accountId: "other",
+                  principalId: "other",
+                  authorizationEpoch: "other",
+                },
+              },
+            });
+          if (path.endsWith("/access/grant")) return Response.json({}, { status: 404 });
+          return upstream.fetch(input, init);
+        },
+      });
+      const handler = createSessionProxyHandler(service, {
+        artifacts: enabled,
+        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+      });
+      const response = await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`));
+      expect(response.status).toBe(200);
+      expect((await response.json()).artifacts).toBeUndefined();
+    }
+  });
+
+  test("old APIs keep conversation bootstrap while artifact capability fails closed", async () => {
+    const upstream = upstreamServer();
+    let supported = false;
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const path = new URL(input instanceof Request ? input.url : input).pathname;
+        if (
+          !supported &&
+          (path.endsWith("/access/grant") || path.includes("/artifact-associations/"))
+        ) {
+          return Response.json(
+            { error: { code: "not_found", message: "Not found." } },
+            { status: 404 },
+          );
+        }
+        return upstream.fetch(input, init);
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      artifacts: true,
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const browser = new OpenGeniClient({
+      baseUrl: `${PRODUCT}/api/opengeni`,
+      fetch: (input, init) => handler(new Request(input, init)),
+    });
+    const config = await browser.getClientConfig();
+    expect(config.artifacts).toBeUndefined();
+    expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
+    expect((await browser.getSession(WORKSPACE_ID, SESSION_ID)).id).toBe(SESSION_ID);
+    const artifact = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${EDITABLE_ID}`,
+        { headers: { "x-opengeni-session-id": SESSION_ID } },
+      ),
+    );
+    expect(artifact.status).toBe(404);
+    expect(
+      upstream.requests.some((request) =>
+        request.url.pathname.endsWith(`/editable-artifacts/${EDITABLE_ID}`),
+      ),
+    ).toBe(false);
+    // A deployment upgrade is discovered without a sticky negative cache.
+    supported = true;
+    expect((await browser.getClientConfig()).artifacts?.cachePartition.principalId).toBe(
+      "subject-u42",
+    );
+  });
+
+  test("viewer negotiation does not turn permission or transient errors into missing capability", async () => {
+    for (const status of [403, 503]) {
+      const upstream = upstreamServer();
+      const service = new OpenGeniClient({
+        baseUrl: API,
+        apiKey: "og_org_key",
+        fetch: async (input, init) => {
+          if (
+            new URL(input instanceof Request ? input.url : input).pathname.endsWith("/access/grant")
+          ) {
+            return Response.json({ error: { code: "denied_or_unavailable" } }, { status });
+          }
+          return upstream.fetch(input, init);
+        },
+      });
+      const handler = createSessionProxyHandler(service, {
+        artifacts: true,
+        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+      });
+      expect((await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`))).status).toBe(
+        status,
+      );
+    }
+  });
   test("returns the host's 401 and never calls OpenGeni without authentication", async () => {
     const { upstream, browser } = setup({
       resolve: () => new Response("Unauthorized", { status: 401 }),
