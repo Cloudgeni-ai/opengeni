@@ -72,18 +72,22 @@ await og.addExternalWorkspaceMember(workspace.id, {
   operationId, // stored before the call, so retries are safe
 });
 
-// 2. The server creates sessions: explicit tools, stable idempotency key.
+// 2. The server creates sessions: the agent, its tools, a stable idempotency key.
 const session = await og.asUser(user.id, { source }).createSession(workspace.id, {
   initialMessage: `Help me with ticket ${ticket.id}`,
   idempotencyKey: `ticket:${ticket.id}:${user.id}`,
+  agent: {
+    identity: "You are Acme's support assistant. Friendly and brief.",
+    capabilities: "none", // Acme's tools, asking questions, reading Skills
+  },
   skills: productSkills,
   tools: [{ kind: "mcp", id: "acme" }],
-  firstPartyMcpTools: [],
   sandboxBackend: "none", // pure chat/tool agent: no sandbox to start
 });
 
 // 3. Mount at /api/opengeni/* (Next.js route handler, Hono, Bun.serve, workers).
 export const handler = createSessionProxyHandler(og, {
+  chats: "private", // the default; "shared" or "isolated"
   resolve: async (request) => {
     const me = await authenticate(request);
     return me
@@ -141,34 +145,86 @@ a member's permissions later, call `updateExternalWorkspaceMember` with a new
 `operationId` instead of removing and re-adding them. To map tenants lazily, pass the `OpenGeni` facade from `@opengeni/sdk/chat` instead of
 a client and return `{ tenant, user }` from `resolve`.
 
-### Pick the privacy and memory of each session
+### Configure the agent
 
-Every session lives in the customer's one workspace, so all of them share that
-customer's documents, workspace instructions, Connections, and integrations.
-Two per-session create options decide what the agent may reach beyond its own
-conversation:
+Every session takes one `agent` object: `capabilities`, `identity`,
+`instructions` and `renderer`. Sessions, the proxy's `createSession` hook, the
+chat facade, scheduled tasks (`agentConfig.agent`), workspace defaults
+(`settings.sessionAgentDefaults`) and a running session
+(`updateSessionAgent`, from its next turn) all use the same object, and every
+session reports the result as `session.agent` and `session.effectiveTools`.
 
-| Scenario | `agentAccess` | `memoryScope` |
-| --- | --- | --- |
-| Support desk: each agent stays in its session tree | `"session"` | `"off"` |
-| One customer's agents may reach that same user's sessions | `"user"` with authenticated `asUser` identity | `"user"` |
-| A team that collaborates across sessions | `"workspace"` (raw create default) | `"workspace"` |
-| Any of the above with Knowledge authoring initially Off | any | `"off"` |
+`capabilities` starts from `"all"` (everything the workspace offers) or
+`"none"` (the session's own tools plus asking questions and reading Skills)
+and switches single capabilities: `{ from: "none", webSearch: true }`.
+
+| Capability | Lets the agent |
+| --- | --- |
+| `humanInput` | pause and ask the person for a decision or missing detail |
+| `webSearch` | search the public web |
+| `media` | generate images and videos |
+| `goals` | work toward a goal across many turns |
+| `subagents` | start, message and follow other sessions; list models |
+| `skills` | `"read"` installed Skills, or `"manage"` them too |
+| `artifacts` | publish files, documents and Sites |
+| `browser` | use a browser or desktop computer |
+| `schedules` | create and manage scheduled tasks |
+| `knowledge` | search and save workspace Knowledge, task notes and instructions |
+| `workspaceFiles` | read files uploaded to the workspace |
+| `workspaceConnectors` | use the workspace's connected apps and integrations |
+| `workspaceAdmin` | manage variable sets, projects, rigs, machines and connector setup |
+
+Tools the session attaches itself (its `mcpServers` and named `tools`), sandbox
+tools and runtime mechanics are not capabilities and are never toggled. A
+capability the deployment does not offer is reported off in `agent.unavailable`;
+requesting it returns 422 `agent_capability_unavailable`. Child sessions may
+only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
+
+`identity` replaces only how OpenGeni introduces the agent. `instructions` is
+the session `instructions` field. The prompt order is identity, OpenGeni's
+working style, organization identity, workspace instructions, session
+instructions; instructions take priority over OpenGeni's default working style,
+never over its safety rules or how it runs tools. `renderer` is `"opengeni"`
+for OpenGeni's React components (`sandbox:`/`artifact:` links and inline
+visuals) or `"markdown"` for any other UI; the chat facade defaults to
+`"markdown"`.
+
+`agent` is admitted when the deployment sets
+`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` (the client config reports
+`agentConfig.enabled`); otherwise it is 422 `agent_config_not_enabled` and the
+older fields (`firstPartyMcpTools`, `tools`, `instructions`) remain the way to
+narrow an agent. Sessions created before agent settings keep `agent: null` and
+their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
+for the design and enforcement details.
+
+### Choose who shares chats
+
+Every session lives in the customer's workspace, so all of them share that
+customer's documents, workspace instructions, Connections and integrations.
+`chats` on the proxy and the chat facade decides who sees and shares the
+conversations themselves:
+
+| `chats` | Who sees the chat | Agent reach | Knowledge written to | Workspace |
+| --- | --- | --- | --- | --- |
+| `"private"` (default) | only the user | its own session tree | the user's personal Knowledge | the tenant's |
+| `"shared"` | the workspace | the workspace | the workspace | the tenant's |
+| `"isolated"` | only the user | its own session tree | the user's personal Knowledge | one per tenant user |
+
+`chats` sets the create fields `visibility`, `agentAccess` and `memoryScope`;
+explicit values in the `createSession` hook still win, and the API authorizes
+each one. Private chats need the organization's private-session setting;
+without it the SDK throws `OpenGeniSetupError`, which names who can enable it
+(an organization owner or admin, in the API, SDK or web app). `"isolated"`
+needs the `OpenGeni` facade as the proxy target and a `resolve` that returns
+`{ tenant, user }`; it provisions a separate workspace and that user's
+membership through `og.workspaceIdFor({ tenant, user }, { isolation: "user" })`
+(standalone: `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
 
 `agentAccess` is enforced for agents in the single session-authorization seam:
-a session's own tree (its children and their children) is always reachable,
-peers are reachable when the caller's task scope and ordinary target authorization
-allow it. Target task scope adds no incoming restriction. `memoryScope` selects
-Knowledge authoring scope: personal entries use the verified user of the active
-turn, not an arbitrary product label or the person who first created a shared
-conversation. Use task notes for temporary conversation-tree coordination.
-There is no active session Memory scope. The organization API key authenticates
-the `asUser()` assertion; the server derives canonical identity, and children
-inherit and may only narrow agent reach and Memory mode.
-
-Human visibility is a separate axis: use `visibility: "user_private"` with
-verified owning-user authority when other humans must not see the transcript.
-Workspace-shared conversations remain accessible to their authorized members.
+a session's own tree is always reachable, and peers are reachable when the
+caller's task scope and ordinary target authorization allow it. Personal
+Knowledge belongs to the verified user of the active turn, not an arbitrary
+product label. Use task notes for temporary conversation-tree coordination.
 Use the same OpenGeni session ID for collaborators; identity must not change the
 conversation address. See [Choose the credential boundary](#choose-the-credential-boundary).
 
@@ -206,8 +262,11 @@ const reply = await chat.send("What did we decide about the invoice?");
 
 `tenant` becomes one organization workspace through `ensureWorkspace`,
 `conversation` one deterministic session created on the first message, and the
-same explicit onboarding is required for `user`. The facade defaults to
-`agentAccess: "session"` and its `memory` option maps to `memoryScope`. The
+same explicit onboarding is required for `user`. With a `user`, `chats`
+defaults to `"private"` (personal Knowledge on; `memory: false` turns authoring
+off); without one, omitted `chats` keeps workspace visibility, session-only
+reach and Knowledge off. `og.chat(...)` and `resolve` also take `agent`, and the
+facade's renderer defaults to `"markdown"`. The
 adapters send only the latest user message and import earlier messages once as
 context on the first message; after that OpenGeni owns the history. Reopen
 legacy user-namespaced conversations with `chatBySessionId`. `og.client`,

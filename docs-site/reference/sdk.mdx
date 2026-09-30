@@ -48,19 +48,20 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 
 `og.asUser(externalUserId, { source })` returns a client that acts as one of your onboarded users.
 
-| Area                         | Highlights                                                                                                         |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace`       |
-| Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                              |
-| Sessions                     | Create with resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete |
-| Input and control            | `sendMessage`, `steerMessage`, queue management, `pauseSession`, `resumeSession`, `cancelSession`                  |
-| Decisions                    | `sendApprovalDecision`, `listHumanInputRequests`, `submitHumanInputResponse`                                       |
-| Events                       | Replay by sequence, and `streamEvents` with reconnect, resume, gap backfill, and duplicate suppression             |
-| Files                        | Upload, attach, and download workspace files                                                                       |
-| Goals                        | Read, update, pause, resume, and clear a session goal                                                              |
-| Scheduled tasks              | Create, update, pause, resume, trigger, and delete schedules; list runs                                            |
-| Integrations                 | Preview and install OpenAPI and GraphQL Integrations                                                               |
-| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                         |
+| Area                         | Highlights                                                                                                                                    |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace`                                  |
+| Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                                         |
+| Sessions                     | Create with an `agent`, resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete                |
+| Agent settings               | `updateSessionAgent` for a running session; `sessionAgentDefaults` in `updateWorkspaceSettings`; `session.agent` and `session.effectiveTools` |
+| Input and control            | `sendMessage`, `steerMessage`, queue management, `pauseSession`, `resumeSession`, `cancelSession`                                             |
+| Decisions                    | `sendApprovalDecision`, `listHumanInputRequests`, `submitHumanInputResponse`                                                                  |
+| Events                       | Replay by sequence, and `streamEvents` with reconnect, resume, gap backfill, and duplicate suppression                                        |
+| Files                        | Upload, attach, and download workspace files                                                                                                  |
+| Goals                        | Read, update, pause, resume, and clear a session goal                                                                                         |
+| Scheduled tasks              | Create, update, pause, resume, trigger, and delete schedules; list runs                                                                       |
+| Integrations                 | Preview and install OpenAPI and GraphQL Integrations                                                                                          |
+| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                                    |
 
 In a chat UI, wire Stop to `pauseSession`: it is resumable, and messages sent while paused queue until `resumeSession`. `cancelSession` is terminal for the session and its children.
 
@@ -72,7 +73,8 @@ The complete method list is in [packages/sdk/README.md](https://github.com/Cloud
 
 | Option                 | Purpose                                                                                                                    |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `resolve`              | Required. Returns `{ workspaceId, user, source? }`, or a `Response` to reject                                              |
+| `resolve`              | Required. Returns `{ workspaceId, user, source? }` (or `{ tenant, user }` with the facade), or a `Response` to reject      |
+| `chats`                | `"private"` (default), `"shared"`, or `"isolated"` (needs the `OpenGeni` facade): who sees and shares chats                |
 | `authorizeMutation`    | Your CSRF check for non-GET requests. Without it, only cross-site (`Sec-Fetch-Site`) mutations are refused                 |
 | `authorizeSession`     | Optional product check that this user may open this session                                                                |
 | `createSession`        | Allows browser-started sessions. The browser sends only `initialMessage` and `idempotencyKey`; you return the full request |

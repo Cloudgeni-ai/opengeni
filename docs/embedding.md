@@ -187,9 +187,29 @@ still reference the public Agents types, so the Agents packages remain declared
 dependencies, but OpenGeni's executable `dist` contains no external Agents or
 Zod import. The publish-closure guard enforces that boundary.
 
+### Agent configuration
+
+Sessions with an agent configuration (`CreateSessionRequest.agent`, the
+workspace's `settings.sessionAgentDefaults`, a scheduled task's
+`agentConfig.agent`, or a parent's configuration) freeze one resolved
+`sessions.agent_config`: `capabilities` (`"all"`, `"none"`, or a starting point
+plus toggles over thirteen capabilities), `identity`, `renderer`, and the
+instructions alias. Workers gate every tool family and compose a modular prompt
+(identity, base behavior, runtime mechanics, then only the modules of enabled
+capabilities and attached resources) from it; `session.agent` and
+`session.effectiveTools` report the result, and `PUT
+/v1/workspaces/:workspaceId/sessions/:sessionId/agent` changes it from the next
+turn under the tool-policy version. Sessions without a configuration
+(`agent: null`) keep the legacy instruction and tool composition below byte for
+byte. Admission is behind `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`, and
+`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve
+to `"all"`. The product-facing model is in
+[Product integration](product-integration.md#configure-the-agent); the design
+and enforcement details are in [Agent configuration](design/agent-configuration.md).
+
 ### Agent instructions and per-message application context
 
-A host has two system-level instruction scopes, composed as **deployment default
+For sessions without an agent configuration, a host has two system-level instruction scopes, composed as **deployment default
 template → workspace persona → per-session instructions**, with the
 non-bypassable CORE (goal-loop ownership + variable set block) always
 substituted in. Exact-message application context does not enter this prefix.
@@ -823,7 +843,9 @@ standalone worker defaults. The inherited set is frozen on the child at
 creation; later deployment-default changes do not rewrite existing sessions.
 
 Model-visible first-party tool selection is a separate field:
-`CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
+`CreateSessionRequest.firstPartyMcpTools`. With an agent configuration it only
+refines inside the enabled capabilities (a name owned by a capability that is
+off is a 422 `agent_config_conflict`); prefer `agent.capabilities`. It accepts only names from
 `FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
 connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools, while explicit `[]` remains
 empty. Connector tools require an explicit selection and their independent

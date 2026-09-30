@@ -93,8 +93,8 @@ createSessionProxyHandler(og, {
   resolve,
   createSession: (input) => ({
     ...input,
+    agent: { capabilities: "none" }, // see Configure the agent
     tools: [{ kind: "mcp", id: "acme" }],
-    firstPartyMcpTools: [],
     sandboxBackend: "none",
   }),
 });

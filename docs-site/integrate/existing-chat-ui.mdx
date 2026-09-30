@@ -28,7 +28,12 @@ export const handleChat = createChatHandler(og, {
   resolve: async (request) => {
     const me = await authenticate(request);
     if (!me) return new Response("Unauthorized", { status: 401 });
-    return { tenant: me.tenantId, user: me.userId, agentAccess: "session", memory: "user" };
+    return {
+      tenant: me.tenantId,
+      user: me.userId,
+      chats: "private", // the default with a user; "shared" or "isolated"
+      agent: { identity: "You are Acme's assistant.", capabilities: "none" },
+    };
   },
   format: "vercel", // or "openai-chat", "openai-responses"; default "native"
 });
@@ -42,7 +47,7 @@ Register `handleChat` for:
 | `POST /api/chat`         | Send a message and stream the reply             |
 | `POST /api/chat/respond` | Answer a pending approval or question           |
 
-Each tenant maps to one workspace and each conversation to one session. Keep one stable conversation id per thread, sent by custom clients in `x-opengeni-conversation`, and check that the user may open it. [Onboard users](/integrate/users-and-tenants#onboard-users) first; chat requests never grant membership. The facade defaults to `agentAccess: "session"` and `memory: false`.
+Each tenant maps to one workspace and each conversation to one session. Keep one stable conversation id per thread, sent by custom clients in `x-opengeni-conversation`, and check that the user may open it. [Onboard users](/integrate/users-and-tenants#onboard-users) first; chat requests never grant membership. With a `user`, chats default to `"private"` (personal knowledge on; `memory: false` turns saving off). Without a user, leaving `chats` out keeps workspace visibility, session-only reach, and knowledge off; use `"shared"` for service-owned chats. `agent` takes the same object as sessions ([Configure the agent](/integrate/configure-the-agent)), and the facade's renderer defaults to `"markdown"`.
 
 The Vercel and OpenAI formats send the latest user message and import earlier messages once, when the conversation is created. After that, OpenGeni owns the history. These routes are served by **your** backend: the OpenGeni API does not expose `/chat/completions` or `/responses`.
 

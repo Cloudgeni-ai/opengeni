@@ -1,9 +1,7 @@
 # Agent configuration: identity, capabilities, boundary
 
-Status: capability contracts, persistence, resolution and turn-time enforcement
-(M0–M3) implemented. Prompt modularization, preview and boundary presets below
-remain proposals; the shipped request uses `capabilities: "all" | "none" | { from, ...toggles }`,
-not named presets.
+Status: implemented (PR #3000). This records the shipped model, its
+enforcement, and what changed from the original proposal.
 
 ### Implemented turn-time boundary (M3)
 
@@ -86,22 +84,25 @@ showed the consequences:
 
 ## The model
 
-An agent is three decisions. Everything else is derived.
+An agent is one object; everything else is derived.
 
-| Decision | Question it answers | Default |
-| --- | --- | --- |
-| **Identity** | Who is this agent (name, product, voice)? | OpenGeni's identity |
-| **Capabilities** | What can it do? | the preset for the surface |
-| **Boundary** | Who shares chats, knowledge, and agent reach? | private chats in a shared tenant workspace |
+```ts
+type AgentConfigRequest = {
+  capabilities?: "all" | "none" | ({ from: "all" | "none" } & Partial<Toggles>);
+  identity?: string | null; // who the agent is; null = workspace default, then OpenGeni's
+  instructions?: string;    // alias of the session `instructions` field
+  renderer?: "opengeni" | "markdown";
+};
+```
 
-A **preset** names a coherent combination:
+`"all"` is everything the workspace offers, which is exactly what a session
+without `agent` gets. `"none"` is the session's own tools plus asking questions
+and reading Skills. There are no named presets: a starting point plus visible
+toggles says the same thing without a vocabulary to learn, and the resolved
+configuration is always inspectable (`session.agent`, `session.effectiveTools`).
 
-- `workspace-agent`: today's behavior and the stock web app (all capabilities the
-  workspace has, OpenGeni identity, OpenGeni renderer, workspace-shared chats).
-- `assistant`: the embedded default (product tools only plus human input and skill
-  reading, embedder identity, private chats).
-
-Presets never hide anything: the resolved configuration is always inspectable.
+Chat privacy is not part of the agent. It is the SDK option `chats` on the
+session proxy and the chat facade (see [Chats](#chats)).
 
 ## What users write (SDK)
 
@@ -109,67 +110,66 @@ Presets never hide anything: the resolved configuration is always inspectable.
 
 ```ts
 export const { GET, POST } = createSessionProxyRoute(og, {
+  chats: "private", // default; "shared" | "isolated"
   resolve: async (req) => {
     const me = await auth(req);
-    return me ? { tenant: me.orgId, user: me.id } : new Response(null, { status: 401 });
+    return me
+      ? { workspaceId: me.openGeniWorkspaceId, user: me.id }
+      : new Response(null, { status: 401 });
   },
-  boundary: { chats: "private" },               // default; "shared" | "isolated"
-  createSession: (input, ctx) => ({
-    ...input,
+  createSession: async ({ initialMessage, idempotencyKey }, { user }) => ({
+    initialMessage,
+    idempotencyKey,
     agent: {
-      preset: "assistant",
       identity: "You are Acme Analytics' assistant. Friendly and brief.",
       instructions: "Lead with the number, then one sentence of context.",
-      renderer: "opengeni", // OpenGeniChat or SessionConversation; "markdown" for a custom UI
-      capabilities: { webSearch: false },
+      capabilities: "none",
     },
-    mcpServers: [{ id: "acme", url: ACME_MCP_URL, headers: userToken(ctx.user) }],
+    mcpServers: [{ id: "acme", url: ACME_MCP_URL, headers: await userHeaders(user) }],
+    tools: [{ kind: "mcp", id: "acme" }],
+    sandboxBackend: "none",
   }),
 });
 ```
 
-Result: the model sees the `acme` tools (visible upfront), `request_human_input`,
-and nothing else. The prompt contains the runtime contract modules for those
-capabilities, base behavior, the embedder's identity and instructions, and
-nothing about goals, Knowledge, subagents, or repositories.
+Result: the model sees the `acme` tools (upfront), `request_human_input`,
+`skill_read` when Skills exist, and the runtime mechanics. The prompt holds
+identity, base behavior, runtime mechanics and the session instructions, and
+nothing about goals, Knowledge, subagents or repositories.
 
 ### Embedded background agent with writes
 
 ```ts
 await og.createScheduledTask(workspaceId, {
   name: "Weekly digest",
-  schedule: { type: "calendar", cron: "0 8 * * MON", timeZone: "Europe/Oslo" },
+  schedule: { type: "calendar", hour: 8, minute: 0, daysOfWeek: ["MONDAY"], timeZone: "Europe/Oslo" },
   agentConfig: {
     prompt: "Summarize last week's bookmarks and save the digest.",
-    agent: { preset: "assistant", capabilities: { goals: true } },
-    tools: [{ kind: "mcp", id: "linkding-api" }],   // API Integration, write tools auto-approved at install
-    approvalTimeoutSeconds: 3600,
+    agent: { capabilities: { from: "none", goals: true } },
+    tools: [{ kind: "mcp", id: "linkding-api" }],
   },
 });
 ```
 
+The agent is frozen into the schedule's execution digest and resolved once per
+accepted occurrence; recovery reuses the accepted resolution.
+
 ### Our web app
 
-A new session sends nothing (workspace default, normally `workspace-agent`). The
-composer's tool picker edits `agent.capabilities`; workspace settings edit the
-workspace's default agent and caps. Same object, same semantics.
+Settings > General > Agent edits the workspace's `sessionAgentDefaults`
+(starting point, capabilities, identity). The composer's + > Capabilities sends
+`agent.capabilities` only when "Customize for this chat" is on. The session dock
+shows the resolved agent, its tools with up-front/on-demand visibility, and edits
+it from the next turn. The schedule form uses the same picker.
 
-### Agent-created child
+### Agent-created child and mid-session changes
 
-Omitted `agent` inherits the parent's resolved configuration. An explicit value
-may only narrow it (fewer capabilities, same or tighter boundary).
-
-### Preview
-
-```ts
-const preview = await og.previewAgent(workspaceId, createRequest);
-// { capabilities: {...resolved}, tools: [{ name, capability, visibility: "upfront" | "search" }],
-//   prompt: { sections: [{ id, source, chars }], text }, boundary: {...} }
-```
-
-The same projection is returned on the session (`session.agent`) so an operator
-can answer "what could this agent do" after the fact. The web app's existing
-model-context inspector becomes a view over this projection.
+Omitted `agent` on a child inherits the parent's resolved configuration; an
+explicit value may only narrow it. Children of a session without a configuration
+stay legacy. `PUT .../sessions/:id/agent` (`updateSessionAgent`) replaces the
+configuration under the tool-policy version (409 when stale), records
+`session.agent.updated` and applies from the next turn; a legacy session converts
+from its current effective state.
 
 ## Capabilities
 
@@ -177,38 +177,42 @@ Rules:
 
 1. **Derived tools follow automatically and cannot be toggled.**
    Sandbox attached ⇒ `exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-   and `code_search` when the deployment and workspace offer it. Any Skill
-   available ⇒ `skill_read`. Anything deferred ⇒ the search router. A product MCP
-   server attached ⇒ selected (upfront by default).
-2. **Selectable capabilities** (each owns its tools *and* its prompt module):
+   and `code_search` when the deployment and workspace offer it. Anything
+   deferred ⇒ the search router. A product MCP server attached ⇒ selected
+   (upfront by default). Runtime mechanics (`wait_for_input`, `command_read`,
+   `command_wait`, titling) are always present.
+2. **Selectable capabilities** (each owns its tools and, where it has one, its
+   prompt module). The single source of truth is the registry in
+   `packages/contracts/src/agent-config.ts`; a test maps every first-party tool.
 
-| Capability | Tools | `workspace-agent` | `assistant` |
-| --- | --- | --- | --- |
-| `humanInput` | `request_human_input` | on | on |
-| `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | on | off |
-| `skills` | `"read"`: `skill_read`; `"manage"`: + `skill_search/save/install/remove/checkout/publish` | manage | read |
-| `goals` | `goal_*` (`wait_for_input` is an unconditional runtime mechanic) | on | off |
-| `subagents` | `session_*`, `sessions_list`, `list_models` (`command_read/wait` are runtime mechanics) | on | off |
-| `knowledge` | `knowledge_*`, `task_note_*`, instruction-policy tools, docs server | on | off |
-| `schedules` | `scheduled_tasks_*` | on | off |
-| `artifacts` | `artifacts_*`, `editable_artifact_*`, Sites | on | off |
-| `browser` | `interaction__browser_*`, `interaction__computer_*` | on (if available) | off |
-| `media` | `generate_image`, `generate_video`, hosted `image_generation` | on (if funded) | off |
-| `workspaceFiles` | files server | on | off |
-| `workspaceConnectors` | workspace connectors, API Integrations, GitHub, Slack/social/Fiken/Atlassian families | workspace defaults | off (select explicitly via `tools`) |
-| `workspaceAdmin` | variable sets, capability/connection setup, machines, rigs, projects | on | off |
+| Capability | Tools | In `"none"` |
+| --- | --- | --- |
+| `humanInput` | `request_human_input` | on |
+| `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | off |
+| `skills` | `"read"`: `skill_read` (with a nonempty catalog); `"manage"`: all seven Skill tools | `"read"` |
+| `goals` | `goal_*` | off |
+| `subagents` | `session_*`, `sessions_list`, `set_other_session_title`, `list_models` | off |
+| `knowledge` | `knowledge_*`, `memory_*`, `task_note_*`, instruction-policy, preference and company-profile tools, docs server | off |
+| `schedules` | `scheduled_tasks_*`, `scheduled_task_runs_list` | off |
+| `artifacts` | `artifacts_*`, `editable_artifact_*`, `sandbox_file_publish`; Sites and visuals guidance | off |
+| `browser` | `interaction_*`, `browser_*`, `computer_*` | off |
+| `media` | `generate_image`, `generate_video`, hosted `image_generation` | off |
+| `workspaceFiles` | files server | off |
+| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken/Atlassian families | off |
+| `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |
 
-3. **Omitted ⇒ workspace default preset. Explicit ⇒ preset + overrides, and
-   nothing is added beyond derived tools.**
-4. **Narrowing only:** deployment allowlist ⊇ workspace caps ⊇ session ⊇ child.
-   A request for a capability above a cap is a 422 naming the cap.
+3. **Omitted ⇒ the workspace default, else `"all"`.** Explicit ⇒ starting point
+   plus toggles; nothing is added beyond derived tools.
+4. **Narrowing only across the tree:** deployment limits ⊇ session ⊇ child.
+   Workspaces set defaults, not caps. A capability the deployment does not offer
+   is reported off in `unavailable`; requesting it is a 422.
 5. **Authority stays separate from visibility.** `firstPartyMcpPermissions` still
-   bounds what first-party tools may do; approvals (`requireApproval`, connector
-   allow/ask/block, `autoApprovedTools`) still gate individual calls.
-6. **Legacy fields keep working** (compatibility policy: additive within a major).
-   `firstPartyMcpTools`, `tools`, `excludedMcpServerIds`, `bundledSkillIds` become
-   refinements inside the resolved capabilities; when `agent` is omitted, resolution
-   reproduces today's behavior exactly.
+   bounds what first-party tools may do; approvals still gate individual calls.
+6. **Legacy fields keep working.** `firstPartyMcpTools`, `tools`,
+   `excludedMcpServerIds` and `bundledSkillIds` refine inside the resolved
+   capabilities; naming a tool of a capability that is off is a 422
+   `agent_config_conflict`. Without `agent`, resolution reproduces the creator's
+   legacy values exactly.
 
 ## Identity and instructions
 
@@ -250,16 +254,17 @@ Capability modules (current size in characters):
 - **skills** (~1k), **admin** or integration setup (~1k), plus the already
   conditional variable-set, rig, codemode, and code-search directives.
 
-Two additions the current text lacks:
+Two additions the legacy text lacked, both shipped in the modular composer
+(`packages/runtime/src/agent-instructions/`):
 
 1. **Precedence.** One explicit rule: product, workspace, and session
    instructions override base-behavior defaults (for example "answer in one
-   sentence"), never runtime mechanics or safety. Today nothing states this, so an
-   embedder's style instruction competes with ours.
+   sentence"), never runtime mechanics or safety.
 2. **Renderer.** `sandbox:` and `artifact:` links only render in OpenGeni's React
    timeline. The session declares its client renderer (`opengeni` or `markdown`);
    with `markdown`, link-syntax rules and inline visuals are omitted and the agent
-   uses ordinary Markdown links. This is the only behavior option.
+   uses ordinary Markdown links. This is the only behavior option. The chat
+   facade and Slack tasks default to `markdown`.
 
 Resulting tiers:
 
@@ -271,28 +276,36 @@ Resulting tiers:
 | Instructions and context | session `instructions` (append, with precedence over base behavior), `modelContext`, goal snapshot, date |
 
 Workspace governance (company profile, charter, policies) stays an organization
-feature composed after identity; it no longer disables the workspace identity
-(today `agentInstructions` is dropped whenever a policy is active). There is no
-"replace everything" option.
+feature composed after identity; in the modular composer it no longer disables
+the workspace identity (the legacy path still drops `agentInstructions` whenever
+a policy is active, byte for byte). There is no "replace everything" option.
+The composed layers are identity, operational contract (its modules reported as
+`modules: [{ id, chars }]` metadata), codemode/code-search/git bindings, Skill
+catalog, workspace governance, workspace memory and session instructions.
 
-## Boundary
+## Chats
 
-One option on the proxy, chat handler, and session create:
+`chats` is SDK sugar on the session proxy and the chat facade; the server's
+privacy semantics are unchanged.
 
-| `chats` | Workspace per | Human visibility | Agent reach (`agentAccess`) | Personal Knowledge |
+| `chats` | Workspace per | `visibility` | `agentAccess` | `memoryScope` |
 | --- | --- | --- | --- | --- |
-| `private` (default) | tenant | `user_private` | `session` | acting user |
-| `shared` | tenant | `workspace_shared` | `workspace` | acting user + workspace |
-| `isolated` | end user | `user_private` | `session` | acting user |
+| `private` (proxy default; facade default with a user) | tenant | `private` | `session` | `user` |
+| `shared` | tenant | `workspace` | `workspace` | `workspace` |
+| `isolated` | tenant user | `private` | `session` | `user` |
 
-- `private` requires the organization private-session setting; the SDK enables it
-  during onboarding (organization key, idempotent) instead of failing later.
-- `memoryScope` is deprecated: it becomes derived from the boundary and stops being
-  documented as "memory".
-- Scheduled and webhook-triggered runs are service runs: no personal Knowledge or
-  personal connections, workspace tools only.
-- Our web app uses the same concepts: organization = customer, workspace = team,
-  "Only me" = `private`.
+- Explicit create fields still win over the `chats` defaults.
+- Private chats need the organization private-session setting. The SDK does not
+  enable it; a missing setting raises `OpenGeniSetupError` with owner/admin
+  remediation for the API, SDK and web app.
+- `isolated` provisions a workspace and external member per tenant user through
+  the facade's `workspaceIdFor({ tenant, user }, { isolation: "user" })`
+  (`createWorkspaceIdResolver` on `@opengeni/sdk/tenant-workspaces`).
+- The facade without a user keeps its legacy defaults (workspace visibility,
+  session reach, Knowledge off). With a user its default moved from Knowledge
+  off to private chats with personal Knowledge on (changelog).
+- Scheduled and webhook-triggered runs are service runs: no personal Knowledge
+  or personal connections.
 
 ## Nuances that shape the implementation
 
@@ -320,15 +333,13 @@ One option on the proxy, chat handler, and session create:
   execution digest and access-drift report), composer drafts
   (`new_session_drafts`), site-auth maintenance sessions, and browser sessions.
   Their stored legacy fields keep working.
-- **Goals imply the goals capability.** A goal-bearing session today requires the
-  goal tools; with capabilities, setting a goal enables `goals`, and a request
-  that disables `goals` while setting a goal is a 422.
-- **Preview has two levels.** Before a session runs, preview can resolve
-  capabilities, our own tools, tool families per MCP server, and the composed
-  prompt (pure composition from `packages/runtime`). The exact tool list of an
-  external MCP server exists only after connecting; that stays in the post-run
-  model-context inspector (`GET .../sessions/:id/model-context`), whose section
-  splitter must learn the module ids.
+- **Goals imply the goals capability.** Setting a goal enables `goals`, and a
+  request that disables `goals` while setting a goal is a 422.
+- **No separate preview API.** Every session reports `agent` and
+  `effectiveTools` from creation; the exact tool list of an external MCP server
+  exists only after connecting. The exact prompt is in the model-context
+  inspector (`GET .../sessions/:id/model-context`); wire captures carry the
+  persistent layer sections and module metadata so the inspector can title them.
 - **Codemode has two enforcement paths.** Tool calls execute only the attempt's
   frozen catalog. The SDK HTTP proxy additionally gates endpoint families and
   intersects its derived permission ceiling with the live resolved configuration.
@@ -346,56 +357,29 @@ One option on the proxy, chat handler, and session create:
 - **Hosted tools are provider-specific.** Disabling web search must remove the
   hosted tool from the Responses request and from the SuperGrok request body
   (`xai-subscription` appends `web_search`/`x_search` itself).
-- **There is no prompt-quality eval today.** `operational-instructions.test.ts`
-  asserts content, not behavior. A behavior eval (fixed scenarios scored before
-  and after) is a prerequisite for changing the default web-app prompt.
+- **Prompt quality is measured.** `bun run eval:behavior`
+  (`scripts/agent-behavior-eval/`) scores fixed scenarios for the legacy and
+  modular prompts; the modular `"all"` prompt switched on for new sessions only
+  after it matched the legacy baseline.
 
-## Core changes
+## Rollout
 
-| Area | Change | Size | Migration |
-| --- | --- | --- | --- |
-| Contracts | `AgentConfig` (`preset`, `identity`, `instructions`, `capabilities`, `renderer`), `SessionAgentProjection`, preview request/response; capability ids and group membership of every first-party tool name | M | no |
-| Capability registry | New module (runtime/contracts): per capability its tool matchers, prompt module id, defaults per preset, dependencies, availability probe | M | no |
-| Session create (`packages/core/src/domain/sessions.ts`, `session-tool-policy.ts`) | Resolve `agent` + legacy fields into one frozen resolution; child narrowing; caps; 422s | M | rolling: `sessions.agent_config` jsonb (null = legacy resolution) |
-| Worker tool assembly (`tool-policy.ts`, `tool-environment.ts`, `skill-tools.ts`, `agent-build.ts`, runtime hosted tools, `xai-subscription`) | Filter every tool family through the frozen resolution; remove the implicit base set; router only when something is deferred | L | no |
-| First-party MCP (`apps/api/src/mcp/server.ts`) | Register by capability group; `opengeni` server attached only when a first-party capability is on | M | no |
-| Prompt (`operational-instructions.ts`, `coreInstructions`, `inspectPersistentAgentInstructions`) | Split into identity, base behavior, runtime mechanics, and capability modules; precedence rule; renderer option; session identity tier; governance no longer drops identity | L | inside `agent_config` |
-| Scheduled tasks | `agentConfig.agent` frozen at save; same resolution at run | S | no (jsonb) |
-| Workspace settings | default agent + caps; replaces `agentHumanInputEnabled`/`sessionToolDefaults` over time | M | settings jsonb |
-| Boundary | proxy/chat option; onboarding enables org private sessions; `memoryScope` derived | M | no |
-| Preview + projection | `POST /v1/workspaces/:ws/agent/preview`; `session.agent` | M | no |
-| Web app | composer capabilities picker; workspace default agent; inspector over projection | M | no |
-| Docs, skill, AGENTS.md | new model; revise the "base runtime tools" invariant and mandatory `opengeni` server note | S | no |
+Readers shipped before writers. `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`
+(default off) admits `agent` on every surface, the workspace default and the
+update route; while it is off they return 422 `agent_config_not_enabled` and the
+client config reports `agentConfig.enabled: false`, which also hides the web UI.
+`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve to
+`{ from: "all" }` with the modular prompt (the web app's switch). Workers honor a
+stored configuration regardless of either switch, and an old worker ignoring an
+`"all"` configuration still produces the legacy tool set.
 
-Stability: sessions created before the change keep `agent_config = null` and the
-byte-identical legacy composition, so running sessions, recovery, and prompt
-caches are unaffected; only new sessions use the new composer. The quality risk is
-the prompt split: every module move must be measured with the eval harness before
-the `workspace-agent` preset switches to the modular composer.
+## Dropped from the proposal
 
-## Phases
-
-0. **Behavior eval** for the current prompt (baseline scores on fixed scenarios).
-1. **Capabilities for tools** (registry, `agent.capabilities`, resolution, worker
-   filtering, preview, `session.agent`), workers first, API admission behind a
-   switch. Ships the exact tool set and visibility.
-2. **Modular prompt** behind the same resolution; `assistant` preset first,
-   `workspace-agent` after eval parity.
-3. **Identity tier and boundary presets** (session identity, governance fix, `chats`
-   option, org private-session onboarding, `memoryScope` deprecation).
-4. **Web app** on the same object; workspace default agent and caps.
-5. **Inline tools** as another capability source (separate design).
-
-## Decisions needed
-
-1. Presets: only `workspace-agent` and `assistant`, or also user-defined named
-   presets stored per workspace? Recommendation: two built-ins now; named
-   workspace presets later.
-2. Default boundary for embedders: `private`? Recommendation: yes.
-3. Should `list_models` belong to `subagents`? Recommendation: yes.
-4. Default identity for `assistant`: neutral product-agnostic voice, not
-   "OpenGeni". Recommendation: yes.
-5. Identity per session allowed? Recommendation: yes (session wins).
-6. Renderer default for embedders: `opengeni` when using the React components,
-   `markdown` for the chat facade. Recommendation: derive it from the SDK surface
-   instead of asking the embedder.
+- Named presets (`workspace-agent`, `assistant`): replaced by starting points
+  and toggles.
+- A pre-run preview API: every session reports `agent` and `effectiveTools`.
+- Workspace capability caps: deployments are the only hard limits.
+- A `boundary` object and automatic private-session enablement: `chats` is an
+  SDK option and a missing setting is an actionable setup error.
+- Retiring `memoryScope`: it stays a supported create field that `chats` sets.
+- Inline host-defined tools: a separate design.

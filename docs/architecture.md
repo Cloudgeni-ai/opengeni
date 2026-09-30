@@ -363,9 +363,9 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
-Configured sessions resolve tools and media through `packages/contracts/src/agent-config.ts`;
-worker, runtime and Codemode enforce that ceiling, and null configurations keep the legacy
-path. See [`agent configuration`](design/agent-configuration.md).
+Configured sessions resolve tools and media through `packages/contracts/src/agent-config.ts`,
+enforced by worker, runtime and Codemode; null configurations stay legacy. See
+[`agent configuration`](design/agent-configuration.md).
 
 ### 3.8 A Connected Machine is first-class primary compute
 
@@ -686,14 +686,13 @@ apps/api and apps/worker
 contracts → sdk → react → apps/web
 ```
 
-The client closure remains server-free. `apps/web` consumes the SDK and React
-packages; it does not own session or authorization semantics. Advanced hosts
-may embed API/core/worker packages, but the same domain and persistence
-boundaries still apply.
+The client closure stays server-free: `apps/web` consumes the SDK and React
+packages and owns no session or authorization semantics. Hosts embedding
+API/core/worker packages keep the same boundaries.
 
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
-Workspace management route classification lives in `apps/web/src/lib/workspace-management-location.ts`. The workspace route loads `components/settings/workspace-settings-shell.tsx` lazily only for management destinations, so session navigation does not import the settings interface.
+Workspace management routes: `apps/web/src/lib/workspace-management-location.ts`; the settings shell (`components/settings/workspace-settings-shell.tsx`) loads lazily, only for management destinations.
 
 ---
 

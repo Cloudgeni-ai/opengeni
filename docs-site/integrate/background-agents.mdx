@@ -15,11 +15,14 @@ await og.createScheduledTask(workspaceId, {
   runMode: "new_session_per_run",
   agentConfig: {
     prompt: "Triage new support tickets and tag urgent ones.",
+    agent: { capabilities: { from: "none", knowledge: true } }, // frozen with the schedule
     tools: [{ kind: "mcp", id: acmeServerId }],
     sandboxBackend: "none",
   },
 });
 ```
+
+`agent` is optional: without it each run uses the workspace's agent defaults. See [Configure the agent](/integrate/configure-the-agent).
 
 Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. Scheduled tasks cannot carry a per-session MCP server, so their tools come from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration), selected by id.
 

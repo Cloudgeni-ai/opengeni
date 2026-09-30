@@ -73,6 +73,7 @@ Install both packages from the same release.
 
     export const dynamic = "force-dynamic";
     export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
+      chats: "private", // each user's chats are theirs; "shared" lets the team see them
       resolve: async (request) => {
         const me = await authenticate(request);
         if (!me) return new Response("Unauthorized", { status: 401 });
@@ -83,8 +84,11 @@ Install both packages from the same release.
       createSession: ({ initialMessage, idempotencyKey }) => ({
         initialMessage,
         idempotencyKey,
+        agent: {
+          identity: "You are Acme's assistant. Friendly and brief.",
+          capabilities: "none", // your tools plus asking questions: see "Configure the agent"
+        },
         tools: [], // add your product's tools: see "Give the agent your data"
-        firstPartyMcpTools: [],
         sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
       }),
     });

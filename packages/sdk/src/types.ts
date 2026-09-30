@@ -5604,6 +5604,11 @@ export type SaveNewSessionDraftRequest = Omit<
 
 /** Input shape for agent config on create/update (server applies defaults). */
 export type ScheduledTaskAgentConfigInput = {
+  /**
+   * Agent configuration frozen into the schedule and used by every run;
+   * omitted runs follow the workspace's agent defaults.
+   */
+  agent?: AgentConfigRequest | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   prompt: string;
   resources?: ResourceRef[] | undefined;

@@ -25,6 +25,7 @@
         "pages": [
           "integrate/how-it-fits-together",
           "integrate/conversation-ui",
+          "integrate/configure-the-agent",
           "integrate/your-data",
           "integrate/background-agents",
           "integrate/users-and-tenants",

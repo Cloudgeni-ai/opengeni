@@ -11,8 +11,8 @@ A workspace is where sessions, files, knowledge, connections, and integrations a
 | Your product                                              | Workspace per | Notes                                                               |
 | --------------------------------------------------------- | ------------- | ------------------------------------------------------------------- |
 | A team or customer shares data and may share chats        | Tenant        | The usual choice                                                    |
-| Users share data but their chats are private              | Tenant        | Create sessions with `visibility: "user_private"` as the user       |
-| Each user is their own boundary                           | User          | Use the user id as `externalId`                                     |
+| Users share data but their chats are private              | Tenant        | `chats: "private"`, the proxy's default                             |
+| Each user is their own boundary                           | User          | `chats: "isolated"`, or the user id as `externalId`                 |
 | Every conversation must have its own data and connections | Chat          | Most isolation, most lifecycle work: automate creation and deletion |
 
 A workspace is configuration, not a running machine. Hundreds of workspaces are normal. Call `ensureWorkspace` with a stable `externalSource` and `externalId` and persist the returned id; repeat calls return the same workspace.
@@ -33,20 +33,28 @@ Grant the final permission set at onboarding. Add `files:upload` and `files:read
 
 Use the same `source` everywhere: onboarding, `asUser`, and the proxy's `resolve`.
 
-## Choose what each conversation shares
+## Choose who shares chats
 
-Set these when your server creates the session. They do not change when it is reopened.
+Set `chats` on the session proxy or the chat facade:
 
-| Product behavior                            | `agentAccess` | `memoryScope` |
-| ------------------------------------------- | ------------- | ------------- |
-| Each conversation works independently       | `"session"`   | `"off"`       |
-| Independent conversations remember the user | `"session"`   | `"user"`      |
-| One user's conversations can collaborate    | `"user"`      | `"user"`      |
-| The tenant's conversations can collaborate  | `"workspace"` | `"workspace"` |
+| `chats`               | Who sees a chat           | The agent reaches | Knowledge is saved to         | Workspace    |
+| --------------------- | ------------------------- | ----------------- | ----------------------------- | ------------ |
+| `"private"` (default) | Only the user             | Its own session   | The user's personal knowledge | The tenant's |
+| `"shared"`            | Everyone in the workspace | The workspace     | The workspace                 | The tenant's |
+| `"isolated"`          | Only the user             | Its own session   | The user's personal knowledge | One per user |
 
-- `agentAccess` limits which other sessions the agent can reach. The default for raw session creation is `"workspace"`.
-- `memoryScope` chooses where the agent saves [knowledge](/concepts/memory-and-knowledge). `"off"` stops new saves; authorized retrieval stays available.
-- `visibility: "user_private"` hides a session from other members. It requires a session created as a verified user and private sessions enabled for the organization.
+```ts
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
+  chats: "private",
+  resolve, // returns { workspaceId, user } for the signed-in user
+});
+```
+
+- Private chats need private sessions enabled for your organization. Without it the SDK throws `OpenGeniSetupError`, which says who can turn it on and where.
+- `"isolated"` gives each user their own workspace. Pass the `OpenGeni` facade from `@opengeni/sdk/chat` to the proxy and return `{ tenant, user }` from `resolve`; `og.workspaceIdFor({ tenant, user }, { isolation: "user" })` provisions the workspace and membership.
+- `chats` sets `visibility`, `agentAccess`, and `memoryScope` on sessions it creates. Values your `createSession` hook returns still win, and OpenGeni still authorizes each one.
+
+What the agent can do is separate: see [Configure the agent](/integrate/configure-the-agent).
 
 ## What is enforced where
 
