@@ -152,3 +152,48 @@ test("subscription replacement identifies the credential as a token", async () =
       ?.getAttribute("type"),
   ).toBe("password");
 });
+
+test("failed subscription rotation never treats another administrator's version as its receipt", async () => {
+  const { useOrganizationProviderConnection } =
+    await import("../organization-model-provider-connection");
+  let version = 1;
+  const sent: Array<{
+    operationId: string;
+    claudeIdentity?: { accountUuid: string; deviceId: string };
+  }> = [];
+  const client = {
+    getOrganizationModelProviderConnection: async () => ({ status: "active", version }),
+    listOrganizationProviderCustomModels: async () => ({ models: [] }),
+    upsertOrganizationModelProviderConnection: async (
+      _org: string,
+      _kind: string,
+      payload: (typeof sent)[number],
+    ) => {
+      sent.push(payload);
+      version = 2;
+      throw new Error("Connection changed concurrently");
+    },
+  } as unknown as Parameters<typeof useOrganizationProviderConnection>[0]["client"];
+  let state!: ReturnType<typeof useOrganizationProviderConnection>;
+  function Harness() {
+    state = useOrganizationProviderConnection({
+      client,
+      organizationId: "org",
+      providerKind: "claude_subscription",
+    });
+    return null;
+  }
+  await act(async () => root.render(<Harness />));
+  let saved: boolean | undefined;
+  const identity = {
+    accountUuid: "10000000-0000-4000-8000-000000000001",
+    deviceId: "a".repeat(64),
+  };
+  await act(async () => {
+    saved = await state.saveKey("sk-ant-oat01-fixture", identity);
+  });
+  expect(saved).toBe(false);
+  expect(sent).toHaveLength(2);
+  expect(sent[0]!.operationId).toBe(sent[1]!.operationId);
+  expect(sent[0]!.claudeIdentity).toEqual(identity);
+});

@@ -216,12 +216,23 @@ describe("Claude full-history Messages adapter", () => {
       const model = new AnthropicMessagesModel(
         {
           ...provider,
-          anthropic: { auth, cacheTtl: "1h", maxOutputTokens: 1000, streamIdleTimeoutMs: 600000 },
+          anthropic: {
+            auth,
+            cacheTtl: "1h",
+            maxOutputTokens: 1000,
+            streamIdleTimeoutMs: 600000,
+            identity: {
+              accountUuid: "10000000-0000-4000-8000-000000000001",
+              deviceId: "a".repeat(64),
+            },
+          },
         },
         "claude",
         (async (url, init) => {
           calls++;
-          expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+          expect(String(url)).toBe(
+            "https://api.anthropic.com/v1/messages" + (auth === "oauth" ? "?beta=true" : ""),
+          );
           const headers = new Headers(init?.headers);
           expect(headers.get(auth === "oauth" ? "authorization" : "x-api-key")).toBe(
             auth === "oauth" ? "Bearer test-key" : "test-key",

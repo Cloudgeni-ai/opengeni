@@ -216,16 +216,20 @@ export function useOrganizationProviderConnection({
 
   useEffect(() => void refresh(), [refresh]);
 
-  async function saveKey(apiKey: string): Promise<boolean> {
+  async function saveKey(
+    apiKey: string,
+    claudeIdentity?: { accountUuid: string; deviceId: string },
+  ): Promise<boolean> {
     const key = apiKey.trim();
     if (!key || connectionBusy) return false;
+    const credentialIdentity = JSON.stringify([key, claudeIdentity]);
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
     const operationId =
-      pending?.key === key && pending.version === version
+      pending?.key === credentialIdentity && pending.version === version
         ? pending.operationId
         : crypto.randomUUID();
-    pendingSaveRef.current = { key, version, operationId };
+    pendingSaveRef.current = { key: credentialIdentity, version, operationId };
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
     const mutate = () =>
@@ -233,6 +237,7 @@ export function useOrganizationProviderConnection({
         operationId,
         expectedVersion: version,
         apiKey: key,
+        ...(claudeIdentity ? { claudeIdentity } : {}),
       });
     const commit = (saved: Connection) => {
       pendingSaveRef.current = null;
@@ -256,12 +261,9 @@ export function useOrganizationProviderConnection({
           finalError = retryError;
         }
       }
-      const reconciled = await refreshConnection();
-      if (reconciled?.status === "active" && reconciled.version > version) {
-        pendingSaveRef.current = null;
-        toast.success(`${meta.title} connected for shared workspaces`);
-        return true;
-      }
+      // A newer version can belong to another administrator. Only the mutation's
+      // idempotent receipt proves that this token and identity were committed.
+      await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
         description: errorText(finalError),
       });

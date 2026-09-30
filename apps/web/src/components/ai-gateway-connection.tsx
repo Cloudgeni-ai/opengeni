@@ -300,7 +300,10 @@ export interface ProviderConnectionView {
   refreshConnection(): Promise<unknown>;
   refreshCustomModels(): Promise<unknown>;
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  saveKey(apiKey: string): Promise<boolean>;
+  saveKey(
+    apiKey: string,
+    claudeIdentity?: { accountUuid: string; deviceId: string },
+  ): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
   addCustomModel(): Promise<void>;
@@ -1016,6 +1019,63 @@ function CustomModels({ state }: { state: ProviderConnection }) {
 }
 
 /** Replace credential: a one-field prompt. */
+function useClaudeIdentityFields(provider: ProviderPresentation["provider"]) {
+  const [accountUuid, setAccountUuid] = useState("");
+  const [deviceId, setDeviceId] = useState("");
+  const enabled = provider === "claude_subscription";
+  const accountValid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    accountUuid.trim(),
+  );
+  const deviceValid = /^[a-f0-9]{64}$/.test(deviceId.trim());
+  const valid = !enabled || (accountValid && deviceValid);
+  return {
+    valid,
+    identity: enabled ? { accountUuid: accountUuid.trim(), deviceId: deviceId.trim() } : undefined,
+    reset: () => {
+      setAccountUuid("");
+      setDeviceId("");
+    },
+    fields: enabled ? (
+      <FieldStack>
+        <Field
+          label="Claude account UUID"
+          required
+          error={
+            accountUuid.trim() && !accountValid
+              ? "Enter the complete account UUID, including hyphens."
+              : undefined
+          }
+          hint="From oauthAccount.accountUuid in ~/.claude.json on the machine signed in to this Claude account."
+        >
+          <TextInput
+            aria-label="Claude account UUID"
+            autoComplete="off"
+            value={accountUuid}
+            onChange={(event) => setAccountUuid(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="Claude device ID"
+          required
+          error={
+            deviceId.trim() && !deviceValid
+              ? "Enter the 64-character lowercase hexadecimal userID."
+              : undefined
+          }
+          hint="From userID in the same ~/.claude.json file. Both identifiers are encrypted with the token; they are not your OpenGeni account IDs."
+        >
+          <TextInput
+            aria-label="Claude device ID"
+            autoComplete="off"
+            value={deviceId}
+            onChange={(event) => setDeviceId(event.target.value)}
+          />
+        </Field>
+      </FieldStack>
+    ) : null,
+  };
+}
+
 export function ReplaceKeyDialog({
   state,
   open,
@@ -1027,8 +1087,12 @@ export function ReplaceKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const { config } = state;
+  const claude = useClaudeIdentityFields(config.provider);
   useEffect(() => {
-    if (!open) setKey("");
+    if (!open) {
+      setKey("");
+      claude.reset();
+    }
   }, [open]);
   return (
     <FormDialog
@@ -1040,8 +1104,8 @@ export function ReplaceKeyDialog({
       description="New work uses the new credential right away. Work already running finishes on the old one."
       submitLabel="Replace credential"
       pendingLabel="Saving…"
-      submitDisabled={!key.trim()}
-      onSubmit={async () => await state.saveKey(key)}
+      submitDisabled={!key.trim() || !claude.valid}
+      onSubmit={async () => await state.saveKey(key, claude.identity)}
       onSubmitted={() => onOpenChange(false)}
     >
       <Field
@@ -1055,6 +1119,7 @@ export function ReplaceKeyDialog({
           onChange={(event) => setKey(event.target.value)}
         />
       </Field>
+      {claude.fields}
     </FormDialog>
   );
 }
@@ -1264,6 +1329,7 @@ export function ProviderConnectPage({
 }) {
   const { config } = state;
   const [key, setKey] = useState("");
+  const claude = useClaudeIdentityFields(config.provider);
   return (
     <ModelsFormPage
       title={`Connect ${config.title}`}
@@ -1272,14 +1338,14 @@ export function ProviderConnectPage({
       submitLabel={`Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
-      submitDisabled={!key.trim() || !state.canManageConnection}
+      submitDisabled={!key.trim() || !claude.valid || !state.canManageConnection}
       disabledReason={
         state.canManageConnection
           ? undefined
           : "Only people who can manage connections can add a key."
       }
       footerStart={footerStart}
-      onSubmit={async () => await state.saveKey(key)}
+      onSubmit={async () => await state.saveKey(key, claude.identity)}
       onSubmitted={onConnected}
     >
       <FieldStack>
@@ -1294,6 +1360,7 @@ export function ProviderConnectPage({
             onChange={(event) => setKey(event.target.value)}
           />
         </Field>
+        {claude.fields}
       </FieldStack>
     </ModelsFormPage>
   );

@@ -116,6 +116,18 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
       });
     if (kind === "claude_subscription" && !/^sk-ant-oat[0-9]+-\S+$/.test(payload.apiKey))
       throw new HTTPException(422, { message: "Enter the setup token from claude setup-token." });
+    if (kind === "claude_subscription" && !payload.claudeIdentity)
+      throw new HTTPException(422, {
+        message: "Enter the Claude account UUID and device ID from your Claude Code configuration.",
+      });
+    if (kind !== "claude_subscription" && payload.claudeIdentity)
+      throw new HTTPException(422, {
+        message: "Claude identity is only valid for subscription connections.",
+      });
+    const credential =
+      kind === "claude_subscription"
+        ? JSON.stringify({ version: 1, token: payload.apiKey, identity: payload.claudeIdentity })
+        : payload.apiKey;
     try {
       const connection = await upsertOrganizationModelProviderConnection(deps.db, {
         organizationId,
@@ -123,9 +135,9 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
         providerKind: providerKind(c.req.param("providerKind")),
         credentialEncrypted: encryptEnvironmentValue(
           requireEnvironmentEncryption(deps.settings),
-          payload.apiKey,
+          credential,
         ),
-        credentialDigest: organizationModelProviderCredentialDigest(payload.apiKey),
+        credentialDigest: organizationModelProviderCredentialDigest(credential),
         operationId: payload.operationId,
         ...(payload.expectedVersion === undefined
           ? {}

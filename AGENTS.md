@@ -538,3 +538,7 @@ and `packages/runtime/src/anthropic-messages.ts`. Run the native adapter tests
 (including its Agents SDK tool cycle), model admission tests, and real PostgreSQL
 lifecycle tests when changing connection kinds. Keep subscription and API-key
 credentials distinct; never copy captured credentials into fixtures or source.
+Subscription wire identity is pinned in `packages/runtime/src/claude-code-identity.ts`.
+Its tests use fake credentials and local transports; no live subscription probes
+without explicit user approval. Account/device identity belongs in the encrypted
+connection bundle, never in source or model-admission metadata.

@@ -140,3 +140,76 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
     });
   }
 });
+
+test("subscription identity stays inside scoped credentials without changing model admission", () => {
+  const settings = withClaudeConnectionCatalog(testSettings(), {
+    claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  });
+  const identity = {
+    accountUuid: "10000000-0000-4000-8000-000000000001",
+    deviceId: "a".repeat(64),
+  };
+  const credential = JSON.stringify({ version: 1, token: "sk-ant-oat01-fixture", identity });
+  const runtime = withClaudeConnectionCredential(settings, "claude_subscription", credential);
+  const provider = configuredProviders(runtime).find(
+    (p) => p.id === "organization-claude-subscription",
+  )!;
+  expect(provider.apiKey).toBe("sk-ant-oat01-fixture");
+  expect(provider.anthropic?.identity).toEqual(identity);
+  expect(configuredModels(runtime)).toEqual(configuredModels(settings));
+  const catalog = withClaudeConnectionCatalog(runtime, {
+    claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  });
+  const cleared = configuredProviders(catalog).find(
+    (p) => p.id === "organization-claude-subscription",
+  )!;
+  expect(cleared.apiKey).toBeUndefined();
+  expect(cleared.anthropic?.identity).toBeUndefined();
+  const replaced = withClaudeConnectionCredential(
+    runtime,
+    "claude_subscription",
+    "sk-ant-oat01-other-account",
+  );
+  const replacedProvider = configuredProviders(replaced).find((p) => p.id === provider.id)!;
+  expect(replacedProvider.apiKey).toBe("sk-ant-oat01-other-account");
+  expect(replacedProvider.anthropic?.identity).toBeUndefined();
+});
+
+test("accepted model definition tracks Claude generation options but excludes account identity", () => {
+  const settings = withClaudeConnectionCatalog(testSettings(), {
+    claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  });
+  const modelId = "organization-claude-subscription/claude-opus-5-5";
+  const version = (settings: ReturnType<typeof testSettings>) =>
+    configuredModels(settings).find((model) => model.id === modelId)!.definitionVersion;
+  const initial = version(settings);
+  for (const identity of [
+    { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "a".repeat(64) },
+    { accountUuid: "20000000-0000-4000-8000-000000000002", deviceId: "b".repeat(64) },
+  ]) {
+    expect(
+      version(
+        withClaudeConnectionCredential(
+          settings,
+          "claude_subscription",
+          JSON.stringify({ version: 1, token: "sk-ant-oat01-fixture", identity }),
+        ),
+      ),
+    ).toBe(initial);
+  }
+  for (const change of [
+    { cacheTtl: "1h" },
+    { maxOutputTokens: 64000 },
+    { auth: "api-key" },
+    { streamIdleTimeoutMs: 120000 },
+  ]) {
+    const providers = JSON.parse(settings.modelProvidersJson!);
+    const provider = providers.find(
+      (provider: { id: string }) => provider.id === "organization-claude-subscription",
+    );
+    Object.assign(provider.anthropic, change);
+    expect(version({ ...settings, modelProvidersJson: JSON.stringify(providers) })).not.toBe(
+      initial,
+    );
+  }
+});

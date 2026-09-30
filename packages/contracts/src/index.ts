@@ -2665,6 +2665,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = z
     operationId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative().optional(),
     apiKey: z.string().trim().min(1).max(8192),
+    claudeIdentity: z
+      .object({
+        accountUuid: z.string().uuid(),
+        deviceId: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type UpsertOrganizationModelProviderConnectionRequest = z.infer<

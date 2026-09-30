@@ -1278,8 +1278,44 @@ without mutating stored history. Usage includes fresh input, cache reads, cache
 writes and output. Organization connections use conservative 200k context / 168k
 input / 150k compaction limits and 32k maximum output; configurable registry
 providers can declare model-specific limits. The managed connection catalog enables
-reasoning only for the captured adaptive model `claude-opus-5-5`; other model IDs
+reasoning only for the captured adaptive models `claude-opus-5-5` and
+`claude-sonnet-5-5`; other model IDs
 remain available without a reasoning option. Registry providers can explicitly
 declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
 does not silently retry failed requests or rotate credentials.
+
+
+### Claude subscription request identity
+
+OAuth requests use the pinned Claude Code 2.1.285 / Agent SDK 0.3.276 profile in
+`packages/runtime/src/claude-code-identity.ts`: `beta=true`, CLI user-agent,
+Stainless SDK 0.127.0, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
+the captured v2d dispatch selector. These are compatibility headers, not a
+statement about the actual worker runtime. API-key requests do not use this profile.
+
+Subscription connections also require the real account UUID and device ID from
+`oauthAccount.accountUuid` and `userID` in the signed-in machine's `~/.claude.json`.
+Both are encrypted with the token in the existing credential column; API reads
+return neither. Legacy token-only connections must be replaced with this metadata
+before use. Registry OAuth providers supply the same fields through
+`anthropic.identity`. Never hardcode a user's account IDs into source or borrow
+another connection's identity. Session IDs use the existing session cache key;
+prompt IDs persist through the run's tool loop and client request IDs are fresh.
+
+Billing attribution is a system text block. Its `cc_version` suffix follows the
+locally inspected 2.1.285 fingerprint calculation; previous request and prompt
+IDs describe this request sequence. **The `cch` checksum is not implemented:** its
+algorithm has not been verified. No captured checksum is replayed. Consequently
+this profile is not yet a byte-exact reproduction and has not been proven to
+resolve the observed HTTP 429.
+
+The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
+also enable interleaved thinking, thinking token counts, effort, and summarized
+thinking display betas. One-hour caching adds the extended cache TTL beta;
+mid-conversation system messages add their existing beta. Thread, advisor,
+inline-tool, context-management, global-cache-scope and fallback-credit flags
+are not advertised without those features. Normal agent calls stream; title and
+compaction calls remain nonstreaming. The default output ceiling remains 32k,
+within the adapter's conservative context budget, rather than copying 128k from
+an unrelated request. No live subscription probe is part of these tests.

@@ -2131,7 +2131,22 @@ const RegistryModelSchema = z
   });
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
+export const ClaudeSubscriptionIdentity = z
+  .object({
+    accountUuid: z.string().uuid(),
+    deviceId: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export type ClaudeSubscriptionIdentity = z.infer<typeof ClaudeSubscriptionIdentity>;
+export const ClaudeSubscriptionCredential = z
+  .object({
+    version: z.literal(1),
+    token: z.string().regex(/^sk-ant-oat[0-9]+-\S+$/),
+    identity: ClaudeSubscriptionIdentity,
+  })
+  .strict();
 const AnthropicProviderOptions = z.object({
+  identity: ClaudeSubscriptionIdentity.optional(),
   auth: z.enum(["api-key", "oauth"]).default("api-key"),
   cacheTtl: z.enum(["5m", "1h", "off"]).default("5m"),
   maxOutputTokens: z.number().int().positive().default(32000),
@@ -4837,7 +4852,9 @@ function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   const publicHeaders = new Set(provider.publicDefaultHeaderNames ?? []);
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
   return {
-    ...(provider.anthropic ? { anthropic: provider.anthropic } : {}),
+    ...(provider.anthropic
+      ? { anthropic: (({ identity: _identity, ...options }) => options)(provider.anthropic) }
+      : {}),
     headers: Object.entries(provider.defaultHeaders ?? {})
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([name, value]) =>
@@ -4894,6 +4911,7 @@ function definitionVersionFor(
       baseUrl: provider.baseUrl ?? null,
       defaultHeaders: requestMetadata.headers,
       defaultQuery: requestMetadata.query,
+      ...(requestMetadata.anthropic ? { anthropic: requestMetadata.anthropic } : {}),
     },
     credentialSource: model.credentialSource,
     billing: model.billing,
@@ -8026,7 +8044,9 @@ export function withClaudeConnectionCatalog(
       models: connection.models.map((model) => {
         // Only captured adaptive-thinking models are enabled by the managed catalog.
         // Operators can explicitly declare other capabilities in a registry provider.
-        const adaptiveThinking = model.upstreamModelId === "claude-opus-5-5";
+        const adaptiveThinking = ["claude-opus-5-5", "claude-sonnet-5-5"].includes(
+          model.upstreamModelId,
+        );
         return {
           contextWindowTokens: 200000,
           effectiveContextWindowTokens: 168000,
@@ -8065,11 +8085,28 @@ export function withClaudeConnectionCredential(
   credential: string,
 ): Settings {
   if (!credential.trim()) throw new Error("Claude credential is empty");
+  const bundle =
+    kind === "claude_subscription" && credential.trim().startsWith("{")
+      ? ClaudeSubscriptionCredential.parse(JSON.parse(credential))
+      : null;
   return {
     ...settings,
     modelProvidersJson: JSON.stringify(
       parseModelProvidersJson(settings.modelProvidersJson).map((provider) =>
-        provider.id === claudeProviderId(kind) ? { ...provider, apiKey: credential } : provider,
+        provider.id === claudeProviderId(kind)
+          ? {
+              ...provider,
+              apiKey: bundle?.token ?? credential,
+              ...(kind === "claude_subscription" && provider.anthropic
+                ? {
+                    anthropic: {
+                      ...provider.anthropic,
+                      identity: bundle?.identity,
+                    },
+                  }
+                : {}),
+            }
+          : provider,
       ),
     ),
   };

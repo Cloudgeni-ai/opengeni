@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import {
   protocol,
   Usage,
@@ -374,6 +375,9 @@ export function anthropicResponse(
 
 /** Native Messages transport; retries are owned by the worker, never hidden here. */
 export class AnthropicMessagesModel implements Model {
+  private readonly fallbackSessionId = randomUUID();
+  private readonly promptId = randomUUID();
+  private previousRequestId: string | undefined;
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
@@ -408,6 +412,23 @@ export class AnthropicMessagesModel implements Model {
         headers.delete("authorization");
         headers.set("x-api-key", this.provider.apiKey);
       }
+    }
+    if (this.provider.anthropic?.auth === "oauth") {
+      const identity = this.provider.anthropic.identity;
+      if (!identity)
+        throw new AnthropicProtocolError(
+          "Claude subscription identity is missing. Replace the connection with its Claude account UUID and device ID in Models.",
+        );
+      const session = request.modelSettings.providerData?.prompt_cache_key;
+      const sessionId =
+        typeof session === "string" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(session)
+          ? session
+          : this.fallbackSessionId;
+      applyClaudeCodeIdentity(body, headers, url, request, identity, {
+        sessionId,
+        promptId: this.promptId,
+        previousRequestId: this.previousRequestId,
+      });
     }
     const response = await this.fetch(url, {
       method: "POST",
@@ -451,6 +472,7 @@ export class AnthropicMessagesModel implements Model {
         code: contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
       });
     }
+    this.previousRequestId = response.headers.get("request-id") ?? undefined;
     return response;
   }
 
