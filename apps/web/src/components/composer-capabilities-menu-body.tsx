@@ -8,7 +8,7 @@
 import { CheckIcon, ChevronRightIcon, LockIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
-import { ConnectorAction } from "@/components/session-connectors-menu-body";
+import { ConnectorAction } from "@/components/ui/composer-menu-action";
 import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
 import {
   AGENT_CAPABILITY_GROUPS,

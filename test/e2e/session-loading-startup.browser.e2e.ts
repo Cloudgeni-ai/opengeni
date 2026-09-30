@@ -1177,7 +1177,7 @@ for (const width of [1280, 390]) {
       await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
       await capture("composer-menu-ready");
       await page.getByRole("menuitem", { name: "Repositories", exact: true }).click();
-      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Back", exact: true }).click();
       await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
       await page.keyboard.press("Escape");
       await page.waitForFunction(

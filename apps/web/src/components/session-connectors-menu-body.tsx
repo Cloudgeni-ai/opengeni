@@ -13,7 +13,7 @@ import {
 } from "@/components/capabilities/connection-account-picker";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { ConnectorAction } from "@/components/ui/composer-menu-action";
 import {
   ComposerMenuHeader,
   ComposerMenuSwitch,
@@ -21,7 +21,6 @@ import {
 } from "@/components/ui/composer-menu";
 import type { SessionToolSelection } from "@/components/pickers";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
-import { cn } from "@/lib/utils";
 
 export type SessionConnectorsMenuProps = {
   presentation?: "menu" | "dialog";
@@ -63,14 +62,15 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         <ComposerMenuHeader
           title={settingsServer.name}
           leading={
-            <button
-              type="button"
-              aria-label="Back to connectors"
-              className="inline-flex size-9 items-center justify-center rounded-md focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => setSettingsId(null)}
+            <ConnectorAction
+              presentation={props.presentation}
+              keepOpen
+              label="Back to connectors"
+              className="inline-flex size-9 w-9 shrink-0 items-center justify-center rounded-md p-0 focus-visible:ring-2 focus-visible:ring-ring"
+              onAction={() => setSettingsId(null)}
             >
               <ChevronLeftIcon className="size-4" />
-            </button>
+            </ConnectorAction>
           }
         />
         <div className="min-h-0 overflow-y-auto overscroll-contain p-2">
@@ -124,12 +124,28 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         leading={props.leading}
         trailing={
           <div className="flex items-center gap-2">
-            <span className="text-xs text-fg-muted">Customize</span>
-            <ComposerMenuSwitch
-              label="Customize connectors"
-              checked={customizing}
-              onCheckedChange={(next) => props.onCustomizingChange?.(next)}
-            />
+            <span aria-hidden className="text-xs text-fg-muted">
+              Customize
+            </span>
+            {props.presentation === "dialog" ? (
+              <ComposerMenuSwitch
+                label="Customize connectors"
+                checked={customizing}
+                onCheckedChange={(next) => props.onCustomizingChange?.(next)}
+              />
+            ) : (
+              // Inside a menu the toggle is a checkable menu item.
+              <ConnectorAction
+                presentation="menu"
+                keepOpen
+                checked={customizing}
+                label="Customize connectors"
+                className="inline-flex size-9 shrink-0 items-center justify-end rounded-md p-0 pointer-coarse:size-11"
+                onAction={() => props.onCustomizingChange?.(!customizing)}
+              >
+                <ComposerMenuSwitchIndicator checked={customizing} />
+              </ConnectorAction>
+            )}
           </div>
         }
       />
@@ -276,96 +292,5 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         </ConnectorAction>
       ) : null}
     </>
-  );
-}
-
-export function ConnectorAction(props: {
-  presentation?: "menu" | "dialog";
-  checked?: boolean;
-  label?: string;
-  disabled?: boolean;
-  /**
-   * Reachable with the keyboard and read as unavailable, but does nothing: a
-   * current value shown in a menu (Radix skips `disabled` items entirely).
-   */
-  readOnly?: boolean;
-  locked?: boolean;
-  className?: string;
-  keepOpen?: boolean;
-  onAction: () => void;
-  children: ReactNode;
-}) {
-  if (props.readOnly) {
-    return props.presentation === "dialog" ? (
-      <button
-        type="button"
-        aria-label={props.label}
-        aria-disabled="true"
-        className={cn(
-          "flex w-full cursor-default items-center gap-2 px-2 py-1.5 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          props.className,
-        )}
-        onClick={(event) => event.preventDefault()}
-      >
-        {props.children}
-      </button>
-    ) : (
-      <DropdownMenuItem
-        aria-label={props.label}
-        aria-disabled="true"
-        className={cn("cursor-default", props.className)}
-        onSelect={(event) => event.preventDefault()}
-      >
-        {props.children}
-      </DropdownMenuItem>
-    );
-  }
-  if (props.locked) {
-    return (
-      <div
-        aria-label={props.label}
-        className={cn(
-          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm",
-          props.className,
-        )}
-      >
-        {props.children}
-      </div>
-    );
-  }
-  if (props.presentation === "dialog") {
-    return (
-      <button
-        type="button"
-        role={props.checked === undefined ? undefined : "switch"}
-        aria-label={props.label}
-        aria-checked={props.checked}
-        aria-disabled={props.disabled || undefined}
-        disabled={props.disabled}
-        className={cn(
-          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
-          props.className,
-        )}
-        onClick={props.onAction}
-      >
-        {props.children}
-      </button>
-    );
-  }
-  return (
-    <DropdownMenuItem
-      role={props.checked === undefined ? "menuitem" : "menuitemcheckbox"}
-      aria-label={props.label}
-      aria-checked={props.checked}
-      aria-disabled={props.disabled || undefined}
-      disabled={props.disabled}
-      className={props.className}
-      onSelect={(event) => {
-        if (props.keepOpen) event.preventDefault();
-        props.onAction();
-      }}
-    >
-      {props.children}
-    </DropdownMenuItem>
   );
 }

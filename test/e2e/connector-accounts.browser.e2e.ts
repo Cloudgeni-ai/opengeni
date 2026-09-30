@@ -72,7 +72,7 @@ describe("composer connector account controls (local fixture)", () => {
       await page.getByRole("menuitem", { name: /Connectors/ }).click();
       await page.getByText("Loading connectors…", { exact: true }).waitFor();
       expect(moduleRequests).toBe(1);
-      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Back", exact: true }).click();
       await page.getByRole("menuitem", { name: /Connectors/ }).waitFor();
       release();
       await page.getByRole("menuitem", { name: /Connectors/ }).click();
@@ -96,7 +96,7 @@ describe("composer connector account controls (local fixture)", () => {
         await page.goto(`${baseUrl}/test/connector-menu.html`);
         await page.getByRole("button", { name: "More composer actions" }).click();
         await page.getByRole("menuitem", { name: /Connectors/ }).click();
-        await page.getByRole("switch", { name: "Customize connectors" }).click();
+        await page.getByRole("menuitemcheckbox", { name: "Customize connectors" }).click();
         const connector = page.getByRole("menuitemcheckbox", { name: "Linear", exact: true });
         const slack = page.getByRole("menuitemcheckbox", { name: "Slack", exact: true });
         const settings = page.getByRole("menuitem", { name: "Slack account settings" });
@@ -147,7 +147,7 @@ describe("composer connector account controls (local fixture)", () => {
         await page.keyboard.press("Space");
         expect(await personal.getAttribute("aria-checked")).toBe("false");
         expect(await workspace.getAttribute("aria-checked")).toBe("true");
-        await page.getByRole("button", { name: "Back to connectors" }).click();
+        await page.getByRole("menuitem", { name: "Back to connectors" }).click();
         await page.getByRole("menuitem", { name: "Slack account settings" }).click();
         expect(await personal.getAttribute("aria-checked")).toBe("false");
         await workspace.click();
@@ -168,8 +168,10 @@ describe("composer connector account controls (local fixture)", () => {
           0,
         );
         expect(await page.getByRole("menuitemcheckbox").count()).toBe(2);
-        // No setup action replaces the removed footer in the account list.
-        expect(await page.getByRole("menuitem").count()).toBe(0);
+        // No setup action replaces the removed footer in the account list: the
+        // only plain menu item is Back.
+        expect(await page.getByRole("menuitem").count()).toBe(1);
+        expect(await page.getByRole("menuitem", { name: "Back to connectors" }).count()).toBe(1);
       } finally {
         await page.close();
       }

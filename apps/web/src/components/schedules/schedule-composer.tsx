@@ -56,6 +56,17 @@ function repositoryName(resource: RepositoryResource): string {
   return /[:/]([^/:]+\/[^/]+)$/.exec(clean)?.[1] ?? clean;
 }
 
+const BUILT_IN_SERVER_COPY = {
+  files: {
+    name: "Uploaded files",
+    needs: "Read files uploaded to the workspace. Needs Workspace files on.",
+  },
+  docs: {
+    name: "Knowledge library",
+    needs: "Search the workspace's documents. Needs Knowledge on.",
+  },
+} as const;
+
 function RemovableChip({
   icon,
   label,
@@ -256,7 +267,22 @@ export function ComposerField({
   // With agent settings, built-in tools follow "What the agent can do"; the
   // menu then only picks connected apps.
   const agentSettings = context.clientConfig.agentConfig?.enabled === true;
-  const servers = context.toolMcpServers.filter((server) => server.id !== "opengeni");
+  // The built-in "files" and "docs" servers share names with the Workspace
+  // files and Knowledge capabilities. Name them for what they attach, and say
+  // which capability they also need.
+  const servers = context.toolMcpServers
+    .filter((server) => server.id !== "opengeni")
+    .map((server) =>
+      server.id in BUILT_IN_SERVER_COPY
+        ? {
+            ...server,
+            name: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].name,
+            detail: agentSettings
+              ? BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs
+              : server.detail,
+          }
+        : server,
+    );
   const selectedTools = draft.mcpServerIds ?? [];
   const toggleTool = (id: string, on: boolean) =>
     update({

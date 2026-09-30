@@ -381,7 +381,7 @@ describe("production session conditional loading", () => {
         const menu = page.getByRole("menu");
         if (outcome === "loaded") {
           await menu.getByText("Loading variable sets…", { exact: true }).waitFor();
-          await menu.getByRole("button", { name: "Back", exact: true }).waitFor();
+          await menu.getByRole("menuitem", { name: "Back", exact: true }).waitFor();
           await page.screenshot({ path: `${evidenceDir}/variables-${width}-loading.png` });
           release();
           await menu.getByRole("button", { name: "Save", exact: true }).waitFor();
@@ -395,7 +395,7 @@ describe("production session conditional loading", () => {
         expect(assets.some((url) => url.endsWith(variableSetAsset))).toBe(true);
         expect(await transcript.isVisible()).toBe(true);
         await page.screenshot({ path: `${evidenceDir}/variables-${width}-${outcome}.png` });
-        await menu.getByRole("button", { name: "Back", exact: true }).click();
+        await menu.getByRole("menuitem", { name: "Back", exact: true }).click();
         await menu.getByRole("menuitem", { name: /Variable sets/ }).waitFor();
         expect(
           await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),

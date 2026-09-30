@@ -15,6 +15,8 @@ import {
   Suspense,
   cloneElement,
   isValidElement,
+  useEffect,
+  useRef,
   type ReactElement,
   type ReactNode,
   type CSSProperties,
@@ -41,6 +43,7 @@ import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
+import { ConnectorAction } from "@/components/ui/composer-menu-action";
 import {
   ComposerCapabilitiesMenuBody,
   type ComposerAgentCapabilities,
@@ -126,6 +129,18 @@ export function ComposerMobilePlusPanel(
   },
 ) {
   const { triggerRef, panel, setPanel, setOpen, dialogOpen } = props;
+  const returnFocusTo = useRef<Panel | null>(null);
+  useEffect(() => {
+    const previous = returnFocusTo.current;
+    if (!previous || previous === panel) return;
+    returnFocusTo.current = null;
+    const frame = requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[role="menu"] [data-composer-panel="${previous}"]`)
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [panel]);
   const connectors = props.servers.filter(isComposerConnector);
   const toolsSelected = connectors.filter((server) =>
     props.selection.mcpServerIds.has(server.id),
@@ -133,18 +148,22 @@ export function ComposerMobilePlusPanel(
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
 
+  // In a menu, Back is a menu item: arrow keys reach it and it is announced as
+  // part of the menu. In a dialog it is a plain button. Going back returns
+  // focus to the item that opened the panel.
   const backAction = (label: string, target: Panel) => (
-    <button
-      type="button"
-      aria-label={label}
-      className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11"
-      onClick={(event) => {
-        event.preventDefault();
+    <ConnectorAction
+      presentation={dialogOpen ? "dialog" : "menu"}
+      keepOpen
+      label={label}
+      className="mt-0.5 inline-flex size-7 w-7 shrink-0 items-center justify-center rounded-md p-0 text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11"
+      onAction={() => {
+        returnFocusTo.current = panel;
         setPanel(target);
       }}
     >
       <ChevronLeftIcon className="size-4" />
-    </button>
+    </ConnectorAction>
   );
   const backButton = backAction("Back", "root");
   const backToCapabilities = backAction("Back to capabilities", "capabilities");
@@ -177,6 +196,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {agentCapabilities ? (
             <DropdownMenuItem
+              data-composer-panel="capabilities"
               className={COMPOSER_MENU_ACTION_CLASS}
               disabled={props.disabled || agentCapabilities.disabled}
               onSelect={(event) => {
@@ -199,6 +219,7 @@ export function ComposerMobilePlusPanel(
             </DropdownMenuItem>
           ) : (
             <DropdownMenuItem
+              data-composer-panel="tools"
               className={COMPOSER_MENU_ACTION_CLASS}
               disabled={props.disabled || props.toolsDisabled}
               onSelect={(event) => {
@@ -217,6 +238,7 @@ export function ComposerMobilePlusPanel(
           )}
           {repositories ? (
             <DropdownMenuItem
+              data-composer-panel="repos"
               className={COMPOSER_MENU_ACTION_CLASS}
               disabled={props.disabled || repositories.disabled}
               onSelect={(event) => {
@@ -234,6 +256,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {props.variableSets ? (
             <DropdownMenuItem
+              data-composer-panel="variables"
               className={COMPOSER_MENU_ACTION_CLASS}
               disabled={props.disabled}
               onSelect={(event) => {
@@ -248,6 +271,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {voiceModel ? (
             <DropdownMenuItem
+              data-composer-panel="voice"
               className={COMPOSER_MENU_ACTION_CLASS}
               disabled={props.disabled || voiceModel.disabled}
               onSelect={(event) => {
@@ -265,6 +289,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {props.chatSettings || props.draftChatSettings ? (
             <DropdownMenuItem
+              data-composer-panel="settings"
               className={COMPOSER_MENU_ACTION_CLASS}
               onSelect={(event) => {
                 event.preventDefault();
