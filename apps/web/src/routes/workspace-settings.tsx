@@ -304,24 +304,28 @@ function WorkspaceGeneralSettings({
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
           control={
-            <DisabledReasonTooltip
-              reason={canRename ? undefined : "Only workspace admins can rename it."}
-            >
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-disabled={canRename ? undefined : "true"}
-                aria-label={`Rename workspace ${activeWorkspace.name}`}
-                onClick={() => {
-                  if (canRename) setRenaming(true);
-                }}
-                className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+            // A Personal workspace keeps its name: no button that could only
+            // say it isn't allowed.
+            personal ? undefined : (
+              <DisabledReasonTooltip
+                reason={canRename ? undefined : "Only workspace admins can rename it."}
               >
-                <PencilIcon aria-hidden="true" />
-                Rename
-              </Button>
-            </DisabledReasonTooltip>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-disabled={canRename ? undefined : "true"}
+                  aria-label={`Rename workspace ${activeWorkspace.name}`}
+                  onClick={() => {
+                    if (canRename) setRenaming(true);
+                  }}
+                  className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+                >
+                  <PencilIcon aria-hidden="true" />
+                  Rename
+                </Button>
+              </DisabledReasonTooltip>
+            )
           }
         />
         <SettingRow

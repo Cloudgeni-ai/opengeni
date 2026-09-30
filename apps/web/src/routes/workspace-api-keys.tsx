@@ -91,11 +91,19 @@ function failureText(what: string, error: unknown): string {
    Data.
    -------------------------------------------------------------------------- */
 
+/** Nobody administers a Personal workspace, so none of its pages offer keys. */
+const PERSONAL_UNAVAILABLE = {
+  title: "API keys aren't available in Personal workspaces",
+  description: "Create a key in a shared workspace, where workspace admins manage them.",
+} as const;
+
 interface Keys {
   keys: ApiKey[];
   loaded: boolean;
   error: Error | null;
   canManage: boolean;
+  /** A Personal workspace has no admins, so it has no API keys at all. */
+  personal: boolean;
   delegable: Set<string>;
   refresh: () => Promise<void>;
   /** Adds or replaces one key in the list. */
@@ -115,6 +123,8 @@ function useWorkspaceApiKeys(workspaceId: string): Keys {
   const client = context.client;
   const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "api_keys:manage");
+  const personal =
+    context.workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
   const workspaceGrant =
     context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ??
     null;
@@ -198,7 +208,7 @@ function useWorkspaceApiKeys(workspaceId: string): Keys {
     return true;
   };
 
-  return { keys, loaded, error, canManage, delegable, refresh, upsert, create, revoke };
+  return { keys, loaded, error, canManage, personal, delegable, refresh, upsert, create, revoke };
 }
 
 /* ----------------------------------------------------------------------------
@@ -336,8 +346,12 @@ function KeyList({
       <EmptyState
         variant="page"
         icon={<KeyRoundIcon />}
-        title="API keys are managed by workspace admins"
-        description="Ask a workspace admin to create a key for your script or app."
+        {...(data.personal
+          ? PERSONAL_UNAVAILABLE
+          : {
+              title: "API keys are managed by workspace admins",
+              description: "Ask a workspace admin to create a key for your script or app.",
+            })}
       />
     );
   } else if (!data.loaded) {
@@ -475,14 +489,20 @@ function KeyPage({
           variant="page"
           icon={<KeyRoundIcon />}
           title={
-            data.canManage ? "This key isn't here" : "API keys are managed by workspace admins"
+            data.canManage
+              ? "This key isn't here"
+              : data.personal
+                ? PERSONAL_UNAVAILABLE.title
+                : "API keys are managed by workspace admins"
           }
           description={
             data.error
               ? "Couldn't load API keys. Go back and try again."
               : data.canManage
                 ? "It may belong to another workspace, or the link is wrong."
-                : "Ask a workspace admin about this key."
+                : data.personal
+                  ? PERSONAL_UNAVAILABLE.description
+                  : "Ask a workspace admin about this key."
           }
           action={
             <Button type="button" variant="outline" onClick={onBack}>
@@ -784,8 +804,12 @@ function CreateKeyPage({
         <EmptyState
           variant="page"
           icon={<KeyRoundIcon />}
-          title="Only workspace admins can create API keys"
-          description="Ask a workspace admin to create a key for your script or app."
+          {...(data.personal
+            ? PERSONAL_UNAVAILABLE
+            : {
+                title: "Only workspace admins can create API keys",
+                description: "Ask a workspace admin to create a key for your script or app.",
+              })}
         />
       </DetailPage>
     );
