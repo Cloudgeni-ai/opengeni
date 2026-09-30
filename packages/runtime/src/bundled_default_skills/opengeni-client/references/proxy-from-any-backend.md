@@ -18,7 +18,7 @@ your product restricts sessions further).
 
 | Method | Path | Body rules |
 | --- | --- | --- |
-| GET | `config/client` | Set `apiContractRevision` in the response to the browser's `x-opengeni-api-contract` request header value |
+| GET | `config/client` | In the response: set `apiContractRevision` to the browser's `x-opengeni-api-contract` header value, set `sandboxFiles: false`, and remove `artifacts` |
 | GET | `workspaces/{ws}` | |
 | GET | `workspaces/{ws}/model-catalog` | |
 | GET | `workspaces/{ws}/live-events/stream` | SSE: stream through |
@@ -47,6 +47,12 @@ Message rules (send, steer, draft, submit): reject `mcpCredentialUpdates`;
 `reasoningEffort` and `latencyMode` if your product fixes the model. Your server
 may add `modelContext` (page state) and `mcpCredentialUpdates` (fresh tool
 tokens) before forwarding.
+
+Artifact and Site viewing (the JS handler's opt-in `artifacts: true`) is not in
+this list: it needs a per-user cache partition in `config/client`, live
+tickets, and a session-scope check on every read (`x-opengeni-session-id` plus
+`GET /v1/workspaces/{ws}/sessions/{sid}/artifact-associations/{id}`). Leave it
+out, and link artifacts to your own authenticated pages with `resolveLink`.
 
 Get the user's `subjectId` once per user from `GET /v1/access/me` with the
 headers below, and cache it.
@@ -152,6 +158,8 @@ def opengeni_proxy(request, rest):
         config = upstream.json()
         config["apiContractRevision"] = request.headers.get(
             "x-opengeni-api-contract", config["apiContractRevision"])
+        config["sandboxFiles"] = False  # sandbox-path reads are not proxied
+        config.pop("artifacts", None)  # upstream capabilities never cover this proxy
         return JsonResponse(config)
     return HttpResponse(upstream.content, status=upstream.status_code,
                         content_type=upstream.headers.get("content-type", "application/json"))
