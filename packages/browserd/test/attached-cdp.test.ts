@@ -61,6 +61,25 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test.each([
+    ["darwin", "Macintosh"],
+    ["win32", "Windows NT"],
+    ["linux", "Linux"],
+  ] as const)("retains %s keyboard platform in browser metadata", async (platform, marker) => {
+    const connection = new AttachedChromeCdpConnection(new FakeBridge(), {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+      platform,
+    });
+    try {
+      const version = await connection.send<{ userAgent: string }>("Browser.getVersion");
+      expect(version.userAgent).toContain(marker);
+      expect(/Macintosh|Mac OS/u.test(version.userAgent)).toBe(platform === "darwin");
+    } finally {
+      connection.close();
+    }
+  });
+
   test("virtualizes browser targets and tunnels target-scoped CDP with events", async () => {
     const bridge = new FakeBridge();
     const connection = new AttachedChromeCdpConnection(bridge, {
