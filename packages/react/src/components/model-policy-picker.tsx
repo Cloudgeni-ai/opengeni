@@ -1,3 +1,4 @@
+import { ClaudeMark } from "./claude-mark";
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
@@ -230,6 +231,8 @@ export function BillingClassMark(props: {
         <Globe2Icon className={mark} aria-hidden />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
+      ) : props.billingClass === "claude_subscription" ? (
+        <ClaudeMark className={mark} />
       ) : props.billingClass === "supergrok_subscription" ? (
         <XaiMark className={mark} />
       ) : (

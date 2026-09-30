@@ -1,3 +1,4 @@
+import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
   OrganizationModelProviderKind as ProviderKind,
@@ -32,9 +33,10 @@ export const ORGANIZATION_PROVIDER_META: Record<
     keyAriaLabel: "Anthropic API key",
     credentialLabelText: "API key",
     customModelsHeading: "Claude models",
-    customModelsDescription: "Add the exact Claude model IDs your account can use.",
+    customModelsDescription:
+      "Choose models for your workspaces. Availability depends on your Anthropic account.",
     customModelInputAriaLabel: "Anthropic model ID",
-    customModelPlaceholder: "claude-sonnet-4-6",
+    customModelPlaceholder: "Claude model ID",
     emptyCustomModelsDescription: "Add a Claude model to make it available in your workspaces.",
     readyModelDescription: "Available where connection access allows",
     waitingModelDescription: "Waiting for an Anthropic API key",
@@ -47,16 +49,16 @@ export const ORGANIZATION_PROVIDER_META: Record<
     shortName: "Claude",
     provider: "claude_subscription",
     billedTo: "The connected Claude subscription",
-    summary: "Use your Claude plan with a Claude Code setup token.",
+    summary: "Use your Claude plan in OpenGeni. Connect using Claude Code on your computer.",
     keyHelp:
       "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; OpenGeni does not refresh setup tokens.",
     keyAriaLabel: "Claude subscription setup token",
     credentialLabelText: "Setup token",
     customModelsHeading: "Claude models",
     customModelsDescription:
-      "Add the exact Claude model IDs available on your plan. Connection access controls which workspaces may use this subscription.",
+      "Choose models for your workspaces. Availability depends on your Claude plan.",
     customModelInputAriaLabel: "Claude subscription model ID",
-    customModelPlaceholder: "claude-sonnet-4-6",
+    customModelPlaceholder: "Claude model ID",
     emptyCustomModelsDescription: "Add a Claude model to make it available in your workspaces.",
     readyModelDescription: "Uses the connected Claude subscription",
     waitingModelDescription: "Waiting for a setup token",
@@ -310,9 +312,16 @@ export function useOrganizationProviderConnection({
     }
   }
 
-  async function addModel(): Promise<void> {
-    if (!slugValid || slugExists || modelBusy) return;
-    const submittedSlug = slug;
+  async function addModel(upstreamModelId?: string): Promise<void> {
+    const submittedSlug = upstreamModelId ?? slug;
+    if (
+      modelBusy ||
+      !submittedSlug ||
+      submittedSlug.length > WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH ||
+      !/^[!-{}-~]+$/.test(submittedSlug) ||
+      models.some((model) => model.upstreamModelId === submittedSlug)
+    )
+      return;
     const pending = pendingCreateRef.current;
     const operationId = pending?.slug === submittedSlug ? pending.operationId : crypto.randomUUID();
     pendingCreateRef.current = { slug: submittedSlug, operationId };
@@ -322,6 +331,10 @@ export function useOrganizationProviderConnection({
       client.createOrganizationProviderCustomModel(organizationId, providerKind, {
         operationId,
         upstreamModelId: submittedSlug,
+        ...((providerKind === "anthropic" || providerKind === "claude_subscription") &&
+        claudeModelLabel(submittedSlug) !== submittedSlug
+          ? { label: claudeModelLabel(submittedSlug) }
+          : {}),
       });
     const commit = (saved: CustomModel) => {
       pendingCreateRef.current = null;

@@ -1,3 +1,4 @@
+import { ClaudeMark, AnthropicMark } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
 import { RouteIcon, SparklesIcon } from "lucide-react";
 import { useCallback, useEffect, useState, type ComponentProps, type SVGProps } from "react";
@@ -45,12 +46,8 @@ export function ProviderMark({
 }) {
   if (provider === "codex") return <ChatGptMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
-  if (provider === "anthropic" || provider === "claude_subscription")
-    return (
-      <span aria-hidden="true" className={className}>
-        A
-      </span>
-    );
+  if (provider === "claude_subscription") return <ClaudeMark className={className} />;
+  if (provider === "anthropic") return <AnthropicMark className={className} />;
   if (provider === "supergrok") return <SparklesIcon aria-hidden="true" className={className} />;
   return <RouteIcon aria-hidden="true" className={className} />;
 }
@@ -82,6 +79,8 @@ export function payerShortLabel(row: { billingClass: string; providerLabel: stri
   switch (row.billingClass) {
     case "codex_subscription":
       return "Codex";
+    case "claude_subscription":
+      return "Claude";
     case "supergrok_subscription":
       return "SuperGrok";
     case "opengeni_credits":
@@ -99,6 +98,8 @@ export function payerLabel(billingClass: string, fallback?: string): string {
   switch (billingClass) {
     case "codex_subscription":
       return "Codex plan";
+    case "claude_subscription":
+      return "Claude plan";
     case "supergrok_subscription":
       return "SuperGrok plan";
     case "opengeni_credits":

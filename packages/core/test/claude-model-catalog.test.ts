@@ -128,6 +128,10 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
     (model) => model.providerId === "organization-anthropic",
   );
   const verified = models.find((model) => model.upstreamModelId === "claude-opus-5-5")!;
+  expect(verified.label).toBe("Claude Opus 5.5");
+  expect(
+    models.find((candidate) => candidate.upstreamModelId === "claude-custom-future")?.label,
+  ).toBe("claude-custom-future");
   expect(verified.capabilities.reasoning.runnable).toBe(true);
   expect(verified.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
   for (const model of models.filter((candidate) => candidate !== verified)) {

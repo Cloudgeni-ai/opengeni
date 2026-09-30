@@ -8053,7 +8053,13 @@ export function withClaudeConnectionCatalog(
           autoCompactTokenLimit: 150000,
           id: id + "/" + model.upstreamModelId,
           upstreamModelId: model.upstreamModelId,
-          label: model.label ?? model.upstreamModelId,
+          label:
+            model.label ??
+            (model.upstreamModelId === "claude-opus-5-5"
+              ? "Claude Opus 5.5"
+              : model.upstreamModelId === "claude-sonnet-5-5"
+                ? "Claude Sonnet 5.5"
+                : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
           hostedWebSearch: false,
           capabilities: {

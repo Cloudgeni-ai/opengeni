@@ -171,9 +171,14 @@ export function WorkspaceModelsPage({
         codexAvailable={canManageConnections}
         grok={!canManageConnections ? "hidden" : grok.unavailable ? "not_enabled" : "available"}
         gateways={gateways}
+        organizationClaude={canManageOrganizationModels && Boolean(organizationId)}
         scopeName={workspaceName}
         onClose={backToList}
-        onPick={(provider) => nav.openView(`connect:${provider}`)}
+        onPick={(provider) =>
+          provider === "claude_subscription" || provider === "anthropic"
+            ? organizationNav.openView(`connect:${provider}`)
+            : nav.openView(`connect:${provider}`)
+        }
         onOpenConnected={(provider) => nav.openAccount(`gateway:${provider}`)}
       />
     );
@@ -418,12 +423,14 @@ export function ConnectPickerPage({
   codexAvailable,
   grok,
   gateways,
+  organizationClaude = false,
   scopeName,
   onClose,
   onPick,
   onOpenConnected,
 }: {
   codexAvailable: boolean;
+  organizationClaude?: boolean;
   /** "not_enabled": this server has SuperGrok off. "hidden": the viewer can't connect it. */
   grok: "available" | "not_enabled" | "hidden";
   gateways?:
@@ -460,13 +467,30 @@ export function ConnectPickerPage({
           },
         ]
       : []),
+    ...(organizationClaude
+      ? [
+          {
+            id: "claude_subscription" as const,
+            title: "Claude subscription",
+            summary: "Use your Claude plan · Shared through your organization",
+          },
+          {
+            id: "anthropic" as const,
+            title: "Anthropic API",
+            summary: "Pay with an Anthropic API key · Shared through your organization",
+          },
+        ]
+      : []),
     ...(gateways
-      ? (["openrouter", "vercel", "anthropic", "claude_subscription"] as const)
+      ? (["claude_subscription", "anthropic", "openrouter", "vercel"] as const)
           .filter((id) => gateways[id]?.canManageConnection)
           .map((id) => ({
             id,
             title: gateways[id]!.config.title,
-            summary: gateways[id]!.config.billedTo,
+            summary:
+              id === "anthropic" || id === "claude_subscription"
+                ? gateways[id]!.config.summary
+                : `Pay per token through ${gateways[id]!.config.title}`,
             connected: gateways[id]!.connected,
           }))
       : []),
@@ -503,7 +527,7 @@ export function ConnectPickerPage({
                   key={choice.id}
                   leading={<ProviderTile provider={choice.id} size="lg" />}
                   title={choice.title}
-                  meta={[choice.connected ? "Connected" : choice.summary]}
+                  meta={[choice.summary, choice.connected ? "Already connected" : null]}
                   indicator="open"
                   onOpen={() =>
                     choice.connected &&

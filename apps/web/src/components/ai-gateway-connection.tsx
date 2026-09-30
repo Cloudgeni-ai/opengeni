@@ -1,3 +1,10 @@
+import {
+  ClaudeTokenInstructions,
+  useClaudeIdentityFields,
+  CLAUDE_MODEL_CHOICES,
+  claudeModelLabel,
+} from "@/components/models/claude-setup";
+import { Disclosure } from "@/components/ui/disclosure";
 import { trackModelConnection } from "@/lib/analytics-observer";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
@@ -306,7 +313,7 @@ export interface ProviderConnectionView {
   ): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
-  addCustomModel(): Promise<void>;
+  addCustomModel(upstreamModelId?: string): Promise<void>;
   removeCustomModel(model: CustomModelLike): Promise<boolean>;
 }
 
@@ -829,15 +836,19 @@ export function ProviderConnectionRow({
   const status = providerStatus(state);
   const models = state.customModels.length;
   const modelsLabel =
-    models === 0 ? null : models === 1 ? "1 custom model" : `${models} custom models`;
+    models === 0 ? "Choose models" : models === 1 ? "1 model" : `${models} models`;
   if (status.status === "loading") return <ListRowSkeleton count={1} />;
   return (
     <ListRow
       leading={<ProviderTile provider={config.provider} size="lg" />}
       title={config.title}
       meta={[
-        status.status === "connected" ? "API key" : status.label,
-        modelsLabel ?? (status.status === "connected" ? "Pay per token" : null),
+        status.status === "connected"
+          ? config.provider === "claude_subscription"
+            ? "Claude plan"
+            : "API key"
+          : status.label,
+        modelsLabel,
       ]}
       indicator={
         status.status === "unavailable" ? { kind: "unavailable", label: "Couldn't load" } : "open"
@@ -854,6 +865,7 @@ export function ProviderConnectionRow({
 function CustomModels({ state }: { state: ProviderConnection }) {
   const { config } = state;
   const modelSlugHelpId = useId();
+  const isClaude = config.provider === "anthropic" || config.provider === "claude_subscription";
   const readiness = state.error
     ? config.unavailableModelDescription
     : state.connected
@@ -862,59 +874,87 @@ function CustomModels({ state }: { state: ProviderConnection }) {
   return (
     <DetailSection title={config.customModelsHeading} description={config.customModelsDescription}>
       <div className="flex min-w-0 flex-col gap-4">
-        {state.canManageCustomModels ? (
-          <div ref={state.addWorkflowRef} className="flex min-w-0 flex-col gap-1.5">
-            <div className="flex min-w-0 gap-2">
-              <TextInput
-                ref={state.modelInputRef}
-                mono
-                value={state.modelSlug}
-                onChange={(event) => state.setModelSlug(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !state.modelBusy) {
-                    event.preventDefault();
-                    void state.addCustomModel();
-                  }
-                }}
-                disabled={state.modelBusy}
-                className="min-w-0 flex-1"
-                placeholder={config.customModelPlaceholder}
-                aria-label={config.customModelInputAriaLabel}
-                aria-describedby={modelSlugHelpId}
-                aria-invalid={state.modelSlugInvalid || undefined}
-                autoComplete="off"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
+        {isClaude && state.canManageCustomModels ? (
+          <SettingRowGroup>
+            {CLAUDE_MODEL_CHOICES.filter(
+              (model) =>
+                !state.customModels.some((current) => current.upstreamModelId === model.id),
+            ).map((model) => (
+              <SettingRow
+                key={model.id}
+                label={model.label}
+                description="Available if included in your account"
+                control={
+                  <RowButton
+                    disabled={state.modelBusy || !state.customModelsLoaded}
+                    onClick={() => void state.addCustomModel(model.id)}
+                  >
+                    <PlusIcon aria-hidden="true" />
+                    Add
+                  </RowButton>
+                }
               />
-              <Button
-                type="button"
-                variant="outline"
-                disabled={state.modelBusy || !state.modelSlugValid || state.modelSlugExists}
-                onClick={() => void state.addCustomModel()}
-                className="h-9 rounded-[10px] pointer-coarse:h-11"
+            ))}
+          </SettingRowGroup>
+        ) : null}
+        {state.canManageCustomModels ? (
+          <Disclosure
+            title={isClaude ? "Add another Claude model" : "Add a custom model"}
+            defaultOpen={!isClaude}
+          >
+            <div ref={state.addWorkflowRef} className="flex min-w-0 flex-col gap-1.5">
+              <div className="flex min-w-0 gap-2">
+                <TextInput
+                  ref={state.modelInputRef}
+                  mono
+                  value={state.modelSlug}
+                  onChange={(event) => state.setModelSlug(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !state.modelBusy) {
+                      event.preventDefault();
+                      void state.addCustomModel();
+                    }
+                  }}
+                  disabled={state.modelBusy}
+                  className="min-w-0 flex-1"
+                  placeholder={config.customModelPlaceholder}
+                  aria-label={config.customModelInputAriaLabel}
+                  aria-describedby={modelSlugHelpId}
+                  aria-invalid={state.modelSlugInvalid || undefined}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={state.modelBusy || !state.modelSlugValid || state.modelSlugExists}
+                  onClick={() => void state.addCustomModel()}
+                  className="h-9 rounded-[10px] pointer-coarse:h-11"
+                >
+                  {state.modelBusy ? (
+                    <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
+                  ) : (
+                    <PlusIcon aria-hidden="true" />
+                  )}
+                  Add model
+                </Button>
+              </div>
+              <p
+                id={modelSlugHelpId}
+                className={
+                  state.modelSlugInvalid
+                    ? "text-xs leading-4.5 text-danger"
+                    : "text-xs leading-4.5 text-fg-muted"
+                }
+                aria-live="polite"
+                aria-atomic="true"
               >
-                {state.modelBusy ? (
-                  <Loader2Icon aria-hidden="true" className="motion-safe:animate-spin" />
-                ) : (
-                  <PlusIcon aria-hidden="true" />
-                )}
-                Add model
-              </Button>
+                {state.modelSlugHelp}
+              </p>
             </div>
-            <p
-              id={modelSlugHelpId}
-              className={
-                state.modelSlugInvalid
-                  ? "text-xs leading-4.5 text-danger"
-                  : "text-xs leading-4.5 text-fg-muted"
-              }
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              {state.modelSlugHelp}
-            </p>
-          </div>
+          </Disclosure>
         ) : null}
 
         {state.customModelsError ? (
@@ -952,7 +992,10 @@ function CustomModels({ state }: { state: ProviderConnection }) {
                 key={model.id}
                 role="listitem"
                 label={
-                  <span className="font-mono text-xs font-normal">{model.upstreamModelId}</span>
+                  <span>
+                    {model.label ??
+                      (isClaude ? claudeModelLabel(model.upstreamModelId) : model.upstreamModelId)}
+                  </span>
                 }
                 description={readiness}
                 control={
@@ -1018,65 +1061,6 @@ function CustomModels({ state }: { state: ProviderConnection }) {
   );
 }
 
-/** Replace credential: a one-field prompt. */
-function useClaudeIdentityFields(provider: ProviderPresentation["provider"]) {
-  const [accountUuid, setAccountUuid] = useState("");
-  const [deviceId, setDeviceId] = useState("");
-  const enabled = provider === "claude_subscription";
-  const accountValid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    accountUuid.trim(),
-  );
-  const deviceValid = /^[a-f0-9]{64}$/.test(deviceId.trim());
-  const valid = !enabled || (accountValid && deviceValid);
-  const reset = useCallback(() => {
-    setAccountUuid("");
-    setDeviceId("");
-  }, []);
-  return {
-    valid,
-    identity: enabled ? { accountUuid: accountUuid.trim(), deviceId: deviceId.trim() } : undefined,
-    reset,
-    fields: enabled ? (
-      <FieldStack>
-        <Field
-          label="Claude account UUID"
-          required
-          error={
-            accountUuid.trim() && !accountValid
-              ? "Enter the complete account UUID, including hyphens."
-              : undefined
-          }
-          hint="From oauthAccount.accountUuid in ~/.claude.json on the machine signed in to this Claude account."
-        >
-          <TextInput
-            aria-label="Claude account UUID"
-            autoComplete="off"
-            value={accountUuid}
-            onChange={(event) => setAccountUuid(event.target.value)}
-          />
-        </Field>
-        <Field
-          label="Claude device ID"
-          required
-          error={
-            deviceId.trim() && !deviceValid
-              ? "Enter the 64-character lowercase hexadecimal userID."
-              : undefined
-          }
-          hint="From userID in the same ~/.claude.json file. Both identifiers are encrypted with the token; they are not your OpenGeni account IDs."
-        >
-          <TextInput
-            aria-label="Claude device ID"
-            autoComplete="off"
-            value={deviceId}
-            onChange={(event) => setDeviceId(event.target.value)}
-          />
-        </Field>
-      </FieldStack>
-    ) : null,
-  };
-}
-
 export function ReplaceKeyDialog({
   state,
   open,
@@ -1088,7 +1072,7 @@ export function ReplaceKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const { config } = state;
-  const claude = useClaudeIdentityFields(config.provider);
+  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
   const resetIdentity = claude.reset;
   useEffect(() => {
     if (!open) {
@@ -1146,10 +1130,12 @@ export function ProviderDisconnectDialog({
       title={`Disconnect ${config.title}?`}
       consequences={[
         models > 0
-          ? `Models billed to this key, including ${models === 1 ? "its custom model" : `its ${models} custom models`}, stop working for new work.`
+          ? `The ${models === 1 ? "model" : `${models} models`} using this connection stop working for new work.`
           : `Models billed to ${config.title} stop working for new work.`,
         "Work already running finishes first.",
-        "The key is deleted. You'll need a new one to reconnect.",
+        config.provider === "claude_subscription"
+          ? "The saved token is removed from OpenGeni. Your Claude subscription stays active."
+          : "The saved API key is removed from OpenGeni. You can reconnect with a valid key.",
       ]}
       confirmLabel="Disconnect"
       pendingLabel="Disconnecting…"
@@ -1201,28 +1187,30 @@ export function ProviderConnectionPage({
       leading={<ProviderTile provider={config.provider} />}
       title={config.title}
       chips={
-        status.status === "loading" ? null : (
+        status.status === "loading" || status.status === "connected" ? null : (
           <StatusBadge
             variant="outline"
-            status={
-              status.status === "connected"
-                ? "connected"
-                : status.status === "unavailable"
-                  ? "unavailable"
-                  : "off"
-            }
+            status={status.status === "unavailable" ? "unavailable" : "off"}
           >
             {status.label}
           </StatusBadge>
         )
       }
-      meta={[config.credentialLabelText ?? "API key", scopeName ?? state.scopeLabel]}
+      meta={[
+        config.provider === "claude_subscription" ? "Claude plan" : "API key",
+        scopeName ?? state.scopeLabel,
+      ]}
       actions={
         state.canManageConnection ? (
           state.connected ? (
             <>
-              <RowButton onClick={() => setReplacing(true)} disabled={state.busy}>
-                Replace credential
+              <RowButton
+                onClick={() =>
+                  config.provider === "claude_subscription" ? onConnect() : setReplacing(true)
+                }
+                disabled={state.busy}
+              >
+                {config.provider === "claude_subscription" ? "Replace token" : "Replace API key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
                 <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
@@ -1254,8 +1242,11 @@ export function ProviderConnectionPage({
       <DetailPageBody
         aside={
           <DetailAside label={`About ${config.title}`}>
-            <DetailAsideItem label="Key" icon={<KeyRoundIcon />}>
-              {state.connected ? "Stored encrypted" : "No key yet"}
+            <DetailAsideItem
+              label={config.credentialLabelText ?? "API key"}
+              icon={<KeyRoundIcon />}
+            >
+              {state.connected ? "Stored encrypted" : "Not connected"}
             </DetailAsideItem>
             <DetailAsideItem
               label="Belongs to"
@@ -1290,6 +1281,14 @@ export function ProviderConnectionPage({
         {!state.canManageConnection ? (
           <DetailSection>
             <p className="text-sm text-fg-muted">{config.connectionManagerDescription}</p>
+          </DetailSection>
+        ) : null}
+        {config.provider === "claude_subscription" ? (
+          <DetailSection title="Subscription">
+            <p className="text-sm text-fg-muted">
+              Model calls use your Claude plan. Usage limits and renewal are managed in Claude.
+              Replace the token here if it expires or is revoked.
+            </p>
           </DetailSection>
         ) : null}
         <CustomModels state={state} />
@@ -1331,13 +1330,19 @@ export function ProviderConnectPage({
 }) {
   const { config } = state;
   const [key, setKey] = useState("");
-  const claude = useClaudeIdentityFields(config.provider);
+  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
   return (
     <ModelsFormPage
-      title={`Connect ${config.title}`}
+      backLabel={state.connected ? config.title : "Models"}
+      headerAside={<ProviderTile provider={config.provider} />}
+      title={
+        state.connected
+          ? `Replace ${config.provider === "claude_subscription" ? "Claude token" : config.title + " API key"}`
+          : `Connect ${config.title}`
+      }
       description={config.summary}
       onClose={onClose}
-      submitLabel={`Connect ${config.title}`}
+      submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
       submitDisabled={!key.trim() || !claude.valid || !state.canManageConnection}
@@ -1346,14 +1351,24 @@ export function ProviderConnectPage({
           ? undefined
           : "Only people who can manage connections can add a key."
       }
-      footerStart={footerStart}
+      footerStart={
+        footerStart ??
+        (state.organization
+          ? "Shared with your organization’s workspaces. You can limit access on the account page."
+          : undefined)
+      }
       onSubmit={async () => await state.saveKey(key, claude.identity)}
       onSubmitted={onConnected}
     >
       <FieldStack>
+        {config.provider === "claude_subscription" ? <ClaudeTokenInstructions /> : null}
         <Field
           label={config.credentialLabelText ?? "API key"}
-          hint={`${config.keyHelp} It's stored encrypted and never shown again. Connecting doesn't run a model or spend credits.`}
+          hint={
+            config.provider === "claude_subscription"
+              ? "Paste the setup token from Claude Code. It is stored encrypted. Connecting makes no model calls."
+              : `${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`
+          }
         >
           <SecretInput
             value={key}

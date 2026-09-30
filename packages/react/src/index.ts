@@ -653,3 +653,6 @@ export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 
 export { StartupTimings } from "./timeline/startup-timings";
 export { setStartupDetails, useStartupDetails } from "./timeline/startup-preference";
+
+export { ClaudeMark } from "./components/claude-mark";
+export { AnthropicMark } from "./components/anthropic-mark";

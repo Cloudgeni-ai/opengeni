@@ -17,3 +17,5 @@ Pin the Claude subscription client identity headers, persist account/device meta
 Preserve Claude session identity across worker turns and recovery while keeping prompt lineage scoped to each run.
 
 Admit organization Claude models through session creation and lock their correct connection kind. Preserve Claude provider labels in the client catalog. Project initial system/developer instructions into Anthropic’s top-level system field so full agent sessions with skill instructions execute successfully.
+
+Polish Claude setup with local settings import, full-page token renewal, named model choices, provider marks, accurate subscription payment labels, and workspace discovery of organization-owned connections.

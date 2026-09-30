@@ -1255,7 +1255,14 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 Organization Models supports **Anthropic API** keys and **Claude subscription**
 setup tokens as separate connections. Generate a subscription token with
 `claude setup-token`; OpenGeni does not refresh it. Replace expired or revoked
-credentials on the connection page. Credentials are encrypted with the existing
+credentials on the connection page. Claude setup offers a copyable terminal command
+and a local import of `~/.claude.json`; only its account/device identifiers are
+submitted with the token, never the settings file. Manual entry remains available
+in the setup disclosure. Token replacement uses the same full-page form. Named
+Opus/Sonnet choices add models without requiring model IDs; other IDs remain
+available under the model disclosure. Workspace administrators who can manage
+organization models can open this shared setup from the workspace Connect account
+page. Credentials are encrypted with the existing
 organization connection storage and workspace access policy. Add exact upstream
 model IDs to each connection; connecting alone does not validate model entitlement
 or make a paid model call. Subscription usage consumes the connected plan's limits;

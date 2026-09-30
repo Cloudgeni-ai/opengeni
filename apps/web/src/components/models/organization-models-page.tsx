@@ -167,8 +167,9 @@ export function OrganizationModelsPage({
     const id = view.slice("connect:".length) as keyof typeof gateways;
     page = (
       <ProviderConnectPage
+        key={id}
         state={gateways[id]}
-        onClose={backToList}
+        onClose={() => (gateways[id].connected ? nav.openAccount(`gateway:${id}`) : backToList())}
         onConnected={() => nav.openAccount(`gateway:${id}`)}
       />
     );
