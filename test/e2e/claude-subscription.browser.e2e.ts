@@ -310,7 +310,16 @@ for (const theme of ["dark", "light"] as const) {
           const cancelPopup = await cancelPopupPromise;
           await cancelPopup.getByText("Approve access in Claude", { exact: true }).waitFor();
           await page.getByRole("button", { name: "Cancel", exact: true }).click();
-          await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+          await page.getByRole("button", { name: "Claude subscription", exact: false }).waitFor();
+          expect(await page.getByLabel("Claude authorization code").count()).toBe(0);
+          expect(
+            await page.evaluate(
+              () =>
+                Object.keys(sessionStorage).filter((key) =>
+                  key.startsWith("opengeni.claude-signin:"),
+                ).length,
+            ),
+          ).toBe(0);
           expect(cancelPopup.isClosed()).toBe(false);
           expect(await cancelPopup.evaluate(() => window.opener === null)).toBe(true);
           await Promise.all([
