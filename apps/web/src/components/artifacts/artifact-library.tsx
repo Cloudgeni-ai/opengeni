@@ -46,6 +46,7 @@ import {
   type ToolbarFilterValue,
 } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
+import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import {
   artifactKey,
   artifactKindLabel,
@@ -604,7 +605,9 @@ export function ArtifactLibrary({
       : (artifactKinds.find(([kind]) => kind === filters.kind)?.[1] ?? "").toLocaleLowerCase();
 
   let body: ReactNode;
-  if (error && items.length === 0) {
+  if (error && items.length === 0 && isPermissionDenied(error)) {
+    body = <Notice title="You can't see artifacts here.">Ask a workspace admin for access.</Notice>;
+  } else if (error && items.length === 0) {
     body = (
       <Notice
         tone="failed"
@@ -616,7 +619,7 @@ export function ArtifactLibrary({
         }
         actionLayout="responsive"
       >
-        {error.message}
+        {apiErrorAdvice(error)}
       </Notice>
     );
   } else if (loading && items.length === 0) {
@@ -637,7 +640,7 @@ export function ArtifactLibrary({
         variant={compact ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
         title="No artifacts yet"
-        description="Sites, images, documents, spreadsheets and presentations Geni makes show up here."
+        description="Sites, images, documents, spreadsheets and presentations Opengeni makes show up here."
         action={emptyAction}
       />
     );
@@ -713,7 +716,7 @@ export function ArtifactLibrary({
         )}
         {error ? (
           <p role="alert" className="text-sm text-danger">
-            {error.message}
+            Couldn't load the latest artifacts. {userErrorText(error)}
           </p>
         ) : null}
         {nextCursor && onLoadMore ? (
