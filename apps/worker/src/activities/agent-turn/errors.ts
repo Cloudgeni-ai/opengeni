@@ -84,6 +84,12 @@ import {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+/**
+ * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
+ * answer a per-minute token limit with a `retry-after` of about a second, which
+ * alone would spend every automatic recovery before the window resets.
+ */
+export const PROVIDER_RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const;
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 
 export class PostCompactionContinuationEmptyError extends Error {
@@ -127,7 +133,15 @@ export function providerRecoveryResult(input: {
       : null;
   const continueDelayMs =
     input.failureCode === "provider_rate_limited"
-      ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
+      ? Math.max(
+          providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+          PROVIDER_RATE_LIMIT_BACKOFF_MS[
+            Math.min(
+              Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+              PROVIDER_RATE_LIMIT_BACKOFF_MS.length - 1,
+            )
+          ]!,
+        )
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "sandbox_command_start_unavailable" ||

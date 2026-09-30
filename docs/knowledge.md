@@ -132,6 +132,14 @@ cannot become accepted answers. An unavailable prepare tool falls back to
 ordinary search in both views and collection browsing, without widening the
 task's selected tools or permissions.
 
+A create omits `entryId` and passes `expectedVersion: 0`. OpenGeni derives the
+id from `operationId` (`knowledgeEntryIdForOperation` in
+`packages/db/src/knowledge-entries.ts`), so an exact retry replays the same
+receipt. A correction passes an existing `entryId` and its current version. The
+all-zero UUID is rejected. A supplied id that already belongs to another entry
+fails as `knowledge_entry_id_taken` (HTTP 409), even when row-level security hides
+that entry, instead of reading as operation-ID reuse.
+
 ### Model-visible discovery results
 
 `knowledge_search` (first-party and Docs MCP) and `knowledge_prepare_save`
