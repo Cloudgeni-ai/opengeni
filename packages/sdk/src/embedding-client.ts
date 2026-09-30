@@ -61,8 +61,23 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
   }
 
   /**
+   * Read the lifecycle version even after clear (config=null). version=0 means
+   * never configured. Use the returned version to recreate or reconcile a 409;
+   * do not guess a CAS version or silently retry a new mutation.
+   * Requires the same budget-read authority as getWorkspaceAllowance.
+   */
+  async getWorkspaceAllowanceState(
+    workspaceId: string,
+  ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceAllowanceState> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/allowance/state`,
+    );
+  }
+
+  /**
    * Set a USD-micro ceiling with exact-version CAS (0 only for first creation;
-   * after clear reuse its returned version). Requires
+   * after clear reuse its returned version or getWorkspaceAllowanceState). Requires
    * organization key-control authority or account:admin, never workspace admin
    * alone. Shares may oversubscribe the pool; actual post-call settlement can
    * overshoot before the next admission check.
@@ -78,7 +93,12 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
-  /** Clear with the exact version; grants and settled usage are not a billing refund. */
+  /**
+   * Clear with the exact version; grants and settled usage are not a billing
+   * refund. Supply operationId and replay the exact request after a lost response.
+   * Replays recheck authority and conflict after a later lifecycle change.
+   * On 409 read getWorkspaceAllowanceState before deciding on a new operation.
+   */
   async clearWorkspaceAllowance(
     workspaceId: string,
     request: import("@opengeni/contracts/usage-allowances").ClearWorkspaceAllowanceRequest,

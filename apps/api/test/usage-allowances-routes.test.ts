@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type AccessContext, type Permission } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import {
+  accessGrantAuthorizationFromContext,
+  type AccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import { requestBodyValidationHttpError } from "../src/http/request-body";
-import { registerUsageAllowanceRoutes } from "../src/routes/usage-allowances";
+import {
+  registerUsageAllowanceRoutes,
+  requireAllowanceAuthority,
+} from "../src/routes/usage-allowances";
 import { createApp, workspaceActorContextExempt } from "../src/app";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
@@ -51,7 +58,7 @@ function track<T extends { mockRestore(): void }>(spy: T): T {
   return spy;
 }
 
-function app(usageAllowancesEnabled = true) {
+function app(usageAllowancesEnabled = true, productAccessMode: "managed" | "local" = "managed") {
   const api = new Hono();
   api.onError((error, c) => {
     const mapped = requestBodyValidationHttpError(error) ?? error;
@@ -61,7 +68,7 @@ function app(usageAllowancesEnabled = true) {
   });
   registerUsageAllowanceRoutes(api, {
     settings: testSettings({
-      productAccessMode: "managed",
+      productAccessMode,
       delegationSecret: secret,
       usageAllowancesEnabled,
     }),
@@ -132,6 +139,7 @@ function storage() {
   );
   return {
     get: track(spyOn(db, "getWorkspaceAllowance").mockResolvedValue(config)),
+    state: track(spyOn(db, "getWorkspaceAllowanceState").mockResolvedValue({ version: 1, config })),
     set: track(spyOn(db, "setWorkspaceAllowance").mockResolvedValue(config)),
     clear: track(spyOn(db, "clearWorkspaceAllowance").mockResolvedValue({ version: 2 })),
     grant: track(
@@ -207,6 +215,7 @@ describe("allowance authorization matrix", () => {
       } as never),
     );
     expect((await request(api, `${path}/allowance`, auth)).status).toBe(200);
+    expect((await request(api, `${path}/allowance/state`, auth)).status).toBe(200);
     expect(
       (
         await request(api, `${path}/allowance`, auth, "PUT", {
@@ -252,7 +261,7 @@ describe("allowance authorization matrix", () => {
         kind: "shared",
       } as never),
     );
-    expect((await request(api, `${path}/allowance`, auth)).status).toBe(404);
+    expect((await request(api, `${path}/allowance`, auth)).status).toBe(403);
     target.mockResolvedValue({ id: workspaceId, accountId, kind: "personal" } as never);
     expect((await request(api, `${path}/allowance`, auth)).status).toBe(403);
     target.mockResolvedValue({ id: workspaceId, accountId, kind: "shared" } as never);
@@ -277,6 +286,7 @@ describe("allowance authorization matrix", () => {
       ).status,
     ).toBe(200);
     expect((await request(fullApp, `${path}/usage`, auth)).status).toBe(403);
+    expect((await request(fullApp, `${path}/allowance/state`, auth)).status).toBe(200);
   });
 
   test("workspace admin reads/configures members but never changes workspace budgets", async () => {
@@ -284,6 +294,7 @@ describe("allowance authorization matrix", () => {
     const api = app();
     const auth = await bearer(["workspace:admin"]);
     expect((await request(api, `${path}/allowance`, auth)).status).toBe(200);
+    expect((await request(api, `${path}/allowance/state`, auth)).status).toBe(200);
     expect((await request(api, `${path}/usage`, auth)).status).toBe(200);
     expect(
       (
@@ -307,7 +318,7 @@ describe("allowance authorization matrix", () => {
     expect(spies.grant).not.toHaveBeenCalled();
   });
 
-  test("literal account admin can change budgets; billing and membership permission cannot", async () => {
+  test("verified account admin with target access reads full usage; billing and membership permission cannot", async () => {
     const spies = storage();
     const api = app();
     expect(
@@ -326,7 +337,8 @@ describe("allowance authorization matrix", () => {
       actorType: "human_session",
       expectedVersion: 0,
     });
-    expect((await request(api, `${path}/usage`, await bearer(["account:admin"]))).status).toBe(403);
+    expect((await request(api, `${path}/usage`, await bearer(["account:admin"]))).status).toBe(200);
+    expect(spies.usage.mock.calls[0]![1]).toMatchObject({ accountId, workspaceId });
     for (const permissions of [
       ["billing:manage"],
       ["billing:read"],
@@ -356,6 +368,93 @@ describe("allowance authorization matrix", () => {
     ).toBe(403);
   });
 
+  test("account admin full reads require a resolver-produced authorization, not a matching shape", () => {
+    const context: AccessContext = {
+      mode: "managed",
+      subjectId,
+      accountGrants: [{ accountId, subjectId, permissions: ["account:admin"] }],
+      workspaceGrants: [
+        {
+          accountId,
+          workspaceId,
+          subjectId,
+          principalKind: "human_session",
+          permissions: ["workspace:read"],
+        },
+      ],
+    };
+    const authorization = accessGrantAuthorizationFromContext(context, context.workspaceGrants[0]!);
+    expect(() => requireAllowanceAuthority({ authorization, context }, "read")).not.toThrow();
+    expect(() =>
+      requireAllowanceAuthority(
+        { authorization: { ...authorization } as AccessGrantAuthorization, context },
+        "read",
+      ),
+    ).toThrow("workspace access authorization is invalid");
+    const wrongAccount = accessGrantAuthorizationFromContext(
+      {
+        ...context,
+        accountGrants: [{ accountId: keyId, subjectId, permissions: ["account:admin"] }],
+      },
+      context.workspaceGrants[0]!,
+    );
+    expect(() =>
+      requireAllowanceAuthority({ authorization: wrongAccount, context }, "read"),
+    ).toThrow();
+  });
+
+  test("an unrelated organization budget lookup miss falls through to normal native target access", async () => {
+    const spies = storage();
+    const otherAccountId = "44444444-4444-4444-8444-444444444444";
+    const anchorId = "88888888-8888-4888-8888-888888888888";
+    const context: AccessContext = {
+      mode: "local",
+      subjectId,
+      accountGrants: [
+        { accountId: otherAccountId, subjectId, permissions: ["account:admin"] },
+        { accountId, subjectId, permissions: ["account:read"] },
+      ],
+      workspaceGrants: [
+        {
+          accountId: otherAccountId,
+          workspaceId: anchorId,
+          subjectId,
+          principalKind: "human_session",
+          permissions: ["workspace:read"],
+        },
+        {
+          accountId,
+          workspaceId,
+          subjectId,
+          principalKind: "human_session",
+          permissions: ["workspace:admin"],
+        },
+      ],
+    };
+    track(spyOn(db, "bootstrapWorkspace").mockResolvedValue(context));
+    track(spyOn(db, "getWorkspace").mockResolvedValue(null));
+    const api = app(true, "local");
+    expect((await request(api, `${path}/allowance`, undefined)).status).toBe(200);
+    expect((await request(api, `${path}/usage`, undefined)).status).toBe(200);
+    expect(spies.get.mock.calls[0]![1]).toMatchObject({ accountId, workspaceId });
+    expect(
+      (await request(api, `${path}/allowance`, undefined, "DELETE", { expectedVersion: 1 })).status,
+    ).toBe(403);
+    expect(spies.clear).not.toHaveBeenCalled();
+    context.accountGrants[1]!.permissions = ["account:admin"];
+    track(
+      spyOn(db, "getWorkspace").mockImplementation(async (_db, targetId) =>
+        targetId === workspaceId
+          ? ({ id: workspaceId, accountId, kind: "personal" } as never)
+          : null,
+      ),
+    );
+    expect(
+      (await request(api, `${path}/allowance`, undefined, "DELETE", { expectedVersion: 1 })).status,
+    ).toBe(403);
+    expect(spies.clear).not.toHaveBeenCalled();
+  });
+
   test("agents with all permissions are denied on every read and write", async () => {
     const spies = storage();
     const api = app();
@@ -365,6 +464,7 @@ describe("allowance authorization matrix", () => {
     );
     for (const [route, method, body] of [
       [`${path}/allowance`, "GET", undefined],
+      [`${path}/allowance/state`, "GET", undefined],
       [`${path}/usage`, "GET", undefined],
       [`${path}/usage/me`, "GET", undefined],
       [`${path}/allowance`, "PUT", { includedCredits: 1, period: "none", expectedVersion: 0 }],
@@ -391,6 +491,7 @@ describe("allowance authorization matrix", () => {
     });
     expect((await request(api, `${path}/usage`, auth)).status).toBe(403);
     expect((await request(api, `${path}/allowance`, auth)).status).toBe(403);
+    expect((await request(api, `${path}/allowance/state`, auth)).status).toBe(403);
     for (const principal of ["service"] as const) {
       expect(
         (await request(api, `${path}/usage/me`, await bearer(["workspace:admin"], principal)))
@@ -470,6 +571,8 @@ describe("allowance authorization matrix", () => {
       ).toBe(403);
     }
     expect((await api.request(`${path}/usage`, { headers })).status).toBe(403);
+    expect((await api.request(`${path}/allowance`, { headers })).status).toBe(403);
+    expect((await api.request(`${path}/allowance/state`, { headers })).status).toBe(403);
     expect(spies.set).not.toHaveBeenCalled();
     expect(spies.clear).not.toHaveBeenCalled();
     expect(spies.grant).not.toHaveBeenCalled();
@@ -557,6 +660,7 @@ describe("allowance authorization matrix", () => {
     let auth = organizationKey(["account:read", "workspace:read", "sessions:read"]);
     expect((await request(api, `${path}/usage`, auth)).status).toBe(200);
     expect((await request(api, `${path}/allowance`, auth)).status).toBe(200);
+    expect((await request(api, `${path}/allowance/state`, auth)).status).toBe(200);
     expect(
       (
         await request(api, `${path}/allowance/grants`, auth, "POST", {
@@ -643,6 +747,7 @@ describe("allowance HTTP contract", () => {
     const api = app(false);
     const auth = await bearer(["workspace:admin", "account:admin"]);
     expect((await request(api, `${path}/allowance`, auth)).status).toBe(200);
+    expect((await request(api, `${path}/allowance/state`, auth)).status).toBe(200);
     expect((await request(api, `${path}/usage`, auth)).status).toBe(200);
     expect((await request(api, `${path}/usage/me`, auth)).status).toBe(200);
     expect(
@@ -703,8 +808,13 @@ describe("allowance HTTP contract", () => {
     expect(
       (await request(fullApp, "/v1/workspaces/external/host/customer/allowance", auth)).status,
     ).toBe(200);
+    expect(
+      (await request(fullApp, "/v1/workspaces/external/host/customer/allowance/state", auth))
+        .status,
+    ).toBe(200);
     for (const [method, suffix] of [
       ["GET", "/allowance"],
+      ["GET", "/allowance/state"],
       ["PUT", "/allowance"],
       ["DELETE", "/allowance"],
       ["POST", "/allowance/grants"],
@@ -722,6 +832,11 @@ describe("allowance HTTP contract", () => {
     expect(
       workspaceActorContextExempt("GET", "/v1/workspaces/external/host/customer/sessions"),
     ).toBe(false);
+    expect(workspaceActorContextExempt("GET", `${path}/allowance/state`)).toBe(true);
+    expect(workspaceActorContextExempt("PUT", `${path}/allowance/state`)).toBe(false);
+    expect(
+      workspaceActorContextExempt("POST", "/v1/workspaces/external/host/customer/allowance/state"),
+    ).toBe(false);
   });
 
   test("requires authentication before all storage access", async () => {
@@ -729,6 +844,7 @@ describe("allowance HTTP contract", () => {
     const api = app();
     track(spyOn(db, "findActiveApiKeyByHash").mockResolvedValue(null));
     expect((await request(api, `${path}/allowance`, undefined)).status).toBe(401);
+    expect((await request(api, `${path}/allowance/state`, undefined)).status).toBe(401);
     for (const spy of Object.values(spies)) expect(spy).not.toHaveBeenCalled();
   });
 
@@ -746,6 +862,15 @@ describe("allowance HTTP contract", () => {
     expect(
       (await request(api, `${path}/allowance`, auth, "DELETE", { expectedVersion: 0 })).status,
     ).toBe(400);
+    for (const operationId of ["", " ", "é".repeat(129)])
+      expect(
+        (
+          await request(api, `${path}/allowance`, auth, "DELETE", {
+            expectedVersion: 1,
+            operationId,
+          })
+        ).status,
+      ).toBe(400);
     for (const query of [
       "period=2026-13",
       "limit=0",
@@ -768,6 +893,13 @@ describe("allowance HTTP contract", () => {
     const auth = await bearer(["workspace:admin"]);
     spies.get.mockResolvedValue(null);
     expect(await (await request(api, `${path}/allowance`, auth)).json()).toBeNull();
+    for (const version of [0, 2]) {
+      spies.state.mockResolvedValue({ version, config: null });
+      expect(await (await request(api, `${path}/allowance/state`, auth)).json()).toEqual({
+        version,
+        config: null,
+      });
+    }
     const response = await request(
       api,
       `${path}/usage?period=2026-09&limit=20&cursor=user%3Afirst`,
@@ -824,6 +956,25 @@ describe("allowance HTTP contract", () => {
     expect(spies.member).toHaveBeenCalledTimes(2);
   });
 
+  test("clear forwards an optional exact operation key and preserves the version receipt", async () => {
+    const spies = storage();
+    const api = app();
+    const auth = await bearer(["account:admin", "workspace:read"]);
+    const body = { expectedVersion: 1, operationId: "clear/once" };
+    expect(await (await request(api, `${path}/allowance`, auth, "DELETE", body)).json()).toEqual({
+      version: 2,
+    });
+    expect(spies.clear.mock.calls[0]![1]).toEqual({
+      accountId,
+      workspaceId,
+      actorSubjectId: subjectId,
+      actorType: "human_session",
+      ...body,
+    });
+    spies.clear.mockRejectedValue(new db.UsageAllowanceVersionConflictError());
+    expect((await request(api, `${path}/allowance`, auth, "DELETE", body)).status).toBe(409);
+  });
+
   test("only defined methods dispatch", async () => {
     const spies = storage();
     const api = app();
@@ -831,6 +982,8 @@ describe("allowance HTTP contract", () => {
     for (const [route, method] of [
       [`${path}/allowance`, "POST"],
       [`${path}/allowance`, "PATCH"],
+      [`${path}/allowance/state`, "PUT"],
+      [`${path}/allowance/state`, "POST"],
       [`${path}/allowance/grants`, "GET"],
       [`${path}/allowance/grants`, "PUT"],
       [`${path}/usage`, "POST"],

@@ -8,6 +8,7 @@ import {
   SetMemberAllowanceRequest,
   SetWorkspaceAllowanceRequest,
   WorkspaceAllowance,
+  WorkspaceAllowanceState,
   WorkspaceCreditGrant,
   WorkspaceUsageResponse,
   MemberAllowance,
@@ -29,6 +30,7 @@ import {
   clearWorkspaceAllowance,
   findWorkspaceByExternalIdentity,
   getWorkspaceAllowance,
+  getWorkspaceAllowanceState,
   getWorkspace,
   getWorkspaceUsage,
   grantWorkspaceCredits,
@@ -58,7 +60,9 @@ export function requireAllowanceAuthority(
   const organizationKey = accountScopedApiKeyWorkspaceAuthority(context);
   const sameOrganizationKey =
     organizationKey?.accountId === grant.accountId ? organizationKey : null;
-  const accountAdmin = authorization.accountGrant?.permissions.includes("account:admin") === true;
+  const accountAdmin =
+    authorization.accountGrant?.permissions.includes("account:admin") === true &&
+    requireAccountAdminAuthorizationStamp(authorization).accountId === grant.accountId;
   const workspaceAdmin = grant.permissions.includes("workspace:admin");
   if (operation === "own") {
     if (grant.principalKind !== "human_session" || grant.serviceInitiator) {
@@ -69,7 +73,7 @@ export function requireAllowanceAuthority(
   if (operation === "read" || operation === "budget-read") {
     if (
       workspaceAdmin ||
-      (operation === "budget-read" && accountAdmin) ||
+      accountAdmin ||
       sameOrganizationKey?.permissions.includes("workspace:read")
     )
       return;
@@ -140,7 +144,6 @@ async function authorize(c: Context, deps: ApiRouteDeps, operation: Operation) {
     // Organization budget management does not require membership in the
     // target shared workspace. Validate the existing authenticated account
     // authority on its own anchor, never manufacture a target workspace grant.
-    let hasAccountBudgetAuthority = false;
     for (const account of context.accountGrants) {
       if (account.subjectId !== context.subjectId || !account.permissions.includes("account:admin"))
         continue;
@@ -156,7 +159,6 @@ async function authorize(c: Context, deps: ApiRouteDeps, operation: Operation) {
       const stamp = requireAccountAdminAuthorizationStamp(
         accessGrantAuthorizationFromContext(context, anchor),
       );
-      hasAccountBudgetAuthority = true;
       const target = await withAccountRls(deps.db, stamp.accountId, (tx) =>
         getWorkspace(tx, workspaceId),
       );
@@ -173,9 +175,8 @@ async function authorize(c: Context, deps: ApiRouteDeps, operation: Operation) {
         actorType: "human_session" as const,
       };
     }
-    if (hasAccountBudgetAuthority) {
-      throw new HTTPException(404, { message: "Shared workspace not found in your organization" });
-    }
+    // An administrator of another organization may still hold an ordinary
+    // target grant. A budget lookup miss grants nothing and must not mask it.
   }
   const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
   requireAllowanceAuthority({ authorization, context }, operation);
@@ -242,6 +243,12 @@ export function registerUsageAllowanceRoutes(app: Hono, deps: ApiRouteDeps): voi
       const result = await getWorkspaceAllowance(deps.db, scope);
       return c.json(result === null ? null : WorkspaceAllowance.parse(result));
     });
+    app.get(`${base}/allowance/state`, async (c) => {
+      const scope = await authorize(c, deps, "budget-read");
+      return c.json(
+        WorkspaceAllowanceState.parse(await getWorkspaceAllowanceState(deps.db, scope)),
+      );
+    });
     app.put(`${base}/allowance`, async (c) => {
       const scope = await authorize(c, deps, "workspace-write");
       const request = await parseRequestJson(c, SetWorkspaceAllowanceRequest);
@@ -280,7 +287,13 @@ export function registerUsageAllowanceRoutes(app: Hono, deps: ApiRouteDeps): voi
       const request = await parseRequestJson(c, ClearWorkspaceAllowanceRequest);
       return c.json(
         ClearWorkspaceAllowanceResponse.parse(
-          await lifecycle(() => clearWorkspaceAllowance(deps.db, { ...scope, ...request })),
+          await lifecycle(() =>
+            clearWorkspaceAllowance(deps.db, {
+              ...scope,
+              expectedVersion: request.expectedVersion,
+              ...(request.operationId === undefined ? {} : { operationId: request.operationId }),
+            }),
+          ),
         ),
       );
     });

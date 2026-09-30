@@ -4,6 +4,17 @@ import { z } from "zod";
 export const AllowanceCredits = z.number().int().nonnegative().safe();
 const Version = z.number().int().nonnegative().safe();
 const Timestamp = z.string().datetime({ offset: true });
+const OperationId = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine(
+    (value) =>
+      value.trim().length > 0 &&
+      !value.includes("\0") &&
+      !/[\uD800-\uDFFF]/u.test(value) &&
+      new TextEncoder().encode(value).byteLength <= 256,
+  );
 const SubjectId = z
   .string()
   .min(1)
@@ -49,14 +60,28 @@ export type WorkspaceAllowanceConfig = z.infer<typeof WorkspaceAllowanceConfig>;
 
 export const WorkspaceAllowance = WorkspaceAllowanceConfig.extend({ version: Version.min(1) });
 export type WorkspaceAllowance = z.infer<typeof WorkspaceAllowance>;
+/**
+ * Lifecycle version survives clear. version=0 means never configured; a null
+ * config with a positive version is cleared. Use this version for recreation.
+ * The existing nullable configuration read remains unchanged.
+ */
+export const WorkspaceAllowanceState = z
+  .object({ version: Version, config: WorkspaceAllowance.nullable() })
+  .strict()
+  .refine((state) => state.config === null || state.config.version === state.version, {
+    message: "Allowance configuration and lifecycle versions must match",
+    path: ["config", "version"],
+  });
+export type WorkspaceAllowanceState = z.infer<typeof WorkspaceAllowanceState>;
 export const SetWorkspaceAllowanceRequest = WorkspaceAllowanceConfig.extend({
   expectedVersion: Version,
 });
 export type SetWorkspaceAllowanceRequest = z.infer<typeof SetWorkspaceAllowanceRequest>;
-/** expectedVersion=0 is only for a never-created allowance. Updates and
- * recreation after clear name the exact version, including the clear receipt. */
+/** Reuse operationId and the exact expectedVersion to recover a lost clear
+ * receipt. A later lifecycle change conflicts; read the state before deciding
+ * on a new mutation, never guess a version or change it for a retry. */
 export const ClearWorkspaceAllowanceRequest = z
-  .object({ expectedVersion: Version.min(1) })
+  .object({ expectedVersion: Version.min(1), operationId: OperationId.optional() })
   .strict();
 export type ClearWorkspaceAllowanceRequest = z.infer<typeof ClearWorkspaceAllowanceRequest>;
 export const ClearWorkspaceAllowanceResponse = z.object({ version: Version.min(1) }).strict();
@@ -65,17 +90,7 @@ export type ClearWorkspaceAllowanceResponse = z.infer<typeof ClearWorkspaceAllow
 /** Reuse the operationId and exact request to recover an uncertain grant response. */
 export const GrantWorkspaceCreditsRequest = z
   .object({
-    operationId: z
-      .string()
-      .min(1)
-      .max(256)
-      .refine(
-        (value) =>
-          value.trim().length > 0 &&
-          !value.includes("\0") &&
-          !/[\uD800-\uDFFF]/u.test(value) &&
-          new TextEncoder().encode(value).byteLength <= 256,
-      ),
+    operationId: OperationId,
     credits: AllowanceCredits.positive(),
     expiresAt: Timestamp.nullable().optional(),
   })

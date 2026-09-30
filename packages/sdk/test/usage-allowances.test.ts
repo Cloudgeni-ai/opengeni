@@ -56,6 +56,11 @@ describe("allowance SDK helpers", () => {
     await client
       .asUser("person", { source: "product" })
       .getMyUsage("workspace/a", { period: "current" });
+    await client.getWorkspaceAllowanceState("workspace/a");
+    await client.clearWorkspaceAllowance("workspace/a", {
+      expectedVersion: 2,
+      operationId: "clear/once",
+    });
     expect(calls.map((call) => [call.method, call.url.pathname])).toEqual([
       ["PUT", "/v1/workspaces/workspace%2Fa/allowance"],
       ["GET", "/v1/workspaces/workspace%2Fa/allowance"],
@@ -65,6 +70,8 @@ describe("allowance SDK helpers", () => {
       ["PUT", "/v1/workspaces/workspace%2Fa/members/external/product%2Fa/Person%2Fb/allowance"],
       ["GET", "/v1/workspaces/workspace%2Fa/usage"],
       ["GET", "/v1/workspaces/workspace%2Fa/usage/me"],
+      ["GET", "/v1/workspaces/workspace%2Fa/allowance/state"],
+      ["DELETE", "/v1/workspaces/workspace%2Fa/allowance"],
     ]);
     expect(calls[0]!.body).toEqual(config);
     expect(calls[2]!.body).toEqual({ expectedVersion: 1 });
@@ -78,6 +85,57 @@ describe("allowance SDK helpers", () => {
       identity: { source: "product", externalId: "person" },
     });
     expect(calls.slice(0, 7).every((call) => call.actor === null)).toBe(true);
+    expect(calls[9]!.body).toEqual({ expectedVersion: 2, operationId: "clear/once" });
+  });
+
+  test("cleared lifecycle state and clear receipts remain available without automatic mutation retries", async () => {
+    const calls: string[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        calls.push(request.method);
+        if (request.method === "DELETE") return Response.json({ version: 2 });
+        return Response.json(
+          new URL(request.url).pathname.endsWith("/state") ? { version: 2, config: null } : null,
+        );
+      },
+    });
+    expect(await client.getWorkspaceAllowance(workspaceId)).toBeNull();
+    expect(await client.getWorkspaceAllowanceState(workspaceId)).toEqual({
+      version: 2,
+      config: null,
+    });
+    expect(
+      await client.clearWorkspaceAllowance(workspaceId, {
+        expectedVersion: 1,
+        operationId: "clear",
+      }),
+    ).toEqual({ version: 2 });
+    expect(calls).toEqual(["GET", "GET", "DELETE"]);
+    let uncertainCalls = 0;
+    const uncertain = new OpenGeniClient({
+      baseUrl: "https://api.test",
+      fetch: async () => {
+        uncertainCalls++;
+        throw new TypeError("lost clear response");
+      },
+    });
+    await expect(
+      uncertain.clearWorkspaceAllowance(workspaceId, { expectedVersion: 1, operationId: "clear" }),
+    ).rejects.toMatchObject({ outcomeUnknown: true });
+    expect(uncertainCalls).toBe(1);
+    const conflicting = new OpenGeniClient({
+      baseUrl: "https://api.test",
+      fetch: async () =>
+        Response.json({ error: { message: "Usage allowance version conflict" } }, { status: 409 }),
+    });
+    await expect(
+      conflicting.clearWorkspaceAllowance(workspaceId, {
+        expectedVersion: 1,
+        operationId: "clear",
+      }),
+    ).rejects.toMatchObject({ status: 409, outcomeUnknown: false });
   });
 
   test("standalone and enveloped exhaustion produce a non-retryable typed API error", async () => {
@@ -250,6 +308,7 @@ describe("own-usage read-only proxy", () => {
     for (const [method, path, status] of [
       ["GET", `${base}/usage`, 404],
       ["GET", `${base}/allowance`, 404],
+      ["GET", `${base}/allowance/state`, 404],
       ["PUT", `${base}/allowance`, 404],
       ["POST", `${base}/allowance/grants`, 404],
       ["PUT", `${base}/members/user:a/allowance`, 404],

@@ -1621,6 +1621,7 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   if (
     (["GET", "PUT", "DELETE"].includes(method) &&
       /^\/v1\/workspaces\/[^/]+\/allowance$/.test(pathname)) ||
+    (method === "GET" && /^\/v1\/workspaces\/[^/]+\/allowance\/state$/.test(pathname)) ||
     (method === "POST" && /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/.test(pathname))
   )
     return true;
@@ -1629,6 +1630,8 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   if (
     (["GET", "PUT", "DELETE"].includes(method) &&
       /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/.test(pathname)) ||
+    (method === "GET" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/.test(pathname)) ||
     (method === "POST" &&
       /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/.test(pathname)) ||
     (method === "GET" &&
@@ -2446,6 +2449,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/external/:source/:externalId/allowance",
   },
   {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance/state",
+  },
+  {
     pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage\/me$/,
     label: "/v1/workspaces/external/:source/:externalId/usage/me",
   },
@@ -2470,6 +2477,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/allowance$/,
     label: "/v1/workspaces/:workspaceId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance\/state$/,
+    label: "/v1/workspaces/:workspaceId/allowance/state",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/usage\/me$/,

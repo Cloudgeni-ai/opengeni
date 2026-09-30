@@ -60,6 +60,7 @@ export type {
   UsageAllowanceWindow,
   WorkspaceAllowance,
   WorkspaceAllowanceConfig,
+  WorkspaceAllowanceState,
   WorkspaceAllowanceUsage,
   WorkspaceCreditGrant,
   WorkspaceUsageResponse,

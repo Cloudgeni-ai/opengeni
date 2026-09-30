@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   AllowanceExhaustedRefusal,
+  ClearWorkspaceAllowanceRequest,
   GetMyUsageRequest,
   GetUsageRequest,
   GrantWorkspaceCreditsRequest,
   MemberAllowanceRule,
   SetWorkspaceAllowanceRequest,
+  WorkspaceAllowanceState,
   WorkspaceUsageResponse,
 } from "../src/usage-allowances";
 import {
@@ -77,6 +79,34 @@ describe("usage allowance contracts", () => {
       { operationId: "once", credits: 1, expiresAt: "tomorrow" },
     ])
       expect(GrantWorkspaceCreditsRequest.safeParse(request).success).toBe(false);
+  });
+
+  test("lifecycle reads expose cleared versions without changing nullable configuration", () => {
+    for (const state of [
+      { version: 0, config: null },
+      { version: 2, config: null },
+      { version: 3, config: { includedCredits: 1, period: "none" as const, version: 3 } },
+    ])
+      expect(WorkspaceAllowanceState.parse(state)).toEqual(state);
+    for (const state of [
+      { version: -1, config: null },
+      { version: 1.5, config: null },
+      { version: 0, config: { includedCredits: 1, period: "none", version: 1 } },
+      { version: 3, config: { includedCredits: 1, period: "none", version: 2 } },
+    ])
+      expect(WorkspaceAllowanceState.safeParse(state).success).toBe(false);
+  });
+
+  test("clear operation keys are optional, exact and bounded like grant keys", () => {
+    expect(ClearWorkspaceAllowanceRequest.parse({ expectedVersion: 1 })).toEqual({
+      expectedVersion: 1,
+    });
+    const request = { expectedVersion: 1, operationId: "host/clear" };
+    expect(ClearWorkspaceAllowanceRequest.parse(request)).toEqual(request);
+    for (const operationId of ["", " ", "é".repeat(129), "nul\0", "\uD800"])
+      expect(ClearWorkspaceAllowanceRequest.safeParse({ ...request, operationId }).success).toBe(
+        false,
+      );
   });
 
   test("own reads cannot select another subject or roster page", () => {
