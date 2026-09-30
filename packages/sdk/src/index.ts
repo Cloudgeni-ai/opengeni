@@ -45,6 +45,7 @@ export type {
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   CredentialProviderRequest,
+  CredentialProviderInitiatorContext,
   CredentialProviderResponse,
   GetWorkspaceCredentialProviderResponse,
   ListWorkspaceWebhookDeliveriesResponse,

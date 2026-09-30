@@ -111,6 +111,30 @@ function validAgentHops(value: unknown): Array<Record<string, unknown>> {
   );
 }
 
+/** Freeze the exact target turn's provenance without changing the new service principal. */
+export function contextForCausalTurn(
+  current: TurnInitiatorContext,
+  causal: FrozenTurnInitiator,
+  reference: { sessionId: string; turnId: string },
+): TurnInitiatorContext {
+  const { via, viaTruncated, ...context } = causal.context;
+  const hops = [
+    ...validAgentHops(via),
+    {
+      kind: causal.initiator.kind === "subject" ? "human" : "service",
+      ...reference,
+      initiator: causal.initiator,
+      context,
+    },
+  ];
+  const clipped = clipAgentProvenanceHops(hops);
+  return {
+    ...current,
+    via: clipped,
+    ...(viaTruncated === true || hops.length > clipped.length ? { viaTruncated: true } : {}),
+  };
+}
+
 export async function frozenInitiatorForCommandActor(
   db: Database,
   workspaceId: string,

@@ -40,6 +40,12 @@ retains its frozen selection. Credential-provider targeting and MCP preparation
 consume those execution refs, never the queue's omitted-tools empty array.
 Connection-backed MCPs remain exclusively native-authenticated and are excluded
 from provider targeting and header application, even for historical work.
+Signed credential-provider callbacks also carry the exact accepted turn's
+informational initiator context. Children inherit bounded agent lineage;
+internal continuations freeze their exact causal turn's provenance at claim,
+without replacing their service authorization principal. Provider renewals
+retain that turn snapshot, never mutable session state. See
+[`workspace-integrations.md`](workspace-integrations.md).
 
 ---
 

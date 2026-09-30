@@ -141,6 +141,11 @@ describe("workspace credential provider", () => {
       workspaceId: scope.workspaceId,
       sessionId: session.id,
       initiatingHumanSubjectId: "user:owner",
+      initiatorContext: {
+        kind: "human",
+        initiator: { kind: "subject", subjectId: "user:owner" },
+        context: {},
+      },
       sandboxBackend: "docker",
     });
     expect(material!.environment).toMatchObject({

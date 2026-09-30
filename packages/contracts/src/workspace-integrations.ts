@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { TurnInitiator, TurnInitiatorContext } from "./index";
 
 import { WORKSPACE_WEBHOOK_EVENT_TYPES } from "./workspace-integration-wire";
 
@@ -258,6 +259,16 @@ export type GetOrganizationCredentialProviderResponse = z.infer<
   typeof GetOrganizationCredentialProviderResponse
 >;
 
+/** Exact accepted-turn provenance, never an authorization grant. */
+export type CredentialProviderInitiatorContext = {
+  /** Agent delegation is identified by the newest frozen `via` hop. */
+  kind: "human" | "service" | "agent";
+  /** Full frozen causal identity, including an accepted service's display label. */
+  initiator: TurnInitiator;
+  /** Unmodified accepted context, including bounded `via` and coalesced `updateIds`. */
+  context: TurnInitiatorContext;
+};
+
 /** The body OpenGeni POSTs to a workspace credential provider. */
 export type CredentialProviderRequest = {
   type: "credentials.request";
@@ -274,6 +285,8 @@ export type CredentialProviderRequest = {
   turnId: string;
   attemptId: string;
   initiator: { kind: string; subjectId?: string };
+  /** Informational, signed with the body. Optional only for pre-upgrade senders. */
+  initiatorContext?: CredentialProviderInitiatorContext;
   initiatingHumanSubjectId: string | null;
   /** Informational, not authority. Optional only for pre-upgrade senders. */
   initiatingHuman?: InitiatingHuman | null;
