@@ -2,6 +2,7 @@ import {
   getSessionAuthorityProjection,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
+  loadClaudeSubscriptionUsageCredential,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
@@ -40,6 +41,9 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
+import { parseModelProvidersJson } from "@opengeni/config";
+import { withClaudeUsageObserver } from "@opengeni/runtime";
+import { createClaudeUsageObserver } from "./claude-usage-observer";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -917,12 +921,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             providerTurn.xaiRequestContext = authorization.context;
           }
+          const claudeUsageObserver = await createClaudeUsageObserver(
+            parseModelProvidersJson(runSettings.modelProvidersJson),
+            providerTurn.latestClaudeUsage,
+            (scope) =>
+              loadClaudeSubscriptionUsageCredential(db, settings, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                scope,
+              }),
+          );
+          const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            withClaudeUsageObserver(claudeUsageObserver, fn);
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            providerTurn.xaiRequestContext
-              ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-              : withCodex(fn);
+            withClaudeUsage(() =>
+              providerTurn.xaiRequestContext
+                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                : withCodex(fn),
+            );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;
           const codexSessionTitleContext = codexContext
@@ -938,25 +956,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            xaiSessionTitleContext
-              ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-              : codexSessionTitleContext
-                ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                : fn();
+            withClaudeUsage(() =>
+              xaiSessionTitleContext
+                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                : codexSessionTitleContext
+                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                  : fn(),
+            );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
-            withCodex(() =>
-              withCodexRequestOverrides(
-                {
-                  betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
-                  turnMetadata: {
-                    request_kind: "compaction",
-                    compaction: {
-                      implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
-                      strategy: "memento",
+            withClaudeUsage(() =>
+              withCodex(() =>
+                withCodexRequestOverrides(
+                  {
+                    betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+                    turnMetadata: {
+                      request_kind: "compaction",
+                      compaction: {
+                        implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                        strategy: "memento",
+                      },
                     },
                   },
-                },
-                fn,
+                  fn,
+                ),
               ),
             );
           const compactionPrep = await prepareCompaction({

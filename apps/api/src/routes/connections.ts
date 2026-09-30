@@ -1,5 +1,8 @@
 import { createHash, createHmac } from "node:crypto";
-import { assertClaudeWorkspaceCredential } from "../claude-workspace-connection";
+import {
+  assertClaudeWorkspaceCredential,
+  prepareClaudeWorkspaceCredential,
+} from "../claude-workspace-connection";
 import {
   createConnectionIdempotently,
   upsertWorkspaceProviderApiKeyConnection,
@@ -256,6 +259,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         assertPersonalConnectionOwnerPrincipal(access);
       }
       const providerDomain = canonicalProviderDomain(payload.providerDomain);
+      payload.credential = prepareClaudeWorkspaceCredential(
+        settings,
+        workspaceId,
+        payload.metadata,
+        payload.credential,
+      );
       assertClaudeWorkspaceCredential(settings, {
         subjectId,
         providerDomain,
@@ -1134,6 +1143,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message: `updating a ${provider.label} connection requires expectedVersion and operationId`,
               });
             }
+            payload.credential = prepareClaudeWorkspaceCredential(
+              settings,
+              workspaceId,
+              existing.metadata,
+              payload.credential,
+            );
             assertClaudeWorkspaceCredential(settings, {
               subjectId,
               providerDomain,

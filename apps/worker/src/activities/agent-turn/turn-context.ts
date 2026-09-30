@@ -190,6 +190,10 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
+  latestClaudeUsage: Map<
+    "workspace" | "organization",
+    import("./claude-usage-observer").CapturedClaudeUsage
+  >;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -304,6 +308,7 @@ export function createTurnContext(input: {
       xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
+      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
     },
   };

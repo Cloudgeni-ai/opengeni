@@ -12239,3 +12239,4 @@ function sortJson(value: unknown): unknown {
 }
 
 export { createFirstPartyAttemptClient } from "./first-party-client";
+export { withClaudeUsageObserver } from "./claude-subscription-usage";

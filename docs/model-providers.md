@@ -1255,10 +1255,8 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
 setup tokens as separate connections. Generate a subscription token with
 `claude setup-token`; OpenGeni does not refresh it. Replace expired or revoked
-credentials on the connection page. Claude setup offers a copyable terminal command
-and a local import of `~/.claude.json`; only its account/device identifiers are
-submitted with the token, never the settings file. Manual entry remains available
-in the setup disclosure. Token replacement uses the same full-page form. Named
+credentials on the connection page. Claude setup and replacement require only the
+setup token and offer the copyable terminal command. Account files are not needed. Named
 Opus/Sonnet choices add models without requiring model IDs; other IDs remain
 available under the model disclosure. Workspace setup creates a workspace-owned connection;
 organization setup creates a separate connection for shared workspaces. The two
@@ -1334,12 +1332,11 @@ Stainless SDK 0.127.0, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
 the captured v2d dispatch selector. These are compatibility headers, not a
 statement about the actual worker runtime. API-key requests do not use this profile.
 
-Subscription connections also require the real account UUID and device ID from
-`oauthAccount.accountUuid` and `userID` in the signed-in machine's `~/.claude.json`.
-Both are encrypted with the token in the existing credential column; API reads
-return neither. Legacy token-only connections must be replaced with this metadata
-before use. Registry OAuth providers supply the same fields through
-`anthropic.identity`. Never hardcode a user's account IDs into source or borrow
+Subscription setup creates a stable installation device ID and uses an empty
+account UUID, the fallback used by Claude Code for inference-only setup tokens.
+Both are encrypted with the token; API reads return neither. Existing explicit
+account/device bundles remain supported. Registry OAuth providers supply the
+same fields through `anthropic.identity`. Never hardcode a user's account IDs into source or borrow
 another connection's identity. The worker passes its stable session cache key to
 native Claude, preserving session identity across turns and activity retries;
 prompt IDs persist through the run's tool loop and client request IDs are fresh.
@@ -1366,3 +1363,23 @@ are not advertised without those features. Normal agent calls stream; title and
 compaction calls remain nonstreaming. The default output ceiling remains 32k,
 within the adapter's conservative context budget, rather than copying 128k from
 an unrelated request. No live subscription probe is part of these tests.
+
+### Claude subscription usage
+
+Model responses, including quota errors, report observed 5-hour, weekly and optional
+model-specific usage windows. The worker saves these through the existing connection
+RLS boundary, fenced against credential replacement, without changing credential or
+admission versions. Settings reuse the shared usage meters, reset times and refresh
+controls. Past reset times invalidate the displayed balance until Claude reports
+another reading; missing windows are never shown as zero usage.
+
+Setup tokens have `user:inference` scope. The separate `/api/oauth/usage` endpoint
+requires `user:profile`, so inference-only tokens update their readings through model
+responses. Manual refresh probes that endpoint without making model calls; a scope
+error retains the readings and disables further unsupported refreshes until the
+credential is replaced. Tokens with the required scope can refresh directly.
+
+Cached usage reads are available to workspace readers; live refresh requires
+connection-management permission. Organization usage follows the existing
+organization provider administration boundary. Credentials and identities are
+never returned in usage responses.

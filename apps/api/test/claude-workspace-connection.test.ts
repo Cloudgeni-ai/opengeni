@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { assertClaudeWorkspaceCredential } from "../src/claude-workspace-connection";
+import {
+  assertClaudeWorkspaceCredential,
+  prepareClaudeSubscriptionCredential,
+  prepareClaudeWorkspaceCredential,
+} from "../src/claude-workspace-connection";
+import { testSettings } from "@opengeni/testing";
 
 const identity = { accountUuid: "11111111-1111-4111-8111-111111111111", deviceId: "a".repeat(64) };
 const connection = (role: "anthropic" | "claude_subscription") => ({
@@ -66,4 +71,83 @@ test("other providers remain outside Claude-specific validation", () => {
       { ...connection("anthropic"), metadata: { credentialRole: "openrouter" }, credential: {} },
     ),
   ).not.toThrow();
+});
+test("token-only setup creates an encrypted-bundle identity stable across retries and replacement", () => {
+  const settings = testSettings({
+    claudeSubscriptionEnabled: true,
+    environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+  });
+  const first = prepareClaudeSubscriptionCredential(
+    settings,
+    "workspace:one",
+    "sk-ant-oat01-token",
+  );
+  const bundle = JSON.parse(first);
+  expect(bundle.identity.accountUuid).toBe("");
+  expect(bundle.identity.deviceId).toMatch(/^[a-f0-9]{64}$/);
+  expect(prepareClaudeSubscriptionCredential(settings, "workspace:one", "sk-ant-oat01-token")).toBe(
+    first,
+  );
+  expect(
+    JSON.parse(
+      prepareClaudeSubscriptionCredential(settings, "workspace:one", "sk-ant-oat01-replacement"),
+    ).identity,
+  ).toEqual(bundle.identity);
+  expect(
+    JSON.parse(
+      prepareClaudeSubscriptionCredential(settings, "organization:one", "sk-ant-oat01-token"),
+    ).identity,
+  ).not.toEqual(bundle.identity);
+  const payload = prepareClaudeWorkspaceCredential(
+    settings,
+    "one",
+    { credentialRole: "claude_subscription" },
+    { apiKey: "sk-ant-oat01-token" },
+  );
+  expect(() =>
+    assertClaudeWorkspaceCredential(settings, {
+      ...connection("claude_subscription"),
+      credential: payload,
+    }),
+  ).not.toThrow();
+});
+test("legacy explicit identity remains valid and API keys are unchanged", () => {
+  const settings = testSettings({
+    claudeSubscriptionEnabled: true,
+    environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+  });
+  const credential = connection("claude_subscription").credential;
+  expect(
+    prepareClaudeWorkspaceCredential(
+      settings,
+      "one",
+      { credentialRole: "claude_subscription" },
+      credential,
+    ),
+  ).toEqual(credential);
+  expect(
+    JSON.parse(
+      prepareClaudeSubscriptionCredential(
+        settings,
+        "organization:one",
+        "sk-ant-oat01-token",
+        identity,
+      ),
+    ).identity,
+  ).toEqual(identity);
+  expect(
+    prepareClaudeWorkspaceCredential(
+      settings,
+      "one",
+      { credentialRole: "anthropic" },
+      { apiKey: "sk-ant-api03-key" },
+    ),
+  ).toEqual({ apiKey: "sk-ant-api03-key" });
+  expect(() =>
+    prepareClaudeSubscriptionCredential(
+      { ...settings, claudeSubscriptionEnabled: false },
+      "workspace:one",
+      "sk-ant-oat01-token",
+    ),
+  ).toThrow("not enabled");
 });

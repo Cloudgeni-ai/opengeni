@@ -1005,7 +1005,10 @@ quota refusals, not backpressure or newer refusals. Capped admission and waits
 use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
 durations, never primary/secondary position. Headers lacking both durations cannot
 update labeled cache; absent reset timing does not clear an exhausted window.
-The account picker refreshes live usage on open rather than trusting stale labels.
+Opening the account picker refreshes usage.
+
+Claude setup and quota observations:
+[`model-providers.md`](model-providers.md#claude-subscription-usage).
 
 Codex turns require durable credential leases. `rotation_enabled` off waits on
 capped accounts; on permits same-turn failover. First allocation freezes source,

@@ -561,6 +561,28 @@
     },
     {
       "method": "GET",
+      "path": "/v1/organizations/:organizationId/model-providers/:providerKind/usage",
+      "sdk": [
+        "OpenGeniClient.getOrganizationClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/model-providers/:providerKind/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshOrganizationClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/organizations/:organizationId/overview",
       "sdk": [
         "OpenGeniClient.getOrganizationAdministrationOverview"
@@ -4309,6 +4331,28 @@
         "DeleteWorkspaceGatewayCustomModelRequest"
       ],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/usage",
+      "sdk": [
+        "OpenGeniClient.getWorkspaceClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/model-providers/:providerKind/usage/refresh",
+      "sdk": [
+        "OpenGeniClient.refreshWorkspaceClaudeSubscriptionUsage"
+      ],
+      "request": [],
+      "response": [
+        "ClaudeSubscriptionUsage"
+      ]
     },
     {
       "method": "GET",
@@ -9252,6 +9296,43 @@
         "$.sortOrder": "integer!",
         "$.updatedAt": "string!",
         "$.workspaceId": "string!"
+      }
+    },
+    "ClaudeSubscriptionUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connected": "boolean!",
+        "$.credentialVersion": "integer! null",
+        "$.observedAt": "string! null",
+        "$.refreshCheckedAt": "string! null",
+        "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.windows": "array!",
+        "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageWindow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "ref(ClaudeUsageWindowId)!",
+        "$.observedAt": "string!",
+        "$.resetsAt": "string! null",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.usedPercent": "number! null"
+      }
+    },
+    "ClaudeUsageWindowId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
       }
     },
     "ClientConfig": {
@@ -23292,6 +23373,8 @@
       "CapabilityUnavailableReason": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
+      "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageWindow": "type",
       "ClientAuthConfig": "type",
       "ClientConfig": "type",
       "ClientModel": "type",
@@ -27246,6 +27329,7 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
@@ -27282,6 +27366,7 @@
       "getWorkspaceArtifactHtml",
       "getWorkspaceCapture",
       "getWorkspaceCaptureFile",
+      "getWorkspaceClaudeSubscriptionUsage",
       "getWorkspaceCredentialProvider",
       "getWorkspaceInsights",
       "getWorkspaceInstructionPolicyRevision",
@@ -27450,7 +27535,9 @@
       "recoverSandbox",
       "redeliverWorkspaceWebhookDelivery",
       "refreshCodexUsage",
+      "refreshOrganizationClaudeSubscriptionUsage",
       "refreshScheduledTaskAccess",
+      "refreshWorkspaceClaudeSubscriptionUsage",
       "rejectGoalRevision",
       "rejectPreferenceRegistryProposal",
       "rejectWorkspaceSkill",
