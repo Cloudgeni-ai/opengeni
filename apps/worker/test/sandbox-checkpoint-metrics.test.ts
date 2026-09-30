@@ -7,7 +7,9 @@ import {
   recordSandboxDeadlineRotationsRequested,
   recordSandboxInventoryProjectionFailure,
   recordSandboxInventoryProjectionSuccess,
+  recordSandboxAutomaticRecoverySelected,
   recordSandboxRecoveryObservationGauges,
+  sandboxAutomaticRecoveryOutcome,
   recordSandboxProviderMissingBeforeCapture,
   recordSandboxRotationBacklogGauges,
   runtimeMetricsHooksForObservability,
@@ -151,7 +153,45 @@ describe("sandbox checkpoint and deadline metrics", () => {
       /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="checkpoint_fallback_selected"[^}]*\} 1\b/,
     );
     expect(metrics).toMatch(
+      /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="fresh_workspace_selected"[^}]*\} 0\b/,
+    );
+    expect(metrics).toMatch(
       /opengeni_sandbox_inventory_refresh_timestamp_seconds\{[^}]*domain="recovery_observations"[^}]*\} 1700000002\b/,
     );
+  });
+
+  test("automatic continuity outcomes stay a closed low-cardinality set", async () => {
+    const observability = workerObservability();
+    expect(sandboxAutomaticRecoveryOutcome({ lane: "checkpoint", groupSessionCount: 1 })).toBe(
+      "selected",
+    );
+    expect(sandboxAutomaticRecoveryOutcome({ lane: "checkpoint", groupSessionCount: 3 })).toBe(
+      "selected_shared",
+    );
+    expect(sandboxAutomaticRecoveryOutcome({ lane: "fresh_workspace", groupSessionCount: 3 })).toBe(
+      "fresh_workspace",
+    );
+    recordSandboxAutomaticRecoverySelected(observability, "modal", "selected_shared");
+    recordSandboxAutomaticRecoverySelected(observability, "modal", "fresh_workspace");
+    recordSandboxAutomaticRecoverySelected(observability, "sb-provider-id", "fresh_workspace");
+    recordSandboxRecoveryObservationGauges(observability, {
+      providerLosses: 1,
+      fallbackSelections: 0,
+      freshWorkspaceSelections: 2,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_checkpoint_fallback_total\{[^}]*backend="modal"[^}]*outcome="selected_shared"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_checkpoint_fallback_total\{[^}]*backend="modal"[^}]*outcome="fresh_workspace"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_checkpoint_fallback_total\{[^}]*backend="unknown"[^}]*outcome="fresh_workspace"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_sandbox_recovery_observations_recent\{[^}]*kind="fresh_workspace_selected"[^}]*\} 2\b/,
+    );
+    expect(metrics).not.toContain("sb-provider-id");
   });
 });

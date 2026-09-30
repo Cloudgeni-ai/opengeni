@@ -370,7 +370,7 @@ test("a viewer who cannot use checkpoint recovery keeps Retry and sees no failed
   expect(container.querySelector("button")).toBeNull();
 });
 
-test.each(["restored", "connected_machine", "automatic"] as const)(
+test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as const)(
   "%s projection exposes only explicit compact Retry through the structural banner",
   async (route) => {
     let retries = 0;
@@ -384,12 +384,17 @@ test.each(["restored", "connected_machine", "automatic"] as const)(
           status:
             route === "restored"
               ? ("restored" as const)
-              : route === "automatic"
+              : route === "automatic" || route === "fresh_workspace"
                 ? ("eligible" as const)
                 : ("unsupported" as const),
           reason: route === "connected_machine" ? "connected_machine_selected" : null,
           operationId: route === "restored" ? "durable-operation" : null,
-          automaticAvailable: route === "automatic",
+          automaticAvailable: route === "automatic" || route === "fresh_workspace",
+          ...(route === "automatic"
+            ? { automaticLane: "checkpoint" as const }
+            : route === "fresh_workspace"
+              ? { automaticLane: "fresh_workspace" as const }
+              : {}),
           checkpoint:
             route === "automatic"
               ? {
@@ -431,8 +436,14 @@ test.each(["restored", "connected_machine", "automatic"] as const)(
     expect(retries).toBe(0);
     expect(container.querySelectorAll("button")).toHaveLength(1);
     expect(container.querySelector("button")!.textContent).toBe("Retry");
-    if (route === "automatic")
-      expect(container.textContent).toContain("Newer sandbox files may be unavailable");
+    if (route === "automatic") {
+      expect(container.textContent).toContain("Retry will use the latest verified checkpoint from");
+      expect(container.textContent).toContain("Newer files are unavailable.");
+    }
+    if (route === "fresh_workspace")
+      expect(container.textContent).toContain(
+        "Retry will continue with an empty workspace. Previous sandbox files were lost.",
+      );
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");
     await act(async () =>

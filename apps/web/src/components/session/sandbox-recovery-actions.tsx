@@ -3,6 +3,7 @@ import type { SandboxRecoverySelection } from "@opengeni/sdk";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
+  automaticRecoveryRetryNotice,
   createSandboxRecoveryController,
   sameRecoverySelection,
   sandboxRecoveryBlocker,
@@ -57,9 +58,17 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
   ) {
     return props.children;
   }
+  // An automatic lane is system continuity for this session's lost sandbox:
+  // its latest verified checkpoint, or a new empty workspace (no checkpoint).
+  const automaticAvailable =
+    projection?.status === "eligible" &&
+    projection.automaticAvailable === true &&
+    (projection.automaticLane === "fresh_workspace"
+      ? projection.checkpoint === null
+      : projection.checkpoint?.sessionId === props.sessionId);
   const eligible =
-    projection?.status === "eligible" && projection.checkpoint?.sessionId === props.sessionId;
-  const automaticAvailable = eligible && projection?.automaticAvailable === true;
+    automaticAvailable ||
+    (projection?.status === "eligible" && projection.checkpoint?.sessionId === props.sessionId);
   const changed = Boolean(
     selection && (!eligible || !sameRecoverySelection(selection, projection?.checkpoint ?? null)),
   );
@@ -91,8 +100,8 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
                 ? "Restoring the selected checkpoint. Restoration has not completed."
                 : restored
                   ? "Checkpoint restored. No commands were retried or replayed."
-                  : automaticAvailable
-                    ? "Retry will use the latest verified checkpoint. Newer sandbox files may be unavailable."
+                  : automaticAvailable && projection
+                    ? automaticRecoveryRetryNotice(projection)
                     : eligible
                       ? "An older checkpoint is available for this session. Review what will be restored before continuing."
                       : projection

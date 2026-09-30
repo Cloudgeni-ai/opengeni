@@ -1578,7 +1578,14 @@ async function resumeBoxForTurnOnce(
       > | null;
     } | null = null;
     try {
-      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      // An audited decision to continue a definitively lost workspace on a new
+      // EMPTY box: hydrate nothing (not even a per-session legacy archive) and
+      // resume no prior provider identity. Every group member was already told
+      // the workspace is empty; the DB accepts only this exact publication.
+      const freshWorkspaceRecoveryId = acquired.lease.freshWorkspaceRecoveryId ?? null;
+      const envelope = freshWorkspaceRecoveryId
+        ? null
+        : await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // The lease is authoritative. A legacy per-session fallback archive may
       // only be used after beginSandboxRematerialization imports its archive
       // fields under the warming-row lock and records one selected revision.
@@ -1586,22 +1593,28 @@ async function resumeBoxForTurnOnce(
       // lease-carried unverified/invalid archive must fail closed rather than
       // silently substituting another revision.
       const fallbackArchiveEnvelope =
+        !freshWorkspaceRecoveryId &&
         acquired.lease.recovery.archive.status === "none" &&
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutSandboxProviderIdentity(envelope)
           : null;
-      let spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      let spawnEnvelope = freshWorkspaceRecoveryId
+        ? null
+        : (fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope);
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
           : acquired.lease.resumeState;
       const continuityRecovery = acquired.lease.recovery.continuity;
+      // A fresh-workspace spawn is deliberately archive-free; commitWarmingToWarm
+      // verifies the exact decision before publication.
       if (
-        (acquired.lease.recovery.archive.status === "available" &&
+        !freshWorkspaceRecoveryId &&
+        ((acquired.lease.recovery.archive.status === "available" &&
           (acquired.lease.archiveComplete ||
             acquired.lease.historicalRecoveryAuthorized === true)) ||
-        (acquired.lease.recovery.archive.status === "none" &&
-          workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
+          (acquired.lease.recovery.archive.status === "none" &&
+            workspaceArchiveFieldsFromEnvelope(archiveSource) !== null))
       ) {
         const rematerializationId = crypto.randomUUID();
         const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -1644,7 +1657,11 @@ async function resumeBoxForTurnOnce(
           legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
           legacyProviderBinding: null,
         };
-      } else if (acquired.lease.recovery.archive.status !== "none" && !continuityRecovery) {
+      } else if (
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status !== "none" &&
+        !continuityRecovery
+      ) {
         throw new SandboxLeaseRecoveryBlockedError(
           ids.sandboxGroupId,
           expectedEpoch,
@@ -1937,16 +1954,18 @@ async function resumeBoxForTurnOnce(
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
-        ...(established.providerContinuity
-          ? { continuityRecovery: established.providerContinuity }
-          : rematerialization
-            ? {
-                rematerialization: {
-                  id: rematerialization.id,
-                  verifiedRevision: rematerialization.selectedRevision,
-                },
-              }
-            : {}),
+        ...(freshWorkspaceRecoveryId
+          ? { freshWorkspace: { operationId: freshWorkspaceRecoveryId } }
+          : established.providerContinuity
+            ? { continuityRecovery: established.providerContinuity }
+            : rematerialization
+              ? {
+                  rematerialization: {
+                    id: rematerialization.id,
+                    verifiedRevision: rematerialization.selectedRevision,
+                  },
+                }
+              : {}),
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {

@@ -3204,6 +3204,15 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "none" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, hasRepositoryResources: false })).toBe(false);
+    // A committed post-loss recovery decision rematerializes without waiting
+    // for the first tool call, still only for managed on-demand turns.
+    const recovering = { ...base, hasRepositoryResources: false, automaticRecoveryPending: true };
+    expect(shouldPrefetchManagedSandbox(recovering)).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, machinePrimary: true })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, establishPolicy: "eager" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, groupBoxBackend: "selfhosted" })).toBe(
+      false,
+    );
   });
 
   test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {

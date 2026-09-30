@@ -136,13 +136,19 @@ export async function establishApiSandboxSpawner(input: {
   dataPlaneUrl: string | null;
   objectStorage?: ObjectStorage | null;
 }): Promise<{ established: EstablishedSandboxSession; lease: LeaseSnapshot }> {
+  // An audited decision to continue a definitively lost workspace on a new
+  // EMPTY box: hydrate nothing, including a per-session legacy archive, and
+  // never resume a prior provider identity. Commit verifies the decision.
+  const freshWorkspaceRecoveryId = input.acquiredLease.freshWorkspaceRecoveryId ?? null;
   const fallbackArchiveEnvelope =
+    !freshWorkspaceRecoveryId &&
     input.acquiredLease.recovery.archive.status === "none" &&
     hasWorkspaceArchive(input.fallbackEnvelope)
       ? withoutSandboxProviderIdentity(input.fallbackEnvelope)
       : null;
-  let spawnEnvelope =
-    fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope;
+  let spawnEnvelope = freshWorkspaceRecoveryId
+    ? null
+    : (fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope);
   const archiveSource =
     input.acquiredLease.recovery.archive.status === "none"
       ? fallbackArchiveEnvelope
@@ -161,10 +167,12 @@ export async function establishApiSandboxSpawner(input: {
   const continuityRecovery = input.acquiredLease.recovery.continuity;
   try {
     if (
-      (input.acquiredLease.recovery.archive.status === "available" &&
+      !freshWorkspaceRecoveryId &&
+      ((input.acquiredLease.recovery.archive.status === "available" &&
         (input.acquiredLease.archiveComplete ||
           input.acquiredLease.historicalRecoveryAuthorized === true)) ||
-      (input.acquiredLease.recovery.archive.status === "none" && hasWorkspaceArchive(archiveSource))
+        (input.acquiredLease.recovery.archive.status === "none" &&
+          hasWorkspaceArchive(archiveSource)))
     ) {
       const id = crypto.randomUUID();
       const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -207,7 +215,11 @@ export async function establishApiSandboxSpawner(input: {
         legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
         legacyProviderBinding: null,
       };
-    } else if (input.acquiredLease.recovery.archive.status !== "none" && !continuityRecovery) {
+    } else if (
+      !freshWorkspaceRecoveryId &&
+      input.acquiredLease.recovery.archive.status !== "none" &&
+      !continuityRecovery
+    ) {
       throw new SandboxLeaseRecoveryBlockedError(
         input.sandboxGroupId,
         input.expectedEpoch,
@@ -384,16 +396,18 @@ export async function establishApiSandboxSpawner(input: {
       dataPlaneUrl: input.dataPlaneUrl,
       resumeBackendId: established.backendId,
       resumeState,
-      ...(established.providerContinuity
-        ? { continuityRecovery: established.providerContinuity }
-        : rematerialization
-          ? {
-              rematerialization: {
-                id: rematerialization.id,
-                verifiedRevision: rematerialization.selectedRevision,
-              },
-            }
-          : {}),
+      ...(freshWorkspaceRecoveryId
+        ? { freshWorkspace: { operationId: freshWorkspaceRecoveryId } }
+        : established.providerContinuity
+          ? { continuityRecovery: established.providerContinuity }
+          : rematerialization
+            ? {
+                rematerialization: {
+                  id: rematerialization.id,
+                  verifiedRevision: rematerialization.selectedRevision,
+                },
+              }
+            : {}),
       leaseTtlMs: input.settings.sandboxLeaseTtlMs,
     });
     if (!committed.committed || !committed.lease) {

@@ -107,32 +107,94 @@ test("explicit confirmation names exact timestamp and generation gap, and cancel
   expect(writes).toBe(0);
 });
 
-test("an automatically recoverable failed session offers only Retry with a filesystem warning", async () => {
-  let retries = 0;
-  let consentWrites = 0;
-  const container = await render(
-    {
-      getSandboxRecovery: async () => ({ ...eligible, automaticAvailable: true }),
+for (const lane of ["checkpoint", "fresh_workspace"] as const) {
+  test(`an automatically recoverable ${lane} failure offers only Retry and says what it will do`, async () => {
+    let retries = 0;
+    let consentWrites = 0;
+    const projection: SandboxRecoveryProjection =
+      lane === "checkpoint"
+        ? { ...eligible, automaticAvailable: true, automaticLane: "checkpoint" }
+        : { ...eligible, checkpoint: null, automaticAvailable: true, automaticLane: lane };
+    const container = await render(
+      {
+        getSandboxRecovery: async () => projection,
+        recoverSandbox: async () => {
+          consentWrites++;
+          throw new Error("automatic continuity must not submit human consent");
+        },
+      },
+      true,
+      true,
+      {
+        onRetry: async () => {
+          retries++;
+          return true;
+        },
+      },
+    );
+    if (lane === "checkpoint") {
+      expect(container.textContent).toContain("Retry will use the latest verified checkpoint from");
+      expect(container.textContent).toContain("Newer files are unavailable.");
+      expect(container.textContent).toContain(
+        new Date(eligible.checkpoint!.capturedAt).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }),
+      );
+    } else {
+      expect(container.textContent).toContain(
+        "Retry will continue with an empty workspace. Previous sandbox files were lost.",
+      );
+      expect(container.textContent).not.toContain("checkpoint from");
+    }
+    expect(container.textContent).not.toContain("Review checkpoint recovery");
+    expect(container.textContent).not.toContain("Choose another model");
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    await click("Retry");
+    expect(retries).toBe(1);
+    expect(consentWrites).toBe(0);
+  });
+}
+
+for (const [reason, copy] of [
+  [
+    "shared_sandbox_member_active",
+    "Another session sharing this sandbox is still running or waiting for input.",
+  ],
+  [
+    "retry_tool_outcome_unresolved",
+    "Send a new message to continue; the lost sandbox then recovers automatically.",
+  ],
+] as const) {
+  test(`${reason} explains why Retry is not offered and what to do`, async () => {
+    const container = await render({
+      getSandboxRecovery: async () => ({ ...eligible, status: "blocked", reason }),
       recoverSandbox: async () => {
-        consentWrites++;
-        throw new Error("automatic fallback must not submit human consent");
+        throw new Error("unexpected mutation");
       },
+    });
+    expect(container.textContent).toContain(copy);
+    expect(container.textContent).not.toContain("Retry will");
+    expect([...container.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
+      "Check recovery status",
+    ]);
+  });
+}
+
+test("a fresh-workspace projection for another session is not a Retry lane", async () => {
+  const container = await render({
+    getSandboxRecovery: async () => ({
+      ...eligible,
+      checkpoint: { ...eligible.checkpoint!, sessionId: "other" },
+      automaticAvailable: true,
+      automaticLane: "checkpoint",
+    }),
+    recoverSandbox: async () => {
+      throw new Error("unexpected mutation");
     },
-    true,
-    true,
-    {
-      onRetry: async () => {
-        retries++;
-        return true;
-      },
-    },
-  );
-  expect(container.textContent).toContain("Newer sandbox files may be unavailable");
-  expect(container.textContent).not.toContain("Review checkpoint recovery");
-  expect(container.querySelectorAll("button")).toHaveLength(1);
-  await click("Retry");
-  expect(retries).toBe(1);
-  expect(consentWrites).toBe(0);
+  });
+  expect(container.textContent).not.toContain("Retry will");
+  expect(container.querySelector("button")?.textContent).not.toBe("Retry");
 });
 
 test("acceptance is not restoration and double clicks never replay mutation", async () => {

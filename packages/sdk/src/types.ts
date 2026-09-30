@@ -5357,6 +5357,9 @@ export type SandboxRecoveryProjection = {
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
   automaticAvailable?: boolean;
+  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
+   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  automaticLane?: "checkpoint" | "fresh_workspace";
 };
 export type SandboxRecoveryRequest = {
   operationId: string;

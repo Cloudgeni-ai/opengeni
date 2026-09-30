@@ -68,7 +68,12 @@ export function sandboxRecoveryBlocker(reason: string): string {
     managed_modal_home_required: "Recovery supports only this session's managed cloud sandbox.",
     connected_machine_selected:
       "This session now uses a Connected Machine. Check prior execution outcomes before retrying.",
-    singleton_required: "This sandbox is shared with another session and cannot be recovered here.",
+    singleton_required:
+      "Checkpoint consent is available only when this session does not share its sandbox. Ask your operator to review this session.",
+    shared_sandbox_member_active:
+      "Another session sharing this sandbox is still running or waiting for input. Retry becomes available once it settles.",
+    retry_tool_outcome_unresolved:
+      "A tool call in the failed turn has no recorded outcome, so Retry cannot safely reopen it. Send a new message to continue; the lost sandbox then recovers automatically.",
     checkpoint_unavailable: "No recoverable checkpoint is available.",
     registered_current_checkpoint_required:
       "No verified current checkpoint is available for this recovery.",
@@ -89,6 +94,26 @@ export function sandboxRecoveryBlocker(reason: string): string {
     session_unavailable: "This session is unavailable.",
   };
   return messages[reason] ?? "Recovery is blocked. Ask your operator to review this session.";
+}
+
+/** What an automatic Retry will do after the managed sandbox was lost. */
+export function automaticRecoveryRetryNotice(projection: SandboxRecoveryProjection): string {
+  if (projection.automaticLane === "fresh_workspace") {
+    return "Retry will continue with an empty workspace. Previous sandbox files were lost.";
+  }
+  const capturedAt = projection.checkpoint?.capturedAt;
+  return capturedAt
+    ? `Retry will use the latest verified checkpoint from ${formatCheckpointTime(capturedAt)}. Newer files are unavailable.`
+    : "Retry will use the latest verified checkpoint. Newer files are unavailable.";
+}
+
+function formatCheckpointTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 }
 
 /** GETs may repeat; a consented mutation never repeats automatically. */
