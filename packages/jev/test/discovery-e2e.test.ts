@@ -96,7 +96,7 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
       keywords: ["ArtifactList", "onLoadMore"],
       workspace: new LocalCodeSearchWorkspace(root),
       // two symbol rounds, so each round's sources are asserted exactly
-      config: codeSearchConfig({ symbols: { maxRounds: 2 } }),
+      config: codeSearchConfig({ symbols: { maxRounds: 2, triage: true } }),
       jev: fakeJevClient({
         good: ["useArtifactPaging", "fetchRowPage"],
         symbolGood: ["useArtifactPaging"],
