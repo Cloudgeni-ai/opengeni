@@ -34,6 +34,13 @@ retain catalog floors but grant no capabilities or credentials.
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
+[`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
+owns effective turn refs: ordinary work uses session policy; scheduled work
+retains its frozen selection. Credential-provider targeting and MCP preparation
+consume those execution refs, never the queue's omitted-tools empty array.
+Connection-backed MCPs remain exclusively native-authenticated and are excluded
+from provider targeting and header application, even for historical work.
+
 ---
 
 ## 3. Core invariants

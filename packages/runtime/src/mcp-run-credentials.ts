@@ -1,9 +1,14 @@
 import {
   CredentialProviderMcpMaterial,
   normalizeCredentialProviderMcpUrl,
+  type McpServerConnectionRef,
 } from "@opengeni/contracts";
 
-export type RunMcpCredentialTarget = { id: string; url: string };
+export type RunMcpCredentialTarget = {
+  id: string;
+  url: string;
+  connectionRef?: McpServerConnectionRef | undefined;
+};
 export type RunMcpCredentialMaterial = {
   mcp?: CredentialProviderMcpMaterial;
   expiresAt: Date | null;
@@ -43,7 +48,9 @@ export class RunMcpCredentials {
     targets: readonly RunMcpCredentialTarget[],
     options: { signal?: AbortSignal; now?: () => number } = {},
   ) {
-    this.#targets = targets.map(({ id, url }) => ({ id, url }));
+    this.#targets = targets
+      .filter((target) => !target.connectionRef)
+      .map(({ id, url }) => ({ id, url }));
     this.#signal = options.signal;
     this.#now = options.now ?? Date.now;
     this.#signal?.addEventListener("abort", this.#onAbort, { once: true });
@@ -135,11 +142,12 @@ export class RunMcpCredentials {
     this.prepare(material)();
   }
 
-  /** Refuse credentials for omitted, local, or rewritten server routes. */
+  /** Refuse credentials for native, omitted, local, or rewritten server routes. */
   assertRemoteTargets(targets: readonly RunMcpCredentialTarget[]): void {
     this.#remoteTargets = this.#targets.filter((original) =>
       targets.some(
         (target) =>
+          !target.connectionRef &&
           target.id === original.id &&
           normalizedUrl(target.url) !== null &&
           normalizedUrl(target.url) === normalizedUrl(original.url),
@@ -195,6 +203,13 @@ export class RunMcpCredentials {
     init?: RequestInit,
   ): RequestInit | undefined {
     this.#assertOpen();
+    // Native connection authority and attribution own all authentication on
+    // this route. Even a stale or manually supplied provider grant must never
+    // replace its bearer or inject alternate authentication headers.
+    if (target.connectionRef) {
+      this.excludeLocalTarget(target.id);
+      return init;
+    }
     this.assertAvailable(target.id);
     const entry = this.#entries.get(target.id);
     if (!entry) return init;

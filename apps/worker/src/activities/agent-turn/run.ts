@@ -1175,6 +1175,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
 
           const runCredentials = await prepareRunCredentials({
+            turnTools,
             localMcpServerIds: installedApiIntegrations.map((integration) => integration.serverId),
             input,
             settings,

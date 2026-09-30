@@ -5,6 +5,7 @@ import type {
   RunCredentialsRequest,
   Session,
   SessionTurn,
+  ToolRef,
 } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { getSessionRootId, type Database } from "@opengeni/db";
@@ -30,6 +31,8 @@ export type RunCredentialResolutionContext = {
   initiatingHumanSubjectId?: string | null;
   /** Installed in-process API routes must never enter a product callback. */
   localMcpServerIds?: readonly string[];
+  /** Exact execution selection, resolved once at the turn policy boundary. */
+  effectiveTools: readonly ToolRef[];
 };
 
 export type BoundRunCredentialResolver = {
@@ -42,7 +45,7 @@ export type BoundRunCredentialResolver = {
 export function buildRunCredentialsRequest(
   input: Omit<
     RunCredentialResolutionContext,
-    "db" | "connectionCredentials" | "settings" | "initiatingHumanSubjectId"
+    "db" | "connectionCredentials" | "settings" | "initiatingHumanSubjectId" | "effectiveTools"
   > & {
     rootSessionId: string;
     purpose: "provision" | "renewal";
@@ -125,7 +128,7 @@ export async function bindRunCredentialResolver(
           mcpServers: selectedSessionRemoteMcpTargets(
             input.settings,
             input.session.mcpServers ?? [],
-            input.turn.tools ?? [],
+            input.effectiveTools,
             (input.localMcpServerIds ?? []).map((id) => ({ id })),
           ),
         },
