@@ -15,6 +15,7 @@ import {
   CreateBillingPortalResponse as ContractCreateBillingPortalResponse,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
+  ClaudeSubscriptionUsage as ContractClaudeSubscriptionUsage,
   CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse as ContractCodexRealtimeWebrtcResponse,
   CodexRealtimeVoice as ContractCodexRealtimeVoice,
@@ -166,6 +167,7 @@ import type {
   Workspace,
   WorkspaceMemorySearchResponse,
   ClientConfig,
+  ClaudeSubscriptionUsage,
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
   CodexRealtimeVoice,
@@ -1347,6 +1349,22 @@ describe("SDK / contracts parity", () => {
   });
 
   test("workspace Gateway custom-model requests and projections match contracts", () => {
+    const acceptClaudeUsage = (
+      value: z.infer<typeof ContractClaudeSubscriptionUsage>,
+    ): ClaudeSubscriptionUsage => value;
+    const acceptContractUsage = (
+      value: ClaudeSubscriptionUsage,
+    ): z.infer<typeof ContractClaudeSubscriptionUsage> => value;
+    const usage: ClaudeSubscriptionUsage = {
+      connected: true,
+      credentialVersion: 1,
+      windows: [],
+      observedAt: null,
+      source: null,
+      refreshStatus: "scope_required",
+      refreshCheckedAt: null,
+    };
+    expect(acceptClaudeUsage(acceptContractUsage(usage))).toEqual(usage);
     const acceptModel = (
       value: z.infer<typeof ContractWorkspaceGatewayCustomModel>,
     ): WorkspaceGatewayCustomModel => value;

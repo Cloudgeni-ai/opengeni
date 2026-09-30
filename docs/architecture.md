@@ -1005,6 +1005,19 @@ durations, never primary/secondary position. Headers lacking both durations cann
 update labeled cache; absent reset timing does not clear an exhausted window.
 The account picker refreshes live usage on open rather than trusting stale labels.
 
+Claude subscription setup accepts a setup token alone. The API generates scoped
+device identity and encrypts it with the token; older imported identity remains
+valid. Runtime response observers capture provider quota windows without reading
+response bodies; worker finalization persists them against the current encrypted
+credential. Usage writes never advance credential or model admission versions.
+Scoped API reads expose cached observations and authorized refreshes use the
+provider usage endpoint. Inference-only setup tokens cannot read that endpoint;
+their readings update from model responses. Connection replacement invalidates
+the cache, and an elapsed reset is unknown until Claude reports a new reading.
+Canonical: `packages/db/src/claude-subscription-usage.ts`,
+`apps/api/src/claude-subscription-usage.ts`,
+`apps/web/src/components/models/claude-usage.tsx`.
+
 Codex turns require durable credential leases. `rotation_enabled` off waits on
 capped accounts; on permits same-turn failover. First allocation freezes source,
 active pointer, rotation, strategy, and pin in `codexCredentialPolicySnapshotV1`

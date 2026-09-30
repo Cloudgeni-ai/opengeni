@@ -41,6 +41,13 @@ import {
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
 import {
+  emptyClaudeUsage,
+  mergeClaudeUsage,
+  parseClaudeUsageHeaders,
+  parseModelProvidersJson,
+} from "@opengeni/config";
+import { withClaudeUsageObserver } from "@opengeni/runtime";
+import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
@@ -917,12 +924,54 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             providerTurn.xaiRequestContext = authorization.context;
           }
+          const claudeProviders = new Map(
+            parseModelProvidersJson(runSettings.modelProvidersJson)
+              .filter(
+                (provider) =>
+                  provider.kind === "claude-subscription-workspace" ||
+                  provider.kind === "claude-subscription-organization",
+              )
+              .map((provider) => [provider.id, provider]),
+          );
+          const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            withClaudeUsageObserver((providerId, response) => {
+              const provider = claudeProviders.get(providerId);
+              if (!provider?.apiKey) return;
+              const scope =
+                provider.kind === "claude-subscription-workspace" ? "workspace" : "organization";
+              const previous = providerTurn.latestClaudeUsage.get(scope);
+              let observation = parseClaudeUsageHeaders(response.headers);
+              if (observation && previous?.observation) {
+                const merged = mergeClaudeUsage(
+                  mergeClaudeUsage(emptyClaudeUsage(1), previous.observation),
+                  observation,
+                );
+                observation = {
+                  windows: merged.windows,
+                  observedAt: merged.observedAt!,
+                  source: merged.source!,
+                };
+              }
+              if (observation || response.status === 401)
+                providerTurn.latestClaudeUsage.set(scope, {
+                  token: provider.apiKey,
+                  ...(previous?.observation && !observation
+                    ? { observation: previous.observation }
+                    : {}),
+                  ...(observation ? { observation } : {}),
+                  ...(response.status === 401
+                    ? { refresh: { status: "reconnect", checkedAt: new Date().toISOString() } }
+                    : {}),
+                });
+            }, fn);
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            providerTurn.xaiRequestContext
-              ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-              : withCodex(fn);
+            withClaudeUsage(() =>
+              providerTurn.xaiRequestContext
+                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                : withCodex(fn),
+            );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;
           const codexSessionTitleContext = codexContext
@@ -938,25 +987,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            xaiSessionTitleContext
-              ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-              : codexSessionTitleContext
-                ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                : fn();
+            withClaudeUsage(() =>
+              xaiSessionTitleContext
+                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                : codexSessionTitleContext
+                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                  : fn(),
+            );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
-            withCodex(() =>
-              withCodexRequestOverrides(
-                {
-                  betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
-                  turnMetadata: {
-                    request_kind: "compaction",
-                    compaction: {
-                      implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
-                      strategy: "memento",
+            withClaudeUsage(() =>
+              withCodex(() =>
+                withCodexRequestOverrides(
+                  {
+                    betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+                    turnMetadata: {
+                      request_kind: "compaction",
+                      compaction: {
+                        implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                        strategy: "memento",
+                      },
                     },
                   },
-                },
-                fn,
+                  fn,
+                ),
               ),
             );
           const compactionPrep = await prepareCompaction({

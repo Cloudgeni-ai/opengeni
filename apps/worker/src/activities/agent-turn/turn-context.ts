@@ -1,5 +1,6 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import type { Settings } from "@opengeni/config";
+import type { ClaudeUsageObservation } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
 import type {
@@ -190,6 +191,14 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
+  latestClaudeUsage: Map<
+    "workspace" | "organization",
+    {
+      token: string;
+      observation?: ClaudeUsageObservation;
+      refresh?: { status: "reconnect"; checkedAt: string };
+    }
+  >;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -304,6 +313,7 @@ export function createTurnContext(input: {
       xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
+      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
     },
   };

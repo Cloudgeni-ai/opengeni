@@ -1,11 +1,16 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 import {
   ClaudeTokenInstructions,
-  useClaudeIdentityFields,
   CLAUDE_MODEL_CHOICES,
   claudeModelLabel,
 } from "@/components/models/claude-setup";
 import { Disclosure } from "@/components/ui/disclosure";
+import {
+  ClaudeUsage,
+  ClaudeUsageReadout,
+  useClaudeUsage,
+  type ClaudeUsageState,
+} from "@/components/models/claude-usage";
 import { trackModelConnection } from "@/lib/analytics-observer";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
@@ -335,6 +340,7 @@ export interface ProviderConnectionView {
   customModelsError: Error | null;
   customModels: readonly CustomModelLike[];
   customModelsLoaded: boolean;
+  claudeUsage?: ClaudeUsageState;
   busy: boolean;
   modelSlug: string;
   modelBusy: boolean;
@@ -354,10 +360,7 @@ export interface ProviderConnectionView {
   refreshConnection(): Promise<unknown>;
   refreshCustomModels(): Promise<unknown>;
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  saveKey(
-    apiKey: string,
-    claudeIdentity?: { accountUuid: string; deviceId: string },
-  ): Promise<boolean>;
+  saveKey(apiKey: string): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
   addCustomModel(upstreamModelId?: string): Promise<void>;
@@ -423,6 +426,16 @@ export function useProviderConnection(
     );
   }, [config, connections]);
   const connected = props.canManageConnection ? connection?.status === "active" : readOnlyConnected;
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "workspace",
+    scopeId: props.workspaceId,
+    enabled: enabled && config.provider === "claude_subscription",
+    connected: Boolean(connected),
+    credentialVersion: props.canManageConnection ? connection?.version : undefined,
+    credentialId: props.canManageConnection ? connection?.id : undefined,
+    canManage: props.canManageConnection,
+  });
   const modelSlugValid =
     modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(modelSlug);
@@ -530,17 +543,10 @@ export function useProviderConnection(
   }, [customModels, modelPendingRemoval]);
 
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  async function saveKey(
-    apiKey: string,
-    claudeIdentity?: { accountUuid: string; deviceId: string },
-  ): Promise<boolean> {
+  async function saveKey(apiKey: string): Promise<boolean> {
     const token = apiKey.trim();
     if (!token || !enabled || !props.canManageConnection || busy) return false;
-    if (config.id === "claude_subscription" && !claudeIdentity) return false;
-    const value =
-      config.id === "claude_subscription"
-        ? JSON.stringify({ version: 1, token, identity: claudeIdentity })
-        : token;
+    const value = token;
     const recordOutcome =
       config.id === "openrouter" || config.id === "vercel-ai-gateway"
         ? trackModelConnection(
@@ -831,6 +837,7 @@ export function useProviderConnection(
     connected,
     loaded,
     customModelsLoaded,
+    claudeUsage: config.provider === "claude_subscription" ? claudeUsage : undefined,
     settled: !enabled || settled,
     hidden: !enabled || hidden,
     error,
@@ -872,6 +879,8 @@ export function providerStatus(state: ProviderConnection): {
   label: string;
 } {
   if (!state.settled) return { status: "loading", label: "Loading…" };
+  if (state.claudeUsage?.value?.refreshStatus === "reconnect")
+    return { status: "unavailable", label: "Replace token" };
   if (state.error || state.customModelsError)
     return { status: "unavailable", label: "Unavailable" };
   return state.connected
@@ -924,8 +933,18 @@ export function ProviderConnectionRow({
           : status.label,
         modelsLabel,
       ]}
+      cells={
+        state.claudeUsage && state.connected
+          ? { usage: <ClaudeUsageReadout state={state.claudeUsage} /> }
+          : undefined
+      }
       indicator={
-        status.status === "unavailable" ? { kind: "unavailable", label: "Couldn't load" } : "open"
+        status.status === "unavailable"
+          ? {
+              kind: "unavailable",
+              label: status.label === "Replace token" ? "Replace token" : "Couldn't load",
+            }
+          : "open"
       }
       onOpen={onOpen}
     />
@@ -1147,14 +1166,11 @@ export function ReplaceKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const { config } = state;
-  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
-  const resetIdentity = claude.reset;
   useEffect(() => {
     if (!open) {
       setKey("");
-      resetIdentity();
     }
-  }, [open, resetIdentity]);
+  }, [open]);
   return (
     <FormDialog
       open={open}
@@ -1165,8 +1181,8 @@ export function ReplaceKeyDialog({
       description="New work uses the new credential right away. Work already running finishes on the old one."
       submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
       pendingLabel="Saving…"
-      submitDisabled={!key.trim() || !claude.valid}
-      onSubmit={async () => await state.saveKey(key, claude.identity)}
+      submitDisabled={!key.trim()}
+      onSubmit={async () => await state.saveKey(key)}
       onSubmitted={() => onOpenChange(false)}
     >
       <Field
@@ -1180,7 +1196,6 @@ export function ReplaceKeyDialog({
           onChange={(event) => setKey(event.target.value)}
         />
       </Field>
-      {claude.fields}
     </FormDialog>
   );
 }
@@ -1285,12 +1300,7 @@ export function ProviderConnectionPage({
         state.canManageConnection ? (
           state.connected ? (
             <>
-              <RowButton
-                onClick={() =>
-                  config.provider === "claude_subscription" ? onConnect() : setReplacing(true)
-                }
-                disabled={state.busy}
-              >
+              <RowButton onClick={() => setReplacing(true)} disabled={state.busy}>
                 {config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
@@ -1371,14 +1381,7 @@ export function ProviderConnectionPage({
             <p className="text-sm text-fg-muted">{config.connectionManagerDescription}</p>
           </DetailSection>
         ) : null}
-        {config.provider === "claude_subscription" ? (
-          <DetailSection title="Subscription">
-            <p className="text-sm text-fg-muted">
-              Model calls use your Claude plan. Usage limits and renewal are managed in Claude.
-              Replace the token here if it expires or is revoked.
-            </p>
-          </DetailSection>
-        ) : null}
+        {state.claudeUsage && state.connected ? <ClaudeUsage state={state.claudeUsage} /> : null}
         <CustomModels state={state} />
         {showAccess && onEditAccess ? (
           <DetailSection title="Access">
@@ -1418,7 +1421,6 @@ export function ProviderConnectPage({
 }) {
   const { config } = state;
   const [key, setKey] = useState("");
-  const claude = useClaudeIdentityFields(config.provider === "claude_subscription");
   return (
     <ModelsFormPage
       backLabel={state.connected ? config.title : "Models"}
@@ -1433,7 +1435,7 @@ export function ProviderConnectPage({
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
-      submitDisabled={!key.trim() || !claude.valid || !state.canManageConnection}
+      submitDisabled={!key.trim() || !state.canManageConnection}
       disabledReason={
         state.canManageConnection
           ? undefined
@@ -1445,7 +1447,7 @@ export function ProviderConnectPage({
           ? "Shared with your organization’s workspaces. You can limit access on the account page."
           : undefined)
       }
-      onSubmit={async () => await state.saveKey(key, claude.identity)}
+      onSubmit={async () => await state.saveKey(key)}
       onSubmitted={onConnected}
     >
       <FieldStack>
@@ -1465,7 +1467,6 @@ export function ProviderConnectPage({
             onChange={(event) => setKey(event.target.value)}
           />
         </Field>
-        {claude.fields}
       </FieldStack>
     </ModelsFormPage>
   );
