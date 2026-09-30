@@ -1513,7 +1513,8 @@ Modal commands use authenticated task-router byte offsets owned by the retained
 process. Output and cursor commit atomically under an expected-cursor fence;
 losing readers reread without duplicating output or settling uncaptured tails.
 Router credentials remain in memory. Legacy batch readers only drain existing
-commands; their locators are never reinterpreted as offsets.
+commands; their locators are never reinterpreted as offsets. The reaper drains
+progressing output within a bounded claim, since exit requires both streams at EOF.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
