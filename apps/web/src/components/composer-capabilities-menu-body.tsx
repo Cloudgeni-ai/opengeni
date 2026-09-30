@@ -193,7 +193,7 @@ export function ComposerCapabilitiesMenuBody(props: {
                       presentation={props.presentation}
                       readOnly
                       label={manage ? "Can also save and install Skills" : "Reads Skills only"}
-                      className="mr-11 flex min-h-9 items-center py-1 pr-2 pl-6 text-xs leading-4.5 text-fg-muted"
+                      className="mr-11 flex min-h-11 items-center py-1.5 pr-2 pl-6 text-xs leading-4.5 text-fg-muted"
                       onAction={() => {}}
                     >
                       {manage ? "Can also save and install Skills" : "Reads Skills only"}
