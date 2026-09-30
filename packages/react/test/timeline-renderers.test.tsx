@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
+import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -569,10 +570,25 @@ describe("SiteArtifactRenderer", () => {
       status: "complete",
     });
     const Renderer = defaultToolRegistry.resolve(item);
-    const r = await renderComponent(<Renderer item={item} />);
+    // Without a host resolver the console route would 404 inside an embedder.
+    const bare = await renderComponent(<Renderer item={item} />);
     await flush();
+    expect(bare.container.textContent).toContain("Published Incident board");
+    expect(bare.container.querySelector('[aria-label="Open Incident board"]')).toBeNull();
+    await bare.unmount();
 
-    expect(r.container.textContent).toContain("Published Incident board");
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) =>
+          target.kind === "site"
+            ? { href: `/workspaces/${target.workspaceId}/artifacts/${target.artifactId}` }
+            : null
+        }
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
     const link = r.container.querySelector('a[aria-label="Open Incident board"]');
     expect(link?.getAttribute("href")).toBe(
       "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",

@@ -120,7 +120,8 @@ the native routes `OpenGeniProvider` and the conversation use: client config;
 workspace read, model catalog, live control stream, and workspace Resume;
 session read and rename, event list and SSE (with `Last-Event-ID` resume),
 send, steer, approval and human-input responses, queue, composer draft,
-pause/resume, and (unless `files: false`) attachment upload and download URLs.
+pause/resume, (unless `files: false`) attachment upload and download URLs, and
+(unless `sandboxFiles: false`) session sandbox file reads for `sandbox:` links.
 Every other route or method is a 404 (cancel and workspace Pause are refused);
 unknown query parameters on served reads pass through for newer browser SDKs. Browser session creation is off unless the server
 supplies `createSession`; the browser may then send only `initialMessage` and
@@ -656,6 +657,62 @@ selected content. Version the customer runtime profile and apply updates to new
 sessions, with an explicit migration decision if old sessions must change. Do
 not attach implementation guidance about integrating OpenGeni to the end-user
 runtime agent.
+
+### Links, files, artifacts, and Sites in replies
+
+Agents link the objects they produce directly in chat Markdown. None of these
+is a URL the host's browser can navigate: `artifact:` and `sandbox:` are
+application schemes, and the `/workspaces/...` forms are OpenGeni console
+routes, which resolve against the product's own origin and 404 there.
+
+| Agent writes | Target | `SessionConversation` default |
+| --- | --- | --- |
+| `[Report](artifact:<file uuid>)` | Retained workspace file (exports, published files) | Downloads through a short-lived URL (proxy `files`) |
+| `[Code](sandbox:src/app.ts:12)` | File in the session's sandbox or Connected Machine | Downloads through `fs/read` (proxy `sandboxFiles`) |
+| `[Weekly report](/workspaces/<ws>/artifacts/editable/<id>)` | Live editable document, workbook, or presentation (`artifactReference` from the artifact tools) | Unavailable until the host resolves it |
+| `[Dashboard](/workspaces/<ws>/artifacts/<uuid>)` | Saved Site / published HTML | Unavailable until the host resolves it |
+
+So with `SessionConversation` (or `OpenGeniChat`) behind the proxy, file and
+sandbox links work with no code. Pass `resolveLink` to route the rest to the
+product's own UI; return `{ href }` for a host page or `{ open }` for an action,
+and `null` to keep the default:
+
+```tsx
+<SessionConversation
+  sessionId={sessionId}
+  resolveLink={(target) =>
+    target.kind === "editable-artifact"
+      ? { href: `/reports/opengeni/${target.artifactId}` } // page that mounts @opengeni/react/artifacts/*
+      : target.kind === "site"
+        ? { open: () => openSitePanel(target.artifactId) } // e.g. @opengeni/react/sites
+        : null
+  }
+/>
+```
+
+`MessageTimeline` accepts the same `resolveLink` (it has no defaults; compose
+`sessionLinkResolver({ client, workspaceId, sessionId })` for the downloads),
+and it also applies to `Markdown` rendered by a custom `renderMessageText`.
+`OpenGeniLinkProvider` sets a resolver for a whole subtree. An unresolved
+target renders as text marked unavailable, never as a broken link, and the
+Site tool row hides its Open action. Pages for editable artifacts or Sites need
+their own reads (`/v1/workspaces/:ws/editable-artifacts/...`,
+`/published-artifacts/...`), which the packaged proxy does not serve; the host
+exposes them deliberately behind its own authorization.
+
+A non-React frontend applies the same rule with `parseOpenGeniLink(href)` from
+`@opengeni/sdk`, which classifies an agent href into `file`, `sandbox-file`,
+`editable-artifact`, or `site` (or `null` for an ordinary link). Download a file
+with `createFileDownloadUrl(workspaceId, fileId, { sessionId })` and a sandbox
+file with `fsRead(workspaceId, sessionId, { path, encoding: "base64" })`.
+
+Editable artifacts are live collaborative objects, not files. The artifact
+export tool advertises the formats the deployment serves in its description;
+today that is spreadsheet XLSX only, and every other modality/format pair is
+refused with `unsupported_format` before any version is pinned. Agents are told
+to share the live artifact link instead of promising a PDF or DOCX, so a host
+that needs file delivery of documents should plan on the artifact page rather
+than an export.
 
 ## Browser and React integration
 

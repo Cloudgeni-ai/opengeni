@@ -6,6 +6,7 @@ import {
 import {
   EditableArtifactDurableExportService,
   EditableArtifactAgentApplication,
+  EDITABLE_ARTIFACT_EXPORT_FORMATS,
   EDITABLE_ARTIFACT_EXPORT_MAX_DOWNLOAD_BYTES,
   EditableArtifactCompactionPipeline,
   EditableArtifactGenesisPipeline,
@@ -360,9 +361,11 @@ function materializationProfiles(
   const codecVersion = capabilities.codecVersions["opengeni.xlsx"];
   return Object.freeze({
     async resolve(input: Parameters<EditableArtifactMaterializationProfilePort["resolve"]>[0]) {
+      // EDITABLE_ARTIFACT_EXPORT_FORMATS is what agents are told exists.
       if (
         input.modality !== "spreadsheet" ||
         input.format !== "xlsx" ||
+        !EDITABLE_ARTIFACT_EXPORT_FORMATS[input.modality].includes(input.format) ||
         Object.keys(input.options).length !== 0
       ) {
         return null;

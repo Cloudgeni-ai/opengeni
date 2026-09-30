@@ -9,10 +9,12 @@ import {
   EditableArtifactAgentApplication,
   type EditableArtifactAgentApplicationDependencies,
 } from "../../src/domain/editable-artifacts/agent-application";
-import type {
-  EditableArtifactDurableExportService,
-  EditableArtifactMaterializationJob,
-  EditableArtifactPinnedVersion,
+import {
+  EditableArtifactDurableExportError,
+  describeEditableArtifactExportFormats,
+  type EditableArtifactDurableExportService,
+  type EditableArtifactMaterializationJob,
+  type EditableArtifactPinnedVersion,
 } from "../../src/domain/editable-artifacts/durable-export";
 import {
   editableArtifactClientTransactionId,
@@ -598,6 +600,44 @@ describe("editable artifact agent application", () => {
       }),
     ]);
     expect(touched).toEqual([artifactId, artifactId]);
+  });
+
+  test("refuses an unserved export format before pinning and names what exists", async () => {
+    const fixture = await artifactFixture();
+    let pinned = 0;
+    const application = new EditableArtifactAgentApplication({
+      domain: fixture.service,
+      exports: {
+        async pinVersion() {
+          pinned += 1;
+          throw new Error("must not pin");
+        },
+      } as unknown as EditableArtifactDurableExportService,
+      associations: { listArtifactIds: async () => [], touch: async () => undefined },
+      inspector: { query: async () => Promise.reject(new Error("unused")) },
+      officeImports: { prepare: async () => Promise.reject(new Error("unused")) },
+      workspaceFiles: {
+        ensureMaterializationFile: async () => Promise.reject(new Error("unused")),
+      },
+    });
+    const refusal = await application
+      .startExport({
+        scope,
+        actor: agentActor,
+        sessionId,
+        artifactId,
+        idempotencyKey: "deliver-budget-pdf",
+        format: "pdf",
+      })
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(EditableArtifactDurableExportError);
+    expect((refusal as EditableArtifactDurableExportError).code).toBe("unsupported_format");
+    expect((refusal as Error).message).toContain("cannot be exported as pdf");
+    expect((refusal as Error).message).toContain("spreadsheet → xlsx");
+    expect(pinned).toBe(0);
+    expect(describeEditableArtifactExportFormats()).toContain(
+      "document and presentation artifacts cannot be exported yet",
+    );
   });
 
   test("does not create a workspace file for a mismatched export version", async () => {

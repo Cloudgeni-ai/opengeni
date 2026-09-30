@@ -26,10 +26,12 @@ import {
   type SpreadsheetArtifactKernelQuery,
 } from "@opengeni/contracts/editable-artifacts";
 
-import type {
-  EditableArtifactDurableExportService,
-  EditableArtifactMaterializationFormat,
-  EditableArtifactMaterializationJob,
+import {
+  EDITABLE_ARTIFACT_EXPORT_FORMATS,
+  unsupportedEditableArtifactExport,
+  type EditableArtifactDurableExportService,
+  type EditableArtifactMaterializationFormat,
+  type EditableArtifactMaterializationJob,
 } from "./durable-export";
 import {
   EditableArtifactDomainError,
@@ -473,6 +475,10 @@ export class EditableArtifactAgentApplication {
       actor: context.actor,
       artifactId,
     });
+    // Refuse before pinning a version: the agent learns what does exist.
+    if (!EDITABLE_ARTIFACT_EXPORT_FORMATS[artifact.modality].includes(input.format)) {
+      throw unsupportedEditableArtifactExport(artifact.modality, input.format);
+    }
     const version = await this.dependencies.exports.pinVersion({
       scope: context.scope,
       actor: context.actor,

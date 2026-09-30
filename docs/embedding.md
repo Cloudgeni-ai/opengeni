@@ -74,6 +74,14 @@ default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
 children. The SDK scrolls the timeline internally and keeps the composer at
 the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
 
+Agent replies link files, sandbox paths, editable artifacts, and Sites with
+`artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
+host origin. `SessionConversation` downloads files and sandbox files itself;
+route artifacts and Sites with its `resolveLink` prop (also on
+`MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
+`@opengeni/sdk` outside React. See
+[links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
+
 A host that mounts the styled React surfaces
 can import `@opengeni/react/compiled.css` once. That package-owned artifact is
 already compiled from the component source with Tailwind v4, contains no global

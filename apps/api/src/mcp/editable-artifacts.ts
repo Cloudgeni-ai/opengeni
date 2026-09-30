@@ -8,6 +8,7 @@ import type {
   EditableArtifactAgentQuery,
 } from "@opengeni/core/editable-artifacts";
 import {
+  describeEditableArtifactExportFormats,
   editableArtifactClientTransactionId,
   editableArtifactId,
 } from "@opengeni/core/editable-artifacts";
@@ -267,11 +268,12 @@ export function registerEditableArtifactAgentTools(
     "editable_artifact_export",
     {
       title: "Export editable artifact",
-      description:
-        "Pin the current artifact head and start an immutable Office/PDF/image export. This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.",
+      description: `Pin the current artifact head and start an immutable file export. ${describeEditableArtifactExportFormats()} This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.`,
       inputSchema: {
         artifactId: ArtifactId,
-        format: Format,
+        format: Format.describe(
+          "Target file format. Only the formats listed in this tool's description are served; any other combination is refused with unsupported_format.",
+        ),
         options: JsonRecord.optional(),
       },
       outputSchema: {

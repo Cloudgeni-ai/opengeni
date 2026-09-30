@@ -78,6 +78,7 @@ import {
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
+import { useOpenGeniLinkResolver } from "../components/open-geni-links";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers
@@ -1193,19 +1194,49 @@ function publishedSiteReceipt(output: unknown): PublishedSiteReceipt | null {
   };
 }
 
+const SITE_OPEN_CLASS =
+  "inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10";
+
 function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
-  const href = `/workspaces/${encodeURIComponent(receipt.workspaceId)}/artifacts/${encodeURIComponent(receipt.artifactId)}`;
-  return (
-    <a
-      href={href}
-      aria-label={`Open ${receipt.title}`}
-      className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
-      onClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => event.stopPropagation()}
-    >
-      Open
-    </a>
-  );
+  // The console route only exists in the OpenGeni console; a host decides.
+  const resolution = useOpenGeniLinkResolver()?.({
+    kind: "site",
+    artifactId: receipt.artifactId,
+    workspaceId: receipt.workspaceId,
+  });
+  if (resolution?.href) {
+    return (
+      <a
+        href={resolution.href}
+        aria-label={`Open ${receipt.title}`}
+        className={SITE_OPEN_CLASS}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        Open
+      </a>
+    );
+  }
+  if (resolution?.open) {
+    const open = resolution.open;
+    return (
+      <button
+        type="button"
+        aria-label={`Open ${receipt.title}`}
+        className={SITE_OPEN_CLASS}
+        onClick={(event) => {
+          event.stopPropagation();
+          void Promise.resolve()
+            .then(open)
+            .catch(() => undefined);
+        }}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        Open
+      </button>
+    );
+  }
+  return null;
 }
 
 function SiteArtifactRenderer({ item }: ToolRendererProps) {

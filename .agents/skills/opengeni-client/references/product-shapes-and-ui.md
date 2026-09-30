@@ -18,6 +18,31 @@ Inspect the installed OpenGeni React package before creating replacement compone
 
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
 
+## Links, downloads, artifacts, and Sites
+
+Agent replies link OpenGeni objects as `artifact:<file uuid>`,
+`sandbox:<path>[:line]`, `/workspaces/<ws>/artifacts/editable/<id>` (live
+document, workbook, or presentation), and `/workspaces/<ws>/artifacts/<uuid>`
+(Site). None is navigable inside the product: the `/workspaces/...` forms are
+console routes and 404 on the product origin. Never pass them to a raw `<a>`.
+
+- `SessionConversation`/`OpenGeniChat` behind `createSessionProxyHandler`
+  already download `artifact:` files and `sandbox:` files (proxy `files` and
+  `sandboxFiles`, both on by default). Keep those permissions (`files:read`).
+- Route editable artifacts and Sites to the product's own UI with
+  `resolveLink={(target) => ... ({ href } | { open } | null)}` on
+  `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
+  subtree; it also covers `Markdown` inside a custom `renderMessageText`.
+  Unresolved targets render as unavailable text, not broken links.
+- `MessageTimeline` alone has no defaults; add
+  `sessionLinkResolver({ client, workspaceId, sessionId })` for downloads.
+- Non-React or custom renderers: classify each href with
+  `parseOpenGeniLink(href)` from `@opengeni/sdk`, then use
+  `createFileDownloadUrl` / `fsRead`, or the product's artifact page.
+- Editable artifact export serves only the formats the export tool lists
+  (today spreadsheet XLSX). Do not build a "Download PDF" flow on it; open the
+  live artifact instead.
+
 ## Optional artifact library
 
 Use `client.listArtifactCatalog(workspaceId, options)` for a workspace output

@@ -33,6 +33,56 @@ export type EditableArtifactMaterializationFormat =
   | "png"
   | "webp";
 
+/**
+ * The export formats the deployed materializer serves, per modality. This is
+ * the single source for the production profile resolver, the agent tool
+ * schema/description, and the agent-facing refusal, so an agent is never
+ * offered (or left to guess) a format that will be refused. Extend it only
+ * together with a real codec.
+ */
+export const EDITABLE_ARTIFACT_EXPORT_FORMATS: Readonly<
+  Record<EditableArtifactModality, readonly EditableArtifactMaterializationFormat[]>
+> = Object.freeze({
+  spreadsheet: Object.freeze(["xlsx"] as const),
+  document: Object.freeze([] as const),
+  presentation: Object.freeze([] as const),
+});
+
+/** Human/agent-readable summary of {@link EDITABLE_ARTIFACT_EXPORT_FORMATS}. */
+export function describeEditableArtifactExportFormats(): string {
+  const entries = Object.entries(EDITABLE_ARTIFACT_EXPORT_FORMATS) as Array<
+    [EditableArtifactModality, readonly EditableArtifactMaterializationFormat[]]
+  >;
+  const supported = entries
+    .filter(([, formats]) => formats.length > 0)
+    .map(([modality, formats]) => `${modality} → ${formats.join(", ")}`);
+  const none = entries.filter(([, formats]) => formats.length === 0).map(([modality]) => modality);
+  return [
+    supported.length > 0
+      ? `Supported exports: ${supported.join("; ")}.`
+      : "No exports are available.",
+    none.length > 0
+      ? `${none.join(" and ")} artifacts cannot be exported yet (no PDF, DOCX, PPTX, or image export); share the live artifact with its artifactReference link instead.`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Typed refusal that tells the caller which formats do exist. */
+export function unsupportedEditableArtifactExport(
+  modality: EditableArtifactModality,
+  format: string,
+): EditableArtifactDurableExportError {
+  const listed = (EDITABLE_ARTIFACT_EXPORT_FORMATS[modality] as readonly string[]).includes(format);
+  return new EditableArtifactDurableExportError(
+    "unsupported_format",
+    listed
+      ? `unsupported_format: this deployment does not serve a ${format} export of a ${modality} artifact with these options; retry with options omitted.`
+      : `unsupported_format: a ${modality} artifact cannot be exported as ${format}. ${describeEditableArtifactExportFormats()}`,
+  );
+}
+
 export type EditableArtifactMaterializationMimeType =
   | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -223,8 +273,11 @@ export type EditableArtifactDurableExportErrorCode =
   | "unavailable";
 
 export class EditableArtifactDurableExportError extends Error {
-  constructor(readonly code: EditableArtifactDurableExportErrorCode) {
-    super(code);
+  constructor(
+    readonly code: EditableArtifactDurableExportErrorCode,
+    message?: string,
+  ) {
+    super(message ?? code);
     this.name = "EditableArtifactDurableExportError";
   }
 }
@@ -312,7 +365,7 @@ export class EditableArtifactDurableExportService {
       format,
       options,
     });
-    if (!profile) throw new EditableArtifactDurableExportError("unsupported_format");
+    if (!profile) throw unsupportedEditableArtifactExport(version.modality, format);
     validateProfile(profile, version.modality, format);
     const requestHash = hashPublicRequest("materialize", [
       idempotencyKey,

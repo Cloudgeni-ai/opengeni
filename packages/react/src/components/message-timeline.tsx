@@ -64,6 +64,7 @@ import {
   type OlderHistoryLoader,
 } from "../older-history";
 import { Markdown } from "./markdown";
+import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
@@ -203,6 +204,16 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /**
+   * Open OpenGeni object links the agent writes in replies and progress notes:
+   * `artifact:<file>`, `sandbox:<path>`, editable artifacts, and Sites. Return
+   * a host URL (`{ href }`) or action (`{ open }`); unhandled targets render as
+   * unavailable text instead of a console link that 404s inside the host.
+   * Applies to the default message renderer and to any `Markdown` a custom
+   * `renderMessageText` renders. `SessionConversation` supplies file and
+   * sandbox downloads by default.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
@@ -463,6 +474,7 @@ function cssEscapeAttribute(value: string): string {
  * with a "jump to latest" affordance when the reader scrolls back.
  */
 export function MessageTimeline({
+  resolveLink,
   userMessageDisclosureLabels,
   searchTarget,
   events,
@@ -2109,7 +2121,7 @@ export function MessageTimeline({
     releasePinAfterScrollSettled(node);
   };
 
-  return (
+  const timeline = (
     <LightboxProvider>
       <FoldMemoryProvider value={foldMemoryRef.current}>
         <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
@@ -2523,6 +2535,8 @@ export function MessageTimeline({
       </FoldMemoryProvider>
     </LightboxProvider>
   );
+  // Agent-authored object links resolve through the host, never the console.
+  return <OpenGeniLinkProvider resolveLink={resolveLink}>{timeline}</OpenGeniLinkProvider>;
 }
 
 type KeyedTimelineGroup = {

@@ -515,4 +515,63 @@ describe("createSessionProxyHandler", () => {
       ).status,
     ).toBe(404);
   });
+
+  test("sandbox link downloads forward only the file read, unless disabled", async () => {
+    const { upstream, browser, handler } = setup();
+    await browser.fsRead(WORKSPACE_ID, SESSION_ID, {
+      path: "reports/weekly.pdf",
+      encoding: "base64",
+      maxBytes: 1024,
+    });
+    expect(upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
+    );
+    expect(upstream.requests.at(-1)!.body).toEqual({
+      path: "reports/weekly.pdf",
+      encoding: "base64",
+      maxBytes: 1024,
+    });
+    // A browser cannot pick another compute route or smuggle extra fields.
+    const smuggled = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: "a.txt", route: { sandboxId: "other" }, extra: true }),
+        },
+      ),
+    );
+    expect(smuggled.status).toBe(200);
+    expect(upstream.requests.at(-1)!.body).toEqual({ path: "a.txt" });
+    const count = upstream.requests.length;
+    for (const body of [{}, { path: "a.txt", encoding: "hex" }, { path: "a", maxBytes: "1" }]) {
+      const rejected = await handler(
+        new Request(
+          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        ),
+      );
+      expect(rejected.status).toBe(400);
+    }
+    // Writes stay outside the conversation allowlist.
+    expect(
+      (
+        await rejection(
+          browser.fsWrite(WORKSPACE_ID, SESSION_ID, { path: "a.txt", content: "x" } as never),
+        )
+      ).status,
+    ).toBe(404);
+    expect(upstream.requests).toHaveLength(count);
+    const off = setup({ sandboxFiles: false });
+    expect(
+      (await rejection(off.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a.txt" } as never)))
+        .status,
+    ).toBe(404);
+    expect(off.upstream.requests).toHaveLength(0);
+  });
 });
