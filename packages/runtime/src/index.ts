@@ -10470,6 +10470,11 @@ function gitCredentialHelperBindingCaseLines(
   bindings: GitCredentialBindingSeed[],
 ): string[] {
   const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  const providerStoreRemotes = new Set(
+    resources
+      .filter((resource) => !repositoryHasExplicitGitConnection(resource))
+      .map((resource) => resource.uri),
+  );
   return runtimeGitBindingDescriptors(resources)
     .filter(
       (descriptor) =>
@@ -10481,7 +10486,7 @@ function gitCredentialHelperBindingCaseLines(
       const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
-          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) ${providerStoreRemotes.has(descriptor.uri) ? '[ -z "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ] || exit 0; ' : ""}username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
       );
     });
 }
@@ -11096,7 +11101,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  repository_credential_source="${6:-connection}"',
   "  git() {",
   '    if [ "$repository_credential_source" = provider ]; then',
-  '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && exec git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
+  '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
   '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
   // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
   // leaving its platform binding, broker route and askpass behavior intact.

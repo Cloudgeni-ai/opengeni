@@ -9,6 +9,7 @@ import {
   materializeRunCredentials,
   normalizeRunCredentialsResolution,
   repositoryHasExplicitGitConnection,
+  gitCredentialBindingHash,
   repositoryUsesSandboxClone,
   runCredentialRoot,
   runRepositoryCloneHook,
@@ -162,6 +163,18 @@ describe("provider credentials for repository resource clones", () => {
         scope.sessionId,
       );
       expect((await cli.exec({ cmd: "gh pr create" })).exitCode).toBe(0);
+      // A prior platform turn may leave a token behind. Subsequent Git pushes
+      // must still select the renewed product store for this unbound remote.
+      await writeFile(
+        join(root, ".opengeni/git-credentials", `${gitCredentialBindingHash("github")}-token`),
+        "stale-platform-token",
+      );
+      const selected = await cli.exec({
+        cmd: "printf 'protocol=https\\nhost=github.com\\npath=acme/infra\\n\\n' | /usr/bin/git credential fill",
+      });
+      expect(selected.exitCode).toBe(0);
+      expect(selected.stdout).toContain("password=provider-secret-two");
+      expect(selected.stdout).not.toContain("stale-platform-token");
       await clone(
         { ...repository, uri: "https://github.com.evil.test/acme/infra", mountPath: "repos/other" },
         "",

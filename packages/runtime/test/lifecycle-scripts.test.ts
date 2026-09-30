@@ -592,13 +592,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     const lines = command.split("\n");
 
     expect(
-      lines.filter((line) =>
-        line.includes("'https|git.example|acme/repo') username='x-access-token'"),
+      lines.filter(
+        (line) =>
+          line.includes("'https|git.example|acme/repo') ") &&
+          line.includes("username='x-access-token'"),
       ),
     ).toHaveLength(1);
     expect(
-      lines.filter((line) =>
-        line.includes("'https|git.example|acme/repo.git') username='x-access-token'"),
+      lines.filter(
+        (line) =>
+          line.includes("'https|git.example|acme/repo.git') ") &&
+          line.includes("username='x-access-token'"),
       ),
     ).toHaveLength(1);
   });
