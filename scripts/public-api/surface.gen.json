@@ -15753,6 +15753,17 @@
         "$": "enum=[\"\\\"month\\\"\",\"\\\"today\\\"\",\"\\\"week\\\"\",\"\\\"ytd\\\"\"]"
       }
     },
+    "OrganizationUsagePersonalWorkspace": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.membershipId": "string!",
+        "$.totals": "array!",
+        "$.totals[]": "ref(OrganizationUsageTotal)"
+      }
+    },
     "OrganizationUsageSummary": {
       "io": [
         "output"
@@ -15768,6 +15779,9 @@
         "$.granularity": "enum!=[\"\\\"day\\\"\",\"\\\"hour\\\"\"]",
         "$.nextWorkspaceCursor": "string! null",
         "$.period": "ref(InsightsRange)!",
+        "$.personalWorkspaceCount": "integer!",
+        "$.personalWorkspaces": "array!",
+        "$.personalWorkspaces[]": "ref(OrganizationUsagePersonalWorkspace)",
         "$.since": "string!",
         "$.totals": "array!",
         "$.totals[]": "ref(OrganizationUsageTotal)",
