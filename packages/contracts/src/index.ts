@@ -4213,6 +4213,8 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
+      /** Secret, turn-local request headers for session-attached remote MCP servers. */
+      mcp?: import("./workspace-integrations").CredentialProviderMcpHeaders[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */

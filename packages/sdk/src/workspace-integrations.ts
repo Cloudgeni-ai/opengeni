@@ -7,15 +7,30 @@ import {
 import type { CredentialProviderRequest, WorkspaceWebhookEvent } from "@opengeni/contracts";
 
 export type {
+  CreateOrganizationWebhookRequest,
+  CreateOrganizationWebhookResponse,
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   CredentialProviderRequest,
   CredentialProviderResponse,
+  CredentialProviderMcpHeaders,
+  CredentialProviderMcpMaterial,
+  GetOrganizationCredentialProviderResponse,
   GetWorkspaceCredentialProviderResponse,
+  InitiatingHuman,
+  IntegrationWorkspaceFilter,
+  ListOrganizationWebhookDeliveriesResponse,
+  ListOrganizationWebhooksResponse,
   ListWorkspaceWebhookDeliveriesResponse,
   ListWorkspaceWebhooksResponse,
   PutWorkspaceCredentialProviderRequest,
   PutWorkspaceCredentialProviderResponse,
+  PutOrganizationCredentialProviderRequest,
+  PutOrganizationCredentialProviderResponse,
+  OrganizationCredentialProvider,
+  OrganizationWebhook,
+  OrganizationWebhookDelivery,
+  UpdateOrganizationWebhookRequest,
   UpdateWorkspaceWebhookRequest,
   WorkspaceCredentialProvider,
   WorkspaceWebhook,
@@ -98,7 +113,7 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   };
 }
 
-/** Verify and parse one credential request sent to a workspace credential provider. */
+/** Verify and parse one request sent to an organization or workspace credential provider. */
 export async function verifyCredentialProviderRequest(
   input: SignedRequest,
 ): Promise<CredentialProviderRequest> {

@@ -35,6 +35,16 @@ import type {
 } from "./workspace-artifacts";
 import type { CreateFeedbackRequest, Feedback, FeedbackSubmissionResponse } from "./feedback";
 import type {
+  CreateOrganizationWebhookRequest,
+  CreateOrganizationWebhookResponse,
+  GetOrganizationCredentialProviderResponse,
+  ListOrganizationWebhookDeliveriesResponse,
+  ListOrganizationWebhooksResponse,
+  OrganizationWebhook,
+  OrganizationWebhookDelivery,
+  PutOrganizationCredentialProviderRequest,
+  PutOrganizationCredentialProviderResponse,
+  UpdateOrganizationWebhookRequest,
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   GetWorkspaceCredentialProviderResponse,
@@ -1246,6 +1256,113 @@ export class OpenGeniClient {
     await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/credential-provider`);
   }
 
+  /** Organization default; requires account:admin, not an asUser or agent-attempt client. */
+  async getOrganizationCredentialProvider(
+    organizationId: string,
+  ): Promise<GetOrganizationCredentialProviderResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+    );
+  }
+
+  /**
+   * Register once for every matching workspace. An enabled workspace provider
+   * overrides it. Store the signing secret returned on first creation.
+   */
+  async putOrganizationCredentialProvider(
+    organizationId: string,
+    request: PutOrganizationCredentialProviderRequest,
+  ): Promise<PutOrganizationCredentialProviderResponse> {
+    return this.requestJson(
+      "PUT",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+      request,
+    );
+  }
+
+  async deleteOrganizationCredentialProvider(organizationId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+    );
+  }
+
+  async listOrganizationWebhooks(
+    organizationId: string,
+  ): Promise<ListOrganizationWebhooksResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks`,
+    );
+  }
+
+  /** All matching workspaces, one signing secret; requires account:admin. */
+  async createOrganizationWebhook(
+    organizationId: string,
+    request: CreateOrganizationWebhookRequest,
+  ): Promise<CreateOrganizationWebhookResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks`,
+      request,
+    );
+  }
+
+  async getOrganizationWebhook(
+    organizationId: string,
+    webhookId: string,
+  ): Promise<OrganizationWebhook> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+    );
+  }
+
+  async updateOrganizationWebhook(
+    organizationId: string,
+    webhookId: string,
+    request: UpdateOrganizationWebhookRequest,
+  ): Promise<OrganizationWebhook> {
+    return this.requestJson(
+      "PATCH",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+      request,
+    );
+  }
+
+  async deleteOrganizationWebhook(organizationId: string, webhookId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+    );
+  }
+
+  async listOrganizationWebhookDeliveries(
+    organizationId: string,
+    webhookId: string,
+    options: { limit?: number } = {},
+  ): Promise<ListOrganizationWebhookDeliveriesResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/deliveries`,
+      undefined,
+      options.limit !== undefined ? { limit: String(options.limit) } : {},
+    );
+  }
+
+  /** Requeue one settled delivery with a fresh attempt budget. */
+  async redeliverOrganizationWebhookDelivery(
+    organizationId: string,
+    webhookId: string,
+    deliveryId: string,
+  ): Promise<OrganizationWebhookDelivery> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`,
+    );
+  }
+
   async listWorkspaceWebhooks(workspaceId: string): Promise<ListWorkspaceWebhooksResponse> {
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks`);
   }
@@ -1256,6 +1373,10 @@ export class OpenGeniClient {
     request: CreateWorkspaceWebhookRequest,
   ): Promise<CreateWorkspaceWebhookResponse> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/webhooks`, request);
+  }
+
+  async getWorkspaceWebhook(workspaceId: string, webhookId: string): Promise<WorkspaceWebhook> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
   }
 
   async updateWorkspaceWebhook(

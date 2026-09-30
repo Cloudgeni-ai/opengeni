@@ -15,6 +15,20 @@ export const WorkspaceWebhookEventType = z.enum(WORKSPACE_WEBHOOK_EVENT_TYPES);
 export type WorkspaceWebhookEventType = z.infer<typeof WorkspaceWebhookEventType>;
 
 export const WORKSPACE_WEBHOOK_LIMIT_PER_WORKSPACE = 10;
+export const ORGANIZATION_WEBHOOK_LIMIT_PER_ORGANIZATION = 10;
+
+/** Exact external-source match; absent/null means every workspace in the organization. */
+export const IntegrationWorkspaceFilter = z
+  .object({ externalSource: z.string().min(1).max(256).optional() })
+  .strict();
+export type IntegrationWorkspaceFilter = z.infer<typeof IntegrationWorkspaceFilter>;
+
+/** Informational attribution only. It never supplies or changes authorization. */
+export const InitiatingHuman = z.object({
+  subjectId: z.string(),
+  externalIdentity: z.object({ source: z.string(), externalId: z.string() }).nullable(),
+});
+export type InitiatingHuman = z.infer<typeof InitiatingHuman>;
 
 const HttpUrl = z
   .string()
@@ -75,6 +89,33 @@ export const ListWorkspaceWebhooksResponse = z
   .strict();
 export type ListWorkspaceWebhooksResponse = z.infer<typeof ListWorkspaceWebhooksResponse>;
 
+export const OrganizationWebhook = WorkspaceWebhook.omit({ workspaceId: true }).extend({
+  organizationId: z.string().uuid(),
+  workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+});
+export type OrganizationWebhook = z.infer<typeof OrganizationWebhook>;
+
+export const CreateOrganizationWebhookRequest = CreateWorkspaceWebhookRequest.extend({
+  workspaceFilter: IntegrationWorkspaceFilter.nullable().optional(),
+});
+export type CreateOrganizationWebhookRequest = z.input<typeof CreateOrganizationWebhookRequest>;
+
+export const UpdateOrganizationWebhookRequest = UpdateWorkspaceWebhookRequest.extend({
+  /** Omit to preserve; null clears the filter. */
+  workspaceFilter: IntegrationWorkspaceFilter.nullable().optional(),
+});
+export type UpdateOrganizationWebhookRequest = z.input<typeof UpdateOrganizationWebhookRequest>;
+
+export const CreateOrganizationWebhookResponse = z
+  .object({ webhook: OrganizationWebhook, secret: z.string() })
+  .strict();
+export type CreateOrganizationWebhookResponse = z.infer<typeof CreateOrganizationWebhookResponse>;
+
+export const ListOrganizationWebhooksResponse = z
+  .object({ webhooks: z.array(OrganizationWebhook) })
+  .strict();
+export type ListOrganizationWebhooksResponse = z.infer<typeof ListOrganizationWebhooksResponse>;
+
 export const WorkspaceWebhookDeliveryStatus = z.enum(["pending", "delivered", "failed"]);
 export type WorkspaceWebhookDeliveryStatus = z.infer<typeof WorkspaceWebhookDeliveryStatus>;
 
@@ -103,6 +144,13 @@ export type ListWorkspaceWebhookDeliveriesResponse = z.infer<
   typeof ListWorkspaceWebhookDeliveriesResponse
 >;
 
+export const OrganizationWebhookDelivery = WorkspaceWebhookDelivery;
+export type OrganizationWebhookDelivery = z.infer<typeof OrganizationWebhookDelivery>;
+export const ListOrganizationWebhookDeliveriesResponse = ListWorkspaceWebhookDeliveriesResponse;
+export type ListOrganizationWebhookDeliveriesResponse = z.infer<
+  typeof ListOrganizationWebhookDeliveriesResponse
+>;
+
 /**
  * The thin body POSTed to a webhook endpoint. It identifies what changed;
  * receivers read details through the authenticated API.
@@ -111,10 +159,19 @@ export const WorkspaceWebhookEvent = z.object({
   id: z.string().uuid(),
   type: z.string(),
   workspaceId: z.string().uuid(),
+  /** Present on new deliveries; optional for receivers of pre-upgrade deliveries. */
+  workspace: z
+    .object({
+      id: z.string().uuid(),
+      externalSource: z.string().nullable(),
+      externalId: z.string().nullable(),
+    })
+    .optional(),
   sessionId: z.string().uuid(),
   turnId: z.string().uuid().nullable(),
   sequence: z.number().int(),
   occurredAt: z.string(),
+  initiatingHuman: InitiatingHuman.nullable().optional(),
   data: z.object({ status: z.string().optional(), reason: z.string().optional() }).passthrough(),
 });
 export type WorkspaceWebhookEvent = z.infer<typeof WorkspaceWebhookEvent>;
@@ -157,6 +214,37 @@ export type GetWorkspaceCredentialProviderResponse = z.infer<
   typeof GetWorkspaceCredentialProviderResponse
 >;
 
+export const OrganizationCredentialProvider = WorkspaceCredentialProvider.omit({
+  workspaceId: true,
+}).extend({
+  organizationId: z.string().uuid(),
+  workspaceFilter: IntegrationWorkspaceFilter.nullable(),
+});
+export type OrganizationCredentialProvider = z.infer<typeof OrganizationCredentialProvider>;
+
+export const PutOrganizationCredentialProviderRequest =
+  PutWorkspaceCredentialProviderRequest.extend({
+    /** Omit to preserve an existing filter; null covers all organization workspaces. */
+    workspaceFilter: IntegrationWorkspaceFilter.nullable().optional(),
+  });
+export type PutOrganizationCredentialProviderRequest = z.input<
+  typeof PutOrganizationCredentialProviderRequest
+>;
+
+export const PutOrganizationCredentialProviderResponse = z
+  .object({ provider: OrganizationCredentialProvider, secret: z.string().optional() })
+  .strict();
+export type PutOrganizationCredentialProviderResponse = z.infer<
+  typeof PutOrganizationCredentialProviderResponse
+>;
+
+export const GetOrganizationCredentialProviderResponse = z
+  .object({ provider: OrganizationCredentialProvider.nullable() })
+  .strict();
+export type GetOrganizationCredentialProviderResponse = z.infer<
+  typeof GetOrganizationCredentialProviderResponse
+>;
+
 /** The body OpenGeni POSTs to a workspace credential provider. */
 export type CredentialProviderRequest = {
   type: "credentials.request";
@@ -171,6 +259,8 @@ export type CredentialProviderRequest = {
   attemptId: string;
   initiator: { kind: string; subjectId?: string };
   initiatingHumanSubjectId: string | null;
+  /** Informational, not authority. Optional only for pre-upgrade senders. */
+  initiatingHuman?: InitiatingHuman | null;
   sandboxBackend: string;
   sandboxOs: string;
 };
@@ -201,6 +291,67 @@ const ProviderGitCredential = z.object({
   password: z.string().min(1).max(16384),
 });
 
+const FORBIDDEN_MCP_HEADERS = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "content-length",
+]);
+
+/** Secret, turn-local headers for one session-attached remote MCP, by id or exact URL. */
+export const CredentialProviderMcpHeaders = z
+  .object({
+    server: z.string().min(1).max(2048),
+    headers: z.record(z.string(), z.string()),
+    expiresAt: z.iso.datetime({ offset: true }).optional(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    const headers = Object.entries(entry.headers);
+    const seen = new Set<string>();
+    let bytes = 0;
+    if (headers.length === 0 || headers.length > 32) {
+      context.addIssue({ code: "custom", message: "MCP headers must contain 1–32 entries" });
+    }
+    for (const [name, value] of headers) {
+      const lower = name.toLowerCase();
+      if (
+        name.length > 128 ||
+        !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) ||
+        FORBIDDEN_MCP_HEADERS.has(lower) ||
+        seen.has(lower)
+      ) {
+        context.addIssue({ code: "custom", message: "Invalid or duplicate MCP header name" });
+      }
+      seen.add(lower);
+      const valueBytes = new TextEncoder().encode(value).byteLength;
+      bytes += name.length + valueBytes;
+      if (valueBytes > 16384 || /[\u0000-\u0008\u000a-\u001f\u007f]/.test(value)) {
+        context.addIssue({ code: "custom", message: "Invalid or oversized MCP header value" });
+      }
+    }
+    if (bytes > 65536) {
+      context.addIssue({ code: "custom", message: "MCP header material exceeds 64 KiB" });
+    }
+  });
+export type CredentialProviderMcpHeaders = z.infer<typeof CredentialProviderMcpHeaders>;
+
+export const CredentialProviderMcpMaterial = z
+  .array(CredentialProviderMcpHeaders)
+  .max(32)
+  .superRefine((entries, context) => {
+    if (new Set(entries.map((entry) => entry.server)).size !== entries.length) {
+      context.addIssue({ code: "custom", message: "Duplicate MCP server target" });
+    }
+  });
+export type CredentialProviderMcpMaterial = z.infer<typeof CredentialProviderMcpMaterial>;
+
 /** What a credential provider returns. Scope echoes are added by OpenGeni. */
 export const CredentialProviderResponse = z.discriminatedUnion("status", [
   z.object({
@@ -217,6 +368,7 @@ export const CredentialProviderResponse = z.discriminatedUnion("status", [
       .optional(),
     fileEnvironment: z.record(z.string(), z.string()).optional(),
     git: z.array(ProviderGitCredential).max(16).optional(),
+    mcp: CredentialProviderMcpMaterial.optional(),
     expiresAt: z.string().nullable().optional(),
     authNeeded: z.array(ProviderAuthNeeded).optional(),
   }),
