@@ -2,6 +2,7 @@ import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-p
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
+import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
 import {
   CLIENT_ERRORS_PATH,
   isClientErrorReportRequest,
@@ -1496,6 +1497,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
+  registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

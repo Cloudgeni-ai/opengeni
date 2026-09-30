@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0546_idle_command_containment.sql",
+          (migration) => migration.path === "0546_organization_integration_primitives.sql",
         )
-          ? "0546_idle_command_containment.sql"
+          ? "0546_organization_integration_primitives.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0545_workspace_claude_models.sql",
               )
@@ -376,11 +376,11 @@ describe("release schema contract", () => {
     const scheduledAdmissionRefusals = completeSourceContract.migrations.some(
       (migration) => migration.path === "0539_scheduled_admission_refusals.sql",
     );
+    const organizationIntegrationPrimitives = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0546_organization_integration_primitives.sql",
+    );
     const workspaceClaudeModels = completeSourceContract.migrations.some(
       (migration) => migration.path === "0545_workspace_claude_models.sql",
-    );
-    const idleCommandContainment = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0546_idle_command_containment.sql",
     );
     const claudeModelConnections = completeSourceContract.migrations.some(
       (migration) => migration.path === "0544_claude_model_connections.sql",
@@ -664,8 +664,8 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationIntegrationPrimitives ? 1 : 0) +
         (workspaceClaudeModels ? 1 : 0) +
-        (idleCommandContainment ? 1 : 0) +
         (claudeModelConnections ? 1 : 0) +
         (usageEventWorkspaceLockOrder ? 1 : 0) +
         (taskNoteRootLockMode ? 1 : 0) +
@@ -1062,7 +1062,9 @@ describe("release schema contract", () => {
       ...(taskNoteRootLockMode ? { latestMigration: "0542_task_note_root_lock_mode.sql" } : {}),
       ...(claudeModelConnections ? { latestMigration: "0544_claude_model_connections.sql" } : {}),
       ...(workspaceClaudeModels ? { latestMigration: "0545_workspace_claude_models.sql" } : {}),
-      ...(idleCommandContainment ? { latestMigration: "0546_idle_command_containment.sql" } : {}),
+      ...(organizationIntegrationPrimitives
+        ? { latestMigration: "0546_organization_integration_primitives.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1099,7 +1101,8 @@ describe("release schema contract", () => {
             "0542_task_note_root_lock_mode.sql",
             "0544_claude_model_connections.sql",
             "0545_workspace_claude_models.sql",
-            "0546_idle_command_containment.sql",
+
+            "0546_organization_integration_primitives.sql",
           ].includes(migration.path),
       ),
     };
@@ -2585,7 +2588,8 @@ describe("release schema contract", () => {
       "0542_task_note_root_lock_mode.sql",
       "0544_claude_model_connections.sql",
       "0545_workspace_claude_models.sql",
-      "0546_idle_command_containment.sql",
+
+      "0546_organization_integration_primitives.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3123,7 +3127,8 @@ describe("release schema contract", () => {
       "0542_task_note_root_lock_mode.sql",
       "0544_claude_model_connections.sql",
       "0545_workspace_claude_models.sql",
-      "0546_idle_command_containment.sql",
+
+      "0546_organization_integration_primitives.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -434,11 +434,14 @@ the command list mounts and polls only while its panel is open. Closing it abort
 an outstanding read and prevents a late Stop response from starting another read.
 
 Delivery remains the timeline landmark: `system.update.delivered` renders through
-the existing input row for every supported kind, including command results and
-wait timeouts. Those rows stay outside collapsed steps, including an input received
-partway through the same turn. A delivered input does not necessarily start a new
-turn. Command-result summaries include the bounded command preview; an unavailable
-exit result is described as unavailable rather than asserting that execution failed.
+the existing input row for visible update kinds, including wait timeouts. Those
+rows stay outside collapsed steps, including an input received partway through
+the same turn. Background command results are retained in durable agent input
+and event history, but their delivery receipts are omitted from the chat
+timeline, including when they arrive alongside other updates. A delivered input
+does not necessarily start a new turn. Command-result summaries include the
+bounded command preview; an unavailable exit result is described as unavailable
+rather than asserting that execution failed.
 
 The Goal segment keeps pause/resume and clear visible beside its label. The
 Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation

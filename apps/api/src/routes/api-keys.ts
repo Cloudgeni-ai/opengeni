@@ -228,7 +228,7 @@ function ensureDelegablePermissions(
   }
 }
 
-function requireOrganizationApiKeyControlPermission(
+export function requireOrganizationApiKeyControlPermission(
   context: AccessContext,
   organizationId: string,
 ): void {

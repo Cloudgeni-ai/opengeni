@@ -1423,6 +1423,9 @@
 :where(.og-root).top-10,:where(.og-root) .top-10 {
     top: calc(var(--spacing) * 10);
   }
+:where(.og-root).top-11,:where(.og-root) .top-11 {
+    top: calc(var(--spacing) * 11);
+  }
 :where(.og-root).top-\[var\(--og-work-header-top\,0px\)\],:where(.og-root) .top-\[var\(--og-work-header-top\,0px\)\] {
     top: var(--og-work-header-top,0px);
   }
@@ -5764,6 +5767,11 @@
           }
         }
       }
+    }
+  }
+:where(.og-root).pointer-coarse\:top-14,:where(.og-root) .pointer-coarse\:top-14 {
+    @media (pointer: coarse) {
+      top: calc(var(--spacing) * 14);
     }
   }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {

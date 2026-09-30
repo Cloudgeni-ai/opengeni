@@ -552,6 +552,18 @@ export type {
   MarkdownInteractiveBlock,
   SandboxFileLocation,
 } from "./components/markdown";
+export {
+  OpenGeniLinkProvider,
+  chainLinkResolvers,
+  sessionLinkResolver,
+  useOpenGeniLinkResolver,
+} from "./components/open-geni-links";
+export type {
+  OpenGeniLinkResolution,
+  OpenGeniLinkResolver,
+  OpenGeniLinkTarget,
+} from "./components/open-geni-links";
+export { parseOpenGeniLink } from "@opengeni/sdk";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";

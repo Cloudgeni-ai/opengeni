@@ -20,6 +20,15 @@ import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-
 const repo = join(import.meta.dir, "..");
 const SESSION_ROUTES = "apps/api/src/routes/sessions.ts";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
+test("proxy-confined workspace reads retain exact session authorization", () => {
+  expect(
+    sessionAuthorizationOperationForHttp(
+      "POST",
+      `/v1/workspaces/${SESSION_ID}/sessions/${SESSION_ID}/fs/read-workspace`,
+      SESSION_ID,
+    ),
+  ).toBe("session.files.read");
+});
 test("checkpoint preview and consent are session-control surfaces, not agent recovery tools", () => {
   for (const method of ["GET", "POST"]) {
     expect(

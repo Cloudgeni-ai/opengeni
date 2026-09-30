@@ -21,6 +21,22 @@ const DOCUMENT_ID = "88888888-8888-4888-8888-888888888888";
 const TURN_A = "99999999-9999-4999-8999-999999999991";
 const TURN_B = "99999999-9999-4999-8999-999999999992";
 
+test("workspace-only file reads use a distinct route that older APIs reject", async () => {
+  const requests: string[] = [];
+  const client = new OpenGeniEmbeddingClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "dummy",
+    fetch: async (input) => {
+      requests.push(String(input));
+      return Response.json({ content: "", encoding: "base64", sizeBytes: 0 });
+    },
+  });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a", workspaceOnly: true });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a" });
+  expect(requests[0]).toEndWith("/fs/read-workspace");
+  expect(requests[1]).toEndWith("/fs/read");
+});
+
 type RecordedRequest = {
   url: string;
   method: string;

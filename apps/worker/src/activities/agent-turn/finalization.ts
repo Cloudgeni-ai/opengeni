@@ -213,6 +213,8 @@ async function finalizeTurnAttemptSteps(
       renewals.codemodeTokenRenewal as CodemodeTokenRenewalController | null;
     renewals.codemodeTokenRenewal = null;
     renewals.runCredentialRenewalClosed = true;
+    renewals.runMcpCredentials?.close();
+    delete renewals.runMcpCredentials;
     const runRenewalToStop = renewals.runCredentialRenewal as RunCredentialRenewalController | null;
     renewals.runCredentialRenewal = null;
 

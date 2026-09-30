@@ -914,6 +914,7 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_credential_providers",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
@@ -948,6 +949,8 @@ export const FORCE_RLS_TABLES = [
   "organization_user_setup_deliveries",
   "organization_user_setup_delivery_attempts",
   "organization_user_setup_intents",
+  "organization_webhook_deliveries",
+  "organization_webhooks",
   "organization_workspace_lifecycle_events",
   "organization_workspace_operation_receipts",
   "personal_document_once_consumption_receipts",
@@ -1227,9 +1230,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "model_call_facts",
   "new_session_drafts",
   "organization_codex_rotation_settings",
+  "organization_credential_providers",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_webhook_deliveries",
+  "organization_webhooks",
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
@@ -3866,9 +3872,69 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const integrationRoutine = [
+    [
+      "resolve_organization_credential_provider_v1(uuid, uuid)",
+      "organization_credential_providers",
+      true,
+    ],
+    [
+      "resolve_integration_initiating_human_v1(uuid, uuid, text, uuid)",
+      "external_identities",
+      true,
+    ],
+    [
+      "integration_webhook_payload_v1(uuid, uuid, uuid, text, uuid, uuid, bigint, timestamp with time zone, jsonb, text)",
+      "session_turns",
+      false,
+    ],
+    ["enqueue_organization_webhook_deliveries_v1()", "organization_webhook_deliveries", true],
+    [
+      "claim_organization_webhook_deliveries_v1(uuid, integer, integer)",
+      "organization_webhook_deliveries",
+      true,
+    ],
+    [
+      "settle_organization_webhook_delivery_v1(uuid, uuid, integer, text, integer)",
+      "organization_webhook_deliveries",
+      true,
+    ],
+    [
+      "prune_organization_webhook_deliveries_v1(integer, integer)",
+      "organization_webhook_deliveries",
+      true,
+    ],
+  ] as const;
+  const quotedIntegrationSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const integrationSearchPaths = [
+    `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
+  ];
+  if (tableByName.has("organization_credential_providers")) {
+    for (const [name] of integrationRoutine) {
+      if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
+        violations.push(`integration routine ${name} is missing or ambiguous`);
+      }
+    }
+  }
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
+    }
+    const integrationContract = integrationRoutine.find(([name]) => name === routine.name);
+    if (integrationContract) {
+      const [, tableName, definer] = integrationContract;
+      if (
+        routine.publicExecute ||
+        !routine.execute ||
+        routine.securityDefiner !== definer ||
+        routine.owner !== tableByName.get(tableName)?.owner ||
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
+      ) {
+        violations.push(
+          `integration routine ${routine.name} has unsafe execution, ownership or search path`,
+        );
+      }
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (
