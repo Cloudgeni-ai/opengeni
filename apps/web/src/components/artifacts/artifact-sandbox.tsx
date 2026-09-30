@@ -135,7 +135,7 @@ export function ArtifactSandbox(props: {
               onClick={props.onEdit}
             >
               <SparklesIcon className="mr-2 size-3.5" />
-              <span className="hidden sm:inline">Edit with Geni</span>
+              <span className="hidden sm:inline">Edit with Opengeni</span>
               <span className="sm:hidden">Edit</span>
             </Button>
           ) : null}

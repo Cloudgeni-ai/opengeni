@@ -25,7 +25,7 @@ describe("variable names", () => {
     expect(variableNameIssue("GITHUB_TOKEN")).toEqual({
       kind: "reserved",
       message:
-        "OpenGeni sets GITHUB_TOKEN for repository access. Use another name, like GITHUB_BOT_TOKEN.",
+        "Opengeni sets GITHUB_TOKEN for repository access. Use another name, like GITHUB_BOT_TOKEN.",
     });
     expect(variableNameIssue("HOME")?.message).toBe(
       "HOME is set by the sandbox. Use another name.",

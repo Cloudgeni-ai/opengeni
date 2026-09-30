@@ -565,7 +565,7 @@ function WakeButton({ children, onClick }: { children: ReactNode; onClick: () =>
     <button
       type="button"
       onClick={onClick}
-      className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md bg-og-accent-deep px-3 py-2 text-og-sm font-medium text-og-accent-fg shadow-sm transition-opacity hover:opacity-90 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
+      className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-2 text-og-sm font-medium transition-colors hover:bg-og-primary-hover focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
     >
       {children}
     </button>

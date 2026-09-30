@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
@@ -234,8 +235,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
         ...current,
         loadError: error instanceof Error ? error : new Error(String(error)),
       }));
-      toast.error("Failed to load plugins", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't load plugins", {
+        description: userErrorText(error),
       });
     } finally {
       if (live()) update((current) => ({ ...current, loading: false }));

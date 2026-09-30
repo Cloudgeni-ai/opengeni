@@ -130,23 +130,22 @@ export function useLearningDefaults(workspaceId: string, scope: LearningScope): 
   };
 }
 
-/** "Review first", or "Mixed" when the destinations differ. For the header button. */
+/** "Review first", or "Mixed" when the destinations differ. For the Learning menu item. */
 export function learningSummary(modes: Record<AgentLearningCategory, AgentLearningMode>): string {
   const values = LEARNING_DESTINATIONS.map((category) => modes[category]);
   return values.every((value) => value === values[0]) ? LEARNING_MODE_LABEL[values[0]!] : "Mixed";
 }
 
-/** The line over Review: why changes wait there. */
-export function reviewLearningLine(
-  modes: Record<AgentLearningCategory, AgentLearningMode>,
-): string {
+/** Why Review is empty, in one sentence: what waits here, and what doesn't. */
+export function reviewEmptyLine(modes: Record<AgentLearningCategory, AgentLearningMode>): string {
   const waiting = LEARNING_DESTINATIONS.filter(
     (category) => modes[category] === "review_first",
-  ).map((category) => LEARNING_DESTINATION_LABEL[category]);
-  if (waiting.length === 3) return "These wait for you because Learning is set to Review first.";
+  ).map((category) => LEARNING_DESTINATION_LABEL[category].toLocaleLowerCase());
+  if (waiting.length === 3)
+    return "When agents propose knowledge, instruction or skill changes, they wait here for your OK.";
   if (waiting.length > 0)
-    return `These wait for you because ${waiting.join(" and ")} ${waiting.length === 1 ? "is" : "are"} set to Review first.`;
-  return "Agents save changes on their own right now, so new ones won't wait here.";
+    return `Changes agents propose to ${waiting.join(" and ")} wait here for your OK. Agents save other changes on their own.`;
+  return "Agents save knowledge, instruction and skill changes on their own, so nothing waits here.";
 }
 
 function ModeRow({

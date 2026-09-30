@@ -24,6 +24,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission } from "@/lib/permissions";
 
 /** The code the agent prints, e.g. `WXYZ-1234`. We do not enforce the exact
@@ -147,9 +148,7 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       setPhase("approved");
     } catch (error) {
       setPhase("error");
-      setErrorMessage(
-        error instanceof Error ? error.message : "Could not approve this machine. Try again.",
-      );
+      setErrorMessage(userErrorText(error, "Could not approve this machine. Try again."));
     }
   }
 
@@ -162,9 +161,7 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       setPhase("denied");
     } catch (error) {
       setPhase("error");
-      setErrorMessage(
-        error instanceof Error ? error.message : "Could not deny this machine. Try again.",
-      );
+      setErrorMessage(userErrorText(error, "Could not deny this machine. Try again."));
     }
   }
 
@@ -217,7 +214,7 @@ const EMPTY_MACHINE: EnrollmentConsentMachine = {
 /** Centered page chrome shared by every device-page state. */
 function DeviceShell({ children }: { children: ReactNode }) {
   return (
-    <main className="flex min-h-dvh flex-1 items-center justify-center bg-bg px-4 py-10 text-fg">
+    <main className="og-page-glow flex min-h-dvh flex-1 items-center justify-center px-4 py-10 text-fg">
       <div className="w-full max-w-md">{children}</div>
     </main>
   );
@@ -228,7 +225,7 @@ function DeviceShell({ children }: { children: ReactNode }) {
 function SignInPrompt({ userCode }: { userCode: string }) {
   return (
     <DeviceShell>
-      <div className="rounded-lg border border-border bg-surface p-6 text-center">
+      <div className="rounded-xl border border-border bg-surface p-6 text-center">
         <span className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-brand-strong/20 text-brand">
           <LogInIcon className="size-5" />
         </span>

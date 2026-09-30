@@ -132,7 +132,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
         <Button
           type="button"
           size="sm"
-          variant="secondary"
+          variant="outline"
           className="mt-2"
           disabled={state.reading}
           onClick={() => void controller.refresh()}

@@ -7,7 +7,7 @@ const switcherSource = await Bun.file(
 const settingsSource = await Bun.file(`${import.meta.dir}/routes/workspace-settings.tsx`).text();
 const organizationSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
 const organizationShellSource = await Bun.file(
-  `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
+  `${import.meta.dir}/components/settings/organization-settings-pages.ts`,
 ).text();
 const peoplePageSource = await Bun.file(
   `${import.meta.dir}/components/organization/people-page.tsx`,
@@ -36,7 +36,13 @@ describe("managed self-context surfaces", () => {
       "aria-label={personal ? `${workspace.name}, Personal workspace`",
     );
     expect(switcherSource).toContain('<span className="sr-only"> Paused</span>');
-    expect(switcherSource.match(/<PersonalWorkspaceBadge/g)?.length).toBeGreaterThanOrEqual(2);
+    // A Personal workspace reads as a lock tile and "Private · <organization>", not a chip.
+    expect(switcherSource).not.toContain("<PersonalWorkspaceBadge");
+    expect(switcherSource.match(/<WorkspaceGlyph/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(switcherSource).toContain("`Private · ${organizationLabel}`");
+    // The picker is startup code: importing the organization-settings access module
+    // pulls the settings chunks into the direct-session graph (bundle budget).
+    expect(switcherSource).not.toContain("@/lib/organization-settings-access");
     expect(switcherSource).toContain("workspaces={context.workspaces}");
     expect(switcherSource).toContain("export const WorkspaceSwitcherTrigger = forwardRef");
     expect(switcherSource).toContain("{props.collapsed ? (");

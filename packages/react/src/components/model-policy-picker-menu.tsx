@@ -4,6 +4,12 @@ import { useRef, useState, type RefObject, type CSSProperties } from "react";
 import { Popover, RadioGroup } from "radix-ui";
 import { cn } from "../lib/cn";
 import {
+  MENU_CHECK_CLASS,
+  MENU_LABEL_CLASS,
+  MENU_NOTE_CLASS,
+  MENU_SURFACE_CLASS,
+} from "../lib/menu-styles";
+import {
   coerceReasoningEffortForModel,
   effortOptionsForModel,
   findPickerRow,
@@ -77,12 +83,12 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         row.catalog.cost === "free" || row.id === props.model ? (
           <span className="flex items-center gap-2">
             {row.catalog.cost === "free" ? (
-              <span className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-control text-og-fg-muted">
+              <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-og-control text-og-fg-muted">
                 {messages.free}
               </span>
             ) : null}
             {row.id === props.model ? (
-              <CheckIcon className="size-3.5" aria-label={messages.selected} />
+              <CheckIcon className={MENU_CHECK_CLASS} aria-label={messages.selected} />
             ) : null}
           </span>
         ) : null
@@ -120,7 +126,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     >
       {rows.some((row) => row.selectable) ? (
         <div className="border-b border-og-border py-1">
-          <label className="og-model-policy-search flex items-center gap-2 rounded-og-sm px-2 py-1 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-og-accent/40">
+          <label className="og-model-policy-search flex items-center gap-2 px-2.5 py-0.5">
             <SearchIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
             <input
               aria-label={messages.searchLabel}
@@ -143,7 +149,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         </div>
       ) : null}
       {props.error ? (
-        <p className="px-2 py-2 text-og-control text-og-status-failed" role="alert">
+        <p className={cn(MENU_NOTE_CLASS, "text-og-sm text-og-status-failed")} role="alert">
           {props.error}
         </p>
       ) : null}
@@ -152,16 +158,27 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         data-testid="model-picker-models"
       >
         {props.loading ? (
-          <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>
+          // Rows at the menu's row height, never a sentence, so nothing jumps.
+          <div role="status" aria-label={messages.loading}>
+            {[58, 44, 66, 50].map((width) => (
+              <div key={width} aria-hidden="true" className="flex h-8 items-center gap-3 px-2.5">
+                <span className="size-4 shrink-0 animate-pulse rounded bg-og-surface-2" />
+                <span
+                  className="h-2.5 animate-pulse rounded bg-og-surface-2"
+                  style={{ width: `${width}%` }}
+                />
+              </div>
+            ))}
+          </div>
         ) : rows.some((row) => row.selectable) ? (
           <>
             {groups.map((group) => (
               <section
                 key={group.billingClass}
                 aria-label={group.label}
-                className="py-2.5 first:pt-1 [&+section]:border-t [&+section]:border-og-border"
+                className="[&+section]:mt-1.5 [&+section]:border-t [&+section]:border-og-border [&+section]:pt-1.5"
               >
-                <div className="flex items-center gap-2 px-2.5 py-1.5 text-og-control font-semibold text-og-fg">
+                <div className={cn(MENU_LABEL_CLASS, "flex items-center gap-2")}>
                   <BillingClassMark
                     billingClass={group.billingClass}
                     presentation={props.groupPresentation?.[group.billingClass]}
@@ -170,7 +187,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
                   <span className="min-w-0 break-words">{group.label}</span>
                 </div>
                 {group.description ? (
-                  <p className="break-words px-2.5 pb-2 text-og-control text-og-fg-subtle">
+                  <p className="break-words px-2.5 pb-1 text-og-sm text-og-fg-muted">
                     {group.description}
                   </p>
                 ) : null}
@@ -178,7 +195,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
               </section>
             ))}
             {filtered.length === 0 ? (
-              <p className="px-2 py-4 text-og-control text-og-fg-subtle">
+              <p className={MENU_NOTE_CLASS}>
                 {words.length ? messages.noMatches : messages.noModels}
               </p>
             ) : null}
@@ -186,7 +203,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         ) : props.connectModelsHref || rows.length > 0 ? (
           <ConnectModelsPanel href={props.connectModelsHref} messages={messages} />
         ) : (
-          <p className="px-2 py-4 text-og-control text-og-fg-subtle">{messages.noModels}</p>
+          <p className={MENU_NOTE_CLASS}>{messages.noModels}</p>
         )}
       </div>
       {rows.some((row) => row.selectable) &&
@@ -258,7 +275,7 @@ function ConnectModelsPanel(props: {
             </>
           );
           const className =
-            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40";
+            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40";
           return props.href ? (
             <a key={option.title} href={props.href} className={className}>
               {content}
@@ -273,7 +290,7 @@ function ConnectModelsPanel(props: {
       {props.href ? (
         <a
           href={props.href}
-          className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-og-md bg-og-fg text-og-control font-medium text-og-surface-1 outline-hidden transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+          className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover text-og-control font-medium outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40"
         >
           {props.messages.connectAction}
           <ArrowRightIcon className="size-3.5" aria-hidden />
@@ -309,7 +326,7 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
             onClick={() =>
               props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
             }
-            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-hover focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
           >
             <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
             {messages.fast}
@@ -372,7 +389,8 @@ export function ModelPolicyPickerPopover(
             if (!outside.current) props.anchor.current?.focus();
           }}
           className={cn(
-            "og-root og-model-policy-menu z-50 flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-[22rem] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
+            MENU_SURFACE_CLASS,
+            "og-root og-model-policy-menu z-50 flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-[22rem] max-w-[calc(100vw-16px)] flex-col overflow-hidden p-[var(--og-model-picker-menu-padding)]",
             props.contentClassName,
           )}
           style={{ ...props.portalStyle, ...props.contentStyle }}

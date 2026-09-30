@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { request as apiRequest } from "@/api";
 import { AtlassianSourceDialog } from "@/components/capabilities/atlassian-source-dialog";
@@ -136,7 +137,7 @@ export function useAtlassianIntegration({
       return true;
     } catch (error) {
       toast.error("Atlassian could not be disconnected", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -161,7 +162,7 @@ export function useAtlassianIntegration({
       toast.success(enabled ? "Knowledge sync turned on" : "Knowledge sync turned off");
     } catch (error) {
       toast.error("Atlassian sources could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       await refresh();
     } finally {

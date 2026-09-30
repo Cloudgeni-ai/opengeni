@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
   CalendarIcon,
@@ -39,6 +39,7 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import type {
   OrganizationMember,
   OrganizationWorkspaceAccess,
@@ -61,6 +62,7 @@ import {
   workspaceRoleOptions,
 } from "./organization-people-model";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import type { ReturnTo } from "@/lib/return-to";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Workspaces: every shared workspace, who is in it
@@ -76,20 +78,30 @@ const COLUMNS: RowListColumn[] = [
 ];
 
 const SERVICE_LOCK = "Service accounts get access from their API key, in Developer.";
-const SINGLE_USER_LOCK = "Single-user mode: only you use this OpenGeni.";
+const SINGLE_USER_LOCK = "Single-user mode: only you use this Opengeni.";
 
 export function OrganizationWorkspacesPage({
   workspaceId,
   workspace,
   view,
+  returnTo,
+  onEnterWorkspace,
 }: {
   workspaceId: string;
   workspace?: string;
   view?: "new-workspace";
+  /**
+   * New workspace opened from outside this list (the workspace picker): its
+   * back link returns there, and a created workspace opens with `onEnterWorkspace`.
+   */
+  returnTo?: ReturnTo | undefined;
+  onEnterWorkspace?: ((workspaceId: string) => void) | undefined;
 }) {
   const directory = useOrganizationDirectory();
   const nav = useOrganizationNavigation(workspaceId);
-  if (view === "new-workspace") return <NewWorkspacePage nav={nav} />;
+  if (view === "new-workspace") {
+    return <NewWorkspacePage nav={nav} returnTo={returnTo} onEnterWorkspace={onEnterWorkspace} />;
+  }
   if (workspace) return <WorkspacePage key={workspace} workspaceId={workspace} nav={nav} />;
   return <WorkspacesList directory={directory} nav={nav} />;
 }
@@ -226,8 +238,9 @@ function WorkspacesList({
         variant="inline"
         title="Couldn't load the workspaces."
         action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(overview.error)}
       >
-        {overview.error.message}
+        {userErrorTextWithoutReference(overview.error)}
       </ErrorMessage>
     );
   }
@@ -246,7 +259,11 @@ function WorkspacesList({
         icon={<SquareStackIcon />}
         title="No shared workspaces yet"
         description="Create one for a team. Everyone also has a private Personal workspace."
-        action={<RowButton onClick={nav.openNewWorkspace}>New workspace</RowButton>}
+        action={
+          <RowButton variant="default" onClick={nav.openNewWorkspace}>
+            New workspace
+          </RowButton>
+        }
         className="pt-8 pb-6"
       />
     );
@@ -386,7 +403,7 @@ function AddPeople({
             () => toast.success(`Added ${memberName(member)} to ${workspace.name} as a member`),
             (error: unknown) =>
               toast.error(`Couldn't add ${memberName(member)}`, {
-                description: error instanceof Error ? error.message : String(error),
+                description: userErrorText(error),
               }),
           )
           .finally(() => {
@@ -417,8 +434,9 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
             variant="inline"
             title="Couldn't load this workspace."
             action={<RowButton onClick={() => void directory.reload()}>Try again</RowButton>}
+            {...apiErrorDetails(directory.overview.error)}
           >
-            {directory.overview.error.message}
+            {userErrorTextWithoutReference(directory.overview.error)}
           </ErrorMessage>
         ) : (
           <DetailSkeleton />
@@ -461,7 +479,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
       );
     } catch (error) {
       toast.error(`Couldn't change ${member.name}'s role`, {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       throw error;
     }
@@ -476,7 +494,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
       await directory.removeWorkspaceAccess({ workspaceId: workspace.id, member: current });
     } catch (error) {
       toast.error(`Couldn't remove ${member.name}`, {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return;
     }
@@ -494,7 +512,7 @@ function WorkspacePage({ workspaceId, nav }: { workspaceId: string; nav: Organiz
             })
             .catch((error: unknown) =>
               toast.error(`Couldn't give ${member.name} access again`, {
-                description: error instanceof Error ? error.message : String(error),
+                description: userErrorText(error),
               }),
             ),
       });
@@ -686,7 +704,21 @@ function RenameWorkspaceDialog({
 
 /* --------------------------------------------------------------- create */
 
-function NewWorkspacePage({ nav }: { nav: OrganizationNavigation }) {
+/**
+ * The one New workspace flow, from this list or from the workspace picker
+ * ("New workspace in Acme"). From the list, a created workspace opens as its
+ * page here; from the picker, it opens itself, like switching to it.
+ */
+function NewWorkspacePage({
+  nav,
+  returnTo,
+  onEnterWorkspace,
+}: {
+  nav: OrganizationNavigation;
+  returnTo?: ReturnTo | undefined;
+  onEnterWorkspace?: ((workspaceId: string) => void) | undefined;
+}) {
+  const navigate = useNavigate();
   const directory = useOrganizationDirectory();
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -695,8 +727,10 @@ function NewWorkspacePage({ nav }: { nav: OrganizationNavigation }) {
     <ModelsFormPage
       title="New workspace"
       description={`A shared space for a team in ${organizationName}. You'll be its workspace admin.`}
-      backLabel="Workspaces"
-      onClose={() => nav.openSection("workspaces")}
+      backLabel={returnTo?.label ?? "Workspaces"}
+      onClose={() =>
+        returnTo ? void navigate({ href: returnTo.path }) : nav.openSection("workspaces")
+      }
       submitLabel="Create workspace"
       pendingLabel="Creating…"
       onSubmit={async () => {
@@ -715,7 +749,8 @@ function NewWorkspacePage({ nav }: { nav: OrganizationNavigation }) {
         }
         const id = await directory.createWorkspace(trimmed);
         toast.success(`Created ${trimmed}. You're its workspace admin.`);
-        if (id) nav.openWorkspace(id);
+        if (id && returnTo && onEnterWorkspace) onEnterWorkspace(id);
+        else if (id) nav.openWorkspace(id);
         else nav.openSection("workspaces");
         return true;
       }}

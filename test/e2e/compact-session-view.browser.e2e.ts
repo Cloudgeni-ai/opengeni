@@ -865,13 +865,13 @@ describe("compact session view on the live local workspace route (API fixture)",
       await invalidate();
       await page.waitForTimeout(100);
       expect(archiveFixture.readStarted).toBe(true);
-      await page.getByRole("button", { name: /Switch workspace$/ }).click();
+      await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Other workspace/ }).click();
       await page.waitForURL(`**/workspaces/${otherWorkspaceId}/sessions`);
       oldWorkspaceRead.resolve();
       await settleRead();
       expect(await rail.locator("a[data-session-row]").count()).toBe(0);
-      await page.getByRole("button", { name: /Switch workspace$/ }).click();
+      await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Compact view verification/ }).click();
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions`);
       // Wait for the new workspace composer before reopening global search.

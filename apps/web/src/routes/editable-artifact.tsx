@@ -113,7 +113,7 @@ function EditableArtifactContent({
           view.retryable ? (
             <Button
               type="button"
-              variant="secondary"
+              variant="outline"
               onClick={() => setLoadEpoch((value) => value + 1)}
             >
               Try again

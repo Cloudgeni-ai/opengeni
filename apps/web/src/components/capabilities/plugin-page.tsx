@@ -107,11 +107,11 @@ export function PluginPage({
   const needsAttention = installation?.status === "needs_attention";
   const skillCount = skills?.length ?? 0;
   const whatItAdds = exceedsLimit
-    ? "This plugin has more than 64 parts, more than OpenGeni can install at once."
+    ? "This plugin has more than 64 parts, more than Opengeni can install at once."
     : contentsUnknown
       ? "We couldn't read what this plugin contains, so it can't be installed yet."
       : !installableCount
-        ? "Nothing in this plugin can run in OpenGeni yet."
+        ? "Nothing in this plugin can run in Opengeni yet."
         : skillCount
           ? `Adds ${skillCount} ${skillCount === 1 ? "skill" : "skills"}.${servers?.length ? " You'll connect any apps it needs separately." : ""}`
           : "You'll connect the apps it needs separately.";
@@ -236,7 +236,7 @@ export function PluginPage({
         <p className="mt-4 mb-0 text-xs leading-4.5 text-fg-muted">{whatItAdds}</p>
         {others.length ? (
           <p className="mt-2 mb-0 text-xs leading-4.5 text-fg-muted">
-            {`Includes ${joinList(others)}, which OpenGeni doesn't run yet.`}
+            {`Includes ${joinList(others)}, which Opengeni doesn't run yet.`}
           </p>
         ) : null}
         {!canManage ? (

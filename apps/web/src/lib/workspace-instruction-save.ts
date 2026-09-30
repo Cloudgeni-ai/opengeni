@@ -24,7 +24,7 @@ export function createWorkspaceInstructionSave(
     operationId: crypto.randomUUID(),
     expectedCurrentRevisionId: head?.revisionId ?? null,
     expectedActivationVersion: head?.activationVersion ?? 0,
-    reason: "Updated by a workspace admin from Agent Knowledge",
+    reason: "Updated by a workspace admin from Knowledge",
   };
   return {
     content,

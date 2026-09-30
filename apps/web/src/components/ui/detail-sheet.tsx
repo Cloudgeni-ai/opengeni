@@ -204,7 +204,8 @@ export function DetailPage({
   );
 }
 
-function BackLink({ back }: { back: DetailBackLink }) {
+/** "← Variable sets": the back link a detail page, or a page opened from another scope, starts with. */
+export function BackLink({ back }: { back: DetailBackLink }) {
   const className =
     "mb-4 inline-flex w-fit items-center gap-1.5 rounded-[6px] text-sm leading-5 font-medium text-fg-muted transition-colors duration-[120ms] hover:text-fg pointer-coarse:min-h-11";
   const content = (

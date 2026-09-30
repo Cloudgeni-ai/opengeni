@@ -77,7 +77,7 @@ const RAIL: Destination[] = [
   { id: "new-session", label: "New session", icon: SquarePenIcon },
   { id: "for-you", label: "For you", icon: SendIcon, badge: "2" },
   { id: "capabilities", label: "Capabilities", icon: PlugIcon },
-  { id: "knowledge", label: "Agent Knowledge", icon: BrainCircuitIcon, attention: true },
+  { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon, attention: true },
   { id: "schedules", label: "Schedules", icon: CalendarClockIcon },
   { id: "artifacts", label: "Artifacts", icon: PanelsTopLeftIcon },
   { id: "settings", label: "Settings", icon: SlidersHorizontalIcon },
@@ -921,7 +921,7 @@ export default function NavigationSection() {
       <UsageNotes
         use={[
           "Every destination once, with one name and one icon. Rail label = page title = route noun.",
-          "The main rail: New session, For you, Capabilities, Agent Knowledge, Schedules, Artifacts, then Settings in the footer. Settings opens in the content area with its own sub-nav.",
+          "The main rail: New session, For you, Capabilities, Knowledge, Schedules, Artifacts, then Settings in the footer. Settings opens in the content area with its own sub-nav.",
           "Group labels in 12px sentence case, only when a group needs a name (Runtime, Chats).",
           "Hide destinations the viewer can't use. Disable only when access is on its way.",
           "A trailing arrow when the item leaves this area (Organization settings).",

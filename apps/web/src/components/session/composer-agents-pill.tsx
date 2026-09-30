@@ -15,6 +15,7 @@ import { Popover } from "radix-ui";
 import { useState } from "react";
 
 import { SubagentTree, SubagentsLabel } from "@/components/session/subagents";
+import { MENU_SURFACE_CLASS } from "@/components/ui/menu-styles";
 import { cn } from "@/lib/utils";
 
 export function ComposerAgentsPill({
@@ -102,12 +103,13 @@ export function ComposerAgentsPill({
               // Anchored above the composer, opening UPWARD — the same panel
               // family + scroll behaviour as the goal pill's detail panel.
               "z-50 flex max-h-[min(28rem,var(--radix-popover-content-available-height))] w-[min(22rem,calc(100vw-2rem))] flex-col overflow-y-auto overscroll-contain",
-              "rounded-xl border border-border bg-surface shadow-lg outline-none",
+              MENU_SURFACE_CLASS,
+              "outline-none",
               "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
               "data-[side=top]:slide-in-from-bottom-1",
             )}
           >
-            <div className="p-2.5">
+            <div className="p-1">
               <SubagentsLabel count={count} />
               {/* count > 0 here (the pill only renders with children), so the
                   tree always has rows — no loading/empty branch to guard. */}

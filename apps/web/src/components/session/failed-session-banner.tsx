@@ -110,7 +110,9 @@ export function FailedSessionBanner({
         ) : null}
         {freeModelLimit && !modelChanged && workspaceId ? (
           <>
-            {offerCredits ? <BuyCreditsLink workspaceId={workspaceId} /> : null}
+            {offerCredits ? (
+              <BuyCreditsLink workspaceId={workspaceId} primary={!offerConnect} />
+            ) : null}
             {offerConnect ? (
               <ConnectModelLink
                 workspaceId={workspaceId}
@@ -121,7 +123,7 @@ export function FailedSessionBanner({
         ) : null}
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
-            <BuyCreditsLink workspaceId={workspaceId} />
+            <BuyCreditsLink workspaceId={workspaceId} primary />
           ) : workspaceId && canConnectModel ? (
             <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
           ) : null
@@ -141,9 +143,10 @@ export function FailedSessionBanner({
   );
 }
 
-function BuyCreditsLink({ workspaceId }: { workspaceId: string }) {
+/** The banner's one unblocking action is the primary; next to Connect it is the outline. */
+function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary: boolean }) {
   return (
-    <Button asChild size="sm" variant="ghost">
+    <Button asChild size="sm" variant={primary ? "default" : "outline"}>
       <Link
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
@@ -158,7 +161,7 @@ function BuyCreditsLink({ workspaceId }: { workspaceId: string }) {
 
 function ConnectModelLink({ workspaceId, label }: { workspaceId: string; label: string }) {
   return (
-    <Button asChild size="sm" variant="ghost">
+    <Button asChild size="sm">
       <Link
         to="/workspaces/$workspaceId/settings"
         params={{ workspaceId }}

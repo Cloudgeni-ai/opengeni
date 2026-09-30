@@ -890,7 +890,7 @@ describe("scheduled task access in plain words", () => {
       "The account chosen for Slack can no longer be used, so new runs cannot start.",
       "Linear has no account on this schedule, although one is now connected.",
       "New schedules in this workspace also get Gmail; this one does not.",
-      "2 newer OpenGeni tools are not available to it: browser read and browser screenshot.",
+      "2 newer Opengeni tools are not available to it: browser read and browser screenshot.",
       "old-crm is no longer set up in this workspace and will be removed.",
     ]);
     expect(scheduledTaskPolicyDriftLines(null)).toEqual([]);

@@ -24,6 +24,7 @@ import {
 import { AlertDialog } from "radix-ui";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
+import { MENU_BUTTON_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import {
   type PortalTokenStyle,
   usePortalTokenSource,
@@ -1249,7 +1250,7 @@ function DeleteDialog({
                   closeIntentRef.current = "confirm";
                 }}
                 disabled={busy}
-                className="min-h-9 rounded-og-md bg-og-status-failed px-3 text-og-sm font-semibold text-white shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
+                className="min-h-9 rounded-og-md bg-og-danger-fill px-3 text-og-sm font-semibold text-og-danger-fg shadow-sm hover:brightness-110 disabled:opacity-50 pointer-coarse:min-h-11"
               >
                 Delete permanently
               </button>
@@ -1429,9 +1430,8 @@ function ContextMenu({
         onClick();
       }}
       className={cn(
-        "flex w-full items-center gap-2 px-2.5 py-1 text-left text-og-sm pointer-coarse:min-h-11",
-        "hover:bg-og-surface-2",
-        danger ? "text-og-status-failed" : "text-og-fg",
+        MENU_BUTTON_CLASS,
+        danger && "text-og-status-failed [&_svg]:text-og-status-failed!",
       )}
     >
       {icon}
@@ -1447,21 +1447,17 @@ function ContextMenu({
       onKeyDown={onKeyDown}
       onClick={(e) => e.stopPropagation()}
       style={{ left, top }}
-      className={cn(
-        "fixed z-50 min-w-[160px] overflow-hidden rounded-md border py-1 shadow-lg",
-        "border-og-border",
-        "bg-og-surface-1",
-      )}
+      className={cn(MENU_SURFACE_CLASS, "fixed z-50 min-w-[180px] overflow-hidden")}
     >
       {isDir && (
         <>
-          {item("New file", <FilePlusIcon className="size-3.5" />, onNewFile)}
-          {item("New folder", <FolderPlusIcon className="size-3.5" />, onNewFolder)}
-          <div role="separator" className="my-1 h-px bg-og-border" />
+          {item("New file", <FilePlusIcon />, onNewFile)}
+          {item("New folder", <FolderPlusIcon />, onNewFolder)}
+          <div role="separator" className={MENU_SEPARATOR_CLASS} />
         </>
       )}
-      {item("Rename", <PencilIcon className="size-3.5" />, onRename)}
-      {item("Delete", <Trash2Icon className="size-3.5" />, onDelete, true)}
+      {item("Rename", <PencilIcon />, onRename)}
+      {item("Delete", <Trash2Icon />, onDelete, true)}
     </div>
   );
 }

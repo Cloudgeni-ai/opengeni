@@ -153,7 +153,7 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-surface/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65">
+    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65">
       {leading}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them, and a
@@ -221,7 +221,7 @@ export function SessionHeader({
           {session.effectiveControl.state === "active" ? (
             waiting ? (
               <span
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-1 px-2 py-0.5 text-control font-medium text-fg-muted"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
                 data-session-wait-badge=""
               >
                 <span aria-hidden className="size-1.5 rounded-full bg-current" />
@@ -302,7 +302,7 @@ function CompactSessionStatus({
     return (
       <span
         data-compact-session-status="waiting"
-        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface-1 px-1.5 py-px text-2xs font-medium text-fg-muted md:hidden"
+        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface px-1.5 py-px text-2xs font-medium text-fg-muted md:hidden"
       >
         <span aria-hidden className="size-1 rounded-full bg-current" />
         Waiting

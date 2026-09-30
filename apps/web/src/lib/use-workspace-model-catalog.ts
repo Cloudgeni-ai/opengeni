@@ -2,6 +2,7 @@ import type { DefaultModelSelection, WorkspaceModelCatalogModel } from "@opengen
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "@/lib/model-policy";
 
 export type WorkspaceModelCatalogState = {
@@ -54,7 +55,8 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
         if (requestAbort.signal.aborted) return;
         setModels([]);
         setDefaults({ defaultSelection: null, creditsSelection: null });
-        setError(caught instanceof Error ? caught.message : String(caught));
+        // Shown in the model picker: what to do, never the raw API message.
+        setError(userErrorText(caught));
       } finally {
         if (!requestAbort.signal.aborted) setLoading(false);
         if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;

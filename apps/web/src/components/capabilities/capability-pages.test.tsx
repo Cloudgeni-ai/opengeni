@@ -129,7 +129,7 @@ describe("IntegrationPage", () => {
     expect(connect).toHaveLength(1);
     await act(async () => connect[0]!.click());
     expect(onSetup).toHaveBeenCalledTimes(1);
-    expect(view.container.textContent).toContain("Built by OpenGeni");
+    expect(view.container.textContent).toContain("Built by Opengeni");
     await view.unmount();
   });
 
@@ -148,7 +148,10 @@ describe("IntegrationPage", () => {
     expect(
       view.container.querySelector('button[aria-label="More actions for Outlook Mail"]'),
     ).not.toBeNull();
-    expect(view.container.textContent).toContain("Connected");
+    // Healthy: no Connected badge in the header.
+    expect(
+      view.container.querySelector("[data-slot=detail-page-header]")?.textContent,
+    ).not.toContain("Connected");
     await act(async () => buttons(view.container, "Capabilities")[0]!.click());
     expect(onBack).toHaveBeenCalledTimes(1);
     await view.unmount();
@@ -249,13 +252,13 @@ describe("ProviderPage", () => {
       <ProviderPage
         name="Slack"
         mark={null}
-        description="Chat with OpenGeni in Slack, or let it read and send messages as you."
+        description="Chat with Opengeni in Slack, or let it read and send messages as you."
         onBack={() => {}}
         modes={[
           {
             id: "bot",
-            title: "Add OpenGeni to Slack",
-            description: "Everyone can mention or message OpenGeni.",
+            title: "Add Opengeni to Slack",
+            description: "Everyone can mention or message Opengeni.",
             onOpen: openBot,
           },
           {
@@ -269,7 +272,7 @@ describe("ProviderPage", () => {
       />,
     );
     const row = Array.from(view.container.querySelectorAll("[data-row-action]")).find((node) =>
-      node.textContent?.includes("Add OpenGeni to Slack"),
+      node.textContent?.includes("Add Opengeni to Slack"),
     ) as HTMLElement | undefined;
     expect(row).toBeDefined();
     await act(async () => row!.click());

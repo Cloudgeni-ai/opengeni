@@ -5,7 +5,7 @@ import { signInMethodFailure } from "./sign-in-method-failure";
 test("maps backend security errors to actionable and safe guidance", () => {
   const failure = (code: string) =>
     signInMethodFailure(new ApiError(403, "raw provider details must stay hidden", { code }));
-  expect(failure("EMAIL_NOT_VERIFIED").message).toContain("Verify your OpenGeni account email");
+  expect(failure("EMAIL_NOT_VERIFIED").message).toContain("Verify your Opengeni account email");
   expect(failure("ACCOUNT_COLLISION").message).toContain("accounts are not merged");
   expect(failure("EXPLICIT_RECONNECT_REQUIRED").message).toContain("choose Reconnect");
   expect(failure("CURRENT_PASSWORD_REQUIRED").message).toContain("current password");

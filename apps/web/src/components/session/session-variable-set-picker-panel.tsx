@@ -1,8 +1,12 @@
-import { lazy, Suspense, type ComponentProps, type ComponentType, type ReactNode } from "react";
+import { Suspense, type ComponentProps, type ComponentType, type ReactNode } from "react";
 
 import type { SessionVariableSetPicker as SessionVariableSetPickerImplementation } from "@/components/session/session-variable-set-picker";
 import { Button } from "@/components/ui/button";
-import { ComposerMenuHeader } from "@/components/ui/composer-menu";
+import {
+  ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
+  lazyComposerPanel,
+} from "@/components/ui/composer-menu";
 
 type SessionVariableSetPickerProps = ComponentProps<typeof SessionVariableSetPickerImplementation>;
 
@@ -13,12 +17,12 @@ type SessionVariableSetPickerProps = ComponentProps<typeof SessionVariableSetPic
  * the route boundary. React keeps this result, so reopening the menu shows the
  * same notice until the page is reloaded.
  */
-const LazySessionVariableSetPicker = lazy(() =>
+const LazySessionVariableSetPicker = lazyComposerPanel<SessionVariableSetPickerProps>(() =>
   import("@/components/session/session-variable-set-picker")
-    .then((module) => ({
-      default: module.SessionVariableSetPicker as ComponentType<SessionVariableSetPickerProps>,
-    }))
-    .catch(() => ({ default: SessionVariableSetPickerLoadFailed })),
+    .then(
+      (module) => module.SessionVariableSetPicker as ComponentType<SessionVariableSetPickerProps>,
+    )
+    .catch(() => SessionVariableSetPickerLoadFailed),
 );
 
 function PickerNotice(props: { leading: ReactNode; children: ReactNode }) {
@@ -35,15 +39,10 @@ function SessionVariableSetPickerLoadFailed(props: SessionVariableSetPickerProps
     <PickerNotice leading={props.leading}>
       <div
         role="alert"
-        className="flex items-center justify-between gap-3 px-2 py-1 text-sm text-fg-muted"
+        className="flex items-center justify-between gap-3 px-2.5 py-1 text-sm text-fg-muted"
       >
         <span>Variable sets could not be loaded.</span>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          onClick={() => window.location.reload()}
-        >
+        <Button type="button" size="sm" variant="outline" onClick={() => window.location.reload()}>
           Reload
         </Button>
       </div>
@@ -63,9 +62,7 @@ export function SessionVariableSetPicker(props: SessionVariableSetPickerProps) {
     <Suspense
       fallback={
         <PickerNotice leading={props.leading}>
-          <p role="status" className="px-2 py-1 text-sm text-fg-muted">
-            Loading variable sets…
-          </p>
+          <ComposerMenuRowsSkeleton rows={2} label="Loading variable sets" />
         </PickerNotice>
       }
     >

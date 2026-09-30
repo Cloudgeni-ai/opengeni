@@ -134,7 +134,7 @@ test("the free model's daily limit names it and offers credits, a subscription a
   const headline = () => row().querySelector("span")!.textContent;
   const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
   expect(headline()).toBe(
-    "The free model has reached its daily limit. Buy OpenGeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
+    "The free model has reached its daily limit. Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
   );
   expect(labels()).toEqual(["Buy credits", "Connect a subscription", "Retry"]);
   expect(row().querySelector("details p")!.textContent).toBe(detail);
@@ -144,7 +144,7 @@ test("the free model's daily limit names it and offers credits, a subscription a
     root!.render(banner({ freeModel: true, subscriptions: { codex: false, supergrok: false } })),
   );
   expect(headline()).toBe(
-    "The free model has reached its daily limit. Buy OpenGeni credits, connect a model provider, or pick another model to keep going.",
+    "The free model has reached its daily limit. Buy Opengeni credits, connect a model provider, or pick another model to keep going.",
   );
   expect(labels()).toEqual(["Buy credits", "Connect a model", "Retry"]);
   await act(async () =>

@@ -265,8 +265,8 @@ export function ComposerTranscriptionControl({
                       }
                       className={cn(
                         "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                        "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                        "hover:bg-og-fg-muted disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
+                        "border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover transition-colors duration-150 motion-reduce:transition-none",
+                        "disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11",
                       )}
                     >
                       {savedTranscript ? (
@@ -349,8 +349,8 @@ export function ComposerTranscriptionControl({
                           aria-label={messages.stop}
                           className={cn(
                             "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-                            "bg-og-fg text-og-bg transition-colors duration-150 motion-reduce:transition-none",
-                            "hover:bg-og-fg-muted pointer-coarse:size-11",
+                            "border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover",
+                            "transition-colors duration-150 motion-reduce:transition-none pointer-coarse:size-11",
                           )}
                         >
                           <SquareIcon className="size-2.5 fill-current" />

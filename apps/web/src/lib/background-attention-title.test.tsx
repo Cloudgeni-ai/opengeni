@@ -25,7 +25,7 @@ function setPage(next: { hidden: boolean; focused: boolean }) {
 
 afterEach(() => {
   setPage({ hidden: false, focused: true });
-  document.title = "OpenGeni";
+  document.title = "Opengeni";
 });
 
 describe("attention transitions", () => {
@@ -42,17 +42,17 @@ describe("attention transitions", () => {
   });
 
   test("the prefix is idempotent and removable", () => {
-    expect(withAttentionPrefix(withAttentionPrefix("OpenGeni"))).toBe(
-      `${ATTENTION_TITLE_PREFIX}OpenGeni`,
+    expect(withAttentionPrefix(withAttentionPrefix("Opengeni"))).toBe(
+      `${ATTENTION_TITLE_PREFIX}Opengeni`,
     );
-    expect(withoutAttentionPrefix(`${ATTENTION_TITLE_PREFIX}OpenGeni`)).toBe("OpenGeni");
-    expect(withoutAttentionPrefix("OpenGeni")).toBe("OpenGeni");
+    expect(withoutAttentionPrefix(`${ATTENTION_TITLE_PREFIX}Opengeni`)).toBe("Opengeni");
+    expect(withoutAttentionPrefix("Opengeni")).toBe("Opengeni");
   });
 });
 
 describe("useBackgroundAttentionTitle", () => {
   test("marks a background tab when the open session finishes and clears on focus", async () => {
-    document.title = "OpenGeni";
+    document.title = "Opengeni";
     setPage({ hidden: false, focused: true });
     const hook = await renderHook(
       ({ status }: { status: SessionStatus | null }) =>
@@ -61,16 +61,16 @@ describe("useBackgroundAttentionTitle", () => {
     );
     setPage({ hidden: true, focused: false });
     await hook.rerender({ status: "idle" });
-    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}Opengeni`);
 
     setPage({ hidden: false, focused: true });
     await actRun(() => window.dispatchEvent(new Event("focus")));
-    expect(document.title).toBe("OpenGeni");
+    expect(document.title).toBe("Opengeni");
     await hook.unmount();
   });
 
   test("an unfocused window counts as background and visibility alone does not clear it", async () => {
-    document.title = "OpenGeni";
+    document.title = "Opengeni";
     const hook = await renderHook(
       ({ status }: { status: SessionStatus | null }) =>
         useBackgroundAttentionTitle("session-1", status),
@@ -78,12 +78,12 @@ describe("useBackgroundAttentionTitle", () => {
     );
     setPage({ hidden: false, focused: false });
     await hook.rerender({ status: "requires_action" });
-    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}Opengeni`);
     await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
-    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}Opengeni`);
     setPage({ hidden: false, focused: true });
     await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
-    expect(document.title).toBe("OpenGeni");
+    expect(document.title).toBe("Opengeni");
     await hook.unmount();
   });
 
@@ -92,7 +92,7 @@ describe("useBackgroundAttentionTitle", () => {
     ["focusin", () => document.body.dispatchEvent(new Event("focusin", { bubbles: true }))],
     ["pointerdown", () => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }))],
   ])("returning through %s clears the mark once the page has focus", async (_label, dispatch) => {
-    document.title = "OpenGeni";
+    document.title = "Opengeni";
     const hook = await renderHook(
       ({ status }: { status: SessionStatus | null }) =>
         useBackgroundAttentionTitle("session-1", status),
@@ -100,19 +100,19 @@ describe("useBackgroundAttentionTitle", () => {
     );
     setPage({ hidden: false, focused: false });
     await hook.rerender({ status: "idle" });
-    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}Opengeni`);
     // Still in the background: the event alone does not clear it.
     await actRun(dispatch);
-    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}Opengeni`);
     // An embedded frame holding focus makes the parent report hasFocus().
     setPage({ hidden: false, focused: true });
     await actRun(dispatch);
-    expect(document.title).toBe("OpenGeni");
+    expect(document.title).toBe("Opengeni");
     await hook.unmount();
   });
 
   test("a foreground tab, a session switch, or an initial load never marks the title", async () => {
-    document.title = "OpenGeni";
+    document.title = "Opengeni";
     const hook = await renderHook(
       ({ id, status }: { id: string; status: SessionStatus | null }) =>
         useBackgroundAttentionTitle(id, status),
@@ -121,16 +121,16 @@ describe("useBackgroundAttentionTitle", () => {
     await hook.rerender({ id: "session-1", status: "failed" });
     await hook.rerender({ id: "session-1", status: "running" });
     await hook.rerender({ id: "session-1", status: "failed" });
-    expect(document.title).toBe("OpenGeni");
+    expect(document.title).toBe("Opengeni");
 
     setPage({ hidden: true, focused: false });
     await hook.rerender({ id: "session-2", status: "idle" });
-    expect(document.title).toBe("OpenGeni");
+    expect(document.title).toBe("Opengeni");
 
     await hook.rerender({ id: "session-2", status: "running" });
     await hook.rerender({ id: "session-2", status: "failed" });
-    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}OpenGeni`);
+    expect(document.title).toBe(`${ATTENTION_TITLE_PREFIX}Opengeni`);
     await hook.unmount();
-    expect(document.title).toBe("OpenGeni");
+    expect(document.title).toBe("Opengeni");
   });
 });

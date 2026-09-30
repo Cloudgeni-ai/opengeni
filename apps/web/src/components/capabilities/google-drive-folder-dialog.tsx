@@ -1,6 +1,7 @@
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { request as apiRequest } from "@/api";
 import {
@@ -165,7 +166,7 @@ function GoogleDriveFolderDialogBody({
       return response.current;
     } catch (error) {
       toast.error("Google Drive folder could not be opened", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       await onLoadFailed();
       return null;
@@ -252,7 +253,7 @@ function GoogleDriveFolderDialogBody({
       });
     } catch (error) {
       toast.error("Google Drive sync could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       await onLoadFailed();
     } finally {
@@ -404,7 +405,7 @@ function GoogleDriveFolderDialogBody({
               <div className="border-t border-border p-2 text-center">
                 <Button
                   type="button"
-                  variant="secondary"
+                  variant="outline"
                   size="sm"
                   disabled={browseBusy}
                   onClick={() =>
@@ -434,7 +435,7 @@ function GoogleDriveFolderDialogBody({
           />
           <Button
             type="button"
-            variant="secondary"
+            variant="outline"
             size="sm"
             disabled={!folderIdDraft.trim() || browseBusy}
             onClick={() => void addFolderId()}
@@ -520,7 +521,7 @@ function GoogleDriveFolderDialogBody({
       </div>
 
       <DialogFooter>
-        <Button type="button" variant="secondary" onClick={() => onClose()}>
+        <Button type="button" variant="outline" onClick={() => onClose()}>
           Cancel
         </Button>
         <Button

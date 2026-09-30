@@ -47,7 +47,7 @@ const models: SelectOption[] = [
   {
     value: "credits:gpt-6-astra",
     label: "GPT-6 Astra",
-    meta: "OpenGeni credits",
+    meta: "Opengeni credits",
     disabled: true,
     disabledReason: "No credit balance. An owner can add credits in Billing.",
   },
@@ -91,7 +91,7 @@ describe("option helpers", () => {
 
   test("native options keep the payer and say when they are unavailable", () => {
     expect(nativeOptionText(models[2]!)).toBe("GPT-6 Sol · Codex plan");
-    expect(nativeOptionText(models[3]!)).toBe("GPT-6 Astra · OpenGeni credits - unavailable");
+    expect(nativeOptionText(models[3]!)).toBe("GPT-6 Astra · Opengeni credits - unavailable");
   });
 });
 
@@ -108,7 +108,7 @@ describe("native select", () => {
     );
     expect(html).toContain("Balanced speed and depth for everyday work.");
     expect(html).toContain("Only workspace admins can change the default model.");
-    expect(html).toContain("GPT-6 Astra · OpenGeni credits - unavailable");
+    expect(html).toContain("GPT-6 Astra · Opengeni credits - unavailable");
   });
 
   test("inside a Field it takes the field's label, error and invalid state", () => {
