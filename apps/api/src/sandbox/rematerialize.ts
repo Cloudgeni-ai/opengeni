@@ -74,8 +74,9 @@ async function materializeArchiveObjectRef(
   }
   if (!objectStorage) {
     throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
+      "archive_storage_unavailable",
       "workspace archive object storage is not configured",
+      { retryable: true },
     );
   }
   const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);

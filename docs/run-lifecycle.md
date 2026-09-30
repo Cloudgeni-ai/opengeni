@@ -1810,16 +1810,22 @@ replacement box writes provider `not_created` with diagnostic
 `replacement_failed` and is never evidence. Rows committed before this release
 qualify from their own loss transition's exact shape (the
 `provider_not_found_before_workspace_capture` diagnostic, or the lost-instance
-shape) or from the committed `sandbox.provider_missing_before_capture` audit for
-the same lease and unchanged workspace generation, so stuck sessions recover on
-their next turn or Retry. A decision pins the evidence it used. Provider
+shape) or, when a replacement attempt overwrote that record (older code wrote
+`missing`, current code `replacement_failed`), from the committed
+`sandbox.provider_missing_before_capture` audit for the same lease and unchanged
+workspace generation, so stuck sessions recover on their next turn or Retry. A
+plain `not_created` (an ordinary drain, operator restore or capture failure)
+never revives an older loss. Turn start takes the workspace-control fence only
+for a lease with an incomplete archive and a loss-shaped provider record (or a
+pending decision), so the ordinary resume of a complete archive stays unlocked. A decision pins the evidence it used. Provider
 `unknown`, `creating` or `exists`, an unresolved provider create, an explicit
 public or operator authorization in force, or a complete archive (or one at the
 workspace generation) is never eligible: an ordinary restore failure stops for
 an operator exactly as before. A drain capture that was in flight when the box
 vanished (`lateArchiveCapture`) may publish the lost generation only within a
 durable one-hour window enforced by `persistDrainSnapshot`; both lanes wait
-slightly longer than that window before deciding.
+slightly longer than that window before deciding. Every such deadline is
+compared with the database clock, never a host clock.
 
 **Quiescence.** Checked under the exclusive workspace-control fence: no lease
 holder, open workspace admission, active retained process, unclosed or
@@ -1834,9 +1840,12 @@ records a system-attributed audit, one immutable `sandbox.recovery.automatic`
 receipt per member (the deciding attempt is the actor for its own session, the
 system recovery subject for the others) and a lease marker. Restore then uses
 the existing cold election, native provider binding and artifact checks. Only a
-definitive integrity failure of that exact checkpoint (its metadata, bytes or
-registered artifact) abandons it. Any other failed system restore (capacity, a
-worker death or reset, a rejected commit, a changed provider binding) is decided
+definitive, non-retryable integrity failure of that exact checkpoint's content
+(its metadata, bytes or registered artifact) abandons it. A missing archive
+object (`archive_object_missing`) or unconfigured archive storage
+(`archive_storage_unavailable`) is never definitive, so a bad storage deploy
+cannot abandon checkpoints. Any other failed system restore (capacity, a worker
+death or reset, a rejected commit, a changed provider binding) is decided
 again after a backoff of 1 minute, 5, 15, 60 and 240 minutes; after six attempts
 an operator decides and the checkpoint is kept. The lease pins group
 membership, route and CURRENT archive while a checkpoint selection is pending;
@@ -1882,7 +1891,9 @@ checkpoint with its own warning. Members that join the group while a decision is
 pending receive the same receipt on their first turn start.
 
 Retry may admit either lane once the group is quiescent, but does not itself
-restore files or replay unknown effects. It never reopens a turn whose own
+restore files or replay unknown effects. Nothing re-decides by itself: a timed
+wait (restore backoff, provider lifetime, late capture) projects `availableAt`,
+the earliest time a Retry or a new message can decide again. It never reopens a turn whose own
 pending call has no recorded outcome; the projection then asks for a new
 message, whose turn start makes the same decision. Human consent stays
 singleton-only: it needs one accountable human for a single session, and the

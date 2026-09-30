@@ -61,8 +61,24 @@ export function isRecoveryNotApplicableError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && error.status === 403;
 }
 
-/** Public blocker codes are stable; UI copy must not expose persistence jargon. */
-export function sandboxRecoveryBlocker(reason: string): string {
+/** Public blocker codes are stable; UI copy must not expose persistence jargon.
+ * A timed wait never implies OpenGeni proceeds by itself: only Retry or a new
+ * message decides again, so the copy names when that becomes possible. */
+export function sandboxRecoveryBlocker(reason: string, availableAt?: string | null): string {
+  const message = sandboxRecoveryBlockerMessage(reason);
+  if (!TIMED_RECOVERY_WAITS.has(reason)) return message;
+  return availableAt
+    ? `${message} You can retry after ${formatCheckpointTime(availableAt)}.`
+    : `${message} You can retry later.`;
+}
+
+const TIMED_RECOVERY_WAITS: ReadonlySet<string> = new Set([
+  "restore_retry_backoff",
+  "provider_lifetime_unexpired",
+  "capture_unresolved",
+]);
+
+function sandboxRecoveryBlockerMessage(reason: string): string {
   const messages: Record<string, string> = {
     recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
     managed_modal_home_required: "Recovery supports only this session's managed cloud sandbox.",
@@ -73,11 +89,11 @@ export function sandboxRecoveryBlocker(reason: string): string {
     shared_sandbox_member_active:
       "Another session sharing this sandbox is still running or waiting for input. Retry becomes available once it settles.",
     restore_retry_backoff:
-      "The last checkpoint restore failed. OpenGeni will try the checkpoint again shortly; check back in a few minutes.",
+      "The last checkpoint restore failed. The checkpoint is kept for the next attempt.",
     restore_retry_exhausted:
       "Restoring the checkpoint failed repeatedly. The checkpoint is kept; ask your operator to review this session.",
     provider_lifetime_unexpired:
-      "No checkpoint can be restored automatically. OpenGeni continues with an empty workspace once the lost sandbox's provider lifetime has ended; check back later.",
+      "No checkpoint can be restored automatically. Retry can continue with an empty workspace once the lost sandbox's provider lifetime has ended.",
     automatic_recovery_pending:
       "OpenGeni is already recovering this sandbox automatically. Retry to continue.",
     retry_tool_outcome_unresolved:
@@ -94,7 +110,7 @@ export function sandboxRecoveryBlocker(reason: string): string {
     execution_unresolved:
       "Execution may still be active. Recovery must wait until its outcome is settled.",
     capture_unresolved:
-      "A checkpoint capture is still unresolved. Recovery can continue once it settles; check back later.",
+      "A checkpoint capture is still unresolved. Recovery can continue once it settles.",
     restore_failed: "Restoration failed. Operator review is required; no commands were replayed.",
     consent_stale:
       "The accepted checkpoint consent is no longer current. Operator review is required.",

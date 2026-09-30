@@ -165,7 +165,7 @@ for (const [reason, copy] of [
     "retry_tool_outcome_unresolved",
     "Send a new message to continue; the lost sandbox then recovers automatically.",
   ],
-  ["restore_retry_backoff", "OpenGeni will try the checkpoint again shortly"],
+  ["restore_retry_backoff", "The checkpoint is kept for the next attempt. You can retry later."],
   ["restore_retry_exhausted", "The checkpoint is kept; ask your operator to review this session."],
   ["provider_lifetime_unexpired", "once the lost sandbox's provider lifetime has ended"],
 ] as const) {
@@ -181,6 +181,26 @@ for (const [reason, copy] of [
     expect([...container.querySelectorAll("button")].map((item) => item.textContent)).toEqual([
       "Check recovery status",
     ]);
+  });
+}
+
+for (const reason of ["restore_retry_backoff", "provider_lifetime_unexpired"] as const) {
+  test(`${reason} names when Retry can decide again, never implying automatic progress`, async () => {
+    const availableAt = "2026-09-18T07:24:31.000Z";
+    const container = await render({
+      getSandboxRecovery: async () => ({ ...eligible, status: "blocked", reason, availableAt }),
+      recoverSandbox: async () => {
+        throw new Error("unexpected mutation");
+      },
+    });
+    expect(container.textContent).toContain(
+      `You can retry after ${new Date(availableAt).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })}.`,
+    );
+    expect(container.textContent).not.toContain("OpenGeni will");
+    expect(container.textContent).not.toContain("check back");
   });
 }
 

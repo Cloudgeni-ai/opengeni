@@ -47315,9 +47315,12 @@ const AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS = [
   60 * 60_000,
   4 * 60 * 60_000,
 ] as const;
-/** Failure codes that prove the exact selected checkpoint itself can never be
- * restored (its bytes, descriptor or registered artifact are wrong). Provider,
- * binding, capacity, commit and worker failures are deliberately absent. */
+/** Failure codes that prove the exact selected checkpoint's own content can
+ * never be restored (its bytes, descriptor or registered artifact are wrong),
+ * and only when the failure was recorded as not retryable. Provider, binding,
+ * capacity, commit, worker, storage-configuration (`archive_storage_unavailable`)
+ * and missing-object (`archive_object_missing`) failures are deliberately
+ * absent: a bad deploy or storage outage must never abandon a checkpoint. */
 const DEFINITIVE_CHECKPOINT_FAILURES: ReadonlySet<string> = new Set([
   "archive_metadata_missing",
   "archive_metadata_invalid",
@@ -47613,6 +47616,9 @@ type AutomaticRecoveryLane =
         | "provider_lifetime_unexpired"
         | "authorization_pending"
         | "authorization_invalid";
+      /** For a timed wait: the earliest time a new decision (Retry or a new
+       * message) can proceed. Nothing re-decides by itself before then. */
+      availableAt?: string;
     };
 
 function isoTimestamp(...candidates: Array<string | null | undefined>): string {
@@ -47718,16 +47724,24 @@ async function automaticRecoveryLaneTx(
   // A drain capture that was in flight when the provider vanished may still
   // publish the exact lost generation until its durable publication deadline
   // (enforced by persistDrainSnapshot). Neither lane may pre-empt it.
+  // Every deadline is compared with the database clock, the same clock
+  // persistDrainSnapshot uses for its publication window, never a host clock.
   const late = recovery.lateArchiveCapture;
-  const now = Date.now();
-  if (late && now < Date.parse(late.recordedAt) + LATE_CAPTURE_DECISION_DELAY_MS)
-    return { kind: "unavailable", reason: "capture_unresolved" };
+  const now = (await transactionNow(tx)).getTime();
+  const lateDecisionAt = late ? Date.parse(late.recordedAt) + LATE_CAPTURE_DECISION_DELAY_MS : 0;
+  if (late && now < lateDecisionAt)
+    return {
+      kind: "unavailable",
+      reason: "capture_unresolved",
+      availableAt: new Date(lateDecisionAt).toISOString(),
+    };
 
   // Only a definitive integrity failure of the exact checkpoint abandons it.
   // Retryable or ambiguous failures (provider capacity, worker death, a
   // rejected commit, a changed provider binding) keep the checkpoint lane.
   const definitiveCheckpointFailure =
     (recovery.restore.status === "degraded" || recovery.restore.status === "unrecoverable") &&
+    recovery.restore.retryable !== true &&
     DEFINITIVE_CHECKPOINT_FAILURES.has(recovery.restore.failureCode ?? "");
   const selection = definitiveCheckpointFailure
     ? null
@@ -47747,7 +47761,11 @@ async function automaticRecoveryLaneTx(
           Math.min(automatic.attempt, AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS.length) - 1
         ]!;
       if (now < failedAt + backoffMs)
-        return { kind: "unavailable", reason: "restore_retry_backoff" };
+        return {
+          kind: "unavailable",
+          reason: "restore_retry_backoff",
+          availableAt: new Date(failedAt + backoffMs).toISOString(),
+        };
     }
     return {
       kind: "checkpoint",
@@ -47767,7 +47785,12 @@ async function automaticRecoveryLaneTx(
   const lifetimeEndsAt = loss.providerDeadlineAt
     ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
     : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
-  if (now < lifetimeEndsAt) return { kind: "unavailable", reason: "provider_lifetime_unexpired" };
+  if (now < lifetimeEndsAt)
+    return {
+      kind: "unavailable",
+      reason: "provider_lifetime_unexpired",
+      availableAt: new Date(lifetimeEndsAt).toISOString(),
+    };
   const reason: SandboxFreshWorkspaceReason = definitiveCheckpointFailure
     ? "checkpoint_restore_failed"
     : recovery.archive.status === "none"
@@ -47829,9 +47852,17 @@ async function providerLossEvidenceTx(
     )
       return legacy("warm_resume", recovery.provider.observedAt);
   }
-  // A replacement attempt overwrote the provider record. The committed reaper
-  // audit still names this exact lease and unchanged workspace generation,
-  // unless a verified automatic restore already ended that lineage.
+  // A replacement attempt overwrote the provider record: older code wrote
+  // `missing`, current code `replacement_failed`. Only those shapes may fall
+  // back to the committed reaper audit for this exact lease and unchanged
+  // workspace generation; a plain `not_created` (an ordinary drain, operator
+  // restore or capture failure) never resurrects an older loss, nor does a
+  // lineage a verified automatic restore already ended.
+  if (
+    recovery.provider.status !== "missing" &&
+    recovery.provider.diagnostic !== REPLACEMENT_FAILED_DIAGNOSTIC
+  )
+    return null;
   if (automaticCheckpointMarker(row.resume_state)?.status === "verified") return null;
   const [audit] = await tx
     .select({ occurredAt: schema.auditEvents.occurredAt })
@@ -47881,12 +47912,14 @@ async function projectPublicSandboxRecovery(
   const unavailable = (
     reason: string,
     checkpoint: SandboxRecoverySelection | null = null,
+    availableAt?: string,
   ): SandboxRecoveryProjection => ({
     version: 1,
     status: "blocked",
     reason,
     checkpoint,
     operationId: null,
+    ...(availableAt ? { availableAt } : {}),
   });
   const [session] = await tx
     .select()
@@ -47989,14 +48022,15 @@ async function projectPublicSandboxRecovery(
         automaticLane: lane.kind,
       };
     }
-    // The system will proceed by itself (or an operator must); explain which.
+    // A timed wait (Retry or a new message can re-decide at `availableAt`;
+    // nothing proceeds by itself) or an operator hand-off; explain which.
     if (
       lane.reason === "capture_unresolved" ||
       lane.reason === "restore_retry_backoff" ||
       lane.reason === "restore_retry_exhausted" ||
       lane.reason === "provider_lifetime_unexpired"
     )
-      return unavailable(lane.reason);
+      return unavailable(lane.reason, null, lane.availableAt);
   }
   // A system decision already owns this lease; consent may not compete with it.
   if (
@@ -48321,8 +48355,11 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
   },
 ): Promise<AutomaticSandboxRecoveryAuthorization> {
   return withRlsContext(db, input, async (tx) => {
-    // Healthy turns must not acquire a workspace-wide inference or session
-    // write lock just to discover that no system recovery is needed.
+    // Healthy turns, including the ordinary idle-drained resume of a complete
+    // archive (`not_created`/`pending`), must not acquire a workspace-wide
+    // inference or session write lock just to discover that no system recovery
+    // is needed. Only an incomplete archive with a loss-shaped provider record
+    // can ever be decided (see automaticRecoveryLaneTx/providerLossEvidenceTx).
     const [candidate] = await rawRows<{ present: boolean }>(
       tx,
       sql`select exists(select 1 from sessions session
@@ -48332,6 +48369,12 @@ export async function authorizeAutomaticSandboxCheckpointRecovery(
           and session.workspace_id = ${input.workspaceId}
           and session.id = ${input.sessionId}
           and ((lease.liveness = 'cold'
+              and (lease.archive_generation is null
+                or lease.archive_generation < lease.workspace_generation)
+              and (lease.resume_state #>> '{opengeniRecovery,provider,status}' = 'missing'
+                or lease.resume_state ? ${PROVIDER_LOSS_KEY}
+                or lease.resume_state #>> '{opengeniRecovery,provider,diagnostic}'
+                  = ${REPLACEMENT_FAILED_DIAGNOSTIC})
               and lease.resume_state #>> '{opengeniRecovery,provider,status}' in ('missing', 'not_created')
               and lease.resume_state #>> '{opengeniRecovery,restore,status}' in
                 ('degraded', 'unrecoverable', 'pending'))
@@ -59086,7 +59129,8 @@ export async function persistDrainSnapshot(
         lateReceipt.providerRequestId === input.providerRequestId &&
         // Durable publication deadline: automatic recovery decisions wait out
         // this window, so an archive can never land behind one.
-        Date.now() < Date.parse(lateReceipt.recordedAt) + LATE_CAPTURE_PUBLICATION_WINDOW_MS &&
+        (await transactionNow(scopedDb)).getTime() <
+          Date.parse(lateReceipt.recordedAt) + LATE_CAPTURE_PUBLICATION_WINDOW_MS &&
         !pendingFreshWorkspaceRecovery(row.resume_state) &&
         automaticCheckpointMarker(row.resume_state)?.status !== "accepted" &&
         !row.unsettled_mutation;

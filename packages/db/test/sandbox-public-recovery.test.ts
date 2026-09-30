@@ -1977,10 +1977,10 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       if (index === failures.length - 1) break;
       // Immediately after a failure the lane waits instead of retrying hot.
       expect(await authorize()).toEqual({ status: "not_eligible" });
-      expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
-        status: "blocked",
-        reason: "restore_retry_backoff",
-      });
+      const waiting = await readPublicSandboxRecovery(client.db, f);
+      expect(waiting).toMatchObject({ status: "blocked", reason: "restore_retry_backoff" });
+      // The projection names when Retry can decide again; nothing retries by itself.
+      expect(Date.parse(waiting.availableAt!)).toBeGreaterThan(Date.now());
       await elapseRetryBackoff(f);
     }
     await elapseRetryBackoff(f);
@@ -2055,13 +2055,172 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
     }
   });
 
+  test("an ordinary complete-archive cold resume never takes the workspace-wide exclusive lock", async () => {
+    const f = await fixture();
+    // The idle drain of a complete archive: the most common Modal resume shape.
+    await shared.admin`update sandbox_leases set workspace_generation = 10,
+      resume_state = jsonb_set(resume_state, '{opengeniRecovery}', ${shared.admin.json({
+        provider: {
+          status: "not_created",
+          instanceId: null,
+          observedAt: "2026-09-29T01:00:00.000Z",
+        },
+        restore: { status: "pending", rematerializationId: null },
+        workspace: { status: "not_ready" },
+      })}::jsonb) where id = ${f.leaseId}`;
+    const initiator = await claimedAttempt(f, f.session.id);
+    const authorize = () =>
+      authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+        ...f.scope,
+        sessionId: f.session.id,
+        attemptId: initiator.attemptId,
+      });
+    const blocked = (ms: number) => Bun.sleep(ms).then(() => "blocked" as const);
+    // Another transaction holds the exclusive workspace-control fence.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    const holder = shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${f.workspaceId}`}, 0))`;
+      held();
+      await released;
+    });
+    await holding;
+    try {
+      expect(await Promise.race([authorize(), blocked(3_000)])).toEqual({
+        status: "not_eligible",
+      });
+      // Control: a lost lease with an incomplete archive does wait for the fence.
+      await shared.admin`update sandbox_leases set workspace_generation = 44,
+        resume_state = jsonb_set(resume_state, '{opengeniRecovery,provider,status}', '"missing"'::jsonb)
+        where id = ${f.leaseId}`;
+      const lost = authorize();
+      expect(await Promise.race([lost, blocked(1_000)])).toBe("blocked");
+      release();
+      await holder;
+      await lost;
+    } finally {
+      release();
+      await holder.catch(() => undefined);
+    }
+  });
+
+  test("storage configuration, a missing object or a retryable integrity failure never abandon a checkpoint", async () => {
+    for (const [failureCode, retryable] of [
+      ["archive_storage_unavailable", true],
+      ["archive_object_missing", false],
+      ["archive_hash_mismatch", true],
+    ] as const) {
+      const f = await fixture();
+      const initiator = await claimedAttempt(f, f.session.id);
+      const authorize = () =>
+        authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        });
+      expect(await authorize(), failureCode).toMatchObject({
+        status: "authorized",
+        lane: "checkpoint",
+      });
+      await failAutomaticRestore(f, initiator.attemptId, failureCode, retryable);
+      expect(await authorize(), failureCode).toEqual({ status: "not_eligible" });
+      expect(await readPublicSandboxRecovery(client.db, f), failureCode).toMatchObject({
+        status: "blocked",
+        reason: "restore_retry_backoff",
+      });
+      await elapseRetryBackoff(f);
+      expect(await authorize(), failureCode).toMatchObject({
+        status: "authorized",
+        lane: "checkpoint",
+      });
+      expect(
+        (await readLease(client.db, f.workspaceId, f.session.sandboxGroupId))?.resumeState
+          ?.opengeniAutomaticCheckpointRecovery,
+        failureCode,
+      ).toMatchObject({ status: "accepted", attempt: 2 });
+      expect(
+        await automaticReceipts(f.workspaceId, "sandbox.recovery.fresh_workspace"),
+        failureCode,
+      ).toHaveLength(0);
+    }
+  });
+
+  test("the loss audit proves loss only for an overwritten loss record, never for a plain not_created", async () => {
+    const shapes = [
+      {
+        name: "plain not_created (ordinary drain, operator restore or capture failure)",
+        provider: {
+          status: "not_created",
+          instanceId: null,
+          observedAt: "2026-09-17T06:24:31.000Z",
+        },
+        eligibleWithAudit: false,
+      },
+      {
+        name: "replacement_failed",
+        provider: {
+          status: "not_created",
+          instanceId: null,
+          observedAt: "2026-09-17T06:24:31.000Z",
+          diagnostic: "replacement_failed",
+        },
+        eligibleWithAudit: true,
+      },
+      {
+        name: "older replacement failure that wrote missing",
+        provider: { status: "missing", instanceId: null, observedAt: "2026-09-17T06:24:31.000Z" },
+        eligibleWithAudit: true,
+      },
+    ];
+    for (const shape of shapes) {
+      const f = await fixture();
+      await shared.admin`update sandbox_leases set resume_state = jsonb_set(jsonb_set(resume_state,
+        '{opengeniRecovery,provider}', ${shared.admin.json(shape.provider)}::jsonb),
+        '{opengeniRecovery,restore}', ${shared.admin.json({
+          status: "degraded",
+          retryable: false,
+          failureCode: "sandbox_rematerialization_failed",
+          rematerializationId: crypto.randomUUID(),
+          completedAt: "2026-09-17T07:00:00.000Z",
+        })}::jsonb) where id = ${f.leaseId}`;
+      const initiator = await claimedAttempt(f, f.session.id);
+      const authorize = () =>
+        authorizeAutomaticSandboxCheckpointRecovery(client.db, {
+          ...f.scope,
+          sessionId: f.session.id,
+          attemptId: initiator.attemptId,
+        });
+      expect(await authorize(), shape.name).toEqual({ status: "not_eligible" });
+      await shared.admin`insert into audit_events(id, account_id, workspace_id, subject_id, action,
+          target_type, target_id, metadata)
+        values(${crypto.randomUUID()}, ${f.accountId}, ${f.workspaceId}, 'opengeni:sandbox-reaper',
+          'sandbox.provider_missing_before_capture', 'sandbox_group', ${f.session.sandboxGroupId},
+          ${shared.admin.json({ leaseId: f.leaseId, leaseEpoch: 2, workspaceGeneration: 44 })}::jsonb)`;
+      if (shape.eligibleWithAudit) {
+        expect(await authorize(), shape.name).toMatchObject({
+          status: "authorized",
+          lane: "checkpoint",
+        });
+      } else {
+        expect(await authorize(), shape.name).toEqual({ status: "not_eligible" });
+        expect(
+          (await readPublicSandboxRecovery(client.db, f)).automaticAvailable,
+          shape.name,
+        ).toBeUndefined();
+      }
+    }
+  });
+
   test("an empty workspace waits until the lost box is past its provider lifetime; a checkpoint does not", async () => {
     for (const archive of ["checkpoint", "none"] as const) {
       const f = await fixture();
       if (archive === "none") await withoutAnyArchive(f);
       // Loss observed moments ago with no recorded deadline.
+      const observedAt = new Date().toISOString();
       await shared.admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-        '{opengeniRecovery,provider,observedAt}', to_jsonb(${new Date().toISOString()}::text))
+        '{opengeniRecovery,provider,observedAt}', to_jsonb(${observedAt}::text))
         where id = ${f.leaseId}`;
       const initiator = await claimedAttempt(f, f.session.id);
       const authorize = () =>
@@ -2077,6 +2236,7 @@ describe("automatic continuity after definitive managed sandbox loss", () => {
       expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
         status: "blocked",
         reason: "provider_lifetime_unexpired",
+        availableAt: new Date(Date.parse(observedAt) + 24 * 60 * 60_000).toISOString(),
       });
       expect(await authorize()).toEqual({ status: "not_eligible" });
       // The exact recorded deadline of the lost box has passed.

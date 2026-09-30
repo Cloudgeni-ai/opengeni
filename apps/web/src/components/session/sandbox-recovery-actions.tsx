@@ -109,7 +109,9 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
                         : "Checking checkpoint recovery availability…"}
       </p>
       {projection?.reason ? (
-        <p className="mt-1 text-xs text-fg-muted">{sandboxRecoveryBlocker(projection.reason)}</p>
+        <p className="mt-1 text-xs text-fg-muted">
+          {sandboxRecoveryBlocker(projection.reason, projection.availableAt)}
+        </p>
       ) : null}
       {!props.canControl ? (
         <p className="mt-1 text-xs text-fg-muted">

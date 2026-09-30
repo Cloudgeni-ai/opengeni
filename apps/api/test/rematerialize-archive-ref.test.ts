@@ -214,7 +214,10 @@ async function setupColdArchiveLease() {
   return { accountId, workspaceId, groupId, archive, ref, acquired };
 }
 
-async function establishArchiveFixture(fixture: ArchiveFixture, objectStorage: ObjectStorage) {
+async function establishArchiveFixture(
+  fixture: ArchiveFixture,
+  objectStorage: ObjectStorage | null,
+) {
   return await establishApiSandboxSpawner({
     db: db!,
     settings,
@@ -340,14 +343,33 @@ test("viewer attach forwards object storage and restores a cold archive ref", as
 test("API cold spawner records a missing object archive restore failure", async () => {
   const fixture = await setupColdArchiveLease();
   const storage = objectStorageFor(fixture.ref, null);
+  // A missing object is not proof that the checkpoint content is corrupt.
   await expect(establishArchiveFixture(fixture, storage.objectStorage)).rejects.toMatchObject({
-    code: "archive_base64_invalid",
+    code: "archive_object_missing",
   });
   expect(storage.reads()).toBe(1);
   expectFailedArchiveRestore(
     await readLease(db!, fixture.workspaceId, fixture.groupId),
-    "archive_base64_invalid",
+    "archive_object_missing",
   );
+}, 120_000);
+
+test("API cold spawner without object storage records a retryable configuration failure", async () => {
+  const fixture = await setupColdArchiveLease();
+  await expect(establishArchiveFixture(fixture, null)).rejects.toMatchObject({
+    code: "archive_storage_unavailable",
+    retryable: true,
+  });
+  const lease = await readLease(db!, fixture.workspaceId, fixture.groupId);
+  expect(lease?.liveness).toBe("cold");
+  expect(lease?.recovery.provider).toMatchObject({
+    status: "not_created",
+    diagnostic: "replacement_failed",
+  });
+  expect(lease?.recovery.restore).toMatchObject({
+    failureCode: "archive_storage_unavailable",
+    retryable: true,
+  });
 }, 120_000);
 
 test("API cold spawner records a corrupt object archive restore failure", async () => {

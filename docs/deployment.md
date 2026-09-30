@@ -218,8 +218,10 @@ restored automatically, continuation on a new EMPTY workspace
 the empty-workspace receipt requires warning protocol v3 at claim. The empty
 workspace additionally waits until the lost box is past its hard provider
 lifetime (its stamped deadline plus one hour, else loss plus 24 hours). Only a
-definitive integrity failure abandons a checkpoint; other restore failures retry
-with backoff and then wait for an operator. A complete archive is never
+definitive, non-retryable content-integrity failure abandons a checkpoint; a
+missing archive object or unconfigured archive storage never does, so fix
+storage and Retry. Other restore failures retry with backoff and then wait for
+an operator. A complete archive is never
 bypassed. The lost archive fields and checkpoint references stay on the lease
 for review. Sessions stuck before this release qualify on their next turn or
 Retry when their loss is provable from the row or its loss audit; a capture

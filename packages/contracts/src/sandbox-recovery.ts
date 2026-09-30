@@ -38,6 +38,9 @@ export const SandboxRecoveryProjection = z
     /** What an automatic Retry will do: restore `checkpoint`, or continue on a
      * new empty workspace because no usable checkpoint survived the loss. */
     automaticLane: z.enum(["checkpoint", "fresh_workspace"]).optional(),
+    /** For a timed recovery wait: the earliest time a Retry or a new message
+     * can let OpenGeni decide again. Nothing proceeds by itself before then. */
+    availableAt: z.string().datetime().optional(),
   })
   .strict();
 export type SandboxRecoveryProjection = z.infer<typeof SandboxRecoveryProjection>;
