@@ -240,6 +240,17 @@ test("Claude import ignores a stale file and invalid replacement clears readines
   }
   await act(async () => root.render(<Harness />));
   const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  const importButton = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Import Claude account details"]',
+  )!;
+  expect(importButton.id).not.toBe("");
+  expect(
+    [...container.querySelectorAll("label")].find((label) => label.htmlFor === importButton.id)
+      ?.textContent,
+  ).toBe("Claude account details");
+  expect(
+    document.getElementById(importButton.getAttribute("aria-describedby")!)?.textContent,
+  ).toContain("Only the two account identifiers are read");
   const text = JSON.stringify({
     oauthAccount: { accountUuid: "10000000-0000-4000-8000-000000000001" },
     userID: "a".repeat(64),
@@ -260,9 +271,18 @@ test("Claude import ignores a stale file and invalid replacement clears readines
   await act(async () => finish(text));
   expect(current!.valid).toBe(false);
   expect(container.textContent).toContain("Account details are missing");
+  expect(importButton.getAttribute("aria-invalid")).toBe("true");
+  expect(
+    document.getElementById(importButton.getAttribute("aria-describedby")!)?.textContent,
+  ).toContain("Account details are missing");
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+    "Account details are missing",
+  );
   await select(async () => text);
   expect(current!.valid).toBe(true);
   expect(container.textContent).toContain("Account details ready");
+  expect(importButton.hasAttribute("aria-invalid")).toBe(false);
+  expect(container.querySelector('[role="alert"]')).toBeNull();
   await select(async () => "bad json");
   expect(current!.valid).toBe(false);
   expect(current!.identity?.accountUuid).toBe("");

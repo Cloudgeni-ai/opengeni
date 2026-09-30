@@ -29,6 +29,52 @@ function text(value: unknown, field: string): string {
   return value;
 }
 
+/** Error text is diagnostic only: never delay a known HTTP failure indefinitely. */
+async function readErrorDetail(
+  body: Response["body"],
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
+  if (!body) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let detail = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  // One budget for the entire diagnostic drain, including slow trickles. This
+  // does not limit successful model requests, streams, or agent execution.
+  const deadline = new Promise<undefined>((resolve, reject) => {
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
+    if (signal) {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
+  });
+  try {
+    let bytes = 0;
+    while (bytes < 65536) {
+      const chunk = await Promise.race([reader.read(), deadline]);
+      if (!chunk || chunk.done) break;
+      detail += decoder.decode(chunk.value.subarray(0, 65536 - bytes), { stream: true });
+      bytes += chunk.value.byteLength;
+    }
+  } catch {
+    // A truncated/erroring diagnostic body must not hide status/Retry-After.
+    signal?.throwIfAborted();
+  } finally {
+    clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    // Cancel immediately, but do not await untrusted transport cleanup: its
+    // promise can itself stall after the diagnostic deadline or caller abort.
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  signal?.throwIfAborted();
+  return detail;
+}
+
 export function anthropicToolName(name: string, namespace?: string): string {
   if (!namespace && /^[a-zA-Z0-9_-]{1,64}$/.test(name)) return name;
   const identity = JSON.stringify([namespace ?? null, name]);
@@ -467,23 +513,11 @@ export class AnthropicMessagesModel implements Model {
       ...(request.signal ? { signal: request.signal } : {}),
     });
     if (!response.ok) {
-      let detail = "";
-      const reader = response.body?.getReader();
-      if (reader) {
-        const decoder = new TextDecoder();
-        try {
-          let bytes = 0;
-          while (bytes < 65536) {
-            const chunk = await reader.read();
-            if (chunk.done) break;
-            detail += decoder.decode(chunk.value.subarray(0, 65536 - bytes), { stream: true });
-            bytes += chunk.value.byteLength;
-          }
-        } finally {
-          await reader.cancel().catch(() => undefined);
-          reader.releaseLock();
-        }
-      }
+      const detail = await readErrorDetail(
+        response.body,
+        Math.min(this.provider.anthropic?.streamIdleTimeoutMs ?? 600000, 5000),
+        request.signal,
+      );
       const contextExceeded =
         response.status === 400 &&
         /prompt is too long|context_length_exceeded|exceeds.*context window/i.test(detail);

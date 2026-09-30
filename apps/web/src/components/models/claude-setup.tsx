@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckIcon, UploadIcon } from "lucide-react";
 import { CopyField } from "@/components/ui/copy-field";
 import { Disclosure } from "@/components/ui/disclosure";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
+import { Field, FieldStack, TextInput, useFieldControlProps } from "@/components/ui/field";
 
 export type ClaudeIdentity = { accountUuid: string; deviceId: string };
 const accountPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -49,6 +49,23 @@ export function ClaudeTokenInstructions() {
   );
 }
 
+function ClaudeImportButton({ ready, onClick }: { ready: boolean; onClick: () => void }) {
+  const fieldProps = useFieldControlProps();
+  return (
+    <Button
+      {...fieldProps}
+      type="button"
+      variant="outline"
+      className="w-fit"
+      aria-label="Import Claude account details"
+      onClick={onClick}
+    >
+      <UploadIcon aria-hidden="true" />
+      {ready ? "Choose another settings file" : "Choose Claude settings file"}
+    </Button>
+  );
+}
+
 export function useClaudeIdentityFields(enabled: boolean) {
   const [accountUuid, setAccountUuid] = useState("");
   const [deviceId, setDeviceId] = useState("");
@@ -79,18 +96,9 @@ export function useClaudeIdentityFields(enabled: boolean) {
         <Field
           label="Claude account details"
           hint="Choose .claude.json from your home folder on the same computer. Only the two account identifiers are read; the file itself is never uploaded."
-          error={error}
+          error={error ? <span role="alert">{error}</span> : undefined}
         >
-          <Button
-            type="button"
-            variant="outline"
-            className="w-fit"
-            aria-label="Import Claude account details"
-            onClick={() => fileInput.current?.click()}
-          >
-            <UploadIcon aria-hidden="true" />
-            {valid ? "Choose another settings file" : "Choose Claude settings file"}
-          </Button>
+          <ClaudeImportButton ready={valid} onClick={() => fileInput.current?.click()} />
           <input
             ref={fileInput}
             hidden

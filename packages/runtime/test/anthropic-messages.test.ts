@@ -498,6 +498,81 @@ test("stream idle timeout cancels the body without accepting a partial response"
   expect(cancelled).toBe(true);
 });
 
+test("stalled HTTP error diagnostics and cleanup preserve the known failure", async () => {
+  let cancelled = false;
+  const model = new AnthropicMessagesModel(
+    { ...provider, anthropic: { streamIdleTimeoutMs: 10 } },
+    "claude",
+    (async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+            return new Promise<void>(() => {});
+          },
+        }),
+        { status: 429, headers: { "request-id": "req_stalled", "retry-after": "7" } },
+      )) as typeof fetch,
+  );
+  await expect(collect(model)).rejects.toMatchObject({
+    status: 429,
+    code: "anthropic_http_error",
+    request_id: "req_stalled",
+    headers: { "retry-after": "7" },
+  });
+  expect(cancelled).toBe(true);
+}, 1000);
+
+test("failed HTTP diagnostic reads do not replace status with a transport error", async () => {
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude",
+    (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("private transport detail"));
+          },
+        }),
+        { status: 503, headers: { "request-id": "req_failed_body", "retry-after": "2" } },
+      )) as typeof fetch,
+  );
+  await expect(model.getResponse(request())).rejects.toMatchObject({
+    status: 503,
+    request_id: "req_failed_body",
+    headers: { "retry-after": "2" },
+    message: "Claude request failed (HTTP 503)",
+  });
+});
+
+test("caller abort interrupts HTTP diagnostics even when transport cleanup stalls", async () => {
+  const abort = new AbortController();
+  const reason = new Error("caller stopped request");
+  let cancelled = false;
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude",
+    (async () =>
+      new Response(
+        new ReadableStream(
+          {
+            pull() {
+              abort.abort(reason);
+            },
+            cancel() {
+              cancelled = true;
+              return new Promise<void>(() => {});
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { status: 429 },
+      )) as typeof fetch,
+  );
+  await expect(model.getResponse({ ...request(), signal: abort.signal })).rejects.toBe(reason);
+  expect(cancelled).toBe(true);
+}, 1000);
+
 test("native title and compaction calls handle output limits without accepting incomplete summaries", async () => {
   const { generateSessionTitle, summarizeForCompaction } = await import("../src/index");
   let stop = "end_turn";

@@ -1291,6 +1291,10 @@ workspace connection create/rotate/revoke API. Model IDs are scoped under
 `organization-anthropic/` and `organization-claude-subscription/`. Custom models use
 immutable generations: retiring one prevents fresh selection while preserving
 accepted execution history. Connection/model allowlists still govern execution.
+Workspace API-key credential rotation and disconnect/reconnect preserve the
+previous connection's model access policy, including deny-all restrictions and
+its policy revision. Credential management does not grant permission to reset
+administrator-owned access rules.
 
 Registry providers can set `anthropic.auth` (`api-key` or `oauth`), `cacheTtl`
 (`5m`, `1h`, or `off`), `maxOutputTokens`, and `streamIdleTimeoutMs`. API keys use
@@ -1316,6 +1320,10 @@ remain available without a reasoning option. Registry providers can explicitly
 declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
 does not silently retry failed requests or rotate credentials.
+HTTP error details are read for at most 5 seconds (or the shorter configured
+stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
+hide the HTTP status, request ID or Retry-After header; caller cancellation
+interrupts the read.
 
 
 ### Claude subscription request identity
