@@ -87,6 +87,7 @@ import { isApiErrorStatus } from "@/api";
 import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
+import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sandbox-switcher";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
@@ -1840,6 +1841,8 @@ function SessionChatPane(props: {
   const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
     null,
   );
+  // "+" > Runs on: the compute this chat runs on and the machines it can move to.
+  const runsOn = useSessionRunsOn(props.session.id, props.session.sandboxBackend);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -3015,6 +3018,22 @@ function SessionChatPane(props: {
                     disabled: terminal || composer.sending,
                     panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
                   }}
+                  {...(runsOn.hasChoices ||
+                  props.session.rigId ||
+                  (runsOn.activeMachine && !runsOn.activeMachine.isSessionGroup)
+                    ? {
+                        runsOn: {
+                          summary: runsOn.activeName,
+                          panel: (
+                            <SessionRunsOnMenuBody
+                              runsOn={runsOn}
+                              workspaceId={props.session.workspaceId}
+                              rigId={props.session.rigId ?? null}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
                 />
               </>
             }

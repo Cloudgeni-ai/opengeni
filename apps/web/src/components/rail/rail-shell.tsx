@@ -37,7 +37,7 @@ import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-
 import { PrimaryNav, WorkspaceShortcutLinks } from "@/components/rail/primary-nav";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import {
-  SessionSandboxSwitcher,
+  SessionComputeIndicator,
   sessionSupportsFleetSwitching,
 } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
@@ -532,11 +532,7 @@ function SessionRouteHeader({
       }
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
-          <SessionSandboxSwitcher
-            workspaceId={session.workspaceId}
-            sessionId={session.id}
-            sandboxBackend={session.sandboxBackend}
-          />
+          <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
         ) : null
       }
       codexSlot={

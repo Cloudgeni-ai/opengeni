@@ -1,28 +1,30 @@
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-// The compact "Run on" control in the session header: shows the session's
-// currently-active machine and, on click, opens a dropdown to live-swap the
-// session's active sandbox to any online machine (the session's own box + the
-// enrolled selfhosted machines). Backed by `useWorkspaceMachines({ sessionId })`, whose
-// `attach(sandboxId)` performs the swap and re-polls the pointer.
-//
-// Degrades gracefully: when selfhosted is disabled the machines API 404s and
-// `fleet.machines` is empty, so this falls back to a static compute label.
+// Where a running chat runs. "+" > Runs on shows the session's active machine
+// and live-swaps it to any online machine (the session's own box + the enrolled
+// selfhosted machines) through `useWorkspaceMachines({ sessionId })`, whose
+// `attach(sandboxId)` performs the swap and re-polls the pointer. The header
+// keeps only a read-only "on <machine>" when the chat runs on a person's own
+// machine. When selfhosted is disabled the machines API 404s and the list is
+// empty, so the drill-in just names the compute.
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
-import { LaptopIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
+import { CheckIcon, LaptopIcon, Loader2Icon, ServerIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
+import { ComposerMenuHeader } from "@/components/ui/composer-menu";
 import {
-  DropdownMenu,
-  DropdownMenuCheck,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuMeta,
-  DropdownMenuNote,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  MENU_BUTTON_CLASS,
+  MENU_CHECK_CLASS,
+  MENU_CHECK_SLOT_CLASS,
+  MENU_LABEL_CLASS,
+  MENU_META_CLASS,
+  MENU_NOTE_CLASS,
+  MENU_SEPARATOR_CLASS,
+} from "@/components/ui/menu-styles";
+import { userErrorText } from "@/lib/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { cn } from "@/lib/utils";
 
 export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
 export const NO_SANDBOX_LABEL = "No sandbox";
@@ -49,10 +51,18 @@ export function machineDisplayName(machine: Pick<MachineView, "isSessionGroup" |
   return machine.isSessionGroup ? sessionSandboxLabel(machine.kind) : machine.name;
 }
 
-function SandboxMark({ kind, backend }: { kind: string | undefined; backend: SandboxBackend }) {
+function SandboxMark({
+  kind,
+  backend,
+  className = "size-3",
+}: {
+  kind: string | undefined;
+  backend: SandboxBackend;
+  className?: string;
+}) {
   const local = kind === "local" || (kind === undefined && backend === "local");
   const Icon = local ? LaptopIcon : ServerIcon;
-  return <Icon className="size-3 shrink-0" />;
+  return <Icon className={cn("shrink-0", className)} />;
 }
 
 export function sessionSupportsFleetSwitching(_sandboxBackend: SandboxBackend): boolean {
@@ -65,95 +75,145 @@ function isSelectable(machine: MachineView): boolean {
   return machine.active || isMachineComputeSelectable(machine.state);
 }
 
-export function SessionSandboxSwitcher({
-  workspaceId: _workspaceId,
-  sessionId,
-  sandboxBackend,
-}: {
-  workspaceId: string;
-  sessionId: string;
-  sandboxBackend: SandboxBackend;
-}) {
+/** The session's compute: which box or machine it runs on, and what it may swap to. */
+export function useSessionRunsOn(sessionId: string, sandboxBackend: SandboxBackend) {
   const fleet = useWorkspaceMachines({ sessionId, pollIntervalMs: MACHINES_SESSION_POLL_MS });
   const machines = fleet.machines;
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const activeName = activeMachine
     ? machineDisplayName(activeMachine)
     : sessionSandboxLabel(sandboxBackend);
-
-  // No machines to choose between (selfhosted off, or only the session box and
-  // it is already active): render a static, non-interactive label.
   const hasChoices =
     fleet.canAttach && machines.some((machine) => !machine.active && isSelectable(machine));
-  if (!hasChoices) {
-    return (
-      <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-muted">
-        <SandboxMark kind={activeMachine?.kind} backend={sandboxBackend} />
-        <span className="shrink-0">on</span>
-        <span className="truncate text-fg-muted">{activeName}</span>
-      </span>
-    );
-  }
+  return { fleet, machines, activeMachine, activeName, hasChoices, sandboxBackend };
+}
 
+export type SessionRunsOn = ReturnType<typeof useSessionRunsOn>;
+
+/**
+ * "+" > Runs on for a running chat: where it runs now, and the machines it can
+ * move to. The Sandbox Environment is fixed once the sandbox exists, so it is
+ * shown, not chosen.
+ */
+export function SessionRunsOnMenuBody(props: {
+  leading?: ReactNode;
+  runsOn: SessionRunsOn;
+  workspaceId: string;
+  rigId: string | null;
+}) {
+  const { fleet, machines } = props.runsOn;
+  const rigs = useWorkspaceRigs({ workspaceId: props.workspaceId, enabled: props.rigId !== null });
+  const rig = props.rigId ? rigs.rigs.find((candidate) => candidate.id === props.rigId) : null;
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-6 max-w-[12rem] gap-1 rounded-full border border-transparent px-1.5 text-2xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
-        >
-          <SandboxMark kind={activeMachine?.kind} backend={sandboxBackend} />
-          {/* Natural-language "on {target}" — semantic without the colon-label
-              grammar; "Run on" remains the dropdown menu's label. */}
-          <span className="shrink-0">on</span>
-          <span className="truncate text-fg-muted">{activeName}</span>
-          {fleet.attaching ? (
-            <Loader2Icon className="size-3 shrink-0 animate-spin" />
-          ) : (
-            <ChevronDownIcon className="size-3 shrink-0" />
-          )}
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="bottom" sideOffset={8} className="w-60">
-        <DropdownMenuLabel>Run on</DropdownMenuLabel>
-        {machines.map((machine) => {
-          const selectable = isSelectable(machine);
-          const swapping = fleet.attachingSandboxId === machine.sandboxId;
-          return (
-            <DropdownMenuItem
-              key={machine.sandboxId}
-              disabled={!selectable || fleet.attaching}
-              // Selecting the active one is a no-op; the hook collapses it.
-              onSelect={(event) => {
-                event.preventDefault();
-                if (machine.active || !selectable) {
-                  return;
-                }
-                void fleet.attach(machine.sandboxId);
-              }}
-              className="cursor-pointer"
+    <>
+      <ComposerMenuHeader title="Runs on" leading={props.leading} />
+      <div className="min-h-0 overflow-y-auto overscroll-contain pb-1">
+        <div role="radiogroup" aria-label="Runs on">
+          {props.runsOn.activeMachine === null ? (
+            // No listed box is active (e.g. no sandbox): still say where it runs now.
+            <button
+              type="button"
+              role="radio"
+              aria-checked
+              disabled
+              className={cn(MENU_BUTTON_CLASS, "disabled:opacity-100")}
             >
-              <ServerIcon />
-              <span className="min-w-0 flex-1 truncate">{machineDisplayName(machine)}</span>
-              {machine.state !== "online" && !machine.active ? (
-                <DropdownMenuMeta>{machine.state}</DropdownMenuMeta>
-              ) : null}
-              {swapping ? (
-                <Loader2Icon className="size-4 shrink-0 animate-spin" />
-              ) : (
-                <DropdownMenuCheck checked={machine.active} className="ml-0" />
-              )}
-            </DropdownMenuItem>
-          );
-        })}
+              <SandboxMark
+                kind={undefined}
+                backend={props.runsOn.sandboxBackend}
+                className="size-4"
+              />
+              <span className="min-w-0 flex-1 truncate">{props.runsOn.activeName}</span>
+              <span className={MENU_CHECK_SLOT_CLASS}>
+                <CheckIcon className={MENU_CHECK_CLASS} />
+              </span>
+            </button>
+          ) : null}
+          {machines.map((machine) => {
+            const selectable = isSelectable(machine) && fleet.canAttach;
+            const swapping = fleet.attachingSandboxId === machine.sandboxId;
+            return (
+              <button
+                key={machine.sandboxId}
+                type="button"
+                role="radio"
+                aria-checked={machine.active}
+                disabled={!selectable || fleet.attaching}
+                onClick={() => {
+                  if (machine.active || !selectable) return;
+                  void fleet.attach(machine.sandboxId);
+                }}
+                className={MENU_BUTTON_CLASS}
+              >
+                <SandboxMark
+                  kind={machine.kind}
+                  backend={props.runsOn.sandboxBackend}
+                  className="size-4"
+                />
+                <span className="min-w-0 flex-1 truncate">{machineDisplayName(machine)}</span>
+                {machine.state !== "online" && !machine.active ? (
+                  <span className={MENU_META_CLASS}>{machineStateLabel(machine.state)}</span>
+                ) : null}
+                <span className={MENU_CHECK_SLOT_CLASS}>
+                  {swapping ? (
+                    <Loader2Icon className="size-4 animate-spin" />
+                  ) : machine.active ? (
+                    <CheckIcon className={MENU_CHECK_CLASS} />
+                  ) : null}
+                </span>
+              </button>
+            );
+          })}
+        </div>
         {fleet.mutationError ? (
-          <DropdownMenuNote role="alert" className="text-danger">
-            Swap failed: {fleet.mutationError.message}
-          </DropdownMenuNote>
+          <p role="alert" className={cn(MENU_NOTE_CLASS, "text-danger")}>
+            Couldn't move this chat. {userErrorText(fleet.mutationError)}
+          </p>
         ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        {props.rigId ? (
+          <>
+            <div className={MENU_SEPARATOR_CLASS} />
+            <p className={MENU_LABEL_CLASS}>Sandbox environment</p>
+            <p className={cn(MENU_NOTE_CLASS, "flex items-center justify-between gap-3 pt-0.5")}>
+              <span className="truncate text-fg">{rig?.name ?? "Set for this chat"}</span>
+              <span className="shrink-0 text-xs">Fixed for this chat</span>
+            </p>
+          </>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
+function machineStateLabel(state: string): string {
+  if (state === "offline") return "Offline";
+  if (state === "reconnecting") return "Reconnecting";
+  if (state === "display_unavailable") return "No display";
+  return state;
+}
+
+/**
+ * The session header names the compute only when the chat runs on someone's
+ * own machine, where knowing it matters. Changing it lives under "+" > Runs on.
+ */
+export function SessionComputeIndicator({
+  sessionId,
+  sandboxBackend,
+}: {
+  sessionId: string;
+  sandboxBackend: SandboxBackend;
+}) {
+  const runsOn = useSessionRunsOn(sessionId, sandboxBackend);
+  const machine = runsOn.activeMachine;
+  if (!machine || machine.isSessionGroup) return null;
+  return (
+    <span
+      className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-muted"
+      title="Change it under + > Runs on"
+    >
+      <SandboxMark kind={machine.kind} backend={sandboxBackend} />
+      <span className="shrink-0">on</span>
+      <span className="truncate">{machineDisplayName(machine)}</span>
+    </span>
   );
 }

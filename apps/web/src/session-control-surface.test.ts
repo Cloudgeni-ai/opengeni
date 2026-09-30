@@ -236,8 +236,10 @@ describe("session control surface architecture", () => {
     expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
     expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
-    expect(route).toContain("onChange={props.onComputeChange}");
-    expect(route).toContain("props.onComputeChange({");
+    // Machine and folder choices live under "+" > Runs on and go through the
+    // explicit compute path, never the launch-selection draft setter.
+    const runsOn = await source("components/session/new-session-settings-menu.tsx");
+    expect(runsOn).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
@@ -589,7 +591,7 @@ describe("session control surface architecture", () => {
     expect(panel).not.toMatch(
       /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
     );
-    expect(panel).toContain(".catch(() => ({ default: SessionVariableSetPickerLoadFailed }))");
+    expect(panel).toContain(".catch(() => SessionVariableSetPickerLoadFailed)");
   });
 
   test("the retired client-side queue model is gone", async () => {

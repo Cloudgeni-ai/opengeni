@@ -3,9 +3,11 @@ import {
   AudioLinesIcon,
   BoxIcon,
   ChevronRightIcon,
+  EyeIcon,
   GitBranchIcon,
   PaperclipIcon,
   PlugIcon,
+  ServerIcon,
   SettingsIcon,
 } from "lucide-react";
 import {
@@ -40,12 +42,30 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuMeta,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
 
-export type Panel = "root" | "tools" | "repos" | "voice" | "variables" | "settings";
+export type Panel =
+  | "root"
+  | "tools"
+  | "repos"
+  | "voice"
+  | "variables"
+  | "settings"
+  | "runs-on"
+  | "visibility";
+
+/** A per-session setting shown as a "+" row with its current value, opening a drill-in. */
+export type ComposerSettingPanel = {
+  /** The current value, right-aligned on the row. */
+  summary: string;
+  disabled?: boolean;
+  /** Panel element; receives `leading` (back control) via clone. */
+  panel: ReactElement<{ leading?: ReactNode }>;
+};
 
 /**
  * Shared composer actions at every width; model and voice stay in the bar.
@@ -93,6 +113,10 @@ export type ComposerPlusProps = {
     selectedCount: number;
     panel: ReactElement<{ leading?: ReactNode; onClose?: () => void }>;
   };
+  /** Where the chat runs: managed sandbox and environment, or a connected machine. */
+  runsOn?: ComposerSettingPanel;
+  /** Who can see the chat, when the organization offers a choice. */
+  visibility?: ComposerSettingPanel;
   /** When set, Voice model appears under + (bar keeps a start-only control). */
   voiceModel?: {
     selectedLabel: string;
@@ -220,6 +244,25 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
+          {props.runsOn || props.visibility ? <DropdownMenuSeparator /> : null}
+          {props.runsOn ? (
+            <SettingRowItem
+              icon={<ServerIcon className="size-4" />}
+              label="Runs on"
+              setting={props.runsOn}
+              disabled={props.disabled}
+              onOpen={() => setPanel("runs-on")}
+            />
+          ) : null}
+          {props.visibility ? (
+            <SettingRowItem
+              icon={<EyeIcon className="size-4" />}
+              label="Visibility"
+              setting={props.visibility}
+              disabled={props.disabled}
+              onOpen={() => setPanel("visibility")}
+            />
+          ) : null}
           {voiceModel ? (
             <DropdownMenuItem
               className="cursor-pointer"
@@ -273,6 +316,10 @@ export function ComposerMobilePlusPanel(
             setPanel("root");
           },
         })
+      ) : panel === "runs-on" && props.runsOn ? (
+        withLeading(props.runsOn.panel, backButton)
+      ) : panel === "visibility" && props.visibility ? (
+        withLeading(props.visibility.panel, backButton)
       ) : panel === "voice" && voiceModel ? (
         withLeading(voiceModel.panel, backButton)
       ) : panel === "settings" ? (
@@ -359,6 +406,30 @@ function ComposerPanelContent(props: {
     >
       {props.children}
     </DropdownMenuContent>
+  );
+}
+
+function SettingRowItem(props: {
+  icon: ReactNode;
+  label: string;
+  setting: ComposerSettingPanel;
+  disabled?: boolean;
+  onOpen: () => void;
+}) {
+  return (
+    <DropdownMenuItem
+      className="cursor-pointer"
+      disabled={props.disabled || props.setting.disabled}
+      onSelect={(event) => {
+        event.preventDefault();
+        props.onOpen();
+      }}
+    >
+      {props.icon}
+      {props.label}
+      <DropdownMenuMeta className="max-w-[9rem] truncate">{props.setting.summary}</DropdownMenuMeta>
+      <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
+    </DropdownMenuItem>
   );
 }
 

@@ -12,6 +12,7 @@ import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
 import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
+import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
 import {
   WorkspaceDeveloperSettings,
   WorkspaceSandboxImageRow,
@@ -390,6 +391,7 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
+        <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
           workspaceId={workspaceId}
