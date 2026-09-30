@@ -68,6 +68,7 @@ import {
   trimAround,
 } from "./text";
 import {
+  blockEnd,
   definitionWindow,
   enclosingWindow,
   keywordRegex,
@@ -542,13 +543,17 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       );
     }
     for (const [ci, g] of toTriage) cands[ci]!.lexScore += g.score;
-    const newScores = await judge.scoreFiles(
-      toTriage.map(([ci]) => fileItem(ci)),
-      ctx,
-    );
-    for (const [id, p] of newScores) fileScores.set(id, p);
+    // With symbols.triage off (the default) the files are ranked by how strongly the followed identifiers
+    // lead to them (a definition counts 1.5x) and wave 2 verifies their windows: one Jev round less.
+    if (cfg.symbols.triage) {
+      const newScores = await judge.scoreFiles(
+        toTriage.map(([ci]) => fileItem(ci)),
+        ctx,
+      );
+      for (const [id, p] of newScores) fileScores.set(id, p);
+    }
     const passed = toTriage
-      .map(([ci, g]) => ({ ci, g, p: pOf(ci) }))
+      .map(([ci, g]) => ({ ci, g, p: cfg.symbols.triage ? pOf(ci) : 1 }))
       .filter((x) => x.p >= thr.T1)
       .sort((a, b) => b.p - a.p || b.g.score - a.g.score);
     const take = passed.slice(0, cfg.symbols.maxNewFilesSelected);
@@ -819,11 +824,19 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         // functions, handlers, hooks, components and classes; not types or values
         if (!/\(|=>|\bfunction\b|\bclass\b|\bdef\b|\bfn\b/.test(l)) continue;
         const id = `c${String(changeItems.length).padStart(3, "0")}`;
-        const body = lines
-          .slice(d.line - 1, d.line + 3)
-          .map((x) => x.trim())
-          .join(" ")
-          .slice(0, 280);
+        // signature plus the calls the body makes: what a declaration mutates shows in its calls
+        // (`rollbackWorkspaceArtifact`, `setWorkspaceArtifactStatus`), rarely in its first lines
+        const end = Math.min(lines.length, (blockEnd(lines, d.line - 1, lang) ?? d.line + 30) + 1, d.line + 150);
+        const calls = [
+          ...new Set(
+            lines
+              .slice(d.line, end)
+              .flatMap((x) => [...x.matchAll(/\b([A-Za-z_$][\w$]{3,})\s*\(/g)].map((m) => m[1]!))
+              .filter((n) => specificName(n) && n !== d.name),
+          ),
+        ].slice(0, 10);
+        const body =
+          l.trim().slice(0, 200) + (calls.length ? `\ncalls: ${calls.join(", ")}` : "") + `\nlines ${d.line}-${end}`;
         changeItems.push({ id, name: d.name, seenAt: `${path}:${d.line}`, context: body, lex: 0 });
         changeDecls.push({ id, name: d.name, path, line: d.line });
       }
@@ -1117,6 +1130,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   let body = packBody(evidence, packOpts());
   await check(body);
   const adaptive: string[] = [];
+  let refilled = false;
   const ratingOf = () => (status.overall === null ? null : status.overall);
   const firstRating = ratingOf();
   if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.followBelowRating && cfg.wave3.enabled) {
@@ -1135,8 +1149,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     const before = body.included.length;
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
     if (body.included.length !== before) {
+      // the rating stays that of the passages above the bar (no second check: one Jev round less)
       adaptive.push(`rating ${r2(firstRating)}: filled the budget with passages rel >= ${cfg.pack.fillMinRelevance}`);
-      await check(body);
+      refilled = true;
     }
   }
   mark("pack", ts);
@@ -1278,7 +1293,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       : `evidence rating ${r2(status.overall)}` +
         (status.subs.length
           ? ` (${status.subs.map((x, j) => `s${j + 1} ${r2(x)}`).join(", ")})`
-          : "");
+          : "") +
+        (refilled ? " for the passages above the bar; weaker passages fill the rest" : "");
   const buildText = (packTok: number) => {
     const head = [
       `code_search${label ? " " + label : ""}: ${statusText} | ${body.included.length} passages from ${includedFiles.size} files, ~${fmtK(packTok)} tokens | ${(wallMs / 1000).toFixed(1)}s`,

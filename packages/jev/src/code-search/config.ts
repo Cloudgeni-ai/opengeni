@@ -105,6 +105,8 @@ export interface CodeSearchConfig {
     maxNewFilesTriaged: number;
     /** New files selected per round (p >= T1, best first). */
     maxNewFilesSelected: number;
+    /** Triage the files the identifiers lead to with Jev before selecting them (off: rank by symbol evidence). */
+    triage: boolean;
   };
   change: {
     /** "Must change together": judge the declarations of the most relevant files against the question. */
@@ -262,13 +264,14 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     maxRefFiles: 40,
     maxNewFilesTriaged: 40,
     maxNewFilesSelected: 6,
+    triage: false,
   },
   change: {
     enabled: true,
     files: 3,
     perFile: 25,
     maxJudged: 60,
-    threshold: 0.6,
+    threshold: 0.5,
     maxChosen: 6,
   },
   wave3: {

@@ -169,6 +169,7 @@ describe("config", () => {
       maxRefFiles: 40,
       maxNewFilesTriaged: 40,
       maxNewFilesSelected: 6,
+      triage: false,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.wave3).toEqual({
       enabled: true,
@@ -221,7 +222,7 @@ describe("config", () => {
       files: 3,
       perFile: 25,
       maxJudged: 60,
-      threshold: 0.6,
+      threshold: 0.5,
       maxChosen: 6,
     });
     expect(Object.keys(DEFAULT_CODE_SEARCH_CONFIG).sort()).toEqual(
