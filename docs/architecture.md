@@ -1005,12 +1005,6 @@ Opening the account picker refreshes usage.
 
 Claude setup and quota observations:
 [`model-providers.md`](model-providers.md#claude-subscription-usage).
-Browser sign-in is owned by `apps/api/src/claude-subscription-oauth.ts` and its
-scoped routes. Encrypted attempts bind browser/human authority; native connection
-writers retain access policy. `packages/db/src/claude-subscription-tokens.ts`
-renews only the captured generation before physical Claude requests or explicit
-usage checks, while catalog reads stay offline. Setup tokens remain a fallback;
-browser sign-in adds profile access, direct quota reads and renewal.
 
 Codex turns require durable credential leases. `rotation_enabled` off waits on
 capped accounts; on permits same-turn failover. First allocation freezes source,
