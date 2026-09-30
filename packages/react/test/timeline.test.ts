@@ -4384,6 +4384,28 @@ describe("buildTimeline — memory writes", () => {
 });
 
 describe("delivered-input landmarks", () => {
+  test("command-only delivery does not split an in-flight agent message", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Checking " }),
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "command",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+        ],
+      }),
+      event("agent.message.delta", { text: "the result." }),
+    ]);
+    expect(items).toMatchObject([
+      { kind: "agent-message", text: "Checking the result.", streaming: true },
+    ]);
+  });
+
   test("omits background command receipts, including failed results, from the chat timeline", () => {
     reset();
     const items = buildTimeline([

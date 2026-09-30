@@ -482,24 +482,20 @@ export function buildTimeline(
           }
         }
         if (inputs.length === 0) break;
-        // Goal continuations already land as `goal.continuation` GoalRows.
-        // A solo continuation batch would duplicate that landmark + dump the
-        // model-facing prompt — skip chrome for that case only.
-        if (inputs.every((member) => member.kind === "goal_continuation")) {
-          break;
-        }
-        closeStreamingTail();
         // Background command receipts are agent-facing inputs, not chat messages.
         // The durable event remains available to the agent and audit history.
         const visibleInputs = inputs.filter(
           (member) => member.kind !== "background_command_result",
         );
+        // Goal continuations already have GoalRows. A batch with no other
+        // visible update must not interrupt an in-flight streaming message.
         if (
           visibleInputs.length === 0 ||
           visibleInputs.every((member) => member.kind === "goal_continuation")
         ) {
           break;
         }
+        closeStreamingTail();
         items.push({
           kind: "machine-input-batch",
           id: event.id,
