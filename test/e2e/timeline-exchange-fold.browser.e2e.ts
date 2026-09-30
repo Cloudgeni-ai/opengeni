@@ -474,13 +474,13 @@ describe("readable timeline browser regression", () => {
               .querySelector("[data-og-jump-to-question]")!
               .getBoundingClientRect();
             const host = document.querySelector("header")!.getBoundingClientRect();
-            const questionSpace =
-              3.5 * parseFloat(getComputedStyle(document.documentElement).fontSize);
             return {
               position: getComputedStyle(trigger).position,
               top: rect.top,
-              expectedTop: viewport.getBoundingClientRect().top + questionSpace,
-              questionBottom: question.bottom,
+              bottom: rect.bottom,
+              // Flush with the scrollport: no scrolling row may show above it.
+              expectedTop: viewport.getBoundingClientRect().top,
+              questionTop: question.top,
               hostBottom: host.bottom,
               hit: trigger.contains(
                 document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2),
@@ -491,7 +491,7 @@ describe("readable timeline browser regression", () => {
           });
           expect(geometry.position).toBe("sticky");
           expect(Math.abs(geometry.top - geometry.expectedTop)).toBeLessThanOrEqual(2);
-          expect(geometry.top).toBeGreaterThanOrEqual(geometry.questionBottom);
+          expect(geometry.questionTop).toBeGreaterThanOrEqual(geometry.bottom);
           expect(geometry.top).toBeGreaterThanOrEqual(geometry.hostBottom);
           expect(geometry.hit).toBe(true);
           expect(geometry.following).toBe("false");

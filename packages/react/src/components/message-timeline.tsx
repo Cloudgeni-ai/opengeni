@@ -2120,11 +2120,12 @@ export function MessageTimeline({
                   <div
                     className={cn("og-root relative flex min-h-0 flex-col", className)}
                     // Sticky insets start at the scroller's padded content edge
-                    // (pt-16). Subtract that padding, then reserve 3.5rem for the
-                    // floating question action, including its touch hit target.
-                    style={
-                      { "--og-work-header-top": questionNav ? "-0.5rem" : "-4rem" } as CSSProperties
-                    }
+                    // (pt-16). Subtract exactly that padding so an expanded work
+                    // header pins flush to the scrollport. Pinning it lower left a
+                    // band of scrolling rows visible above the header, which then
+                    // looked like it floated over the middle of the timeline. The
+                    // floating question action sits below this strip instead.
+                    style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                   >
                     {onAnnotate ? (
                       <Suspense fallback={null}>
@@ -2407,7 +2408,9 @@ export function MessageTimeline({
                           exit={{ opacity: 0, y: -6 }}
                           transition={{ duration: 0.15, ease: "easeOut" }}
                           data-og-question-nav=""
-                          className="pointer-events-none absolute inset-x-0 top-2 z-10 flex justify-end px-4 sm:px-6"
+                          // Below the pinned work-header strip (py-1.5 row, 44px on coarse
+                          // pointers), never over it: the header stays a full-width target.
+                          className="pointer-events-none absolute inset-x-0 top-11 z-10 flex justify-end px-4 sm:px-6 pointer-coarse:top-14"
                         >
                           <div className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
                             <button
