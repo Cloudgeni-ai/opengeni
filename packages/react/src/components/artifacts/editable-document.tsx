@@ -9,7 +9,7 @@ import {
   type EditableArtifactSession,
 } from "@opengeni/sdk/editable-artifacts";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { createLatestTaskRunner } from "./latest-task-runner";
+import { useLatestTaskRunner } from "./latest-task-runner";
 
 import {
   DocumentProjectionArtifactSurface,
@@ -88,7 +88,7 @@ export function EditableDocumentArtifactSurface({
     error: null,
   });
   const loadGeneration = useRef(0);
-  const [scheduleLoad] = useState(createLatestTaskRunner);
+  const scheduleLoad = useLatestTaskRunner(session);
   const commandStateRef = useRef<DocumentCommandState | null>(null);
   if (commandStateRef.current?.session !== session) {
     commandStateRef.current = {

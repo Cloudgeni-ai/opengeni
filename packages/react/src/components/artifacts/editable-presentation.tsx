@@ -33,7 +33,7 @@ import {
   type PresentationSlideProjection,
 } from "./presentation-editor";
 import { ArtifactSurface } from "./artifact-surface";
-import { createLatestTaskRunner } from "./latest-task-runner";
+import { useLatestTaskRunner } from "./latest-task-runner";
 import {
   asEditableArtifactError,
   editableArtifactAccessRevoked,
@@ -106,7 +106,7 @@ export function EditablePresentationArtifactSurface({
     error: null,
   });
   const loadGeneration = useRef(0);
-  const [scheduleLoad] = useState(createLatestTaskRunner);
+  const scheduleLoad = useLatestTaskRunner(session);
   const sceneNodes = useRef(new Map<string, PresentationArtifactEditorSceneNode>());
 
   useEffect(() => {
