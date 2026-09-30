@@ -71,7 +71,7 @@ export const lineTabVariants = cva(
         ],
         pill: [
           "h-8 rounded-full border border-border bg-surface px-3 text-fg-muted hover:border-border-strong hover:bg-surface-2 hover:text-fg",
-          "data-[state=active]:border-fg data-[state=active]:bg-fg data-[state=active]:text-bg",
+          "data-[state=active]:border-border-strong data-[state=active]:bg-selection data-[state=active]:text-fg",
           "disabled:text-fg-subtle aria-disabled:text-fg-subtle pointer-coarse:h-11 pointer-coarse:px-4",
         ],
       },

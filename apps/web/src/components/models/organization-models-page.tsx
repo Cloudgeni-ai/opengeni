@@ -222,7 +222,7 @@ export function OrganizationModelsPage({
       ).length;
     const empty = !loadingAccounts && listed === 0;
     const connect = (
-      <RowButton onClick={() => nav.openView("connect")}>
+      <RowButton variant="default" onClick={() => nav.openView("connect")}>
         <PlusIcon aria-hidden="true" />
         Connect account
       </RowButton>
@@ -492,7 +492,7 @@ function OrgCodexAccountDetail({
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
+                  variant="default"
                   onClick={places.openConnect}
                   className="rounded-[10px] pointer-coarse:h-11"
                 >
@@ -644,7 +644,7 @@ function OrgCodexConnectPage({
     >
       <FieldStack>
         <p className="text-sm text-fg-muted">
-          ChatGPT opens in a new tab and asks for a code, which shows here. OpenGeni never sees your
+          ChatGPT opens in a new tab and asks for a code, which shows here. Opengeni never sees your
           password. Every shared workspace can use the account until you limit it.
         </p>
         {codex.pending ? (

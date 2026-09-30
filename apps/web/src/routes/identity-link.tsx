@@ -73,7 +73,7 @@ export function IdentityLinkRoute({
     return (
       <ProblemPanel
         title="Organization access required"
-        description="Sign in to the OpenGeni account that belongs to the requesting organization, then reopen this request."
+        description="Sign in to the Opengeni account that belongs to the requesting organization, then reopen this request."
       />
     );
   return (

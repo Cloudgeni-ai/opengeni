@@ -4,7 +4,7 @@ import postgres from "postgres";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { requireAccessContext, type ApiRouteDeps } from "@opengeni/core";
 import {
   completeSelfServiceOrganizationSetup,
   createApiKey,
@@ -20,6 +20,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { registerOrganizationIntegrationPolicyRoutes } from "../src/routes/organization-integration-policy";
+import { registerOrganizationIntegrationRoutes } from "../src/routes/organization-integrations";
+import { registerWorkspaceIntegrationRoutes } from "../src/routes/workspace-integrations";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -121,13 +123,14 @@ function app(actor = owner): Hono {
     if (error instanceof HTTPException) return c.json({ message: error.message }, error.status);
     throw error;
   });
-  registerOrganizationIntegrationPolicyRoutes(application, {
+  const deps = {
     db: client.db,
     settings: testSettings({
       productAccessMode: "managed",
       publicBaseUrl: origin,
       betterAuthSecret: "policy-administration-cookie-secret-at-least-32-bytes",
       delegationSecret: secret,
+      environmentsEncryptionKey: Buffer.alloc(32, 3).toString("base64"),
     }),
     // This adapter supplies the cookie response; getManagedSession still checks
     // the durable identity-bound session and canonical human login revisions.
@@ -147,13 +150,17 @@ function app(actor = owner): Hono {
         }),
       },
     } as never,
-  } as ApiRouteDeps);
+  } as ApiRouteDeps;
+  registerOrganizationIntegrationPolicyRoutes(application, deps);
+  registerOrganizationIntegrationRoutes(application, deps);
+  registerWorkspaceIntegrationRoutes(application, deps);
   return application;
 }
 const path = (accountId = owner.accountId) =>
   `${origin}/v1/organizations/${accountId}/integration-policy`;
 const browser = () => ({
   cookie: "session=present",
+  host: "opengeni.test",
   "content-type": "application/json",
   origin,
   "sec-fetch-site": "same-origin",
@@ -226,6 +233,156 @@ test("canonical cookie cannot cross organizations; cookie mutations require comp
     expect(response.status).toBe(403);
   }
   expect(await currentRevision()).toBe(before);
+});
+
+test("integration registrations require canonical cookie account admin and same-origin writes", async () => {
+  const endpoint = `${origin}/v1/organizations/${owner.accountId}/credential-provider`;
+  const application = app();
+  const put = (headers: Record<string, string>) =>
+    application.request(endpoint, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ url: "https://provider.example/cookie", workspaceFilter: null }),
+    });
+  for (const replacement of [
+    { origin: "https://attacker.example" },
+    { origin: "" },
+    { "sec-fetch-site": "cross-site" },
+  ])
+    expect((await put({ ...browser(), ...replacement })).status).toBe(403);
+  const created = await put(browser());
+  expect(created.status).toBe(201);
+  const first = await created.json();
+  await shared.admin`update organization_memberships set role = 'member'
+    where account_id = ${owner.accountId} and subject_id = ${owner.subjectId}`;
+  try {
+    expect((await application.request(endpoint, { headers: browser() })).status).toBe(403);
+    expect(
+      (
+        await application.request(`${endpoint}/rotate-secret`, {
+          method: "POST",
+          headers: browser(),
+        })
+      ).status,
+    ).toBe(403);
+  } finally {
+    await shared.admin`update organization_memberships set role = 'owner'
+      where account_id = ${owner.accountId} and subject_id = ${owner.subjectId}`;
+  }
+  expect(
+    (
+      await application.request(`${endpoint}/rotate-secret`, {
+        method: "POST",
+        headers: { ...browser(), origin: "https://attacker.example" },
+      })
+    ).status,
+  ).toBe(403);
+  const rotated = await application.request(`${endpoint}/rotate-secret`, {
+    method: "POST",
+    headers: browser(),
+  });
+  expect(rotated.status).toBe(200);
+  expect((await rotated.json()).secret).not.toBe(first.secret);
+  const delegated = await signDelegatedAccessToken(secret, {
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    subjectId: owner.subjectId,
+    permissions: ["account:admin", "workspace:admin"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 300,
+  });
+  expect((await put({ ...browser(), authorization: `Bearer ${delegated}` })).status).toBe(403);
+  expect((await app(outsider).request(endpoint, { headers: browser() })).status).toBe(403);
+  expect(
+    (await application.request(endpoint, { method: "DELETE", headers: browser() })).status,
+  ).toBe(204);
+});
+
+test("a canonical Personal owner can configure workspace callbacks without organization inheritance", async () => {
+  const application = app();
+  const workspacePath = `${origin}/v1/workspaces/${owner.workspaceId}`;
+  const created = await application.request(`${workspacePath}/credential-provider`, {
+    method: "PUT",
+    headers: browser(),
+    body: JSON.stringify({ url: "https://provider.example/personal-owner" }),
+  });
+  expect(created.status).toBe(201);
+  expect((await created.json()).secret).toBeString();
+  const webhook = await application.request(`${workspacePath}/webhooks`, {
+    method: "POST",
+    headers: browser(),
+    body: JSON.stringify({
+      url: "https://receiver.example/personal-owner",
+      eventTypes: ["turn.completed"],
+    }),
+  });
+  expect(webhook.status).toBe(201);
+  const { webhook: registered } = await webhook.json();
+  expect(
+    (await app(outsider).request(`${workspacePath}/credential-provider`, { headers: browser() }))
+      .status,
+  ).toBe(403);
+  expect(
+    (
+      await application.request(`${workspacePath}/webhooks/${registered.id}`, {
+        method: "DELETE",
+        headers: browser(),
+      })
+    ).status,
+  ).toBe(204);
+  expect(
+    (
+      await application.request(`${workspacePath}/credential-provider`, {
+        method: "DELETE",
+        headers: browser(),
+      })
+    ).status,
+  ).toBe(204);
+});
+
+test("only canonical built-in local admin may administer integrations in local mode", async () => {
+  const application = new Hono();
+  const deps = {
+    db: client.db,
+    settings: testSettings({
+      productAccessMode: "local",
+      publicBaseUrl: origin,
+      delegationSecret: secret,
+      environmentsEncryptionKey: Buffer.alloc(32, 3).toString("base64"),
+    }),
+  } as ApiRouteDeps;
+  application.get("/identity", async (c) => c.json(await requireAccessContext(c, deps)));
+  registerOrganizationIntegrationRoutes(application, deps);
+  const access = await (await application.request(`${origin}/identity`)).json();
+  const endpoint = `${origin}/v1/organizations/${access.defaultAccountId}/credential-provider`;
+  expect((await application.request(endpoint, { headers: browser() })).status).toBe(200);
+  expect(
+    (
+      await application.request(endpoint, {
+        method: "PUT",
+        headers: browser(),
+        body: JSON.stringify({ url: "https://local.example/provider", workspaceFilter: null }),
+      })
+    ).status,
+  ).toBe(201);
+  const bearer = await signDelegatedAccessToken(secret, {
+    accountId: access.defaultAccountId,
+    workspaceId: access.defaultWorkspaceId,
+    subjectId: "dev",
+    permissions: ["account:admin", "workspace:admin"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 300,
+  });
+  expect(
+    (
+      await application.request(endpoint, {
+        headers: { ...browser(), authorization: `Bearer ${bearer}` },
+      })
+    ).ok,
+  ).toBe(false);
+  expect(
+    (await application.request(endpoint, { method: "DELETE", headers: browser() })).status,
+  ).toBe(204);
 });
 
 test("signed delegated owner cannot substitute human-session claims or a cookie for native provenance", async () => {

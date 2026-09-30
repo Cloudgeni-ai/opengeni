@@ -3,9 +3,12 @@ import postgres from "postgres";
 import { parseWorkspaceArchiveObjectRef, workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
   acquireLease,
+  authorizeAutomaticSandboxCheckpointRecovery,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   failWarmingToCold,
+  initializeSessionStartAtomically,
   readLease,
   type Database,
   type DbClient,
@@ -211,7 +214,10 @@ async function setupColdArchiveLease() {
   return { accountId, workspaceId, groupId, archive, ref, acquired };
 }
 
-async function establishArchiveFixture(fixture: ArchiveFixture, objectStorage: ObjectStorage) {
+async function establishArchiveFixture(
+  fixture: ArchiveFixture,
+  objectStorage: ObjectStorage | null,
+) {
   return await establishApiSandboxSpawner({
     db: db!,
     settings,
@@ -236,9 +242,11 @@ function expectFailedArchiveRestore(
   expect(lease).not.toBeNull();
   expect(lease?.liveness).toBe("cold");
   expect(lease?.instanceId).toBeNull();
+  // A failed replacement never masquerades as provider loss evidence.
   expect(lease?.recovery.provider).toMatchObject({
-    status: "missing",
+    status: "not_created",
     instanceId: null,
+    diagnostic: "replacement_failed",
   });
   expect(lease?.recovery.restore).toMatchObject({
     status: "unrecoverable",
@@ -335,14 +343,33 @@ test("viewer attach forwards object storage and restores a cold archive ref", as
 test("API cold spawner records a missing object archive restore failure", async () => {
   const fixture = await setupColdArchiveLease();
   const storage = objectStorageFor(fixture.ref, null);
+  // A missing object is not proof that the checkpoint content is corrupt.
   await expect(establishArchiveFixture(fixture, storage.objectStorage)).rejects.toMatchObject({
-    code: "archive_base64_invalid",
+    code: "archive_object_missing",
   });
   expect(storage.reads()).toBe(1);
   expectFailedArchiveRestore(
     await readLease(db!, fixture.workspaceId, fixture.groupId),
-    "archive_base64_invalid",
+    "archive_object_missing",
   );
+}, 120_000);
+
+test("API cold spawner without object storage records a retryable configuration failure", async () => {
+  const fixture = await setupColdArchiveLease();
+  await expect(establishArchiveFixture(fixture, null)).rejects.toMatchObject({
+    code: "archive_storage_unavailable",
+    retryable: true,
+  });
+  const lease = await readLease(db!, fixture.workspaceId, fixture.groupId);
+  expect(lease?.liveness).toBe("cold");
+  expect(lease?.recovery.provider).toMatchObject({
+    status: "not_created",
+    diagnostic: "replacement_failed",
+  });
+  expect(lease?.recovery.restore).toMatchObject({
+    failureCode: "archive_storage_unavailable",
+    retryable: true,
+  });
 }, 120_000);
 
 test("API cold spawner records a corrupt object archive restore failure", async () => {
@@ -381,3 +408,142 @@ test("API cold spawner refuses a malformed durable archive locator", async () =>
   expect(after?.liveness).toBe("cold");
   expect(after?.instanceId).toBeNull();
 });
+
+test("API cold spawner fulfils an audited empty-workspace decision without restoring any fallback", async () => {
+  const { accountId, workspaceId } = await freshWorkspace();
+  const session = await createSession(db!, {
+    accountId,
+    workspaceId,
+    initialMessage: "continue after the managed sandbox was lost",
+    resources: [],
+    metadata: {},
+    model: "m",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "modal",
+  });
+  // A verified legacy per-session archive is offered as the fallback envelope.
+  const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+    sessionId: session.id,
+    recovery: "create-or-restore",
+    backendOverride: backend,
+  });
+  seeded.push(seed);
+  const legacyBackendId = seed.backendId;
+  const write = await seed.session.exec({
+    cmd: "printf 'pre-loss' > /workspace/pre-loss-proof.txt",
+  });
+  expect(write.exitCode).toBe(0);
+  const legacy = await captureVerifiedWorkspaceArchive(seed.session);
+  await closeSandbox(seed);
+  seeded.splice(seeded.indexOf(seed), 1);
+  await admin!.unsafe(
+    `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch, workspace_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values ($1, $2, $3, 'cold', 0, 0, 0, 'modal', 4, 9, 'modal', $4::text::jsonb,
+        now() + interval '60s')`,
+    [
+      accountId,
+      workspaceId,
+      session.sandboxGroupId,
+      JSON.stringify({
+        backendId: "modal",
+        opengeniRecovery: {
+          provider: {
+            status: "missing",
+            instanceId: "lost-box",
+            observedAt: "2026-09-26T01:02:03.000Z",
+            diagnostic: "provider_not_found_before_workspace_capture",
+          },
+          archive: { status: "none", current: null, previous: null },
+          restore: {
+            status: "unrecoverable",
+            rematerializationId: null,
+            selectedRevision: null,
+            startedAt: null,
+            completedAt: "2026-09-26T01:02:03.000Z",
+            failureCode: "archive_unavailable",
+            retryable: false,
+          },
+          workspace: { status: "unrecoverable", verifiedRevision: null, verifiedAt: null },
+        },
+      }),
+    ],
+  );
+  await initializeSessionStartAtomically(db!, {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  expect(
+    await claimSessionWorkForAttempt(db!, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `api-fresh-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+      filesystemDiscontinuityProtocol: 3,
+    }),
+  ).toMatchObject({ action: "claimed" });
+  const decision = await authorizeAutomaticSandboxCheckpointRecovery(db!, {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    attemptId,
+  });
+  expect(decision).toMatchObject({ status: "authorized", lane: "fresh_workspace" });
+
+  const acquired = await acquireLease(db!, {
+    accountId,
+    workspaceId,
+    sandboxGroupId: session.sandboxGroupId,
+    kind: "viewer",
+    holderId: `api-fresh-viewer-${session.id}`,
+    backend,
+    leaseTtlMs: settings.sandboxLeaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxLeaseWarmingTtlMs,
+  });
+  if (acquired.role !== "spawner") throw new Error(`expected spawner, got ${acquired.role}`);
+  expect(acquired.lease.freshWorkspaceRecoveryId).toBeTruthy();
+  const result = await establishApiSandboxSpawner({
+    db: db!,
+    settings,
+    accountId,
+    workspaceId,
+    sandboxGroupId: session.sandboxGroupId,
+    sessionId: session.id,
+    backend,
+    environment: {},
+    expectedEpoch: acquired.lease.leaseEpoch,
+    acquiredLease: acquired.lease,
+    fallbackEnvelope: {
+      backendId: legacyBackendId,
+      sessionState: {
+        providerState: { sandboxId: "lost-box" },
+        workspaceArchive: legacy.base64,
+        workspaceArchiveMeta: legacy.descriptor,
+      },
+    },
+    dataPlaneUrl: null,
+  });
+  seeded.push(result.established);
+  expect(result.established.restoredArchive ?? null).toBeNull();
+  const probe = await result.established.session.exec({
+    cmd: "test -e /workspace/pre-loss-proof.txt",
+  });
+  expect(probe.exitCode).not.toBe(0);
+  expect(result.lease).toMatchObject({
+    liveness: "warm",
+    recovery: { restore: { status: "not_required" }, workspace: { status: "ready" } },
+  });
+  expect(result.lease.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+    status: "verified",
+  });
+}, 120_000);

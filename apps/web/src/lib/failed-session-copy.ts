@@ -191,7 +191,7 @@ export function failedSessionCopy(
     };
   }
   const reason = creditExhausted
-    ? "This workspace is out of OpenGeni credits."
+    ? "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
       : unavailableModel

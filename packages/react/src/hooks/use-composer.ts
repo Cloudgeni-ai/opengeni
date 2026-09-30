@@ -1432,7 +1432,7 @@ export function useComposer(
           }
           if (!operation.canRetry) {
             throw new Error(
-              "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+              "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
             );
           }
         }
@@ -1842,7 +1842,7 @@ export function useComposer(
           if (!pending.canRetry) {
             setError(
               new Error(
-                "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+                "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
               ),
             );
             return false;

@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { XIcon } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, DonutChart, UsageMeter, donutTone } from "@/components/insights/charts";
@@ -27,13 +28,16 @@ import {
   type TraceTarget,
 } from "@/components/insights/mock-data";
 import { Button } from "@/components/ui/button";
+import { BackLink } from "@/components/ui/detail-page";
 import { ContentPage, DataScroller } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import type { ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
 
 function inputSeriesHeading(seriesLabel: string, subject: string): string {
@@ -61,8 +65,16 @@ const EMPTY_PROMPT_CONTRIBUTIONS: WorkspaceInsightsSnapshot["promptContributions
 /**
  * Workspace Insights — live rollups from usage_events + model_call_facts.
  */
-export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
+export function InsightsRoute({
+  workspaceId,
+  returnTo,
+}: {
+  workspaceId: string;
+  /** Where a cross-scope link came from ("Billing & usage"); the back link returns there. */
+  returnTo?: ReturnTo | undefined;
+}) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const workspace = context.workspaces.find((w) => w.id === workspaceId);
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
   const reduceMotion = useReducedMotion();
@@ -76,7 +88,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const [floorFilter, setFloorFilter] = useState<"all" | "active">("all");
   const [snapshot, setSnapshot] = useState<WorkspaceInsightsSnapshot | null>(null);
   const [loadedFilters, setLoadedFilters] = useState<InsightsFilters>(filters);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
 
@@ -106,7 +118,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setLoadError(error instanceof Error ? error.message : String(error));
+        setLoadError(error);
         setLoading(false);
       });
     return () => {
@@ -177,35 +189,44 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
     return true;
   });
   const heading = (
-    <PageHeader
-      title="Insights"
-      description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
-    />
+    <div className="min-w-0">
+      {returnTo ? (
+        <BackLink
+          back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
+        />
+      ) : null}
+      <PageHeader
+        title="Insights"
+        description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
+      />
+    </div>
   );
 
   if (!canRead || (loadError && !snapshot)) {
+    // A refusal from the server reads like missing access: no red, no Try again.
+    const failed = canRead && !isPermissionDenied(loadError);
     return (
       <ContentPage width="wide" data-insights className="gap-6">
         {heading}
         <div role="alert">
           <Notice
-            tone={canRead ? "failed" : "muted"}
-            title={canRead ? "Insights couldn't load" : "Workspace access required"}
+            tone={failed ? "failed" : "muted"}
+            title={failed ? "Insights couldn't load" : "Workspace access required"}
             action={
-              canRead ? (
+              failed ? (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
                   onClick={() => setRetry((value) => value + 1)}
                 >
-                  Retry
+                  Try again
                 </Button>
               ) : undefined
             }
           >
-            {canRead
-              ? `Try again to load workspace usage. ${loadError}`
+            {failed
+              ? apiErrorAdvice(loadError)
               : "Workspace admin permission is required to view Insights."}
           </Notice>
         </div>
@@ -283,11 +304,11 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 variant="outline"
                 onClick={() => setRetry((value) => value + 1)}
               >
-                Retry
+                Try again
               </Button>
             }
           >
-            Showing the last successful selection. {loadError}
+            Showing the last successful selection. {userErrorText(loadError)}
           </Notice>
         </div>
       ) : null}
@@ -325,10 +346,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <Notice tone="muted" title="How prices are calculated">
             <strong className="text-fg">Estimated provider USD</strong> is a hypothetical
             provider-rate comparison from captured list pricing or gateway-reported inference cost,
-            before OpenGeni markup.{" "}
-            <strong className="text-fg">Equivalent OpenGeni credit price</strong>
+            before Opengeni markup.{" "}
+            <strong className="text-fg">Equivalent Opengeni credit price</strong>
             includes the configured markup even when the call was externally paid.{" "}
-            <strong className="text-fg">OpenGeni credit price</strong> is the actual credits-path
+            <strong className="text-fg">Opengeni credit price</strong> is the actual credits-path
             price and is zero for externally paid calls.
           </Notice>
         ) : null}
@@ -370,15 +391,15 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               />
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <Metric
-                  label="Equivalent OpenGeni credit price"
+                  label="Equivalent Opengeni credit price"
                   value={formatUsd(totals.equivalentCreditUsd)}
                   delta={`${formatPctDelta(deltas.equivalentPct, snap.priorLabel)} · ${totals.equivalentPricingCoveragePct}% call coverage`}
                 />
                 <Metric
                   label={
                     snap.modelFilterActive
-                      ? "OpenGeni credit price (filtered)"
-                      : "OpenGeni credit price"
+                      ? "Opengeni credit price (filtered)"
+                      : "Opengeni credit price"
                   }
                   value={formatUsd(totals.creditUsd)}
                   delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · external calls excluded`}
@@ -449,13 +470,13 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       },
                       {
                         id: "equivalent",
-                        label: "Equivalent OpenGeni credit price",
+                        label: "Equivalent Opengeni credit price",
                         values: series.map((d) => d.equivalentCreditUsd),
                         className: "text-status-running",
                       },
                       {
                         id: "credits",
-                        label: "OpenGeni credit price",
+                        label: "Opengeni credit price",
                         values: series.map((d) => d.modelCostUsd),
                         className: "text-status-waiting",
                       },
@@ -580,7 +601,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">
-              {measure === "tokens" ? "Total tokens" : "Equivalent OpenGeni credit price"}
+              {measure === "tokens" ? "Total tokens" : "Equivalent Opengeni credit price"}
             </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by model · click to filter</p>
             <DonutChart
@@ -623,7 +644,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     "Reasoning",
                     "Est. provider USD",
                     "Equivalent credits",
-                    "OpenGeni credits",
+                    "Opengeni credits",
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                       {h}
@@ -730,7 +751,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Reasoning",
                   "Est. provider USD",
                   "Equivalent credits",
-                  "OpenGeni credits",
+                  "Opengeni credits",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                     {h}
@@ -818,7 +839,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <h3 className="text-sm font-medium text-fg">
-              {measure === "tokens" ? "Total tokens" : "Equivalent OpenGeni credit price"}
+              {measure === "tokens" ? "Total tokens" : "Equivalent Opengeni credit price"}
             </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by provider · click to filter</p>
             <DonutChart
@@ -1066,7 +1087,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="Usage drivers">
         <p className="text-2xs text-fg-subtle">
           Top drivers ranked by total tokens, so externally paid work is never hidden by a zero
-          OpenGeni-credit price. Share is relative to the rows shown.
+          Opengeni-credit price. Share is relative to the rows shown.
         </p>
         <DataScroller aria-label="Usage drivers" className="border border-border">
           <table className="min-w-full text-left text-xs">
@@ -1079,7 +1100,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Cache",
                   "Est. provider USD",
                   "Equivalent credits",
-                  "OpenGeni credits",
+                  "Opengeni credits",
                   "Credit Δ",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
@@ -1270,7 +1291,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   "Cache",
                   "Est. provider USD",
                   "Equivalent credits",
-                  "OpenGeni credits",
+                  "Opengeni credits",
                   "Billing",
                 ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">

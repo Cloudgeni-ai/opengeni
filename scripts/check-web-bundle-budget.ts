@@ -450,7 +450,11 @@ const budgets = {
   // measures 36,831 gzip bytes and the merged rebuild 42,744 (Bun 1.4
   // Linux/x64). The DEV-only UI kit has its own stylesheet and is excluded
   // from this scan, so only product utilities remain.
-  cssGzip: wholeKibEnvelope(42_744),
+  // The neutral retheme (settings cards, menu anatomy, hover and glow tokens,
+  // resource-page frame) adds its utilities: main 6f4be148e measures 43,000
+  // gzip bytes and the merged retheme 44,100 (Bun 1.4 Linux/x64). Keep the
+  // next whole-KiB envelope; every other cap remains fixed.
+  cssGzip: wholeKibEnvelope(44_100),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -640,6 +644,12 @@ const effectiveBudgets = {
     wholeKibEnvelope(700_042, 1.5 * kib),
     // Same design-system stylesheet growth documented in the raw bound above.
     wholeKibEnvelope(706_357, 1.5 * kib),
+    // Retiring the For you and Agents routes lowers the direct-session raw graph
+    // by 545 bytes (2,514,093), but the automatic shared-chunk split re-partitions
+    // around the smaller route set (34 -> 36 files, under the 39 cap) and gzip
+    // grows to 709,242 (+2,522; Bun 1.4 Linux/x64). Retain the established
+    // 1.5 KiB allowance; raw, initial, per-file, lazy, and CSS caps stay fixed.
+    wholeKibEnvelope(709_242, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

@@ -251,6 +251,7 @@ import type {
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
+  ClaudeSubscriptionUsage,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -752,6 +753,8 @@ function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "com
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+  /** Opt-in void response handling for focused helpers using the shared transport. */
+  responseType?: "json" | "void";
 };
 
 export type SharedSessionReadOptions = {
@@ -4708,6 +4711,41 @@ export class OpenGeniClient {
       "DELETE",
       `/v1/workspaces/${workspaceId}/openrouter-custom-models/${encodeURIComponent(customModelId)}`,
       request,
+    );
+  }
+
+  /** Read metadata for one organization-owned model-provider connection. */
+  async getWorkspaceClaudeSubscriptionUsage(workspaceId: string): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage`,
+    );
+  }
+
+  async refreshWorkspaceClaudeSubscriptionUsage(
+    workspaceId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/model-providers/claude_subscription/usage/refresh`,
+    );
+  }
+
+  async getOrganizationClaudeSubscriptionUsage(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage`,
+    );
+  }
+
+  async refreshOrganizationClaudeSubscriptionUsage(
+    organizationId: string,
+  ): Promise<ClaudeSubscriptionUsage> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/claude_subscription/usage/refresh`,
     );
   }
 
@@ -8916,6 +8954,13 @@ export class OpenGeniClient {
             apiErrorFromResponse(response, { method, correlationId }),
             abort.signal,
           );
+        }
+        if (options.responseType === "void") {
+          await awaitWithAbort(
+            cancelResponseBody(response, "discarding void API response"),
+            abort.signal,
+          );
+          return undefined as T;
         }
         await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
         return (await awaitWithAbort(response.json(), abort.signal)) as T;

@@ -12,6 +12,7 @@
   --_og-duration-stream: var(--og-duration-stream);
   --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize);
   --_og-color-accent-soft: var(--og-color-accent-soft);
+  --_og-color-primary-hover: var(--og-color-primary-hover);
   --_og-color-diff-add-bg: var(--og-color-diff-add-bg);
   --_og-color-diff-del-bg: var(--og-color-diff-del-bg);
   --_og-shadow-glow: var(--og-shadow-glow);

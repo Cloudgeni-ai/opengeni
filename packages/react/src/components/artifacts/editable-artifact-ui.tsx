@@ -76,7 +76,7 @@ export function EditableArtifactMessage({
           <button
             type="button"
             onClick={retry}
-            className="mt-3 rounded-og-sm bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+            className="mt-3 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium hover:bg-og-primary-hover outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
           >
             {retryLabel}
           </button>

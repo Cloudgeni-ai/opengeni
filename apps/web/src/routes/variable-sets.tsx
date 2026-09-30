@@ -44,6 +44,7 @@ import {
 import { ContentPage } from "@/components/ui/content-layout";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { orgLabel } from "@/lib/org";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
@@ -202,7 +203,7 @@ export function VariableSetsRoute({
       }
     } catch (error) {
       await variableSets.refresh();
-      const message = error instanceof Error ? error.message : String(error);
+      const message = userErrorText(error);
       throw userFacingError(
         error,
         saved.length ? `Saved ${joinAnd(saved)}, then stopped: ${message}` : message,
@@ -451,14 +452,13 @@ export function VariableSetsRoute({
           try {
             await client.deleteVariableSet(workspaceId, set.id);
           } catch (error) {
-            const parts = errorParts(error);
             // The server also counts finished chats, older chats and other
             // workspaces, which this page can't list.
             throw userFacingError(
               error,
-              parts.status === 409
+              errorParts(error).status === 409
                 ? `Something still uses ${name}, like an older or finished chat. Remove it there first.`
-                : parts.message,
+                : undefined,
             );
           }
           setDeletingSet(false);

@@ -30,6 +30,7 @@ import {
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
   setSessionGoalStatus,
+  setSessionModelInTransaction,
   settleSessionAttemptInterruptions,
   steerAgentSessionInTransaction,
   submitHumanPromptInTransaction,
@@ -164,6 +165,67 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("attempt-fenced Agent session commands", () => {
+  test("model-setting receipt survives caller replacement without undoing a newer choice", async () => {
+    const grant = await fixture();
+    const workspaceId = grant.workspaceId!;
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    const operationKey = crypto.randomUUID();
+    const write = (
+      actor: SessionCommandActor,
+      key = operationKey,
+      reasoningEffort: "high" | "low" = "high",
+    ) =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        setSessionModelInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          actor,
+          operationKey: key,
+          model: "scripted-model",
+          reasoningEffort,
+        }),
+      );
+    const first = await write(caller.actor);
+    await write(caller.actor, crypto.randomUUID(), "low");
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: caller.session.id,
+      turnId: caller.turn.id,
+      triggerEventId: caller.turn.triggerEventId,
+      attemptId: caller.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    await expect(write(caller.actor)).rejects.toThrow("no longer owns");
+    await submit(grant, caller.session.id, "continue after reconnect");
+    const attemptId = crypto.randomUUID();
+    const next = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: caller.session.id,
+      workflowId: `session-${caller.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (next.action !== "claimed") throw new Error("replacement was not claimed");
+    const actor = {
+      ...caller.actor,
+      turnId: next.turn.id,
+      attemptId,
+      executionGeneration: next.turn.executionGeneration,
+    };
+    expect(await write(actor)).toEqual({ ...first, replay: true });
+    expect(await getSession(client.db, workspaceId, target.id)).toMatchObject({
+      reasoningEffort: "low",
+    });
+    await expect(write(actor, operationKey, "low")).rejects.toThrow(
+      "operation key was already used",
+    );
+  });
+
   test("a service-origin message cannot borrow the receiving session creator's human", async () => {
     const grant = await fixture();
     const sender = await makeSession(grant);

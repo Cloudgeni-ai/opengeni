@@ -178,7 +178,7 @@ export const DEFAULT_ARTIFACT_LABELS: ArtifactLabels = Object.freeze({
   live: "Live",
   reloadSite: "Reload Site",
   openFullScreen: "Open Site full screen",
-  editWithAgent: "Edit with Geni",
+  editWithAgent: "Edit with Opengeni",
   editShort: "Edit",
   preview: "Preview",
   loadPreview: "Load preview",

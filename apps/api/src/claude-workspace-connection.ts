@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+import { requireEnvironmentEncryption } from "@opengeni/core";
 import { ClaudeSubscriptionCredential, type Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 
@@ -46,6 +48,50 @@ export function assertClaudeWorkspaceCredential(
   }
   if (!ClaudeSubscriptionCredential.safeParse(bundle).success)
     throw new HTTPException(422, {
-      message: "Enter a Claude setup token with its account and device identity.",
+      message: "Enter a valid Claude setup token.",
     });
+}
+
+/** Stable installation identity; setup tokens do not grant profile access. */
+export function prepareClaudeSubscriptionCredential(
+  settings: Settings,
+  scope: string,
+  token: string,
+  identity?: { accountUuid: string; deviceId: string },
+): string {
+  if (!settings.claudeSubscriptionEnabled)
+    throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+  if (!/^sk-ant-oat[0-9]+-\S+$/.test(token))
+    throw new HTTPException(422, { message: "Enter the setup token from claude setup-token." });
+  return JSON.stringify(
+    ClaudeSubscriptionCredential.parse({
+      version: 1,
+      token,
+      identity: identity ?? {
+        accountUuid: "",
+        deviceId: createHmac("sha256", requireEnvironmentEncryption(settings))
+          .update("claude-device:" + scope)
+          .digest("hex"),
+      },
+    }),
+  );
+}
+
+export function prepareClaudeWorkspaceCredential(
+  settings: Settings,
+  workspaceId: string,
+  metadata: Record<string, unknown> | undefined,
+  credential: Record<string, unknown>,
+): Record<string, unknown> {
+  if (metadata?.credentialRole !== "claude_subscription" || typeof credential.apiKey !== "string")
+    return credential;
+  if (credential.apiKey.startsWith("{")) return credential;
+  return {
+    ...credential,
+    apiKey: prepareClaudeSubscriptionCredential(
+      settings,
+      "workspace:" + workspaceId,
+      credential.apiKey,
+    ),
+  };
 }

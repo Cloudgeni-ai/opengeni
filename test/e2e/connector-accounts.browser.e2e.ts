@@ -70,14 +70,19 @@ describe("composer connector account controls (local fixture)", () => {
       expect(moduleRequests).toBe(0);
       await trigger.click();
       await page.getByRole("menuitem", { name: /Connectors/ }).click();
-      await page.getByText("Loading connectors…", { exact: true }).waitFor();
+      const loading = page.getByRole("status", { name: "Loading connectors", exact: true });
+      await loading.waitFor();
+      // First-load placeholders preserve the row geometry and announce loading
+      // without putting a loading sentence into the action menu.
+      expect(await loading.locator(':scope > [aria-hidden="true"]').count()).toBe(4);
+      expect(await loading.innerText()).toBe("");
       expect(moduleRequests).toBe(1);
       await page.getByRole("button", { name: "Back", exact: true }).click();
       await page.getByRole("menuitem", { name: /Connectors/ }).waitFor();
       release();
       await page.getByRole("menuitem", { name: /Connectors/ }).click();
       await page.getByRole("menuitem", { name: "Slack account settings" }).waitFor();
-      expect(await page.getByText("Loading connectors…", { exact: true }).count()).toBe(0);
+      expect(await loading.count()).toBe(0);
     } finally {
       release();
       await page.close();

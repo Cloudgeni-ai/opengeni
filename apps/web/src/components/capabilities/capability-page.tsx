@@ -144,7 +144,15 @@ export function CapabilityPage({
           chips={
             status || chips ? (
               <>
-                {typeof status === "string" ? <CapabilityStatus label={status} /> : status}
+                {typeof status === "string" ? (
+                  // A healthy connection carries no badge in the header; only
+                  // states that need attention (or just happened) show.
+                  status === "Connected" ? null : (
+                    <CapabilityStatus label={status} />
+                  )
+                ) : (
+                  status
+                )}
                 {chips}
               </>
             ) : undefined

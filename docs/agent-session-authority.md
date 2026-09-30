@@ -3,7 +3,7 @@
 A live agent attempt may read, message, and control other sessions in the same
 workspace when the caller's outbound `agentAccess` scope allows it. Parent/child
 lineage is never an access deny. First-party session tools (`sessions_list`,
-`session_get`, `session_events`, `session_wait`, `session_steer`,
+`session_get`, `session_events`, `session_wait`, `session_steer`, `session_set_model`,
 pause/resume/cancel) are the capability surface; the access scope below is the
 lock, and unprompted hijack inside an allowed scope is an instruction problem. `session_wait` authorizes
 every watched target exactly as `session_events` does (`session.events.read`)
@@ -26,6 +26,13 @@ bounded; self reads inspect state, not conversation history. REST/SDK session
 reads still require explicit IDs. Attempt catalogs and their generated Codemode
 declarations derive the optional field from the first-party MCP schema; an
 already-frozen catalog does not change in place.
+
+`session_set_model` requires `sessions:control` and `session.model.write` target
+authorization, then rechecks the exact calling attempt under the write lock.
+It changes only future model/reasoning defaults, with a durable idempotent receipt.
+It never resumes or wakes the target, changes accepted work, or widens the
+Codemode SDK proxy. Full `session_get` includes canonical reasoning and latency
+alongside the effective model; metadata is not their authority.
 
 ## Agent access scope
 

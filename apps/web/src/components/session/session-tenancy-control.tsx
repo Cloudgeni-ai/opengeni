@@ -69,7 +69,7 @@ export default function SessionRouteAuxiliary(
         props.loadError instanceof Error ? props.loadError.message : String(props.loadError)
       }
       action={
-        <Button asChild type="button" variant="secondary">
+        <Button asChild type="button" variant="outline">
           <a href={workspaceSessionsPath(props.workspaceId)}>Back to sessions</a>
         </Button>
       }
@@ -664,9 +664,9 @@ export function SessionTenancyControl({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-72">
-              <div className="px-2 py-1.5">
-                <p className="text-sm font-medium">{stateLabel} session</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">{stateDescription}</p>
+              <div className="px-2.5 py-1.5">
+                <p className="text-sm font-medium text-fg">{stateLabel} session</p>
+                <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">{stateDescription}</p>
               </div>
               {mayManage ? (
                 <>
@@ -693,12 +693,12 @@ export function SessionTenancyControl({
                 }
               >
                 <CopyPlusIcon />
-                {retryingFork ? "Retry session fork…" : "Fork session…"}
+                {retryingFork ? "Retry session fork" : "Fork session"}
               </DropdownMenuItem>
               {failure ? (
                 <>
                   <DropdownMenuSeparator />
-                  <div className="px-2 py-1.5 text-xs text-status-waiting">
+                  <div className="px-2.5 py-1.5 text-xs leading-4.5 text-status-waiting">
                     <span className="font-medium">Access change needs attention.</span> {failure}
                   </div>
                 </>
@@ -750,7 +750,7 @@ export function SessionTenancyControl({
                   : "Create an independent copy visible only to you. Live credentials, connections, tools, goals, and processes are not copied."
                 : confirmation?.visibility === "workspace"
                   ? "People who can access this workspace will be able to open and continue the session. Current work keeps running with its existing identity and connections."
-                  : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
+                  : "Only you will be able to open the session. Opengeni waits for all current work and sandbox access to settle first."
         }
         confirmLabel={
           confirmation?.kind === "fork"
@@ -787,7 +787,8 @@ export function SessionTenancyControl({
             {canForkPrivately ? (
               <Button
                 type="button"
-                variant={confirmation.visibility === "private" ? "default" : "secondary"}
+                variant={confirmation.visibility === "private" ? "secondary" : "outline"}
+                className="aria-checked:text-fg"
                 role="radio"
                 aria-checked={confirmation.visibility === "private"}
                 onClick={() => setConfirmation({ kind: "fork", visibility: "private" })}
@@ -797,7 +798,8 @@ export function SessionTenancyControl({
             ) : null}
             <Button
               type="button"
-              variant={confirmation.visibility === "workspace" ? "default" : "secondary"}
+              variant={confirmation.visibility === "workspace" ? "secondary" : "outline"}
+              className="aria-checked:text-fg"
               role="radio"
               aria-checked={confirmation.visibility === "workspace"}
               onClick={() => setConfirmation({ kind: "fork", visibility: "workspace" })}

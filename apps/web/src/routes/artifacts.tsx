@@ -150,7 +150,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     </Button>
   ) : null;
   return (
-    <ContentPage width="wide" className="max-w-[1200px] pt-6">
+    <ContentPage width="standard" className="pt-6">
       <LineTabs
         value={filters.kind}
         onValueChange={(kind) => setFilters({ ...filters, kind: kind as ArtifactKind | "all" })}
@@ -159,7 +159,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         <PageHeader
           icon={<PanelsTopLeftIcon />}
           title="Artifacts"
-          description="Sites, images, documents and files made with Geni"
+          description="Sites, images, documents and files made with Opengeni"
           actions={empty && filters.kind === "all" ? null : newArtifact}
           tabs={
             <LineTabsList aria-label="Artifact types">
@@ -446,7 +446,7 @@ function ArtifactDetailPage({
                       className="rounded-[10px] pointer-coarse:h-11"
                     >
                       <SparklesIcon aria-hidden="true" />
-                      Edit with Geni
+                      Edit with Opengeni
                     </Button>
                   )}
                   {archived ? null : (

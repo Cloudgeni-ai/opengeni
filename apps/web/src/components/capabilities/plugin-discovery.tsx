@@ -12,6 +12,7 @@ import { CapabilityMark } from "./capability-page";
 import { CapabilitySlotPage, useCapabilityPageSlot } from "./capability-page-slot";
 import { PluginPage, type PluginManageActions } from "./plugin-page";
 import { humanizeName } from "./skill-copy";
+import { userErrorText } from "@/lib/api-error";
 
 const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
 
@@ -137,7 +138,7 @@ export function PluginDiscovery({
       // The connection opens its own page; Back returns to this plugin.
       onOpenConnection(item);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not open connection.");
+      setError(userErrorText(cause, "Could not open connection."));
     } finally {
       setBusy(false);
     }
@@ -200,7 +201,7 @@ export function PluginDiscovery({
       setInstalled((previous) => new Set([...previous, item.id]));
       onChanged?.();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not install plugin.");
+      setError(userErrorText(cause, "Could not install plugin."));
     } finally {
       setBusy(false);
     }

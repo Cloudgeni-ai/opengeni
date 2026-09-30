@@ -5,7 +5,11 @@ import { createRoot } from "react-dom/client";
 
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
-import { errorParts, usageSummary } from "@/components/variable-sets/variable-set-model";
+import {
+  errorParts,
+  usageSummary,
+  userFacingError,
+} from "@/components/variable-sets/variable-set-model";
 import {
   VariableSetDetailPage,
   type VariableSetPageActions,
@@ -169,6 +173,18 @@ describe("Variable sets", () => {
     });
   });
 
+  test("a form error says what to do, never the raw API string", () => {
+    const error = userFacingError(
+      Object.assign(
+        new Error("OpenGeni API 403: missing permission: variable_sets:manage Reference: req_403."),
+        { status: 403 },
+      ),
+    );
+    expect(error.message).toBe(
+      "You don't have permission to do this. Ask an admin for access. Reference: req_403.",
+    );
+  });
+
   test("shows variables write-only, with no version, dots or reveal", async () => {
     const view = await render(
       <VariableSetDetailPage
@@ -256,7 +272,7 @@ describe("Variable sets", () => {
 
       await setInputValue(name(), "github token");
       expect(name().value).toBe("GITHUB_TOKEN");
-      expect(view.container.textContent).toContain("OpenGeni sets GITHUB_TOKEN");
+      expect(view.container.textContent).toContain("Opengeni sets GITHUB_TOKEN");
 
       await setInputValue(name(), "api_token");
       expect(view.container.textContent).toContain("API_TOKEN is already in this set");

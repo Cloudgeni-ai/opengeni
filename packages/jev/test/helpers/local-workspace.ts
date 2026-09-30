@@ -3,7 +3,7 @@
  * It enforces the same ripgrep flag allowlist as the sandbox adapter, and the documented pattern cap, so a
  * test fails if the engine ever passes another flag or a longer pattern.
  */
-import { open, stat } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   CODE_SEARCH_MAX_PATTERN_CHARS,
@@ -11,6 +11,7 @@ import {
   CodeSearchWorkspaceError,
   type CodeSearchRipgrepResult,
   type CodeSearchWorkspace,
+  isCodeSearchCredentialPath,
 } from "../../src";
 
 const BARE_FLAGS = new Set([
@@ -142,7 +143,13 @@ export class LocalCodeSearchWorkspace implements CodeSearchWorkspace {
     const out: Record<string, "file" | "directory" | "missing"> = {};
     for (const p of paths) {
       try {
-        const st = await stat(this.inside(p));
+        const abs = this.inside(p);
+        // the documented contract: a path resolving into a credential directory is "missing"
+        if (isCodeSearchCredentialPath(relative(await realpath(this.root), await realpath(abs)))) {
+          out[p] = "missing";
+          continue;
+        }
+        const st = await stat(abs);
         out[p] = st.isDirectory() ? "directory" : st.isFile() ? "file" : "missing";
       } catch {
         out[p] = "missing";

@@ -5156,6 +5156,109 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(successor.role).toBe("spawner");
   }, 60_000);
 
+  test("(8b-2) a late capture cannot land after its durable window or behind an empty-workspace decision", async () => {
+    if (!available) return;
+    for (const fence of ["expired", "fresh_workspace"] as const) {
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      const holderId = `late-capture-${fence}`;
+      const acquired = await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId,
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      const instanceId = `sb-late-${fence}`;
+      await commitWarmingToWarm(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: acquired.lease.leaseEpoch,
+        instanceId,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: {
+            providerState: { sandboxId: instanceId, workspacePersistence: "tar" },
+          },
+        },
+        leaseTtlMs: 45_000,
+      });
+      await releaseLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId,
+        idleGraceMs: 0,
+      });
+      const source = await readLease(db, workspaceId, groupId);
+      const captureId = crypto.randomUUID();
+      const claim = await claimWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId,
+        operationId: captureId,
+        attempt: 1,
+        expectedEpoch: source!.leaseEpoch,
+        expectedInstanceId: instanceId,
+        liveness: "draining",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+      });
+      if (claim.status !== "claimed") throw new Error("late capture fixture was not claimed");
+      expect(
+        await confirmDrainCold(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedEpoch: source!.leaseEpoch,
+          expectedCaptureId: captureId,
+          providerMissingBeforeCapture: true,
+        }),
+      ).toEqual({ wentCold: true });
+      if (fence === "expired") {
+        await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniRecovery,lateArchiveCapture,recordedAt}',
+          to_jsonb(${new Date(Date.now() - 61 * 60_000).toISOString()}::text))
+          where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      } else {
+        await admin`update sandbox_leases set resume_state = resume_state || ${admin.json({
+          opengeniFreshWorkspaceRecovery: {
+            version: 1,
+            operationId: crypto.randomUUID(),
+            sessionId: crypto.randomUUID(),
+            status: "accepted",
+            authorizedAt: new Date().toISOString(),
+          },
+        })}::jsonb where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      }
+      const archive = Buffer.from(`LATE_CAPTURE_${fence}`).toString("base64");
+      expect(
+        await persistDrainSnapshotRaw(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedLeaseId: source!.id,
+          expectedEpoch: source!.leaseEpoch,
+          expectedInstanceId: instanceId,
+          expectedWorkspaceGeneration: 0,
+          captureId,
+          providerRequestId: claim.claim.providerRequestId,
+          workspaceArchive: archive,
+          workspaceArchiveMeta: archiveDescriptor(archive, 1_900_000_000_222),
+        }),
+        fence,
+      ).toEqual({ wrote: false, archiveRevision: null });
+      expect((await readLease(db, workspaceId, groupId))?.recovery.archive.status, fence).toBe(
+        "none",
+      );
+    }
+  }, 60_000);
+
   test("(8c) a late native checkpoint atomically supersedes an older recoverable archive", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();

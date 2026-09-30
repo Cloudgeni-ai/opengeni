@@ -1771,6 +1771,8 @@ export const connections = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     createOperationId: text("create_operation_id"),
     createRequestDigest: text("create_request_digest"),
     grantedScopes: jsonb("granted_scopes").$type<string[]>().notNull().default([]),
@@ -3869,6 +3871,96 @@ export const workspaceWebhookDeliveries = pgTable(
       table.eventId,
     ),
     recent: index("workspace_webhook_deliveries_webhook_recent_idx").on(
+      table.webhookId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type IntegrationWorkspaceFilter = { externalSource: string };
+
+export const organizationCredentialProviders = pgTable(
+  "organization_credential_providers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    timeoutMs: integer("timeout_ms").notNull().default(10000),
+    workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountUnique: uniqueIndex("organization_credential_providers_account_uq").on(table.accountId),
+  }),
+);
+
+export const organizationWebhooks = pgTable(
+  "organization_webhooks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secretEncrypted: text("secret_encrypted").notNull(),
+    eventTypes: text("event_types").array().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    description: text("description"),
+    workspaceFilter: jsonb("workspace_filter").$type<IntegrationWorkspaceFilter | null>(),
+    createdBySubjectId: text("created_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdUnique: unique("organization_webhooks_account_id_uq").on(table.accountId, table.id),
+    accountIndex: index("organization_webhooks_account_idx").on(table.accountId, table.createdAt),
+  }),
+);
+
+export const organizationWebhookDeliveries = pgTable(
+  "organization_webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    webhookId: uuid("webhook_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    lastStatus: integer("last_status"),
+    lastError: text("last_error"),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "organization_webhook_deliveries_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    webhook: foreignKey({
+      name: "organization_webhook_deliveries_webhook_fk",
+      columns: [table.accountId, table.webhookId],
+      foreignColumns: [organizationWebhooks.accountId, organizationWebhooks.id],
+    }).onDelete("cascade"),
+    eventUnique: uniqueIndex("organization_webhook_deliveries_event_uq").on(
+      table.webhookId,
+      table.eventId,
+    ),
+    recent: index("organization_webhook_deliveries_webhook_recent_idx").on(
       table.webhookId,
       table.createdAt,
     ),
@@ -13892,6 +13984,8 @@ export const organizationModelProviderConnections = pgTable(
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    claudeUsageSnapshot:
+      jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),

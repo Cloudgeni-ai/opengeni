@@ -29,6 +29,7 @@ import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
+import { observeClaudeUsageResponse } from "./claude-subscription-usage";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
@@ -406,6 +407,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     const started = performance.now();
     try {
       const response = await inner(input, capture.init);
+      observeClaudeUsageResponse(provider, response);
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {

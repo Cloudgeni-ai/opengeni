@@ -73,6 +73,29 @@ function makeClient(
 const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {
+  test("Claude quota reads and refreshes preserve workspace/organization scope and never request inference", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        connected: false,
+        credentialVersion: null,
+        windows: [],
+        observedAt: null,
+        source: null,
+        refreshStatus: "not_checked",
+        refreshCheckedAt: null,
+      }),
+    );
+    await client.getWorkspaceClaudeSubscriptionUsage(WORKSPACE_ID);
+    await client.refreshWorkspaceClaudeSubscriptionUsage(WORKSPACE_ID);
+    await client.getOrganizationClaudeSubscriptionUsage("organization");
+    await client.refreshOrganizationClaudeSubscriptionUsage("organization");
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname])).toEqual([
+      ["GET", `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/usage`],
+      ["POST", `/v1/workspaces/${WORKSPACE_ID}/model-providers/claude_subscription/usage/refresh`],
+      ["GET", "/v1/organizations/organization/model-providers/claude_subscription/usage"],
+      ["POST", "/v1/organizations/organization/model-providers/claude_subscription/usage/refresh"],
+    ]);
+  });
   test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
     const projection = {
       version: 1 as const,

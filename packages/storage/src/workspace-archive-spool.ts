@@ -22,7 +22,7 @@ type ExpectedArchive = { bytes: number; sha256: string };
 /** Restore classification shared with runtime without importing runtime. */
 export class WorkspaceArchiveStorageError extends Error {
   constructor(
-    readonly code: "archive_base64_invalid" | "archive_hash_mismatch" | "archive_hydration_failed",
+    readonly code: "archive_hash_mismatch" | "archive_hydration_failed" | "archive_object_missing",
     message: string,
     readonly retryable: boolean,
     options?: ErrorOptions,
@@ -213,7 +213,7 @@ async function verifyRanges(
   const head = await storage.headObject!(key);
   if (!head)
     throw new WorkspaceArchiveStorageError(
-      "archive_base64_invalid",
+      "archive_object_missing",
       "Workspace archive object is missing",
       false,
     );
@@ -247,7 +247,7 @@ async function verifyRanges(
       const current = await storage.headObject!(key);
       if (!current) {
         throw new WorkspaceArchiveStorageError(
-          "archive_base64_invalid",
+          "archive_object_missing",
           "Workspace archive object is missing during range read",
           false,
         );
@@ -280,7 +280,7 @@ async function verifyRanges(
   const finalHead = await storage.headObject!(key);
   if (!finalHead)
     throw new WorkspaceArchiveStorageError(
-      "archive_base64_invalid",
+      "archive_object_missing",
       "Workspace archive object is missing after range read",
       false,
     );

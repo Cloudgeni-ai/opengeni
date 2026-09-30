@@ -10,6 +10,7 @@ import type { Settings } from "@opengeni/config";
 import { getSessionRootId, type Database } from "@opengeni/db";
 import {
   normalizeRunCredentialsResolution,
+  selectedSessionRemoteMcpTargets,
   type NormalizedRunCredentialMaterial,
 } from "@opengeni/runtime";
 import { workspaceCredentialProviderResolver } from "./workspace-credential-provider";
@@ -20,13 +21,15 @@ export type RunCredentialResolutionContext = {
   accountId: string;
   workspaceId: string;
   session: Session;
-  turn: SessionTurn;
+  turn: SessionTurn & { initiatingHumanSubjectId?: string | null };
   attemptId: string;
   effectiveSandboxBackend: SandboxBackend;
   variableSet: { id: string; name: string } | null;
   /** Enables the workspace's configured HTTP credential provider. */
   settings?: Settings;
   initiatingHumanSubjectId?: string | null;
+  /** Installed in-process API routes must never enter a product callback. */
+  localMcpServerIds?: readonly string[];
 };
 
 export type BoundRunCredentialResolver = {
@@ -117,10 +120,22 @@ export async function bindRunCredentialResolver(
         input.db,
         input.settings,
         { accountId: input.accountId, workspaceId: input.workspaceId },
-        input.initiatingHumanSubjectId ?? null,
+        input.turn.initiatingHumanSubjectId ?? null,
+        {
+          mcpServers: selectedSessionRemoteMcpTargets(
+            input.settings,
+            input.session.mcpServers ?? [],
+            input.turn.tools ?? [],
+            (input.localMcpServerIds ?? []).map((id) => ({ id })),
+          ),
+        },
       )
     : null;
-  const resolver = workspaceResolver ?? input.connectionCredentials?.runCredentials;
+  const resolver =
+    workspaceResolver ??
+    (input.effectiveSandboxBackend === "none"
+      ? undefined
+      : input.connectionCredentials?.runCredentials);
   if (!resolver) return null;
   const rootSessionId = await getSessionRootId(input.db, input.workspaceId, input.session.id);
   if (!rootSessionId) {

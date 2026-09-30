@@ -1696,6 +1696,9 @@ function PresentationEditorCore({
               className="relative mx-auto shrink-0 overflow-hidden shadow-og-lg"
               style={{ width: stageWidth, height: stageHeight, backgroundColor: "#fff" }}
               data-og-presentation-stage
+              // The slide is white paper in both app themes, so its selection
+              // chrome uses the light palette to stay visible on it.
+              data-og-theme="light"
             >
               <canvas
                 ref={canvasRef}
@@ -1733,7 +1736,7 @@ function PresentationEditorCore({
                       width={effectiveSelectedPosition.width}
                       height={effectiveSelectedPosition.height}
                       fill="transparent"
-                      stroke="var(--og-accent, #3b82f6)"
+                      stroke="var(--og-color-accent-deep)"
                       strokeWidth={2}
                       vectorEffect="non-scaling-stroke"
                       pointerEvents="none"
@@ -1743,7 +1746,7 @@ function PresentationEditorCore({
                         cx={effectiveSelectedPosition.left + effectiveSelectedPosition.width}
                         cy={effectiveSelectedPosition.top + effectiveSelectedPosition.height}
                         r={6 / zoom}
-                        fill="var(--og-accent, #3b82f6)"
+                        fill="var(--og-color-accent-deep)"
                         stroke="white"
                         strokeWidth={1.5}
                         vectorEffect="non-scaling-stroke"

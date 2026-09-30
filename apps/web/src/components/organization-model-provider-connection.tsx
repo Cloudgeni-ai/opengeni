@@ -12,13 +12,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
+import { useClaudeUsage } from "@/components/models/claude-usage";
+import { userErrorText } from "@/lib/api-error";
 
 // Organization API-key providers (Vercel AI Gateway, OpenRouter) shared with
 // the organization's workspaces. Returns the same view as the workspace hook,
 // so Organization settings > Models reuses the row and the provider's page.
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** A failed read, kept whole so the page can show advice and its API facts. */
+function readError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export function useOrganizationProviderConnection({
@@ -38,8 +41,8 @@ export function useOrganizationProviderConnection({
   const [slug, setSlug] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<Error | null>(null);
+  const [modelsError, setModelsError] = useState<Error | null>(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -68,6 +71,7 @@ export function useOrganizationProviderConnection({
   }, []);
 
   const connected = connection?.status === "active";
+
   const slugValid =
     slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(slug);
@@ -96,11 +100,22 @@ export function useOrganizationProviderConnection({
       return result;
     } catch (error) {
       if (!activeRef.current || generation !== connectionGenerationRef.current) return undefined;
-      setConnectionError(errorText(error));
+      setConnectionError(readError(error));
       setLoaded(true);
       return undefined;
     }
   }, [client, organizationId, providerKind, enabled]);
+
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "organization",
+    scopeId: organizationId,
+    enabled: enabled && providerKind === "claude_subscription",
+    connected,
+    credentialVersion: connection?.version,
+    canManage: true,
+    onCredentialChanged: refreshConnection,
+  });
 
   const refreshModels = useCallback(async (): Promise<CustomModel[] | undefined> => {
     if (!enabled) return undefined;
@@ -117,7 +132,7 @@ export function useOrganizationProviderConnection({
       return result.models;
     } catch (error) {
       if (!activeRef.current || generation !== modelsGenerationRef.current) return undefined;
-      setModelsError(errorText(error));
+      setModelsError(readError(error));
       setModelsLoaded(true);
       return undefined;
     }
@@ -129,13 +144,10 @@ export function useOrganizationProviderConnection({
 
   useEffect(() => void refresh(), [refresh]);
 
-  async function saveKey(
-    apiKey: string,
-    claudeIdentity?: { accountUuid: string; deviceId: string },
-  ): Promise<boolean> {
+  async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
     if (!key || connectionBusy) return false;
-    const credentialIdentity = JSON.stringify([key, claudeIdentity]);
+    const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
     const operationId =
@@ -150,7 +162,6 @@ export function useOrganizationProviderConnection({
         operationId,
         expectedVersion: version,
         apiKey: key,
-        ...(claudeIdentity ? { claudeIdentity } : {}),
       });
     const commit = (saved: Connection) => {
       pendingSaveRef.current = null;
@@ -178,7 +189,7 @@ export function useOrganizationProviderConnection({
       // idempotent receipt proves that this token and identity were committed.
       await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
-        description: errorText(finalError),
+        description: userErrorText(finalError),
       });
       return false;
     } finally {
@@ -215,7 +226,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't disconnect ${meta.title}`, {
-        description: errorText(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -279,7 +290,7 @@ export function useOrganizationProviderConnection({
       if (committed) commit(committed);
       else
         toast.error(`Couldn't add ${meta.title} model`, {
-          description: errorText(error),
+          description: userErrorText(error),
         });
     } finally {
       if (activeRef.current) {
@@ -321,7 +332,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't remove ${meta.title} model`, {
-        description: errorText(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -343,6 +354,7 @@ export function useOrganizationProviderConnection({
     customModelsError: modelsError,
     customModels: models,
     customModelsLoaded: modelsLoaded,
+    claudeUsage: providerKind === "claude_subscription" ? claudeUsage : undefined,
     busy: connectionBusy,
     modelSlug: slug,
     modelBusy,

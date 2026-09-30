@@ -15,7 +15,7 @@ The registry provides storage, service operations, HTTP and first-party MCP
 retrieval, SDK types, and isolation guarantees. Migration
 `0157_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
 at runtime and composes only bounded descriptors with workspace policy. Full
-content remains on-demand. The Agent Knowledge page provides a deliberately
+content remains on-demand. The Knowledge page provides a deliberately
 small human surface over these same governance routes: active Skill cards, an
 agent-assisted creation prompt, and a compact manual editor. It does not show
 inactive proposals, revision hashes, or lifecycle controls, and it does not add
@@ -220,7 +220,7 @@ expired rows that sort earlier.
 user-facing Skills surface. It lists active authorized records and permits a
 direct human to create and activate an explicit Skill. The full proposal and
 lifecycle API remains available for purpose-built governance clients, but is
-not presented in the default Agent Knowledge UI. Organization controls require
+not presented in the default Knowledge UI. Organization controls require
 the matching `account:admin` grant, workspace controls require
 `workspace:admin`, and personal controls remain self-only.
 

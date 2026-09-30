@@ -4,8 +4,7 @@ import { createRoot } from "react-dom/client";
 
 import {
   accountMenuAriaLabel,
-  OrganizationInvitationCountBadge,
-  OrganizationInvitationRailNotice,
+  OrganizationInvitationDot,
   OrganizationInvitationsDialog,
   OrganizationInvitationsMenuItem,
   type OrganizationInvitationsController,
@@ -105,7 +104,6 @@ function RailAccountFooter(props: {
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
       <div className={collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}>
         <div className={collapsed ? undefined : "min-w-0 flex-1"}>
-          {!collapsed ? <OrganizationInvitationRailNotice controller={controller} /> : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -122,7 +120,7 @@ function RailAccountFooter(props: {
                       A
                     </AvatarFallback>
                   </Avatar>
-                  <OrganizationInvitationCountBadge pendingCount={controller.pendingCount} />
+                  <OrganizationInvitationDot pendingCount={controller.pendingCount} />
                 </span>
                 {!collapsed ? (
                   <span className="min-w-0 flex-1">

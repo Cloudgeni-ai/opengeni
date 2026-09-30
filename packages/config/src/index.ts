@@ -2136,7 +2136,7 @@ const RegistryModelSchema = z
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
 export const ClaudeSubscriptionIdentity = z
   .object({
-    accountUuid: z.string().uuid(),
+    accountUuid: z.union([z.string().uuid(), z.literal("")]),
     deviceId: z.string().regex(/^[a-f0-9]{64}$/),
   })
   .strict();
@@ -8154,3 +8154,4 @@ export function withClaudeConnectionCredential(
     ),
   };
 }
+export * from "./claude-subscription-usage";

@@ -233,7 +233,7 @@ export function ManagedAuthPanel(props: {
   const resendVerificationControl = verificationEmail ? (
     <div className="mt-2">
       <p className="text-xs text-fg-subtle">
-        Look for “Verify your OpenGeni email” in your inbox or spam folder. After verifying, return
+        Look for “Verify your Opengeni email” in your inbox or spam folder. After verifying, return
         here to sign in.
       </p>
       <Button
@@ -258,7 +258,7 @@ export function ManagedAuthPanel(props: {
       className={
         props.presentation === "embedded"
           ? "w-full"
-          : "flex flex-1 items-center justify-center px-4"
+          : "og-page-glow flex flex-1 items-center justify-center px-4"
       }
     >
       <form
@@ -266,7 +266,7 @@ export function ManagedAuthPanel(props: {
         className={
           props.presentation === "embedded"
             ? "w-full"
-            : "w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+            : "w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         }
         onSubmit={(event) => {
           event.preventDefault();
@@ -320,6 +320,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signin" ? "secondary" : "ghost"}
+              className={mode === "signin" ? "text-fg" : "text-fg-muted"}
               disabled={formInteractionBusy}
               onClick={() => selectMode("signin")}
             >
@@ -329,6 +330,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signup" ? "secondary" : "ghost"}
+              className={mode === "signup" ? "text-fg" : "text-fg-muted"}
               disabled={formInteractionBusy}
               onClick={() => selectMode("signup")}
             >

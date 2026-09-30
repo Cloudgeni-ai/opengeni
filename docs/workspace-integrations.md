@@ -1,8 +1,61 @@
-# Workspace integrations: credentials, webhooks, MCP identity, sandbox image
+# Organization and workspace integrations: credentials, webhooks, MCP identity
 
-Four workspace-level primitives let a product run agents on a standalone
+Register once for your organization. A product with one workspace per customer
+can use one signed credential-provider callback and one webhook registration
+across all its customers, with one secret per registration. Use the host's
+full-access organization API key for setup, not an `asUser()` client:
+
+```ts
+import {
+  putOrganizationCredentialProvider,
+  createOrganizationWebhook,
+} from "@opengeni/sdk/workspace-integrations";
+
+const filter = { externalSource: "product:production" };
+const { secret: credentialSecret } = await putOrganizationCredentialProvider(
+  client,
+  organizationId,
+  { url: "https://product.example/opengeni/credentials", workspaceFilter: filter },
+);
+const { webhook, secret: webhookSecret } = await createOrganizationWebhook(
+  client,
+  organizationId,
+  {
+    url: "https://product.example/opengeni/events",
+    eventTypes: ["turn.completed", "turn.failed", "session.requiresAction"],
+    workspaceFilter: filter,
+  },
+);
+// Store both secrets now: they are returned only on first creation.
+```
+
+Organization administration, individual webhook reads, and signing-secret
+rotation are opt-in functions from `@opengeni/sdk/workspace-integrations`,
+not methods on the eager `OpenGeniClient`. Pass `client` first, then the same
+organization/workspace and resource arguments. Existing browser-used workspace
+methods remain on the client.
+
+`workspaceFilter.externalSource` matches the workspace's `external_source`
+exactly (case-sensitive, no trimming; at most 200 UTF-8 bytes). Every organization
+provider/webhook body must include `workspaceFilter`: `{ externalSource: "…" }`
+or explicit `null` for all non-personal workspaces. Missing filters and `{}` are
+rejected with 422. PUT replaces configuration: omitted optional fields reset
+to their defaults, rather than preserving previous values.
+
+The filter is **scoping convenience, not a security boundary**. A caller with
+`workspace:create` can choose `externalSource` and `externalId`. Credential
+providers and webhook receivers must authorize by mapping the trusted
+OpenGeni `workspaceId` to their own tenant. Never authorize from `externalId`
+or the filter alone; neither proves that the workspace belongs to your customer.
+Use separate organizations for stronger environment separation.
+
+Organization providers and webhooks never cover Personal workspaces, even
+when the filter is `null`. A Personal workspace owner may still configure a
+workspace-level provider or webhook through the existing owner-only authority.
+
+Four integration primitives let a product run agents on a standalone
 OpenGeni deployment the same way an in-process host could: supply
-short-lived credentials to the sandbox, learn when work finishes, recognize
+short-lived credentials to the sandbox and remote MCP servers, learn when work finishes, recognize
 which turn called its MCP server, and pick the sandbox image. All four are
 configured through the API or `@opengeni/sdk`; none requires deployment code.
 
@@ -13,13 +66,25 @@ list, headers, and signature scheme, exported as
 `@opengeni/contracts/workspace-integration-wire` so the SDK root stays
 zod-free), `packages/db/src/workspace-integrations.ts`
 and migration `0536_workspace_integration_primitives.sql` (storage and the
-delivery outbox), `apps/api/src/routes/workspace-integrations.ts` (routes),
+delivery outbox), migration `0546_organization_integration_primitives.sql`
+(organization defaults, filtered deliveries, and identity),
+`apps/api/src/routes/workspace-integrations.ts` (shared workspace routes),
+`apps/api/src/routes/organization-integrations.ts` (organization authority adapter),
 `apps/api/src/workspace-webhook-dispatch.ts` (delivery pump),
 `apps/worker/src/activities/workspace-credential-provider.ts` (credential
 provider adapter), and `packages/sdk/src/workspace-integrations.ts` (host
 helpers).
 
-Managing any of these requires `workspace:admin`. Agent attempts are refused,
+Managing organization registrations requires a canonical managed-cookie human
+with `account:admin`, the canonical local administrator, or a verified
+organization-scoped **full-access API key**.
+Full keys hold `api_keys:manage` and `workspace:admin`, not `account:admin`;
+the same organization-key control rule used to manage organization API keys
+applies here. Read-only organization keys, workspace-scoped keys, and `asUser()`
+clients and host-signed delegated bearers cannot manage organization integrations.
+Cookie/local browser mutations require the same-origin check used by organization
+integration policy. Workspace registrations require
+`workspace:admin`. Agent attempts are refused at both scopes,
 so an agent can never change where its own credentials come from or where
 events go. Signing secrets are generated by OpenGeni, stored encrypted with
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, and returned only once, at creation.
@@ -48,21 +113,28 @@ const request = await verifyCredentialProviderRequest({ body: rawBody, headers, 
 
 Both throw `OpenGeniSignatureError` on a bad or stale signature.
 
-## Credential provider
+## Credential provider and workspace overrides
 
-One optional endpoint per workspace. When it is enabled, OpenGeni calls it
+One optional endpoint per organization, plus one optional override per workspace.
+Any workspace provider row overrides inheritance: enabled uses that provider;
+disabled pauses credentials for the workspace and means **none**, not fallback.
+Only the absence of a workspace row inherits a matching enabled organization
+provider, and never for a Personal workspace. A selected provider returning `not_applicable` or failing does not
+switch to another provider. When a provider is selected, OpenGeni calls it
 before a turn's sandbox work and again before the returned material expires.
-It replaces the deployment's injected `runCredentials` port for that workspace
+It replaces the deployment's injected `runCredentials` port for the turn
 and reuses the same lifecycle: values are delivered off the sandbox manifest,
 files are written below one OpenGeni-owned directory, renewals swap files in
 place, and reconnect notices reach both the model and the UI.
 
 ```ts
+// Optional: override the organization's callback for one workspace.
 const { secret } = await client.putWorkspaceCredentialProvider(workspaceId, {
   url: "https://product.example/opengeni/credentials",
   timeoutMs: 10_000,
 });
-// Store `secret`; it is not returned again. Later PUTs update URL/enabled/timeout.
+// Store `secret`; it is not returned again except via explicit rotation.
+// PUT fully replaces URL/enabled/timeout; omitted options reset defaults.
 ```
 
 OpenGeni POSTs:
@@ -70,12 +142,15 @@ OpenGeni POSTs:
 ```json
 {
   "type": "credentials.request",
+  "lane": "organization",
+  "mcpServers": [{ "id": "product-capabilities", "url": "https://product.example/mcp" }],
   "purpose": "provision",
   "forceRefresh": false,
   "accountId": "…", "workspaceId": "…", "sessionId": "…", "rootSessionId": "…",
   "parentSessionId": null, "turnId": "…", "attemptId": "…",
   "initiator": { "kind": "subject", "subjectId": "user:alice" },
   "initiatingHumanSubjectId": "user:alice",
+  "initiatingHuman": { "subjectId": "user:alice", "externalIdentity": null },
   "sandboxBackend": "modal", "sandboxOs": "linux"
 }
 ```
@@ -88,6 +163,9 @@ The provider answers with one of:
   "files": [{ "path": "gcp/key.json", "content": "…", "mode": "0400" }],
   "fileEnvironment": { "GOOGLE_APPLICATION_CREDENTIALS": "gcp/key.json" },
   "git": [{ "host": "github.com", "password": "ghs_…" }],
+  "mcp": [{ "url": "https://product.example/mcp",
+    "headers": { "Authorization": "Bearer …" },
+    "expiresAt": "2026-09-24T19:00:00Z" }],
   "expiresAt": "2026-09-24T19:00:00Z",
   "authNeeded": [] }
 { "status": "not_applicable" }
@@ -111,6 +189,69 @@ The provider answers with one of:
   refreshes every 30 minutes.
 - Scope echoes are added by OpenGeni; the provider does not return them.
 
+For `asUser` turns, the new `initiatingHuman` field carries the product's own
+identity, without a reverse mapping:
+
+```json
+{ "subjectId": "external_user:<internal uuid>",
+  "externalIdentity": { "source": "product:production", "externalId": "your-user-id" } }
+```
+
+It is resolved from the exact accepted initiating human's organization-scoped
+external identity record, never from the session creator. No known human means
+`initiatingHuman: null`; an internal human or missing mapping has
+`externalIdentity: null`. Existing `initiator` and `initiatingHumanSubjectId`
+fields are unchanged. These fields are informational identity, never
+authorization: authorize users and tools with the authenticated connection.
+
+### Renewable MCP headers
+
+Attach and select your remote MCP as usual when creating a session:
+
+```ts
+await client.asUser("your-user-id", { source: "product:production" }).createSession(workspaceId, {
+  initialMessage: "Inspect my infrastructure",
+  mcpServers: [{
+    id: "product-capabilities",
+    url: "https://product.example/mcp",
+    allowedTools: ["inspect_infrastructure"],
+  }],
+  tools: [{ kind: "mcp", id: "product-capabilities" }],
+});
+```
+
+Return `mcp` entries from the credential provider's `ok` response. `url`
+matches only a selected, session-attached remote MCP by its exact normalized
+URL (WHATWG URL normalization), never by id. The request's `mcpServers` lists
+these selected product-supplied targets so your provider can authorize each URL.
+A reused id at a different endpoint cannot receive credentials for your URL.
+Deployment MCPs, workspace connectors and local bridges are not eligible.
+Provider headers override same-named static headers
+case-insensitively while valid; renewal replaces the turn-local material.
+Header values are secret material: never placed in session events, history,
+logs, or the sandbox manifest.
+
+Each entry inherits the response-wide `expiresAt`; an entry-specific expiry
+can shorten it. The earliest expiry schedules the shared renewal lifecycle.
+With neither expiry, material lasts until replacement or turn completion and
+refreshes on the default 30-minute cadence. Failed renewals retain the last
+good headers only until their expiry. After that, affected server calls fail
+with an explicit auth-unavailable error until renewal succeeds; static headers
+are never silently restored. Unmatched, ambiguous, unselected, or non-remote
+entries are skipped per target with a metadata-only warning; unrelated tools
+and the turn keep working. Duplicate normalized URLs and malformed material
+are rejected by validation. MCP-only turns renew even when
+no sandbox is started.
+
+Each response accepts at most 32 servers, with 1–32 headers each; header names
+are HTTP tokens up to 128 characters, values at most 16 KiB, and each server's
+headers at most 64 KiB. Duplicate targets and case-insensitive duplicate names
+are rejected. Control characters, transport-owned `mcp-session-id`,
+`mcp-protocol-version`, `content-type`, `accept`, `host`, `content-length`, and hop-by-hop
+headers (including `connection`, `keep-alive`, `proxy-authenticate`,
+`proxy-authorization`, `te`, `trailer`, `transfer-encoding`, `upgrade`) are
+rejected. `expiresAt`, when provided, must be a future ISO timestamp with timezone.
+
 If the provider cannot be reached or answers badly on the first call, the turn
 continues without host material and shows a `refresh_failed` reconnect notice.
 A failed renewal keeps the last good material and retries with backoff. The
@@ -119,7 +260,8 @@ command fails on an expired token.
 
 ## Webhooks
 
-Up to ten endpoints per workspace, each with its own secret and a subset of:
+Up to ten endpoints per organization and ten per workspace, each with its own
+secret and a subset of:
 
 | Event type | Sent when |
 | --- | --- |
@@ -129,6 +271,7 @@ Up to ten endpoints per workspace, each with its own secret and a subset of:
 | `session.humanInput.requested` | The agent asks the user a structured question |
 
 ```ts
+// Optional extra delivery destination for one workspace.
 const { webhook, secret } = await client.createWorkspaceWebhook(workspaceId, {
   url: "https://product.example/opengeni/events",
   eventTypes: ["turn.completed", "turn.failed", "session.requiresAction"],
@@ -138,7 +281,10 @@ const { webhook, secret } = await client.createWorkspaceWebhook(workspaceId, {
 The body is a thin event; read details through the API:
 
 ```json
-{ "id": "<session event id>", "type": "turn.completed", "workspaceId": "…",
+{ "id": "<session event id>", "type": "turn.completed", "lane": "organization", "workspaceId": "…",
+  "workspace": { "id": "…", "externalSource": "product:production", "externalId": "tenant-42" },
+  "initiatingHuman": { "subjectId": "external_user:…",
+    "externalIdentity": { "source": "product:production", "externalId": "your-user-id" } },
   "sessionId": "…", "turnId": "…", "sequence": 42,
   "occurredAt": "2026-09-24T18:00:00.000Z", "data": { "status": "idle" } }
 ```
@@ -152,24 +298,75 @@ backoff (5 s doubling to one hour) for 12 attempts, then marked failed.
 and `redeliverWorkspaceWebhookDelivery` queues a settled delivery again.
 Disabling an endpoint pauses its queue; deleting it drops the queue.
 
-Deliveries are enqueued inside the same transaction that records the session
-event, so an event cannot be committed without its deliveries. A pump in every
+Organization endpoints receive matching non-personal workspaces' selected events;
+workspace endpoints still receive their own events independently. Both gain
+the additive `workspace` routing object; turn events gain `initiatingHuman`
+when known. Pre-upgrade queued deliveries may lack these additions.
+Import `listOrganizationWebhookDeliveries` and
+`redeliverOrganizationWebhookDelivery` from the focused subpath for organization
+registrations; call them with `client` first.
+
+### Management API and SDK
+
+| HTTP | SDK helper |
+| --- | --- |
+| PUT / GET / DELETE `/v1/organizations/:organizationId/credential-provider` | `putOrganizationCredentialProvider` / `getOrganizationCredentialProvider` / `deleteOrganizationCredentialProvider` |
+| POST / GET `/v1/organizations/:organizationId/webhooks` | `createOrganizationWebhook` / `listOrganizationWebhooks` |
+| GET / PATCH / DELETE `…/webhooks/:webhookId` | `getOrganizationWebhook` / `updateOrganizationWebhook` / `deleteOrganizationWebhook` |
+| GET `…/webhooks/:webhookId/deliveries` | `listOrganizationWebhookDeliveries` |
+| POST `…/webhooks/:webhookId/deliveries/:deliveryId/redeliver` | `redeliverOrganizationWebhookDelivery` |
+
+Provider PUT returns `{ provider, secret? }`, webhook creation returns
+`{ webhook, secret }`, lists return `{ webhooks }` or `{ deliveries }`, and
+individual webhook reads/updates return the webhook. Organization projections
+use `organizationId` and `workspaceFilter`; workspace projections retain
+`workspaceId`. Workspace helper names and endpoints remain available.
+
+### Signing-secret rotation
+
+POST `…/credential-provider/rotate-secret` or
+`…/webhooks/:webhookId/rotate-secret` at either organization or workspace scope.
+SDK helpers are `rotateOrganizationCredentialProviderSecret`,
+`rotateOrganizationWebhookSecret`, `rotateWorkspaceCredentialProviderSecret`
+and `rotateWorkspaceWebhookSecret`. Each returns the new secret exactly once
+with `{ provider, secret }` or `{ webhook, secret }`. Rotation is immediate:
+new requests/deliveries use the new secret; there is no overlap window.
+Already-started outbound requests may still carry the previous signature.
+
+```ts
+import { rotateOrganizationWebhookSecret } from "@opengeni/sdk/workspace-integrations";
+
+const { secret } = await rotateOrganizationWebhookSecret(client, organizationId, webhookId);
+```
+
+Deliveries are enqueued inside the transaction that records the session event;
+enqueue errors are logged without aborting the turn's lifecycle transaction.
+A pump in every
 API replica claims them with short leases, so replicas share the work and a
 crash only delays a delivery. Settled deliveries are pruned after seven days.
 
 ## MCP identity
 
-Every agent `tools/call` to an MCP server includes
+Every agent `tools/call` includes the native turn metadata. Only session-attached
+product-supplied remote MCPs receive `initiatingHumanExternalIdentity`:
 
 ```json
 "_meta": { "opengeni": { "workspaceId": "…", "sessionId": "…", "turnId": "…",
-  "attemptId": "…", "initiatingHumanSubjectId": "user:alice" } }
+  "attemptId": "…", "initiatingHumanSubjectId": "external_user:…",
+  "initiatingHumanExternalIdentity": {
+    "source": "product:production", "externalId": "your-user-id"
+  } } }
 ```
 
 It lets a product's MCP server attribute a call to the exact turn and person.
 It is informational: authorize with the connection's own credential, as
 before. OpenGeni sets it from the worker's trusted turn scope after any caller
 metadata, so it cannot be replaced by a caller.
+`initiatingHumanExternalIdentity` is `null` for an internal human or missing
+external mapping. It is informational identity, never authorization.
+Workspace connectors, deployment/third-party MCPs and local bridges never receive
+this embedder external identity. Provider/webhook identity lookup is restricted
+to a member of the workspace or the exact turn's initiating human.
 
 ## Default sandbox image
 

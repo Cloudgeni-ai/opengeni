@@ -167,7 +167,7 @@ export function MachineOperationPolicyEditor({
           <button
             type="submit"
             disabled={saving}
-            className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-og-xs font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-xs font-medium transition-colors hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-60"
           >
             {saving ? <Loader2Icon className="size-3.5 animate-spin" aria-hidden /> : null}
             Save policy

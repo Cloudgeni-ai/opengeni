@@ -24,7 +24,7 @@ const modelCatalog = {
       id: "gpt-5.6-sol",
       label: "GPT-5.6 Sol",
       billingClass: "opengeni_credits" as const,
-      billingClassLabel: "OpenGeni",
+      billingClassLabel: "Opengeni",
       selectable: true,
       unavailableReason: null,
       provider: "opengeni",
@@ -178,14 +178,14 @@ describe("OpenGeni Review Bot execution model", () => {
     try {
       expect(rendered.container.textContent).toContain("Review execution");
       expect(rendered.container.textContent).toContain("Cloudgeni-ai/opengeni");
-      expect(rendered.container.textContent).toContain("do not consume OpenGeni credits");
+      expect(rendered.container.textContent).toContain("do not consume Opengeni credits");
 
       const select = rendered.container.querySelector<HTMLSelectElement>(
         'select[aria-label="Review model for Cloudgeni-ai/opengeni"]',
       );
       expect(select).not.toBeNull();
       expect([...select!.querySelectorAll("optgroup")].map((group) => group.label)).toEqual([
-        "OpenGeni",
+        "Opengeni",
         "Codex",
       ]);
       expect(select!.value).toBe("");

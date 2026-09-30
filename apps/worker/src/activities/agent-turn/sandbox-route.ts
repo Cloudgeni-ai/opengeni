@@ -142,13 +142,16 @@ export function shouldPrefetchManagedSandbox(input: {
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];
   hasRepositoryResources: boolean;
+  /** A committed automatic post-loss recovery decision still awaits its box.
+   * Rematerialize now instead of leaving the group pinned until a tool call. */
+  automaticRecoveryPending?: boolean;
 }): boolean {
   if (input.establishPolicy !== "on-demand") return false;
   if (input.machinePrimary) return false;
   if (input.groupBoxBackend === "none" || input.groupBoxBackend === "selfhosted") {
     return false;
   }
-  return input.hasRepositoryResources;
+  return input.hasRepositoryResources || input.automaticRecoveryPending === true;
 }
 
 /**

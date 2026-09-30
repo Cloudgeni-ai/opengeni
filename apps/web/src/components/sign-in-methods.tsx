@@ -1,10 +1,12 @@
-import { KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
-import { useRef, useState } from "react";
+import { CircleAlertIcon } from "lucide-react";
+import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
+import { RowButton } from "@/components/ui/page-actions";
+import { Section, SectionStack } from "@/components/ui/section";
+import { SettingRow } from "@/components/ui/setting-row";
 import type { ManagedSocialProvider } from "@/components/managed-social-auth-buttons";
 
 export type SignInMethodView = {
@@ -27,6 +29,10 @@ export type SignInMethodsViewProps = {
   recentAuthRequired: boolean;
   error: string | null;
   success: string | null;
+  /** The unblocking action for the error, for example "Retry same request". */
+  errorAction?: ReactNode;
+  /** One quiet action beside the "Sign-in methods" heading, for example Refresh. */
+  sectionAction?: ReactNode;
   onReauthenticate: () => void;
   onConnect: (provider: ManagedSocialProvider) => void;
   onDisconnect: (provider: ManagedSocialProvider) => Promise<boolean>;
@@ -35,6 +41,75 @@ export type SignInMethodsViewProps = {
 
 export function providerLabel(provider: ManagedSocialProvider): string {
   return provider === "google" ? "Google" : "GitHub";
+}
+
+/**
+ * The Security page header. The page draws its own (the settings shell passes
+ * no header) because the title is the focus fallback after a dialog closes.
+ */
+export function SecurityPageHeader({ headingRef }: { headingRef?: Ref<HTMLHeadingElement> }) {
+  return (
+    <header data-slot="page-header" className="min-w-0 pb-4">
+      <h1
+        ref={headingRef}
+        tabIndex={-1}
+        className="text-xl leading-7 font-semibold tracking-[-0.5px] break-words text-fg"
+      >
+        Security
+      </h1>
+      <p className="mt-1 text-sm leading-5 text-fg-muted">
+        Manage how you sign in to your personal Opengeni account.
+      </p>
+    </header>
+  );
+}
+
+const SIGN_IN_METHODS_TITLE = "Sign-in methods";
+const SIGN_IN_METHODS_DESCRIPTION =
+  "Keep at least one usable sign-in method connected so you can access your account.";
+
+/**
+ * The page body under the header: the settings rhythm puts the first section
+ * 32px below it. Loading and error states use it too, so nothing jumps.
+ */
+export function SecurityPageBody({ children }: { children: ReactNode }) {
+  return <div className="mt-8 min-w-0">{children}</div>;
+}
+
+/** The sign-in methods card while it loads or failed to load. */
+export function SignInMethodsPlaceholder({ children }: { children: ReactNode }) {
+  return (
+    <Section title={SIGN_IN_METHODS_TITLE} description={SIGN_IN_METHODS_DESCRIPTION}>
+      {children}
+    </Section>
+  );
+}
+
+function methodDescription(method: SignInMethodView): ReactNode {
+  const status = method.connected
+    ? method.email
+      ? `${method.emailLabel ?? ""}${method.email}${method.handle ? ` · ${method.handle}` : ""}`
+      : (method.handle ?? "Connected")
+    : "Not connected";
+  const notes = [
+    method.connected && !method.canDisconnect
+      ? "Your last usable sign-in method. Connect another method or set a password first."
+      : null,
+    method.available ? null : "Sign-in with this provider is unavailable on this deployment.",
+    method.reconnectRequired && !method.connected
+      ? "Previously disconnected. Reconnect here to use it for sign-in again."
+      : null,
+  ].filter((note): note is string => note !== null);
+  return (
+    <>
+      <span className="block break-words">{status}</span>
+      {notes.map((note) => (
+        <span key={note} className="block">
+          {note}
+        </span>
+      ))}
+    </>
+  );
 }
 
 /** Presentation model is separate from the browser-cookie API and its actor fence. */
@@ -73,242 +148,217 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
       setPasswordOpen(false);
   }
 
-  return (
-    <div className="grid min-w-0 gap-6" aria-busy={props.busy}>
-      <div>
-        <h1 ref={headingRef} tabIndex={-1} className="text-xl font-semibold tracking-tight">
-          Security
-        </h1>
-        <p className="mt-1 text-sm leading-6 text-fg-muted">
-          Manage how you sign in to your personal OpenGeni account.
-        </p>
-      </div>
-      {props.error ? (
-        <div role="alert">
-          <Notice tone="failed">{props.error}</Notice>
-        </div>
-      ) : null}
-      {props.success ? (
-        <div role="status">
-          <Notice tone="success">{props.success}</Notice>
-        </div>
-      ) : null}
-      {props.recentAuthRequired ? (
-        <Notice tone="waiting" title="Confirm it's you">
-          <p>
-            Sign in again before changing your sign-in methods. Return here to review and retry your
-            change.
-          </p>
-          <Button
-            className="mt-3 min-h-11"
-            variant="secondary"
-            disabled={props.busy}
-            onClick={() => {
-              setPassword("");
-              setCurrentPassword("");
-              setConfirmation("");
-              setPasswordOpen(false);
-              setDisconnect(null);
-              props.onReauthenticate();
-            }}
-          >
-            Sign in again
-          </Button>
-        </Notice>
-      ) : null}
-      <section aria-labelledby="signin-methods-heading" className="min-w-0">
-        <h2 id="signin-methods-heading" className="flex items-center gap-2 text-sm font-semibold">
-          <ShieldCheckIcon className="size-4 text-fg-subtle" aria-hidden="true" /> Sign-in methods
-        </h2>
-        <p className="mt-1 text-sm leading-6 text-fg-muted">
-          Keep at least one usable sign-in method connected so you can access your account.
-        </p>
-        <ul className="mt-3 divide-y divide-border border-y border-border">
-          {props.methods.map((method) => (
-            <li
-              key={method.provider}
-              className="flex min-w-0 flex-wrap items-center justify-between gap-3 py-4"
-            >
-              <div className="min-w-0 flex-1 basis-48">
-                <h3 className="text-sm font-medium">{providerLabel(method.provider)}</h3>
-                <p className="mt-1 break-words text-sm text-fg-muted">
-                  {method.connected
-                    ? method.email
-                      ? `${method.emailLabel ?? ""}${method.email}`
-                      : (method.handle ?? "Connected")
-                    : "Not connected"}
-                  {method.connected && method.email && method.handle ? ` · ${method.handle}` : ""}
-                </p>
-                {method.connected && !method.canDisconnect ? (
-                  <p className="mt-1 text-xs text-fg-subtle">
-                    Your last usable sign-in method. Connect another method or set a password first.
-                  </p>
-                ) : null}
-                {!method.available ? (
-                  <p className="mt-1 text-xs text-fg-subtle">
-                    Sign-in with this provider is unavailable on this deployment.
-                  </p>
-                ) : null}
-                {method.reconnectRequired && !method.connected ? (
-                  <p className="mt-1 text-xs text-fg-subtle">
-                    Previously disconnected. Reconnect here to use it for sign-in again.
-                  </p>
-                ) : null}
-              </div>
-              {method.connected ? (
-                <Button
-                  className="min-h-11"
-                  variant="outline"
-                  disabled={locked || !method.canDisconnect}
-                  aria-label={`Disconnect ${providerLabel(method.provider)}`}
-                  onClick={(event) => {
-                    disconnectTrigger.current = event.currentTarget;
-                    setDisconnect(method.provider);
-                  }}
-                >
-                  Disconnect
-                </Button>
-              ) : (
-                <Button
-                  className="min-h-11"
-                  variant="outline"
-                  disabled={locked || !method.available}
-                  aria-label={`${method.reconnectRequired ? "Reconnect" : "Connect"} ${providerLabel(method.provider)}`}
-                  onClick={() => props.onConnect(method.provider)}
-                >
-                  {method.reconnectRequired ? "Reconnect" : "Connect"}
-                </Button>
-              )}
-            </li>
-          ))}
-        </ul>
-      </section>
-      <section aria-labelledby="signin-password-heading" className="grid gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2
-              id="signin-password-heading"
-              className="flex items-center gap-2 text-sm font-semibold"
-            >
-              <KeyRoundIcon className="size-4 text-fg-subtle" aria-hidden="true" /> Password
-            </h2>
-            <p className="mt-1 text-sm text-fg-muted">
-              {props.hasPassword
-                ? "A password is set for email sign-in."
-                : "No password set. Add one to sign in with your email."}
-            </p>
+  function closePassword() {
+    setPasswordOpen(false);
+    setPassword("");
+    setCurrentPassword("");
+    setConfirmation("");
+    setValidation(null);
+  }
+
+  const feedback =
+    props.error || props.success || props.recentAuthRequired ? (
+      <div className="mb-8 grid min-w-0 gap-3">
+        {props.error ? (
+          <div role="alert">
+            <Notice tone="failed" action={props.errorAction} actionLayout="responsive">
+              {props.error}
+            </Notice>
           </div>
-          {!passwordOpen ? (
-            <Button
-              variant="outline"
-              className="min-h-11"
-              disabled={locked || !props.passwordAvailable}
-              onClick={() => {
-                setPasswordOpen(true);
-                setValidation(null);
-              }}
-            >
-              {props.hasPassword ? "Change password" : "Set password"}
-            </Button>
-          ) : null}
-        </div>
-        {!props.passwordAvailable ? (
-          <p className="text-xs text-fg-subtle">
-            Password sign-in is unavailable on this deployment.
-          </p>
         ) : null}
-        {passwordOpen ? (
-          <form
-            className="grid max-w-md gap-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!locked) void savePassword();
-            }}
-          >
-            {props.hasPassword ? (
-              <div className="grid gap-2">
-                <Label htmlFor="signin-current-password">Current password</Label>
-                <Input
-                  id="signin-current-password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  disabled={locked}
-                  value={currentPassword}
-                  onChange={(event) => setCurrentPassword(event.target.value)}
-                />
-              </div>
-            ) : null}
-            <div className="grid gap-2">
-              <Label htmlFor="signin-new-password">New password</Label>
-              <Input
-                id="signin-new-password"
-                type="password"
-                autoComplete="new-password"
-                minLength={8}
-                maxLength={128}
-                required
-                disabled={locked}
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                aria-describedby="signin-password-hint"
-                aria-invalid={Boolean(validation)}
-              />
-              <p id="signin-password-hint" className="text-xs text-fg-subtle">
-                Use at least 8 characters. A unique password keeps your account safer.
-              </p>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="signin-confirm-password">Confirm new password</Label>
-              <Input
-                id="signin-confirm-password"
-                type="password"
-                autoComplete="new-password"
-                required
-                disabled={locked}
-                value={confirmation}
-                onChange={(event) => setConfirmation(event.target.value)}
-                aria-invalid={Boolean(validation)}
-                aria-describedby={validation ? "signin-password-validation" : undefined}
-              />
-            </div>
-            {validation ? (
-              <p
-                id="signin-password-validation"
-                role="alert"
-                className="text-sm text-status-failed"
-              >
-                {validation}
-              </p>
-            ) : null}
-            <div className="flex flex-wrap gap-2">
-              <Button type="submit" className="min-h-11" disabled={locked}>
-                {props.busy ? "Saving…" : "Save password"}
-              </Button>
+        {props.success ? (
+          <div role="status">
+            <Notice tone="success">{props.success}</Notice>
+          </div>
+        ) : null}
+        {props.recentAuthRequired ? (
+          <Notice
+            tone="waiting"
+            title="Confirm it's you"
+            actionLayout="responsive"
+            action={
               <Button
-                type="button"
-                variant="ghost"
-                className="min-h-11"
+                size="sm"
+                className="pointer-coarse:h-11"
                 disabled={props.busy}
                 onClick={() => {
-                  setPasswordOpen(false);
                   setPassword("");
                   setCurrentPassword("");
                   setConfirmation("");
-                  setValidation(null);
+                  setPasswordOpen(false);
+                  setDisconnect(null);
+                  props.onReauthenticate();
                 }}
               >
-                Cancel
+                Sign in again
               </Button>
-            </div>
-          </form>
+            }
+          >
+            Sign in again before changing your sign-in methods. Return here to review and retry your
+            change.
+          </Notice>
         ) : null}
-      </section>
-      <p className="border-t border-border pt-4 text-sm leading-6 text-fg-subtle">
-        These methods only sign you in to OpenGeni. Repository access, Gmail, and Google Drive are
-        separate connections managed in workspace Capabilities. Connecting or disconnecting a
-        sign-in method does not grant or remove those integrations.
-      </p>
+      </div>
+    ) : null;
+
+  return (
+    <div className="min-w-0" aria-busy={props.busy}>
+      <SecurityPageHeader headingRef={headingRef} />
+      <SecurityPageBody>
+        {feedback}
+        <SectionStack>
+          <Section
+            title={SIGN_IN_METHODS_TITLE}
+            description={SIGN_IN_METHODS_DESCRIPTION}
+            action={props.sectionAction}
+          >
+            {props.methods.map((method) => (
+              <SettingRow
+                key={method.provider}
+                label={providerLabel(method.provider)}
+                description={methodDescription(method)}
+                control={
+                  method.connected ? (
+                    <RowButton
+                      disabled={locked || !method.canDisconnect}
+                      aria-label={`Disconnect ${providerLabel(method.provider)}`}
+                      onClick={(event) => {
+                        disconnectTrigger.current = event.currentTarget;
+                        setDisconnect(method.provider);
+                      }}
+                    >
+                      Disconnect
+                    </RowButton>
+                  ) : (
+                    <RowButton
+                      disabled={locked || !method.available}
+                      aria-label={`${method.reconnectRequired ? "Reconnect" : "Connect"} ${providerLabel(method.provider)}`}
+                      onClick={() => props.onConnect(method.provider)}
+                    >
+                      {method.reconnectRequired ? "Reconnect" : "Connect"}
+                    </RowButton>
+                  )
+                }
+              />
+            ))}
+            <SettingRow
+              label="Password"
+              description={
+                <>
+                  <span className="block">
+                    {props.hasPassword
+                      ? "A password is set for email sign-in."
+                      : "No password set. Add one to sign in with your email."}
+                  </span>
+                  {props.passwordAvailable ? null : (
+                    <span className="block">
+                      Password sign-in is unavailable on this deployment.
+                    </span>
+                  )}
+                </>
+              }
+              control={
+                passwordOpen ? undefined : (
+                  <RowButton
+                    disabled={locked || !props.passwordAvailable}
+                    onClick={() => {
+                      setPasswordOpen(true);
+                      setValidation(null);
+                    }}
+                  >
+                    {props.hasPassword ? "Change password" : "Set password"}
+                  </RowButton>
+                )
+              }
+            />
+            {passwordOpen ? (
+              <form
+                aria-label={props.hasPassword ? "Change password" : "Set password"}
+                className="py-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!locked) void savePassword();
+                }}
+              >
+                <FieldStack className="max-w-md gap-5">
+                  {props.hasPassword ? (
+                    <Field label="Current password" id="signin-current-password" required>
+                      <TextInput
+                        type="password"
+                        autoComplete="current-password"
+                        required
+                        disabled={locked}
+                        value={currentPassword}
+                        onChange={(event) => setCurrentPassword(event.target.value)}
+                      />
+                    </Field>
+                  ) : null}
+                  <Field
+                    label="New password"
+                    id="signin-new-password"
+                    required
+                    hint="Use at least 8 characters. A unique password keeps your account safer."
+                  >
+                    <TextInput
+                      type="password"
+                      autoComplete="new-password"
+                      minLength={8}
+                      maxLength={128}
+                      required
+                      disabled={locked}
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      aria-invalid={Boolean(validation) || undefined}
+                    />
+                  </Field>
+                  <Field label="Confirm new password" id="signin-confirm-password" required>
+                    <TextInput
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      disabled={locked}
+                      value={confirmation}
+                      onChange={(event) => setConfirmation(event.target.value)}
+                      aria-invalid={Boolean(validation) || undefined}
+                      aria-describedby={validation ? "signin-password-validation" : undefined}
+                    />
+                  </Field>
+                </FieldStack>
+                {validation ? (
+                  <p
+                    id="signin-password-validation"
+                    role="alert"
+                    className="mt-3 flex items-start gap-1.5 text-xs leading-4.5 text-danger"
+                  >
+                    <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+                    <span className="min-w-0">{validation}</span>
+                  </p>
+                ) : null}
+                <div className="mt-5 flex flex-wrap gap-2">
+                  <Button type="submit" size="sm" className="pointer-coarse:h-11" disabled={locked}>
+                    {props.busy ? "Saving…" : "Save password"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="pointer-coarse:h-11"
+                    disabled={props.busy}
+                    onClick={closePassword}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            ) : null}
+          </Section>
+        </SectionStack>
+        <p className="mt-3 text-xs leading-4.5 text-fg-muted">
+          These methods only sign you in to Opengeni. Repository access, Gmail, and Google Drive are
+          separate connections managed in workspace Capabilities. Connecting or disconnecting a
+          sign-in method does not grant or remove those integrations.
+        </p>
+      </SecurityPageBody>
       <ConfirmDialog
         open={disconnect !== null}
         onOpenChange={(open) => {

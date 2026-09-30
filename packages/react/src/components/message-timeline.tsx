@@ -324,7 +324,7 @@ const QUESTION_NAV_MARGIN_PX = 12;
 const OLDER_PREFETCH_MARGIN_PX = 400;
 const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 const PRIMARY_ACTION_CLASS =
-  "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto";
+  "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-menu font-medium sm:w-auto";
 const MESSAGE_BUBBLE_CLASS =
   "w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg";
 const WAITING_PILL_CLASS =
@@ -4756,7 +4756,7 @@ function AuthNeededRow({
             target="_blank"
             className={cn(
               PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
+              "transition-colors hover:bg-og-primary-hover pointer-coarse:min-h-9",
             )}
           >
             <RefreshCwIcon className="size-3.5" aria-hidden />
@@ -4769,7 +4769,7 @@ function AuthNeededRow({
             disabled={busy}
             className={cn(
               PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
+              "transition-colors hover:bg-og-primary-hover disabled:opacity-50 pointer-coarse:min-h-9",
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
@@ -4782,7 +4782,7 @@ function AuthNeededRow({
             target="_blank"
             className={cn(
               PRIMARY_ACTION_CLASS,
-              "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
+              "transition-colors hover:bg-og-primary-hover pointer-coarse:min-h-9",
             )}
           >
             <RefreshCwIcon className="size-3.5" aria-hidden />

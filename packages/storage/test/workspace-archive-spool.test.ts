@@ -126,7 +126,7 @@ describe("workspace archive spool storage", () => {
     const { storage } = fixture();
     storage.headObject = async () => null;
     await expect(uploadWorkspaceArchiveSpool(storage, key, source())).rejects.toMatchObject({
-      code: "archive_base64_invalid",
+      code: "archive_object_missing",
       retryable: false,
     });
   });
@@ -168,7 +168,7 @@ describe("workspace archive spool storage", () => {
       };
       storage.getObjectRange = async () => null;
       await expect(downloadWorkspaceArchiveSpool(storage, key, expected)).rejects.toMatchObject({
-        code: after === "missing" ? "archive_base64_invalid" : "archive_hydration_failed",
+        code: after === "missing" ? "archive_object_missing" : "archive_hydration_failed",
         retryable: after !== "missing",
       });
       expect(heads).toBe(2);
@@ -342,7 +342,7 @@ describe("workspace archive spool storage", () => {
       const retryable = ["drift", "final-drift", "provider"].includes(failure);
       expect(error).toMatchObject({
         code: missing
-          ? "archive_base64_invalid"
+          ? "archive_object_missing"
           : retryable || failure === "token"
             ? "archive_hydration_failed"
             : "archive_hash_mismatch",

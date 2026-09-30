@@ -28,6 +28,18 @@ export type RunCredentialRenewalOptions = {
   }) => void;
 };
 
+export function runCredentialRenewalExpiry(
+  material: NormalizedRunCredentialMaterial | null,
+): Date | null {
+  const expiries = [
+    ...(material?.expiresAt ? [material.expiresAt.getTime()] : []),
+    ...(material?.mcp ?? []).flatMap((entry) =>
+      entry.expiresAt ? [Date.parse(entry.expiresAt)] : [],
+    ),
+  ];
+  return expiries.length ? new Date(Math.min(...expiries)) : null;
+}
+
 export function nextRunCredentialRenewalDelay(expiresAt: Date | null, nowMs = Date.now()): number {
   return nextExpiringMaterialRenewalDelay(
     expiresAt,
@@ -52,7 +64,7 @@ export function startRunCredentialRenewalLoop(
     initialExpiresAt: options.initialExpiresAt,
     resolve: options.resolve,
     write: options.write,
-    expiresAt: (material) => material?.expiresAt ?? null,
+    expiresAt: runCredentialRenewalExpiry,
     publicErrorClass: "RunCredentialRenewalOperationError",
     policy: {
       defaultRefreshMs: RUN_CREDENTIAL_DEFAULT_REFRESH_MS,

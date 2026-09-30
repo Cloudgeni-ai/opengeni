@@ -193,6 +193,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/embedded-artifact-viewer.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/chat-media-entry.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -210,6 +215,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/ai-gateway-connection.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/claude-subscription.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/sdk",
     "@opengeni/testing",
@@ -263,6 +273,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/composer-pane.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
+  "test/e2e/composer-keyboard.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/composer-menus.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",

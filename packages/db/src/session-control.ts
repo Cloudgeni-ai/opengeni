@@ -252,7 +252,7 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait";
+    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings";
   },
 ): Promise<void> {
   if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
