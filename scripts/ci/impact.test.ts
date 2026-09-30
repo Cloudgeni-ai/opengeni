@@ -28,6 +28,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
+const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
@@ -113,6 +114,27 @@ describe("fail-closed change impact", () => {
       expect(plan.integrationTests, path).not.toContain(suite);
     }
     expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(suite);
+  });
+
+  test("Claude connection coverage follows its web and shared dependencies without widening leaf plans", () => {
+    for (const path of [
+      CLAUDE_SUBSCRIPTION_E2E,
+      "apps/web/src/components/models/workspace-models-page.tsx",
+      "apps/web/src/components/models/claude-usage.tsx",
+      "apps/web/test/claude-subscription-fixture.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(CLAUDE_SUBSCRIPTION_E2E);
+      expect(plan.unitTests, path).not.toContain(CLAUDE_SUBSCRIPTION_E2E);
+      expect(plan.integrationTests, path).not.toContain(CLAUDE_SUBSCRIPTION_E2E);
+    }
+    expect(usesBrowserRunner(CLAUDE_SUBSCRIPTION_E2E)).toBe(true);
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      CLAUDE_SUBSCRIPTION_E2E,
+    );
   });
 
   test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
@@ -266,6 +288,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
+      CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
       COMPOSER_KEYBOARD_E2E,
@@ -777,6 +800,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
+      CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
       COMPOSER_KEYBOARD_E2E,

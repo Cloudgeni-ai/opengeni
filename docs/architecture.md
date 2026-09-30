@@ -1003,20 +1003,10 @@ quota refusals, not backpressure or newer refusals. Capped admission and waits
 use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
 durations, never primary/secondary position. Headers lacking both durations cannot
 update labeled cache; absent reset timing does not clear an exhausted window.
-The account picker refreshes live usage on open rather than trusting stale labels.
+Opening the account picker refreshes usage.
 
-Claude subscription setup accepts a setup token alone. The API generates scoped
-device identity and encrypts it with the token; older imported identity remains
-valid. Runtime response observers capture provider quota windows without reading
-response bodies; worker finalization persists them against the current encrypted
-credential. Usage writes never advance credential or model admission versions.
-Scoped API reads expose cached observations and authorized refreshes use the
-provider usage endpoint. Inference-only setup tokens cannot read that endpoint;
-their readings update from model responses. Connection replacement invalidates
-the cache, and an elapsed reset is unknown until Claude reports a new reading.
-Canonical: `packages/db/src/claude-subscription-usage.ts`,
-`apps/api/src/claude-subscription-usage.ts`,
-`apps/web/src/components/models/claude-usage.tsx`.
+Claude setup and quota observations:
+[`model-providers.md`](model-providers.md#claude-subscription-usage).
 
 Codex turns require durable credential leases. `rotation_enabled` off waits on
 capped accounts; on permits same-turn failover. First allocation freezes source,
