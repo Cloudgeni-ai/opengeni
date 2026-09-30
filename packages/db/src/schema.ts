@@ -2990,8 +2990,17 @@ export const slackInteractions = pgTable(
     // Environment), rendered once when the session binds and shown in the
     // acknowledgement. Frozen for the same byte-compare reason as the label
     // above: the session's tools and resources can change after creation.
-    // NULL means no line (bound by an older image, or never bound).
+    // NULL means no line. No longer written: new tasks do not list what they
+    // started with, and older rows keep their line so a repair of an already
+    // posted acknowledgement still renders the same bytes.
     sessionDefaultsLine: text("session_defaults_line"),
+    // The first message's opening sentence (session link, routed workspace,
+    // privacy note), rendered once when the session binds. Frozen for the same
+    // byte-compare reason as the label above: the first message is re-rendered
+    // on repair, on every Stop/Resume click, and when the task settles. NULL
+    // means the interaction keeps the previous message format (bound before
+    // this column existed, or by an older image).
+    startMessageLine: text("start_message_line"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
@@ -11631,6 +11640,7 @@ export const scheduledTaskRuns = pgTable(
     acceptedExecutionSnapshot: jsonb("accepted_execution_snapshot").$type<unknown>(),
     acceptedExecutionDigest: text("accepted_execution_digest"),
     admissionDiagnostic: jsonb("admission_diagnostic").$type<unknown>(),
+    admissionRefusal: jsonb("admission_refusal").$type<unknown>(),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -4,6 +4,7 @@ import {
   AddExternalWorkspaceMemberRequest,
   ExternalIdentityReference,
   CancelExternalWorkspaceMemberGrantRequest,
+  UpdateExternalWorkspaceMemberRequest,
   type ExternalIdentity,
 } from "@opengeni/contracts/external-identities";
 import {
@@ -16,6 +17,7 @@ import {
   withWorkspaceSubjectRls,
   addExternalWorkspaceMemberOperation,
   cancelExternalWorkspaceMemberGrant,
+  updateExternalWorkspaceMemberOperation,
   lookupExternalIdentity,
   nestedPostgresSqlState,
 } from "@opengeni/db";
@@ -174,6 +176,37 @@ export async function cancelExternalWorkspaceMemberGrantForRequest(
     throw new HTTPException(422, { message: "Invalid external grant cancellation" });
   try {
     return await cancelExternalWorkspaceMemberGrant(
+      deps.db,
+      { ...service, workspaceId, membershipId },
+      request.data,
+    );
+  } catch (error) {
+    rethrowExternalWorkspaceOperation(error);
+  }
+}
+
+/** Keyed permission change for an existing external member. Widening only
+ * rewrites the set; narrowing also advances the member's authorization
+ * revision so live authority re-checks. Never cancels or tears down work. */
+export async function updateExternalWorkspaceMemberForRequest(
+  c: Context,
+  deps: AccessDeps,
+  organizationId: string,
+  workspaceId: string,
+  membershipId: string,
+  input: unknown,
+) {
+  const service = await externalService(c, deps, organizationId);
+  const request = UpdateExternalWorkspaceMemberRequest.safeParse(input);
+  if (!request.success)
+    throw new HTTPException(422, {
+      message: `Invalid external member update: ${request.error.issues
+        .slice(0, 5)
+        .map((issue) => `${issue.path.map(String).join(".") || "request"}: ${issue.message}`)
+        .join("; ")}`,
+    });
+  try {
+    return await updateExternalWorkspaceMemberOperation(
       deps.db,
       { ...service, workspaceId, membershipId },
       request.data,

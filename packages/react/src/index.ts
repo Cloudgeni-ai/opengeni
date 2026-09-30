@@ -483,6 +483,10 @@ export type { CommandPaletteProps } from "./components/command-palette";
 export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
 export { SessionConversation } from "./components/session-conversation";
+export { SessionList } from "./components/session-list";
+export type { SessionListLabels, SessionListProps } from "./components/session-list";
+export { OpenGeniChat } from "./components/open-geni-chat";
+export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
 export type { SessionConversationProps } from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
@@ -569,6 +573,9 @@ export type { WorkbenchChangesProps } from "./components/workbench-changes";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";
+// Opt in to the optional `@pierre/diffs` peer with `enablePierreDiffs()` from
+// `@opengeni/react/diffs`; the root entry never names the peer.
+export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-loader";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";

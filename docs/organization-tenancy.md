@@ -880,9 +880,9 @@ application database role list through
 0348; and never restart a pre-0348 image. The migration checks
 `pg_stat_activity` before and after its exclusive writer fence and aborts with
 SQLSTATE `55000` if a configured application login remains. The Personal-only
-product mutations are also API-contract fenced, and the web sends the exact
-release contract revision, so a stale client cannot cross the cutover after
-service resumes.
+product mutations are also API-contract fenced for cookie-authenticated browser
+sessions, and the web sends the exact release contract revision, so a stale tab
+cannot cross the cutover after service resumes.
 
 The canonical repository acceptance for this lifecycle is
 `test/e2e/organization-onboarding-acceptance.e2e.ts`. It composes the real
@@ -967,7 +967,7 @@ no Personal workspace is shared.
 
 Organization usage (`GET /v1/billing/usage-summary`, Organization settings >
 Billing & usage) is the one place billing readers see Personal workspaces, and
-only as amounts. Period totals always counted Personal usage; migration 0541
+only as amounts. Period totals always counted Personal usage; migration 0542
 adds `personalWorkspaces`: one row per member whose Personal workspace had
 visible usage in the period, keyed by that member's organization membership
 id, carrying the same metric totals as a shared workspace row. The rows never

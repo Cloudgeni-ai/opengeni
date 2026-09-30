@@ -51,6 +51,7 @@ import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
+import { parseRequestJson } from "../http/request-body";
 
 const ReadSettings = z
   .object({
@@ -167,10 +168,10 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         context.workspaceId,
         "files:read",
       );
-      const { revisionId } = z
-        .object({ revisionId: z.uuid().optional() })
-        .strict()
-        .parse(await c.req.json());
+      const { revisionId } = await parseRequestJson(
+        c,
+        z.object({ revisionId: z.uuid().optional() }).strict(),
+      );
       const entryId = Id.parse(c.req.param("entryId"));
       const file = await getKnowledgeOriginalFile(deps.db, context, entryId, revisionId);
       if (!file) throw new HTTPException(404, { message: "Original file unavailable" });
@@ -233,7 +234,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await prepareKnowledgeSave(
           deps.db,
           context,
-          KnowledgeSavePreparationRequest.parse(await c.req.json()),
+          await parseRequestJson(c, KnowledgeSavePreparationRequest),
           () => deps.getDocumentServices().embedder,
           undefined,
           deps.settings,
@@ -247,7 +248,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await searchKnowledgeEntries(
           deps.db,
           context,
-          KnowledgeEntryListRequest.parse(await c.req.json()),
+          await parseRequestJson(c, KnowledgeEntryListRequest),
           () => deps.getDocumentServices().embedder,
           deps.settings,
         ),
@@ -275,7 +276,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await reviewKnowledgeEntries(
           deps.db,
           context,
-          KnowledgeEntryBatchReviewRequest.parse(await c.req.json()),
+          await parseRequestJson(c, KnowledgeEntryBatchReviewRequest),
         ),
       ),
     ),
@@ -302,7 +303,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       const result = await saveKnowledgeEntry(
         deps.db,
         context,
-        KnowledgeEntrySaveRequest.parse(await c.req.json()),
+        await parseRequestJson(c, KnowledgeEntrySaveRequest),
       );
       return c.json(result, result.replayed ? 200 : 201);
     }),
@@ -360,10 +361,10 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
   app.post(`${base}/:entryId/archive`, (c) =>
     run(c, true, async (context) => {
-      const request = z
-        .object({ operationId: Id, expectedVersion: z.number().int().positive() })
-        .strict()
-        .parse(await c.req.json());
+      const request = await parseRequestJson(
+        c,
+        z.object({ operationId: Id, expectedVersion: z.number().int().positive() }).strict(),
+      );
       return c.json(
         await archiveKnowledgeEntry(deps.db, context, {
           ...request,
@@ -403,14 +404,14 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         await reviewAgentInstruction(
           deps.db,
           await instructionReviewContext(c, context),
-          AgentInstructionReviewRequest.parse(await c.req.json()),
+          await parseRequestJson(c, AgentInstructionReviewRequest),
         ),
       ),
     ),
   );
   app.post(`${learning}/read`, (c) =>
     run(c, false, async (context) => {
-      const request = ReadSettings.parse(await c.req.json());
+      const request = await parseRequestJson(c, ReadSettings);
       return c.json(
         await getAgentLearningSettings(deps.db, context, request.scope, request.source),
       );
@@ -427,7 +428,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   );
   app.post(learning, (c) =>
     run(c, false, async (context) => {
-      const request = WriteSettings.parse(await c.req.json());
+      const request = await parseRequestJson(c, WriteSettings);
       if (context.actor.kind !== "human")
         throw new HTTPException(403, { message: "Agents cannot change learning settings" });
       const access = await requireAccessGrantAuthorization(c, deps, context.workspaceId);

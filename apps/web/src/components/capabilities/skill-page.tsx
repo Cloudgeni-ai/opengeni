@@ -58,6 +58,7 @@ export function SkillPage({
   onContentChange,
   onAddFile,
   onRemoveFile,
+  onRemove,
   onSave,
   onDiscard,
   onReviewRevision,
@@ -83,6 +84,7 @@ export function SkillPage({
   onContentChange: (content: string) => void;
   onAddFile: () => void;
   onRemoveFile: () => void;
+  onRemove: () => void;
   onSave: () => void;
   onDiscard: () => void;
   onReviewRevision: (operation: "approve" | "restore") => void;
@@ -157,7 +159,23 @@ export function SkillPage({
         isNew ? null : record.source ? "Installed from a source" : "Written in this workspace",
         activeVersion ? `Version ${activeVersion.revision}` : null,
       ]}
-      actions={actions}
+      actions={
+        <>
+          {!isNew && record.scope !== "organization" && canManage(record.scope) ? (
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              className={buttonClass}
+              disabled={busy}
+              onClick={onRemove}
+            >
+              Remove skill
+            </Button>
+          ) : null}
+          {actions}
+        </>
+      }
       aside={
         isNew ? undefined : (
           <CapabilityAside
@@ -204,7 +222,9 @@ export function SkillPage({
             <p className="mt-3 mb-0 text-xs leading-4.5 text-fg-muted">
               {pending
                 ? "You are looking at a proposed version. It is not active until someone approves it."
-                : "You are looking at an older version. Restoring it saves it as a new version."}
+                : record.activeRevisionId === null
+                  ? "This skill is inactive. Restoring this version makes it active again."
+                  : "You are looking at an older version. Restoring it saves it as a new version."}
             </p>
           ) : null}
         </DetailSection>
@@ -215,7 +235,9 @@ export function SkillPage({
         description={
           editable
             ? "Edit the name and description at the top of SKILL.md."
-            : "Only people who can manage this skill can change it."
+            : reviewing
+              ? "Restore or approve this version to edit its instructions."
+              : "Only people who can manage this skill can change it."
         }
       >
         <div className="grid min-w-0 gap-3">

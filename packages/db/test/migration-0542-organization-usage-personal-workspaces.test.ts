@@ -15,7 +15,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const migrationPath = new URL(
-  "../drizzle/0541_organization_usage_personal_workspaces.sql",
+  "../drizzle/0542_organization_usage_personal_workspaces.sql",
   import.meta.url,
 );
 const signature =
@@ -28,7 +28,7 @@ beforeAll(async () => {
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
       throw new Error("Organization usage Personal rows owner-RLS fixture unavailable");
-    console.warn("SKIPPED 0541 owner/FORCE-RLS Personal usage assertions: PostgreSQL unavailable");
+    console.warn("SKIPPED 0542 owner/FORCE-RLS Personal usage assertions: PostgreSQL unavailable");
     return;
   }
   await migrate(owned.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
@@ -44,7 +44,7 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-describe("0541 organization usage Personal workspace rows", () => {
+describe("0542 organization usage Personal workspace rows", () => {
   test("source replaces only the aggregate, keeps the shared inventory and restores scope", async () => {
     const source = await readFile(migrationPath, "utf8");
     expect(source.split("\n")[0]).toBe("-- deployment-mode: rolling");

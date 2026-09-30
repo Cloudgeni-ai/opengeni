@@ -37,6 +37,7 @@ import {
   browseGoogleDriveFacetSource,
   saveGoogleDriveFacetSource,
 } from "../integrations/google-drive";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get(
@@ -130,7 +131,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
-      const payload = UpsertIntegrationFacetRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, UpsertIntegrationFacetRequest);
       const capabilityId = decoded(c.req.param("capabilityId"));
       const instanceKey = decoded(c.req.param("instanceKey"));
       const facetKey = decoded(c.req.param("facetKey"));
@@ -222,7 +223,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
       async (c) => {
         const workspaceId = c.req.param("workspaceId");
         const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
-        const payload = MutateIntegrationFacetRequest.parse(await c.req.json());
+        const payload = await parseRequestJson(c, MutateIntegrationFacetRequest);
         try {
           return c.json(
             IntegrationFacetMutationResult.parse(
@@ -261,7 +262,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
-      const payload = MutateIntegrationFacetRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, MutateIntegrationFacetRequest);
       try {
         return c.json(
           IntegrationFacetRemovalResult.parse(

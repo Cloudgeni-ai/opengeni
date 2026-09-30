@@ -518,3 +518,65 @@ test("a refused skills list is a calm line without Try again", async () => {
     await view.dispose();
   }
 });
+
+test("inactive skills can be removed with confirmation; failed retries retain the operation and successful removal clears the row", async () => {
+  const inactive = { ...record, status: "disabled", activeRevisionId: null };
+  const requests: unknown[] = [];
+  const { context } = fixture({
+    async listWorkspaceSkills() {
+      return { skills: [inactive], nextCursor: null };
+    },
+    async readWorkspaceSkill() {
+      return inactive;
+    },
+    async removeWorkspaceSkill(_workspaceId: string, _skillId: string, request: unknown) {
+      requests.push(request);
+      if (requests.length === 1) throw new Error("Temporary failure");
+      return { removed: true, outcome: "applied" };
+    },
+  });
+  const view = await mount(context);
+  try {
+    expect(view.container.querySelector(".og-connection-installed-status")?.textContent).toBe(
+      "Inactive",
+    );
+    await view.click("Example");
+    await view.click("Remove skill");
+    expect(requests).toHaveLength(0);
+    await view.click("Cancel");
+    expect(requests).toHaveLength(0);
+    await view.click("Remove skill");
+    const confirm = () =>
+      act(async () => {
+        const dialog = document.querySelector('[role="dialog"]')!;
+        const button = [...dialog.querySelectorAll("button")].find(
+          (b) => b.textContent === "Remove skill",
+        )!;
+        button.click();
+      });
+    await confirm();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Temporary failure");
+    await confirm();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toEqual(requests[1]);
+    expect(requests[0]).toMatchObject({ expectedRevisionId: null, expectedScopeVersion: 1 });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(view.container.querySelector(".og-connection-installed button")).toBeNull();
+    expect(view.container.textContent).toContain("permanently deleted");
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("read-only viewers cannot remove skills", async () => {
+  const { context } = fixture({}, false);
+  const view = await mount(context);
+  try {
+    await view.click("Example");
+    expect(
+      [...view.container.querySelectorAll("button")].some((b) => b.textContent === "Remove skill"),
+    ).toBe(false);
+  } finally {
+    await view.dispose();
+  }
+});

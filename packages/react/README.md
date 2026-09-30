@@ -83,10 +83,55 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-Use `SessionConversation` for an existing session, or compose `MessageTimeline`
-and `ChatComposer` with the session hooks. These use the normal SDK through
-your authenticated host routes. For custom or compatible frontends, the backend
-`@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
+`SessionConversation` is the default product integration for an existing
+session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
+on your server, and point an unmodified browser
+`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+
+```tsx
+import "@opengeni/react/compiled.css";
+
+<OpenGeniProvider client={client} workspaceId={workspaceId}>
+  <SessionConversation sessionId={sessionId} />
+</OpenGeniProvider>;
+```
+
+Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
+the product needs a materially different interaction model. These components do
+not consume the text-only `@opengeni/sdk/chat` fallback protocol.
+
+`OpenGeniChat` adds the user's chat list to the conversation: a sidebar when
+the component is wide and a drawer behind a menu button when narrow (measured on
+its own container, so it works inside panels), a new-chat composer that creates
+the session from its first message, and inline rename and archive. It is
+composed from `SessionList` and `SessionConversation`, which you can also mount
+separately. Pass `conversationProps` for message rendering and tool renderers,
+`createSession` to create chats through your own endpoint, or `sessionId` /
+`onSessionChange` to control the selection (for example from the URL).
+
+`SessionConversation` hides its model picker when the client config reports
+`modelSelection: false` (a proxy that fixes the model policy); pass
+`modelPicker={false}` or `modelPicker` to override. Attachments appear when the
+deployment enables uploads (`attachments={false}` opts out), pending tool
+approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
+
+Highlighted diffs use the optional `@pierre/diffs` peer only after an explicit
+opt-in, so a host without it still builds with any bundler (Turbopack resolves
+every reachable `import()`). Hosts that install it call `enablePierreDiffs()`
+once; call it from the lazily loaded route that renders diffs to keep the peer
+out of your initial bundle. Views already on screen upgrade when it registers:
+
+```ts
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+enablePierreDiffs();
+```
+
+Without it, diffs and file views render as plain text.
+
+`OpenGeniProvider` never blocks or reloads the host page when OpenGeni deploys
+a new API contract revision. The stock OpenGeni console opts into that
+stale-tab protection with `reloadOnApiContractChange`; embedded products
+should leave it off.
 
 ### Exact conversation search navigation
 

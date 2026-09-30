@@ -19,6 +19,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { requestBodyValidationHttpError } from "../src/http/request-body";
 import { registerFileRoutes } from "../src/routes/files";
 
 const SECRET = "signed-url-audit-test-secret";
@@ -205,5 +206,28 @@ describe("signed-URL issuance audit facts", () => {
     const serialized = JSON.stringify(audit!.metadata);
     expect(serialized).not.toContain("signature=do-not-record");
     expect(serialized).not.toContain("/original/");
+  });
+
+  test("an upload begin with a wrong field is a 400 naming it, and mints nothing", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(["files:upload"]);
+    const app = routeApp();
+    // The production app maps tagged request-input failures centrally.
+    app.onError((error, c) => {
+      const mapped = requestBodyValidationHttpError(error);
+      return mapped
+        ? c.json({ message: mapped.message }, 400)
+        : c.json({ message: "unexpected" }, 500);
+    });
+    const response = await app.request(
+      `http://x/v1/workspaces/${workspace.workspaceId}/files/uploads`,
+      {
+        method: "POST",
+        headers: { authorization: workspace.authorization, "content-type": "application/json" },
+        body: JSON.stringify({ filename: "notes.txt", mediaType: "text/plain", sizeBytes: 42 }),
+      },
+    );
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { message: string }).message).toContain("contentType");
   });
 });

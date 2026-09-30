@@ -4,6 +4,7 @@
 import { useCodexAccounts } from "@opengeni/react";
 import type { CodexAccount, CodexUsageWindow, SessionEvent } from "@opengeni/sdk";
 import { ChevronDownIcon, Loader2Icon } from "lucide-react";
+import { useState } from "react";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChatGptMark } from "@/components/chatgpt-mark";
@@ -118,6 +119,9 @@ export function CodexAccountIndicator({
     enabled: modelReady && isCodexSession,
     ...(events !== undefined ? { events } : {}),
   });
+  const [checkingUsage, setCheckingUsage] = useState(false);
+  const [usageChecked, setUsageChecked] = useState(false);
+  const [usageCheckFailed, setUsageCheckFailed] = useState(false);
 
   if (!modelReady) {
     return (
@@ -158,9 +162,33 @@ export function CodexAccountIndicator({
   const tone = statusTone(effective);
   const hasAccounts = codex.accounts.length > 0;
   const ariaLabel = `Switch Codex account · ${selectionLabel} · ${displayName}`;
+  const liveStatus = effective ? codex.liveUsage[effective.id]?.status : null;
+  const usageUnavailable =
+    usageCheckFailed ||
+    (usageChecked && !liveStatus) ||
+    liveStatus === "error" ||
+    liveStatus === "no-data";
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (!open) return;
+        setCheckingUsage(true);
+        setUsageChecked(false);
+        setUsageCheckFailed(false);
+        void codex.refreshUsage().then(
+          (ok) => {
+            setUsageChecked(ok);
+            setUsageCheckFailed(!ok);
+            setCheckingUsage(false);
+          },
+          () => {
+            setUsageCheckFailed(true);
+            setCheckingUsage(false);
+          },
+        );
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <button
           type="button"
@@ -217,7 +245,11 @@ export function CodexAccountIndicator({
               </p>
             </div>
           </div>
-          {effective ? (
+          {checkingUsage ? (
+            <p className="text-2xs text-fg-subtle">Checking usage…</p>
+          ) : usageUnavailable ? (
+            <p className="text-2xs text-fg-subtle">Usage unavailable</p>
+          ) : effective ? (
             <div className="space-y-1.5">
               <UsageRow label="5h" window={effective.fiveHour} />
               <UsageRow label="Week" window={effective.weekly} />
@@ -267,7 +299,13 @@ export function CodexAccountIndicator({
               >
                 <span className="min-w-0 flex-1 truncate">{accountLabel(account)}</span>
                 {account.plan ? <DropdownMenuMeta>{account.plan}</DropdownMenuMeta> : null}
-                <MiniBar account={account} />
+                {!checkingUsage &&
+                !usageCheckFailed &&
+                (!usageChecked || codex.liveUsage[account.id]) &&
+                codex.liveUsage[account.id]?.status !== "error" &&
+                codex.liveUsage[account.id]?.status !== "no-data" ? (
+                  <MiniBar account={account} />
+                ) : null}
                 {account.status !== "active" ? (
                   <span className="shrink-0 text-xs text-status-waiting">
                     {account.status === "needs_relogin" ? "relogin" : account.status}

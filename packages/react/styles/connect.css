@@ -112,6 +112,7 @@
 .og-connection-installed button { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 10px; border: 0; box-shadow: none; border-radius: var(--og-radius-sm, 8px); background: transparent; color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
 .og-connection-installed button:hover { background: var(--og-color-surface-2, #f3f4f5); }
 .og-connection-installed button:focus-visible { outline: 2px solid var(--og-color-accent, currentColor); outline-offset: 2px; }
+.og-connection-installed-status { font-size: 12px; color: var(--og-color-fg-muted, inherit); }
 .og-connection-type-picker { display:flex; flex-wrap:wrap; gap:4px; border:0; padding:0; margin:0 0 16px; }
 .og-connection-type-picker legend { font-size:12px; margin-bottom:8px; }
 .og-connection-type-picker label { position:relative; padding:8px 12px; font-size:13px; border-radius:8px; cursor:pointer; }

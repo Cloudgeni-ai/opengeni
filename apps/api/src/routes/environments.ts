@@ -38,6 +38,7 @@ import {
   requireVariableSetEncryption,
   requireVariableSetForApi,
 } from "@opengeni/core";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db } = deps;
@@ -67,7 +68,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       const grant = authorization.grant;
       requirePermission(grant, "variable-sets:write");
       const key = requireVariableSetEncryption(settings);
-      const payload = CreateVariableSetRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, CreateVariableSetRequest);
       if (prefix.endsWith("/environments") && payload.scope !== "workspace") {
         throw new HTTPException(422, {
           message: "the legacy environments route only creates workspace-scoped variable sets",
@@ -144,7 +145,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
         const grant = await requireAccessGrant(c, deps, workspaceId);
         requirePermission(grant, "variable-sets:attach");
         requirePermission(grant, "variable-sets:use");
-        const payload = ResolveVariableSetAttachmentsRequest.parse(await c.req.json());
+        const payload = await parseRequestJson(c, ResolveVariableSetAttachmentsRequest);
         const variableSets = await resolveVariableSetAttachments(
           db,
           {
@@ -206,7 +207,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "missing permission: account:admin",
         });
       }
-      const payload = UpdateVariableSetRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, UpdateVariableSetRequest);
       const name = payload.name !== undefined ? trimmedVariableSetName(payload.name) : undefined;
       if (name !== undefined && name !== variableSet.name) {
         const existing = await getVariableSetByName(
@@ -300,7 +301,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "missing permission: account:admin",
         });
       }
-      const payload = SetVariableSetVariableRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, SetVariableSetVariableRequest);
       const exists = variableSet.variables.some((variable) => variable.name === name);
       if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
         throw new HTTPException(422, {

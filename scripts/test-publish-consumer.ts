@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { proveConversationConsumer } from "./conversation-consumer-proof";
 import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
 import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
 import type { PackageJson } from "./publishable-workspaces";
@@ -163,6 +164,7 @@ try {
   const minimalSpreadsheetRoot = join(tempRoot, "minimal-spreadsheet-artifact-consumer");
   const minimalSessionRoot = join(tempRoot, "minimal-session-consumer");
   const minimalRealtimeRoot = join(tempRoot, "minimal-realtime-consumer");
+  const conversationRoot = join(tempRoot, "conversation-consumer");
   await Promise.all([
     mkdir(stagingRoot, { recursive: true }),
     mkdir(tarballRoot, { recursive: true }),
@@ -1312,6 +1314,21 @@ try {
   await run(["bun", "run", "typecheck"], minimalRealtimeRoot);
   await run(["bun", "run", "build"], minimalRealtimeRoot);
   await run(["bun", "run", "ssr"], minimalRealtimeRoot);
+  process.stdout.write(
+    "[publish-consumer] building a Next.js + Vite conversation consumer without optional peers\n",
+  );
+  await mkdir(conversationRoot, { recursive: true });
+  await proveConversationConsumer({
+    root: conversationRoot,
+    tarballs: {
+      contracts: contracts.tarball,
+      connect: connect.tarball,
+      sdk: sdk.tarball,
+      react: react.tarball,
+    },
+    reactManifest: reactSource,
+    run: async (command, cwd) => await run(command, cwd),
+  });
 
   const sessionBundle = await readFile(
     join(consumerRoot, "session-dist", "session-consumer.js"),

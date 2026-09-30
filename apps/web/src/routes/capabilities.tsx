@@ -1862,6 +1862,11 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                     <SkillsPanel
                       refreshRevision={skillsRevision}
                       onSkillsChange={setCanonicalSkills}
+                      onRemoved={() => {
+                        setSkillsRevision((value) => value + 1);
+                        void refresh();
+                        onRuntimeChanged();
+                      }}
                       openSkillRef={openSkillRef}
                       key={workspaceId}
                       workspaceId={workspaceId}
@@ -1883,6 +1888,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                     hidden={!searchingAll && activeTab === "connections"}
                   >
                     <BundlesSection
+                      refreshRevision={skillsRevision}
                       overviewSkills={canonicalSkills
                         .filter((skill) =>
                           `${skill.title} ${skill.stableKey} ${skill.description ?? ""}`
@@ -1894,17 +1900,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                           name: skill.title || humanizeName(skill.stableKey),
                           status: skill.pendingRevisionIds.length
                             ? "attention"
-                            : skill.activeRevisionId
+                            : skill.status === "active"
                               ? "added"
                               : "unavailable",
                           statusLabel: skill.pendingRevisionIds.length
                             ? "Pending changes"
-                            : skill.activeRevisionId
+                            : skill.status === "active"
                               ? "Installed"
                               : "Inactive",
                           ...(skill.description ? { description: skill.description } : {}),
                           onOpen: () => {
-                            setActiveTab("skills");
                             openSkillRef.current?.(skill.id);
                           },
                         }))}

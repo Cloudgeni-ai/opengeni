@@ -1,5 +1,6 @@
-import { canonicalPublicOrigin, type Settings } from "@opengeni/config";
+import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import {
+  configureManagedUserAdmission,
   type ManagedAuth,
   type ManagedEmailMessage,
   type ManagedEmailTransport,
@@ -60,10 +61,11 @@ export function managedAuthUserCreateOverride(
 }
 
 export function managedAuthUserCreateAdmission(
-  settings: Pick<Settings, "environment">,
+  settings: Pick<Settings, "environment" | "allowedUserEmails">,
   user: { emailVerified: boolean } & Record<string, unknown>,
   providerId: string,
 ): { data: typeof user } | false | undefined {
+  if (!managedUserEmailAllowed(settings.allowedUserEmails, user.email)) return false;
   if (
     managedAuthRequiresEmailVerification(settings) &&
     providerId !== "credential" &&
@@ -171,7 +173,7 @@ export function createManagedAuth(
     : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
-  return betterAuth({
+  const auth = betterAuth({
     appName: "OpenGeni",
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
@@ -409,6 +411,18 @@ export function createManagedAuth(
       session: {
         create: {
           before: async (session) => {
+            if (settings.allowedUserEmails !== undefined) {
+              const result = await pool.query<{ email: string; email_verified: boolean }>(
+                "select email, email_verified from auth_users where id = $1",
+                [session.userId],
+              );
+              const user = result.rows[0];
+              if (
+                !user?.email_verified ||
+                !managedUserEmailAllowed(settings.allowedUserEmails, user.email)
+              )
+                return false;
+            }
             const providerId = currentManagedAuthProviderId();
             await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
             const preflightProjection = await getCanonicalHumanIdentityProjection(
@@ -525,6 +539,8 @@ export function createManagedAuth(
       },
     },
   }) as ManagedAuth;
+  configureManagedUserAdmission(auth, settings.allowedUserEmails);
+  return auth;
 }
 
 export type ManagedAuthOAuthAttempt = {

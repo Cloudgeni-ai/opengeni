@@ -40,6 +40,7 @@ export function BundlesSection({
   onShowCategory,
   overviewSkills,
   discoveryEnabled = true,
+  refreshRevision = 0,
   section = "plugins",
   client,
   workspaceId,
@@ -54,6 +55,7 @@ export function BundlesSection({
 }: {
   query: string;
   discoveryEnabled?: boolean;
+  refreshRevision?: number;
   importSkillRef?: RefObject<(() => void) | null>;
   overviewSkills?: readonly {
     id: string;
@@ -82,6 +84,7 @@ export function BundlesSection({
   const openerRef = useRef<HTMLElement | null>(null);
   const removalFallbackRef = useRef<HTMLElement | null>(null);
   const source = useSourcePackages({
+    refreshRevision,
     client,
     workspaceId,
     connections,

@@ -44,7 +44,7 @@ export const OrganizationUsageSummary = z.object({
    * Usage in each member's Personal workspace, keyed by the owner's
    * organization membership: amounts only, never the workspace's id, name or
    * content. Only Personal workspaces with usage in the period, the 50 that
-   * spent the most. Absent before migration 0541, hence the defaults.
+   * spent the most. Absent before migration 0542, hence the defaults.
    */
   personalWorkspaces: z.array(OrganizationUsagePersonalWorkspace).max(50).default([]),
   /** How many Personal workspaces had usage in the period, listed or not. */

@@ -50,6 +50,10 @@
       "types": "./src/session-ui.ts",
       "default": "./src/session-ui.ts"
     },
+    "./diffs": {
+      "types": "./src/diffs.ts",
+      "default": "./src/diffs.ts"
+    },
     "./accounts": {
       "types": "./src/accounts.tsx",
       "default": "./src/accounts.tsx"
