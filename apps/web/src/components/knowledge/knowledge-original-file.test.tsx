@@ -104,3 +104,32 @@ test("failed preview leaves extracted text available and retry reauthorizes the 
   expect(container.querySelector("img")?.getAttribute("src")).toBe(file.url);
   await act(async () => root.unmount());
 });
+
+test("an API failure says what happened and what to do, never the raw API string", async () => {
+  download.mockRejectedValueOnce(
+    Object.assign(
+      new Error(
+        "OpenGeni API 500: storage backend timed out Reference: 7d8e9f00-1111-2222-3333-444455556666.",
+      ),
+      { status: 500 },
+    ),
+  );
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () =>
+    root.render(
+      <KnowledgeOriginalFile
+        workspaceId="workspace"
+        entryId="api"
+        revisionId="revision"
+        autoOpen
+      />,
+    ),
+  );
+  const alert = container.querySelector('[role="alert"]')?.textContent ?? "";
+  expect(alert).toContain("Couldn't open the original file.");
+  expect(alert).toContain("Try again in a moment.");
+  expect(container.textContent).not.toContain("OpenGeni API");
+  expect(container.textContent).not.toContain("Reference");
+  await act(async () => root.unmount());
+});

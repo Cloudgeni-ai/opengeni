@@ -8,8 +8,15 @@ import type {
 } from "@opengeni/sdk";
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ErrorMessage } from "@/components/ui/error-message";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
+import {
+  apiErrorAdvice,
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+} from "@/lib/api-error";
 
 export const LEARNING_MODE_LABEL: Record<AgentLearningMode, string> = {
   automatic: "Automatic",
@@ -105,7 +112,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   const fieldId = useId();
   const [record, setRecord] = useState<AgentLearningSettingsRecord | null>(null);
   const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [reload, setReload] = useState(0);
@@ -128,7 +135,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
         }
       })
       .catch((reason: unknown) => {
-        if (current) setError(reason instanceof Error ? reason.message : String(reason));
+        if (current) setError(reason);
       });
     return () => {
       current = false;
@@ -157,7 +164,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       }
     } catch (reason) {
       if (active.current && context.ownsWorkspaceInvocation(props.workspaceId, invocation)) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setError(reason);
       }
     } finally {
       if (active.current) setSaving(false);
@@ -166,12 +173,25 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
 
   if (!record)
     return error ? (
-      <div role="alert" className="text-sm text-status-error">
-        {error}
-        <Button variant="ghost" onClick={() => setReload((n) => n + 1)}>
-          Retry
-        </Button>
-      </div>
+      isPermissionDenied(error) ? (
+        <p className="text-sm text-fg-muted">
+          You can't see Agent learning here. Ask a workspace admin for access.
+        </p>
+      ) : (
+        <ErrorMessage
+          variant="inline"
+          title="Couldn't load Agent learning."
+          announce
+          action={
+            <Button variant="ghost" size="sm" onClick={() => setReload((n) => n + 1)}>
+              Try again
+            </Button>
+          }
+          {...apiErrorDetails(error)}
+        >
+          {apiErrorAdvice(error)}
+        </ErrorMessage>
+      )
     ) : (
       <p role="status" className="text-sm text-fg-muted">
         Loading Agent learning…
@@ -228,7 +248,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       ) : null}
       {error ? (
         <p role="alert" className="text-xs text-status-error">
-          {error}
+          Couldn't save that. {userErrorText(error)}
         </p>
       ) : null}
       <p role="status" className={saving || saved ? "text-xs text-fg-muted" : "sr-only"}>
@@ -250,7 +270,7 @@ export function AgentLearningDraftEditor(props: {
   const { client } = useAppContext();
   const id = useId();
   const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   useEffect(() => {
     let current = true;
     setDefaults(null);
@@ -261,8 +281,8 @@ export function AgentLearningDraftEditor(props: {
       .then((value) => {
         if (current) setDefaults(value);
       })
-      .catch((reason) => {
-        if (current) setError(reason instanceof Error ? reason.message : String(reason));
+      .catch((reason: unknown) => {
+        if (current) setError(reason);
       });
     return () => {
       current = false;
@@ -321,9 +341,15 @@ export function AgentLearningDraftEditor(props: {
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-xs text-status-error">
-          Couldn't load defaults: {error}
-        </p>
+        isPermissionDenied(error) ? (
+          <p className="text-xs text-fg-muted">
+            The workspace defaults aren't visible to you. A workspace admin can see them.
+          </p>
+        ) : (
+          <p role="alert" className="text-xs text-status-error">
+            Couldn't load the defaults. {userErrorText(error)}
+          </p>
+        )
       ) : null}
     </fieldset>
   );

@@ -1137,7 +1137,7 @@ function ReviewDetail({
           </Field>
           {actionError ? (
             <p role="alert" className="text-sm text-danger">
-              {actionError}
+              Couldn't save your decision. {actionError}
             </p>
           ) : null}
           <div className="flex flex-wrap items-center justify-end gap-2">

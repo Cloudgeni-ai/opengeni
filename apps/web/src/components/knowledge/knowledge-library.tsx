@@ -469,7 +469,7 @@ export function LibraryTab({
         />
         {list.error ? (
           <p role="alert" className="text-sm text-danger">
-            {list.error}
+            Couldn't load more entries. {list.error}
           </p>
         ) : null}
         {list.cursor ? (
@@ -806,7 +806,7 @@ function CollectionSection({
         </RowList>
       ) : members.error && !rows.length ? (
         <p role="alert" className="py-3 text-sm text-danger">
-          {errorText(members.error)}{" "}
+          Couldn't load this collection. {errorText(members.error)}{" "}
           <button type="button" className="underline" onClick={members.reload}>
             Try again
           </button>
