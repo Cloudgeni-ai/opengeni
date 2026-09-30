@@ -350,7 +350,7 @@ const EndCard: React.FC<{ t: number }> = ({ t }) => {
         <RestingCursor t={t} />
       </div>
       <div style={{ position: "absolute", left: 152, top: 560, fontFamily: F.ui, fontSize: 33, color: C.paperDim, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 10}px)` }}>
-        Inside your app. Powered by OpenGeni.
+        Your app. Your brand. Your tools.
       </div>
       <div style={{ position: "absolute", left: 150, right: 150, top: 690, height: 1, background: C.paper, opacity: 0.3 * m, transformOrigin: "left", transform: `scaleX(${m})` }} />
       <div style={{ position: "absolute", left: 150, top: 736, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 14}px)` }}>
