@@ -22,15 +22,14 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
 NATS transports reconstructible events. The API authorizes; workers execute.
 
-External users require live membership. `asUser()` supplies identity; labels do
-not. Visibility differs from `agentAccess`. Personal Knowledge follows the
-verified active-turn user; task notes coordinate temporarily. Linking never
-merges users. See [product integration](product-integration.md),
+External users require live membership; `asUser()` supplies identity, labels do
+not. Visibility differs from `agentAccess`; Personal Knowledge follows the
+verified active-turn user. Task notes coordinate; linking never merges users.
+[Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
-[Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal deletes the scoped registry head and revisions through exact
-approval and Learning enforcement.
-Accepted conversation context remains unchanged.
+[Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
+Skill removal deletes scoped heads/revisions with exact approval and Learning
+enforcement, preserving conversation context.
 
 Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors but grant no capabilities or credentials.
