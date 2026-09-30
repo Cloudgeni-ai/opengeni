@@ -125,7 +125,10 @@ function CapabilityRow({
   const locked = disabled || !available;
   const text = (
     <span className="min-w-0 flex-1">
-      <span id={labelId} className="block text-sm font-medium text-fg">
+      <span
+        id={labelId}
+        className={cn("block text-sm font-medium", available ? "text-fg" : "text-fg-muted")}
+      >
         {capabilityLabel(id)}
       </span>
       <span

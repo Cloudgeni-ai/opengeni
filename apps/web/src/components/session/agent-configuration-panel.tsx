@@ -133,7 +133,7 @@ export function AgentConfigurationPanel(props: {
           <h2 className="text-sm font-medium text-fg">{editing ? "Edit agent" : "Agent"}</h2>
           <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
             {editing
-              ? "Applies from the next turn."
+              ? `Applies from the next turn · ${capabilitySummary(draft.values, availability)}`
               : `${config ? startingPoint : "Before agent settings"} · ${capabilitySummary(current.values, availability)}`}
           </p>
         </div>
@@ -240,9 +240,6 @@ export function AgentConfigurationPanel(props: {
       </div>
       {editing ? (
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 border-t border-border px-4 py-3">
-          <p className="mr-auto min-w-0 text-xs leading-4.5 text-fg-muted">
-            {capabilitySummary(draft.values, availability)}
-          </p>
           <Button
             type="button"
             variant="ghost"

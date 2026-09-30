@@ -9,7 +9,6 @@ import { useMemo } from "react";
 
 import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
 import { Disclosure } from "@/components/ui/disclosure";
-import { Field } from "@/components/ui/field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
 import {
@@ -55,17 +54,11 @@ export function ScheduleAgentCapabilities({
       summary={custom ? `Chosen for this schedule · ${summary}` : `Workspace defaults · ${summary}`}
     >
       <div className="flex min-w-0 flex-col gap-6">
-        <Field
-          label="Capabilities"
-          group
-          hint={
-            custom
-              ? "Saved with the schedule. Later changes to the workspace's defaults don't change it."
-              : "Each run uses the workspace's agent defaults at the time it runs."
-          }
-        >
+        <div className="flex min-w-0 flex-col gap-1.5">
+          {/* The disclosure title already names the question. */}
           <SegmentedControl
             size="sm"
+            aria-label="Capabilities for this schedule"
             value={custom ? "custom" : "default"}
             disabled={disabled}
             onValueChange={(next) =>
@@ -77,8 +70,14 @@ export function ScheduleAgentCapabilities({
               { value: "default", label: "Workspace defaults" },
               { value: "custom", label: "Choose for this schedule" },
             ]}
+            className="self-start"
           />
-        </Field>
+          <p className="text-xs leading-4.5 text-fg-muted">
+            {custom
+              ? "Saved with the schedule. Later changes to the workspace's defaults don't change it."
+              : "Each run uses the workspace's agent defaults at the time it runs."}
+          </p>
+        </div>
         {custom ? (
           <AgentCapabilityPicker
             draft={draft}

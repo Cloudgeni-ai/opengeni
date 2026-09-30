@@ -100,6 +100,8 @@ type Ids = {
   lab: string;
   sessions: Record<string, string>;
   labSession: string;
+  /** A child session from the design-preview seed: created before agent settings. */
+  legacyChild: { workspace: string; session: string };
   orgWorkspace: string;
   schedule: string | null;
 };
@@ -117,11 +119,17 @@ async function resolveIds(browser: Browser): Promise<Ids> {
     const sessions: any[] = await get(`/v1/workspaces/${support}/sessions?limit=100`);
     const labSessions: any[] = await get(`/v1/workspaces/${lab}/sessions?limit=100`);
     const tasks: any[] = await get(`/v1/workspaces/${support}/scheduled-tasks`);
+    const platform = workspaces.find((row) => row.name === "Platform engineering")?.id;
+    const platformSessions: any[] = platform
+      ? await get(`/v1/workspaces/${platform}/sessions?limit=200`)
+      : [];
+    const legacy = platformSessions.find((row) => row.parentSessionId && row.agent === null);
     return {
       support,
       lab,
       sessions: Object.fromEntries(sessions.map((row) => [row.title, row.id])),
       labSession: labSessions[0]?.id,
+      legacyChild: { workspace: platform, session: legacy?.id },
       orgWorkspace: support,
       schedule: tasks.find((row) => row.name === "Morning ticket digest")?.id ?? null,
     };
@@ -146,6 +154,9 @@ const settle = (page: Page, ms = 600) => page.waitForTimeout(ms);
 
 async function openDockTab(page: Page, tab: string) {
   const open = page.locator('[aria-label="Open workspace"]').first();
+  const tabButton = page.getByRole("tab", { name: tab }).first();
+  // Either the dock is closed (its toggle shows) or already open (its tabs show).
+  await open.or(tabButton).first().waitFor({ timeout: 20_000 });
   if (await open.isVisible().catch(() => false)) await open.click();
   await settle(page);
   await page.getByRole("tab", { name: tab }).first().click();
@@ -353,12 +364,12 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: "session-agent-legacy",
-    path: (ids) => `/workspaces/${ids.support}/sessions/${ids.sessions["Legacy session"]}`,
+    path: (ids) => `/workspaces/${ids.legacyChild.workspace}/sessions/${ids.legacyChild.session}`,
     steps: (page) => openDockTab(page, "Agent"),
   },
   {
     name: "session-agent-legacy-edit",
-    path: (ids) => `/workspaces/${ids.support}/sessions/${ids.sessions["Legacy session"]}`,
+    path: (ids) => `/workspaces/${ids.legacyChild.workspace}/sessions/${ids.legacyChild.session}`,
     steps: async (page) => {
       await openDockTab(page, "Agent");
       await page.getByRole("button", { name: "Edit" }).first().click();
@@ -401,12 +412,6 @@ const SCENARIOS: Scenario[] = [
     name: "session-agent-viewer",
     user: "aiko",
     path: (ids) => `/workspaces/${ids.support}/sessions/${ids.sessions["Ticket triage assistant"]}`,
-    steps: (page) => openDockTab(page, "Agent"),
-  },
-  {
-    name: "session-agent-child",
-    path: (ids) =>
-      `/workspaces/${ids.support}/sessions/${ids.sessions["Research customer sentiment"]}`,
     steps: (page) => openDockTab(page, "Agent"),
   },
   {
@@ -640,8 +645,22 @@ await Promise.all(
   }),
 );
 await browser.close();
-writeFileSync(resolve(OUT, "axe.json"), `${JSON.stringify(axeResults, null, 2)}\n`);
-writeFileSync(resolve(OUT, "failures.txt"), failures.join("\n") + "\n");
+// A run limited with --only adds to (and replaces its own entries in) earlier results.
+const axePath = resolve(OUT, "axe.json");
+const previousAxe: Record<string, unknown[]> =
+  ONLY && existsSync(axePath) ? JSON.parse(readFileSync(axePath, "utf8")) : {};
+for (const key of Object.keys(previousAxe)) {
+  if (ONLY?.includes(key.split("@")[0]!)) delete previousAxe[key];
+}
+writeFileSync(axePath, `${JSON.stringify({ ...previousAxe, ...axeResults }, null, 2)}\n`);
+const failuresPath = resolve(OUT, "failures.txt");
+const previousFailures =
+  ONLY && existsSync(failuresPath)
+    ? readFileSync(failuresPath, "utf8")
+        .split("\n")
+        .filter((line) => line && !ONLY.includes(line.split(" ")[0]!))
+    : [];
+writeFileSync(failuresPath, [...previousFailures, ...failures].join("\n") + "\n");
 console.log(
   `\n${failures.length} failures; axe serious/critical in ${Object.keys(axeResults).length} shots`,
 );

@@ -408,6 +408,7 @@ export function InstructionsTab({
             />
             {loading ? (
               <div
+                role="status"
                 aria-label="Loading the instructions"
                 className="ml-11 flex flex-col gap-2 max-sm:ml-0"
               >
