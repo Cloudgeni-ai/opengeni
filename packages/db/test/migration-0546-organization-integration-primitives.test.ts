@@ -90,9 +90,9 @@ async function fixture(label: string) {
   });
   return { scope, session, subjectId, source, externalId };
 }
-test("0542 is additive rolling storage without external-identity runtime grants", async () => {
+test("0546 is additive rolling storage without external-identity runtime grants", async () => {
   const source = await Bun.file(
-    new URL("../drizzle/0542_organization_integration_primitives.sql", import.meta.url),
+    new URL("../drizzle/0546_organization_integration_primitives.sql", import.meta.url),
   ).text();
   expect(source).toStartWith("-- deployment-mode: rolling");
   expect(source).not.toMatch(/\bDROP\s+(TABLE|COLUMN|FUNCTION)\b/i);
@@ -108,7 +108,7 @@ test("0542 is additive rolling storage without external-identity runtime grants"
   }
 });
 
-test("0542 owner migration and custom runtime preserve FORCE-RLS dispatcher posture", async () => {
+test("0546 owner migration and custom runtime preserve FORCE-RLS dispatcher posture", async () => {
   const owner = await acquireOwnerMigratedTestDatabase("migration-0542-owner");
   if (!owner) throw new Error("PostgreSQL test database unavailable");
   const ownerSql = postgres(owner.ownerUrl, { max: 1 });
@@ -255,7 +255,7 @@ test("0542 owner migration and custom runtime preserve FORCE-RLS dispatcher post
     await owner.release();
   }
 }, 240_000);
-describe("0542 organization integration primitives (PostgreSQL)", () => {
+describe("0546 organization integration primitives (PostgreSQL)", () => {
   test("workspace runtime cannot read or rewrite organization registrations or deliveries", async () => {
     const { scope, session } = await fixture("rls");
     const webhook = await createOrganizationWebhook(client.db, {

@@ -53,7 +53,7 @@ list, headers, and signature scheme, exported as
 `@opengeni/contracts/workspace-integration-wire` so the SDK root stays
 zod-free), `packages/db/src/workspace-integrations.ts`
 and migration `0536_workspace_integration_primitives.sql` (storage and the
-delivery outbox), migration `0542_organization_integration_primitives.sql`
+delivery outbox), migration `0546_organization_integration_primitives.sql`
 (organization defaults, filtered deliveries, and identity),
 `apps/api/src/routes/workspace-integrations.ts` (shared workspace routes),
 `apps/api/src/routes/organization-integrations.ts` (organization authority adapter),
