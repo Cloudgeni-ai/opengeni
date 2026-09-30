@@ -271,38 +271,44 @@ export function AgentConfigurationPanel(props: {
   );
 }
 
-/** Apps this session can use: its own and the workspace's connected apps. */
+/** Apps this session can use: its own, then the workspace's, as names. */
 function ConnectedApps({ session }: { session: Session }) {
   const context = useAppContext();
-  const servers = (session.effectiveTools?.mcpServers ?? []).filter(
-    (server) => server.capability === "product" || server.capability === "workspaceConnectors",
-  );
-  if (servers.length === 0) return null;
+  const servers = session.effectiveTools?.mcpServers ?? [];
   const nameOf = (id: string) =>
     session.mcpServers.find((server) => server.id === id)?.name ??
     context.toolMcpServers.find((server) => server.id === id)?.name ??
-    null;
+    "Custom app";
+  const names = (capability: "product" | "workspaceConnectors") =>
+    servers
+      .filter((server) => server.capability === capability)
+      .map((server) => nameOf(server.id))
+      .sort((left, right) => left.localeCompare(right));
+  const own = names("product");
+  const workspace = names("workspaceConnectors");
+  if (own.length === 0 && workspace.length === 0) return null;
   return (
     <section aria-labelledby="agent-connected-apps" className="min-w-0">
       <h3 id="agent-connected-apps" className="pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
         Connected apps
       </h3>
-      <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">
-        {servers.map((server) => (
-          <li
-            key={server.id}
-            className="flex min-h-11 min-w-0 items-center justify-between gap-4 py-2"
-          >
-            <span className="min-w-0 text-sm break-words text-fg">
-              {nameOf(server.id) ?? "Custom app"}
-            </span>
-            <span className="shrink-0 text-xs text-fg-subtle">
-              {server.capability === "product" ? "Added to this session" : "Workspace connector"}
-            </span>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-1 text-xs leading-4.5 text-fg-muted">
+      <dl className="m-0 flex min-w-0 flex-col gap-2 text-sm leading-5">
+        {own.length > 0 ? (
+          <div className="min-w-0">
+            <dt className="text-xs leading-4.5 text-fg-muted">Added to this session</dt>
+            <dd className="m-0 break-words text-fg">{own.join(", ")}</dd>
+          </div>
+        ) : null}
+        {workspace.length > 0 ? (
+          <div className="min-w-0">
+            <dt className="text-xs leading-4.5 text-fg-muted">
+              From the workspace ({workspace.length})
+            </dt>
+            <dd className="m-0 break-words text-fg">{workspace.join(", ")}</dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="mt-2 text-xs leading-4.5 text-fg-muted">
         Each app lists its own tools when a turn starts.
       </p>
     </section>

@@ -40,10 +40,7 @@ import { DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
-import {
-  ConnectorAction,
-  type SessionConnectorsMenuProps,
-} from "@/components/session-connectors-menu-body";
+import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
 import {
   ComposerCapabilitiesMenuBody,
   type ComposerAgentCapabilities,
@@ -136,17 +133,18 @@ export function ComposerMobilePlusPanel(
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
 
-  // In a menu, Back is a menu item so arrow keys reach it; in a dialog, a button.
   const backAction = (label: string, target: Panel) => (
-    <ConnectorAction
-      presentation={dialogOpen ? "dialog" : "menu"}
-      keepOpen
-      label={label}
-      className="mt-0.5 inline-flex size-7 w-7 shrink-0 items-center justify-center rounded-md p-0 text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11"
-      onAction={() => setPanel(target)}
+    <button
+      type="button"
+      aria-label={label}
+      className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11"
+      onClick={(event) => {
+        event.preventDefault();
+        setPanel(target);
+      }}
     >
       <ChevronLeftIcon className="size-4" />
-    </ConnectorAction>
+    </button>
   );
   const backButton = backAction("Back", "root");
   const backToCapabilities = backAction("Back to capabilities", "capabilities");

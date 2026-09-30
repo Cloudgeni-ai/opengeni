@@ -16,23 +16,24 @@
  *   choose" + Goals + Knowledge. Maria is admin, Jonas member, Aiko viewer.
  * - "Research lab" (workspace B): no connectors, no Skills, defaults untouched.
  * - Sessions in A: legacy (no configuration), everything, only own tools,
- *   custom with identity, workspace default, goal-bearing, a child session,
- *   one updated mid-session (session.agent.updated), a Slack-style markdown
- *   renderer session, a private one when the organization allows it; one
- *   "everything" session in B.
+ *   custom with identity, workspace default, goal-bearing, one updated
+ *   mid-session (session.agent.updated), a Slack-style markdown renderer
+ *   session, a private one when the organization allows it; one "everything"
+ *   session in B.
  * - A paused schedule in A with its own capabilities.
  *
  * Sessions with a first message run ONE real model turn each (the stack's
  * configured model) so the model-context inspector has captures; pass
- * --no-turns to create empty shells instead. The legacy session and the child
- * are finished via SQL through this worktree's loopback migrations DSN.
+ * --no-turns to create empty shells instead. Everything goes through the
+ * public API. Sessions without an agent configuration (created before agent
+ * settings) and child sessions come from the design-preview seed's nested
+ * conversations.
  */
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SQL } from "bun";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
@@ -54,7 +55,6 @@ function readEnvFile(path: string): Record<string, string> {
   }
   return values;
 }
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
 if (!flag("--yes"))
   fail("refusing to run without --yes (this writes fake data into the local dev stack).");
@@ -63,10 +63,6 @@ const runtime = readEnvFile(resolve(repositoryRoot, ".env.runtime"));
 if (!runtime.OPENGENI_API_PORT)
   fail("no .env.runtime; start this worktree's stack with `bun run dev`.");
 const API = `http://127.0.0.1:${runtime.OPENGENI_API_PORT}`;
-const migrationsUrl = runtime.OPENGENI_MIGRATIONS_DATABASE_URL;
-if (!migrationsUrl || !LOOPBACK.has(new URL(migrationsUrl).hostname)) {
-  fail("the worktree migrations database URL is missing or not loopback.");
-}
 const clientConfig = (await (await fetch(`${API}/v1/config/client`)).json()) as {
   apiContractRevision: string;
   productAccessMode: string;
@@ -395,7 +391,6 @@ const sessionsA: SessionPlan[] = [
     agent: { capabilities: { from: "none", knowledge: true } },
     visibility: "private",
   },
-  { title: "Legacy session", message: "Reply with the word legacy." },
 ];
 const createdA: Record<string, any> = {};
 for (const plan of sessionsA) {
@@ -443,105 +438,6 @@ if (runTurns) {
     log('  schedule "Morning ticket digest"');
   }
 }
-
-// ---------------------------------------------------------------------------
-// SQL-only states: a legacy session and a child session.
-// ---------------------------------------------------------------------------
-const sql = new SQL(migrationsUrl);
-async function withSessionGate(ws: string, work: (tx: any) => Promise<void>) {
-  await sql.begin(async (tx) => {
-    await tx`select pg_advisory_xact_lock_shared(hashtextextended(${"workspace-control:" + ws}, 0))`;
-    await tx`select pg_advisory_xact_lock_shared(hashtextextended(${"session-tenancy:" + ws}, 0))`;
-    await tx`select set_config('opengeni.session_activity_gate_state', 'open', true),
-                    set_config('opengeni.session_activity_gate_workspace_id', ${ws}, true)`;
-    await work(tx);
-    await tx`select set_config('opengeni.session_activity_gate_state', 'preparing', true)`;
-    await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
-    await tx.unsafe(
-      "SET CONSTRAINTS sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard DEFERRED",
-    );
-    await tx`select set_config('opengeni.session_activity_gate_state', 'finalizing', true)`;
-    await tx`with advanced as (
-        update workspace_session_activity_revisions set revision = revision + 1
-        where workspace_id = ${ws} returning revision)
-      update sessions s set activity_revision = advanced.revision, activity_revision_pending_xid = null
-      from advanced
-      where s.workspace_id = ${ws} and s.activity_revision_pending_xid = pg_current_xact_id()::text::bigint`;
-    await tx`select set_config('opengeni.session_activity_gate_state', 'finalized', true)`;
-    await tx.unsafe(
-      "SET CONSTRAINTS sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard IMMEDIATE",
-    );
-  });
-}
-
-const legacy = createdA["Legacy session"];
-if (legacy) {
-  await withSessionGate(A, async (tx) => {
-    await tx`update sessions set agent_config = null where workspace_id = ${A} and id = ${legacy.id}`;
-  });
-  log('  "Legacy session" has no agent configuration');
-}
-
-const parent = createdA["Everything the workspace offers"];
-if (parent) {
-  const childTitle = "Research customer sentiment";
-  const [existing] =
-    await sql`select id from sessions where workspace_id = ${A} and parent_session_id = ${parent.id} and title = ${childTitle}`;
-  if (!existing) {
-    const childId = randomUUID();
-    const childConfig = {
-      version: 1,
-      from: "none",
-      capabilities: {
-        webSearch: true,
-        humanInput: true,
-        skills: "read",
-        goals: false,
-        subagents: false,
-        knowledge: true,
-        schedules: false,
-        artifacts: false,
-        browser: false,
-        media: false,
-        workspaceFiles: false,
-        workspaceConnectors: false,
-        workspaceAdmin: false,
-      },
-      unavailable: [],
-      identity: null,
-      renderer: "opengeni",
-      source: "inherited",
-    };
-    await withSessionGate(A, async (tx) => {
-      await tx`insert into sessions (id, status, initial_message, resources, tools, metadata, model,
-          sandbox_backend, temporal_workflow_id, account_id, workspace_id, parent_session_id, sandbox_os,
-          sandbox_group_id, title, title_source, tool_policy, created_by_kind, created_by_subject_id,
-          created_by_context, root_session_id, nested_agent_depth, effective_max_nested_agent_depth,
-          nested_agent_depth_policy_source, skills, first_party_mcp_tools, codex_compaction_mode,
-          reasoning_effort, latency_mode, visibility, create_requested_visibility, variable_set_ids,
-          agent_access, memory_scope, mcp_approval_policies, initial_xai_provider_account_authority_snapshot,
-          agent_config)
-        select ${childId}, 'idle', '', p.resources, '[{"id":"opengeni","kind":"mcp"}]'::jsonb, '{}'::jsonb, p.model, p.sandbox_backend,
-          ${"session-" + childId}, p.account_id, p.workspace_id, p.id, p.sandbox_os, gen_random_uuid(),
-          ${childTitle}, 'user', jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', p.id::text),
-          p.created_by_kind, p.created_by_subject_id, p.created_by_context, p.root_session_id,
-          p.nested_agent_depth + 1, p.effective_max_nested_agent_depth, p.nested_agent_depth_policy_source,
-          p.skills, '["set_session_title","wait_for_input","command_read","command_wait"]'::jsonb,
-          p.codex_compaction_mode, p.reasoning_effort, p.latency_mode,
-          p.visibility, p.create_requested_visibility, '[]'::jsonb, p.agent_access, p.memory_scope,
-          p.mcp_approval_policies, p.initial_xai_provider_account_authority_snapshot,
-          ${childConfig}::jsonb
-        from sessions p where p.workspace_id = ${A} and p.id = ${parent.id}`;
-      const [created] = await tx`select payload from session_events
-        where workspace_id = ${A} and session_id = ${parent.id} and sequence = 1`;
-      await tx`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload,
-          payload_codec_version, occurred_at, created_at)
-        values (${parent.accountId}, ${A}, ${childId}, 1, 'session.created', ${created.payload}, 1, now(), now())`;
-    });
-    log(`  child session "${childTitle}"`);
-  }
-}
-await sql.close();
 
 // ---------------------------------------------------------------------------
 // Workspace B: Research lab (no connectors, no Skills, defaults untouched)

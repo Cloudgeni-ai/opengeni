@@ -165,7 +165,12 @@ async function openComposerCapabilities(page: Page, customized = false) {
     .click();
   await settle(page);
   const toggle = page.getByRole("menuitemcheckbox", { name: "Customize for this chat" }).first();
-  if (((await toggle.getAttribute("aria-checked")) === "true") !== customized) {
+  // Always start from the workspace's defaults: switch off, then on if wanted.
+  if ((await toggle.getAttribute("aria-checked")) === "true") {
+    await toggle.click();
+    await settle(page);
+  }
+  if (customized) {
     await toggle.click();
     await settle(page);
   }
@@ -584,10 +589,15 @@ async function runJob({ scenario, width, height, theme }: Job) {
   try {
     await page.goto(`${WEB}${scenario.path(ids)}`, { waitUntil: "load" });
     // The app keeps event streams open, so wait for content, not network idle.
+    // Past the app's boot splash: some navigation has rendered.
     await page
-      .locator("main, [data-slot=form-body], [role=main]")
-      .first()
-      .waitFor({ timeout: 15_000 })
+      .waitForFunction(
+        () =>
+          document.querySelector("nav, [data-slot=form-body]") !== null &&
+          !/^\s*Loading/.test(document.body.innerText),
+        undefined,
+        { timeout: 45_000 },
+      )
       .catch(() => {});
     await settle(page, 1800);
     await scenario.steps?.(page, ids, width);
