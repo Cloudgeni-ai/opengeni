@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { eq } from "drizzle-orm";
+import * as schema from "../src/schema";
 import {
   admitVideoGenerationOperation,
   getGeneratedVideoArtifact,
@@ -148,6 +150,13 @@ async function managedFixture(creditMicros: number) {
     defaultModelId: "bytedance/seedance-2.5",
   });
   return { ...base, policy };
+}
+
+async function workspaceVideoAllowanceUsed(workspaceId: string): Promise<number> {
+  const [row] = await shared!.admin`
+    SELECT coalesce(sum(used),0)::bigint AS used FROM workspace_allowance_counters
+    WHERE workspace_id=${workspaceId} AND subject_id=''`;
+  return Number(row?.used ?? 0);
 }
 
 describe("durable video generation operation", () => {
@@ -440,6 +449,17 @@ describe("durable video generation operation", () => {
     const admitted = await admitVideoGenerationOperation(client.db, common);
     expect(admitted.operation.creditState).toBe("debited");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(1_380_000);
+    const [attributedDebit] = await client.db
+      .select({ metadata: schema.creditLedgerEntries.metadata })
+      .from(schema.creditLedgerEntries)
+      .where(
+        eq(
+          schema.creditLedgerEntries.idempotencyKey,
+          `credit:video_generation_debit:${operationId}`,
+        ),
+      );
+    expect(attributedDebit?.metadata).toMatchObject({ turnId: claim.turn.id });
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(620_000);
 
     const replay = await admitVideoGenerationOperation(client.db, {
       ...common,
@@ -449,6 +469,7 @@ describe("durable video generation operation", () => {
     });
     expect(replay.created).toBe(false);
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(1_380_000);
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(620_000);
 
     await markVideoGenerationAccepted(client.db, {
       accountId: grant.accountId,
@@ -466,6 +487,16 @@ describe("durable video generation operation", () => {
     });
     expect(failed.creditState).toBe("refunded");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(2_000_000);
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(0);
+    await settleVideoGenerationFailure(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      operationId,
+      requestDigest,
+      status: "provider_failed",
+      publicReason: "Provider rejected the request.",
+    });
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(0);
 
     const successfulOperationId = crypto.randomUUID();
     const successfulRequestDigest = "d".repeat(64);
@@ -482,6 +513,7 @@ describe("durable video generation operation", () => {
     });
     expect(successful.operation.creditState).toBe("debited");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(1_380_000);
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(620_000);
     await markVideoGenerationAccepted(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -571,6 +603,7 @@ describe("durable video generation operation", () => {
       references: [],
     });
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(380_000);
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(620_000);
     await registerPendingSessionToolCall(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -611,6 +644,7 @@ describe("durable video generation operation", () => {
     expect(cancelled?.creditState).toBe("refunded");
     expect(cancelled?.admissionOutputState).toBe("pending");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(1_000_000);
+    expect(await workspaceVideoAllowanceUsed(grant.workspaceId)).toBe(0);
   }, 60_000);
 
   test("rejects managed video before admission when the exact price is unavailable", async () => {

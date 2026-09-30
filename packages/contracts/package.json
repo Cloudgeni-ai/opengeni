@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./usage-allowances": {
+      "types": "./src/usage-allowances.ts",
+      "default": "./src/usage-allowances.ts"
+    },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
       "default": "./src/browser-storage.ts"

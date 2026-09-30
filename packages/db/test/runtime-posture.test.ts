@@ -424,6 +424,31 @@ function safePosture(): RuntimeDatabasePosture {
       ...organizationMembershipLifecycleAuthorityTables(),
       ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
+      ...[
+        "workspace_usage_allowances",
+        "workspace_member_allowances",
+        "workspace_allowance_grants",
+        "workspace_allowance_counters",
+        "workspace_allowance_notifications",
+        "workspace_allowance_periods",
+        "workspace_video_allowance_allocations",
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        rlsEnabled: false,
+        rlsForced: false,
+        rlsActive: false,
+        policyCount: 0,
+        artifactOutboxDispatcherPolicy: false,
+        artifactMaterializerPolicy: false,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      })),
     ],
     privateTables: [
       {
@@ -553,6 +578,54 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("video refund reversal remains a same-owner non-public internal helper", () => {
+    const posture = safePosture();
+    const routine = posture.targetRoutines.find(
+      (r) => r.name === "reverse_video_allowance_refund()",
+    );
+    expect(routine).toBeDefined();
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    routine!.execute = true;
+    routine!.publicExecute = true;
+    routine!.owner = "wrong_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "runtime role has forbidden owner-internal helper reverse_video_allowance_refund()",
+        ),
+        expect.stringContaining(
+          "PUBLIC has forbidden owner-internal helper reverse_video_allowance_refund()",
+        ),
+        expect.stringContaining("helper reverse_video_allowance_refund() owner wrong_owner"),
+      ]),
+    );
+  });
+  test("usage allowance capability rejects direct runtime access and split lifecycle ownership", () => {
+    const posture = safePosture();
+    posture.privateTables.push({
+      name: "usage_allowance_capabilities",
+      owner: "opengeni_migrator",
+      rlsEnabled: false,
+      rlsForced: false,
+      rlsActive: false,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    posture.privateTables.at(-1)!.insert = true;
+    posture.targetRoutines.find((r) => r.name === "usage_allowance_command(jsonb)")!.owner =
+      "wrong_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "usage allowance capability has unsafe owner or direct runtime privileges",
+        ),
+        expect.stringContaining("allowance authority owners do not match"),
+      ]),
+    );
+  });
   test("organization usage read capability forbids direct runtime DML and PUBLIC execution", () => {
     const posture = safePosture();
     posture.tables.push({
@@ -834,6 +907,7 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 7 : 0) +
           // 0536 adds the workspace credential provider, webhook, and delivery tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
@@ -884,7 +958,7 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 7;
       for (const removed of [
         "workspace_packs",
         "pack_installations",

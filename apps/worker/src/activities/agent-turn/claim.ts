@@ -62,6 +62,8 @@ import {
   turnExecutionPolicyBillingIdentity,
   legacyTurnExecutionPolicyInput,
   ensureRunAllowed,
+  AllowanceExhaustedError,
+  type AllowanceRefusal,
 } from "./admission";
 import { providerRecoveryCountFromMetadata, isWorkerShutdownCancellation } from "./errors";
 import { throwIfTurnOperationCancelled, waitForTurnOperation } from "./sandbox-provision";
@@ -368,20 +370,27 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // bypass OpenGeni credit/token gates)
   // AND the optional host `entitlements` port (when bound, its admitRun replaces
   // the local credit read). Unset port → today's local-ledger path.
-  await waitForTurnOperation(
-    ensureRunAllowed(
-      capabilitySettings,
-      db,
-      input.accountId,
-      input.workspaceId,
-      billingState.isExternallyBilledTurn,
-      entitlements,
-      billingState.chargesOpenGeniCredits,
-      billingState.countsTowardTokenCap,
-    ),
-    cancellationSignal,
-    undefined,
-  );
+  let allowanceRefusal: AllowanceRefusal | null = null;
+  try {
+    await waitForTurnOperation(
+      ensureRunAllowed(
+        capabilitySettings,
+        db,
+        input.accountId,
+        input.workspaceId,
+        billingState.isExternallyBilledTurn,
+        entitlements,
+        billingState.chargesOpenGeniCredits,
+        billingState.countsTowardTokenCap,
+        turn.initiatingHumanSubjectId,
+      ),
+      cancellationSignal,
+      undefined,
+    );
+  } catch (error) {
+    if (!(error instanceof AllowanceExhaustedError)) throw error;
+    allowanceRefusal = error.refusal;
+  }
   // Setup (variableSet load, MCP connects, sandbox restore) does not
   // stream and so never observes cancellation on its own; these explicit
   // checks let a graceful shutdown checkpoint the turn before the worker is
@@ -514,6 +523,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       ...(inputSettlement.suppressGoalContinuation !== undefined
         ? { suppressGoalContinuation: inputSettlement.suppressGoalContinuation }
         : {}),
+      ...(inputSettlement.allowanceGoalPause
+        ? { allowanceGoalPause: inputSettlement.allowanceGoalPause }
+        : {}),
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
@@ -575,6 +587,36 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     durationSeconds: (performance.now() - activityStarted) / 1_000,
   });
   const turnStartSettlementStartedAt = performance.now();
+  if (allowanceRefusal) {
+    // Claim has frozen the exact human, but no provider or sandbox has started.
+    // Use the same terminal valve as a post-response stop, retaining a usable
+    // session and a visible typed refusal instead of manufacturing a failure.
+    if (
+      !(await eventing.settle({
+        events: [
+          { type: "usage.exhausted", payload: allowanceRefusal },
+          {
+            type: "turn.completed",
+            payload: {
+              output: "",
+              segmentLimit: "budget_exhausted",
+              ...allowanceRefusal,
+            },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        allowanceGoalPause: { rationale: allowanceRefusal.message },
+      }))
+    ) {
+      return { exit: claimedResult({ status: "cancelled" }) };
+    }
+    control.turnMetricOutcome = "completed";
+    control.activityStatus = "idle";
+    return { exit: claimedResult({ status: "idle" }) };
+  }
   if (
     !(await eventing.settle({
       events: [

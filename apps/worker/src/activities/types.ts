@@ -458,6 +458,7 @@ export type DispatchScheduledTaskRunResult =
       refusal?: import("@opengeni/contracts").ScheduledTaskAdmissionRefusal;
       reason:
         | "insufficient_credits"
+        | "allowance_exhausted"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
         | "malformed_manual_trigger"

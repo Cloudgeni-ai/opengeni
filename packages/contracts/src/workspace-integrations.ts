@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 import { WORKSPACE_WEBHOOK_EVENT_TYPES } from "./workspace-integration-wire";
+import {
+  UsageAllowancePeriod,
+  UsageAllowanceStatus,
+  UsageAllowanceWindow,
+} from "./usage-allowances";
 
 export * from "./workspace-integration-wire";
 
@@ -107,7 +112,7 @@ export type ListWorkspaceWebhookDeliveriesResponse = z.infer<
  * The thin body POSTed to a webhook endpoint. It identifies what changed;
  * receivers read details through the authenticated API.
  */
-export const WorkspaceWebhookEvent = z.object({
+export const SessionWorkspaceWebhookEvent = z.object({
   id: z.string().uuid(),
   type: z.string(),
   workspaceId: z.string().uuid(),
@@ -117,6 +122,34 @@ export const WorkspaceWebhookEvent = z.object({
   occurredAt: z.string(),
   data: z.object({ status: z.string().optional(), reason: z.string().optional() }).passthrough(),
 });
+export type SessionWorkspaceWebhookEvent = z.infer<typeof SessionWorkspaceWebhookEvent>;
+/** Workspace allowance events have no synthetic session or turn identity.
+ * Optional null context fields let transport adapters share an envelope. */
+export const WorkspaceUsageWebhookEvent = z.object({
+  id: z.string().uuid(),
+  type: z.enum(["usage.threshold_reached", "usage.exhausted", "usage.period_reset"]),
+  workspaceId: z.string().uuid(),
+  sessionId: z.null().optional(),
+  turnId: z.null().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  occurredAt: z.string(),
+  data: z
+    .object({
+      scope: z.enum(["workspace", "member"]).optional(),
+      subjectId: z.string().nullable().optional(),
+      threshold: z.number().finite().optional(),
+      fraction: z.number().finite().nullable().optional(),
+      resetsAt: z.string().nullable().optional(),
+      status: UsageAllowanceStatus.optional(),
+      period: z.union([UsageAllowanceWindow, UsageAllowancePeriod, z.literal("*")]).optional(),
+    })
+    .passthrough(),
+});
+export type WorkspaceUsageWebhookEvent = z.infer<typeof WorkspaceUsageWebhookEvent>;
+export const WorkspaceWebhookEvent = z.union([
+  SessionWorkspaceWebhookEvent,
+  WorkspaceUsageWebhookEvent,
+]);
 export type WorkspaceWebhookEvent = z.infer<typeof WorkspaceWebhookEvent>;
 
 export const WorkspaceCredentialProvider = z

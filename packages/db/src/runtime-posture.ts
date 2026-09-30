@@ -633,6 +633,9 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "maintain_usage_allowances(integer, integer)",
+  "usage_allowance_command(jsonb)",
+  "usage_allowance_capability_active(uuid, uuid)",
   ...UNIFIED_KNOWLEDGE_ROUTINES,
   MCP_OPERATION_CAPABILITY_ROUTINE,
   "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
@@ -690,6 +693,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
  */
 export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
+  "usage_allowance_capability_active(uuid, uuid)",
 ] as const;
 const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
@@ -697,6 +701,15 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "usage_allowance_members(uuid, uuid)",
+  "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
+  "count_workspace_allowance_debit()",
+  "reverse_video_allowance_refund()",
+  "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
+  "emit_usage_allowance_notifications(uuid, uuid, jsonb, text, timestamp with time zone, text)",
+  "usage_allowance_period(jsonb, timestamp with time zone)",
+  "validate_usage_allowance_config(jsonb)",
+  "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -709,6 +722,9 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "usage_allowance_period(jsonb, timestamp with time zone)",
+  "validate_usage_allowance_config(jsonb)",
+  "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -1078,6 +1094,10 @@ export const FORCE_RLS_TABLES = [
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
+  "workspace_allowance_counters",
+  "workspace_allowance_grants",
+  "workspace_allowance_notifications",
+  "workspace_allowance_periods",
   "workspace_artifact_events",
   "workspace_artifact_uploads",
   "workspace_artifact_versions",
@@ -1099,11 +1119,14 @@ export const FORCE_RLS_TABLES = [
   "workspace_learning_policy_heads",
   "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
+  "workspace_member_allowances",
   "workspace_model_policies",
   "workspace_screenshot_quotas",
   "workspace_session_activity_revisions",
+  "workspace_usage_allowances",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_allowance_allocations",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
   "workspace_webhook_deliveries",
@@ -1575,8 +1598,15 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "workspace_allowance_counters",
+  "workspace_allowance_grants",
+  "workspace_allowance_notifications",
+  "workspace_allowance_periods",
+  "workspace_member_allowances",
+  "workspace_usage_allowances",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_allowance_allocations",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1999,13 +2029,13 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on the inventory stamp are also unsafe; in
             -- particular INSERT can mint authority without a table grant.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              (c.relname = 'modal_inventory_read_capabilities' and
+              (c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              (c.relname = 'modal_inventory_read_capabilities' and
+              (c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              (c.relname = 'modal_inventory_read_capabilities' and
+              (c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
           from pg_class c
@@ -2024,6 +2054,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
+              'usage_allowance_capabilities',
               'session_file_attachments',
               'session_file_read_capabilities',
               'modal_inventory_read_capabilities',
@@ -2397,6 +2428,28 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
     if (
+      routine.name.startsWith("usage_allowance_") ||
+      routine.name === "maintain_usage_allowances(integer, integer)"
+    ) {
+      const allowanceTables = [
+        "workspace_usage_allowances",
+        "workspace_member_allowances",
+        "workspace_allowance_grants",
+        "workspace_allowance_counters",
+        "workspace_allowance_notifications",
+        "workspace_allowance_periods",
+        "workspace_video_allowance_allocations",
+      ];
+      const owners = new Set(allowanceTables.map((name) => tableByName.get(name)?.owner));
+      if (
+        (!options.protectedTables || allowanceTables.some((name) => tableByName.has(name))) &&
+        (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} allowance authority owners do not match`,
+        );
+      }
+    } else if (
       routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
       routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
     ) {
@@ -3799,6 +3852,20 @@ export function evaluateRuntimeDatabasePosture(
   const organizationUsageCapability = posture.privateTables.find(
     (table) => table.name === "organization_usage_read_capabilities",
   );
+  const usageAllowanceCapability = posture.privateTables.find(
+    (table) => table.name === "usage_allowance_capabilities",
+  );
+  if (
+    usageAllowanceCapability &&
+    (usageAllowanceCapability.owner === expectedRole ||
+      usageAllowanceCapability.owner !== tableByName.get("workspace_usage_allowances")?.owner ||
+      usageAllowanceCapability.select ||
+      usageAllowanceCapability.insert ||
+      usageAllowanceCapability.update ||
+      usageAllowanceCapability.delete)
+  ) {
+    violations.push("usage allowance capability has unsafe owner or direct runtime privileges");
+  }
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );

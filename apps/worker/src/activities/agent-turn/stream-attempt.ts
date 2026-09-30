@@ -97,6 +97,7 @@ import {
   stableInteractionInterventionId,
   stableInteractionInterventionOperationId,
   BudgetExhaustedError,
+  AllowanceExhaustedError,
   ensureRunAllowed,
 } from "./admission";
 import {
@@ -235,6 +236,7 @@ export type TurnStreamAttemptDeps = {
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
   turn: Pick<SessionTurn, "initiator" | "initiatorContext"> & {
+    initiatingHumanSubjectId: string | null;
     id: string;
     executionGeneration: number;
     model: string;
@@ -1104,6 +1106,7 @@ export async function runTurnStreamAttempt(
               entitlements,
               billingState.chargesOpenGeniCredits,
               billingState.countsTowardTokenCap,
+              turn.initiatingHumanSubjectId,
             );
           } catch (limitError) {
             // Capture the run state at the boundary so the budget valve in
@@ -1120,6 +1123,7 @@ export async function runTurnStreamAttempt(
             throw new BudgetExhaustedError(
               limitError instanceof Error ? limitError.message : String(limitError),
               serializedRunState,
+              limitError instanceof AllowanceExhaustedError ? limitError.refusal : null,
             );
           }
         }

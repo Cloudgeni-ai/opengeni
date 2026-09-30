@@ -1,4 +1,10 @@
 import { currentSessionAttachmentReadAccess } from "./database";
+import {
+  CreditDebitAttribution,
+  creditDebitAttributionMetadata,
+  currentCreditDebitAttribution,
+} from "./credit-debit-attribution";
+import { checkWorkspaceAllowance } from "./usage-allowances";
 import { readSessionFileAttachments } from "./session-file-attachments";
 export {
   acceptSessionFileAttachments,
@@ -656,6 +662,7 @@ export * from "./company-profile";
 export * from "./company-profile-agent-policy";
 export * from "./company-profile-agent-admin";
 export * from "./workspace-learning-policy";
+export * from "./usage-allowances";
 export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
@@ -18142,6 +18149,7 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "variable_set_unavailable"
   | "rig_version_unavailable"
   | "insufficient_credits"
+  | "allowance_exhausted"
   | "monthly_model_cost_limit"
   | "monthly_agent_run_limit";
 
@@ -45653,8 +45661,17 @@ type SandboxWarmBillingSnapshot = {
   rateMicrosPerSecond: number;
   accountId: string;
   workspaceId: string;
+  attribution?: CreditDebitAttribution;
   stopChargeAt?: string;
 };
+
+export class SandboxDebitAttributionUnavailableError extends SandboxPaidComputeAdmissionError {
+  readonly code = "credit_debit_attribution_unavailable";
+  constructor(workspaceId: string, sandboxGroupId: string) {
+    super(workspaceId, sandboxGroupId);
+    this.message = "Paid sandbox compute has no frozen initiating attribution";
+  }
+}
 
 function warmBillingSnapshot(
   row: Pick<LeaseRow, "resume_state" | "account_id" | "workspace_id">,
@@ -45671,9 +45688,45 @@ function warmBillingSnapshot(
       (typeof snapshot.stopChargeAt === "string" &&
         Number.isFinite(Date.parse(snapshot.stopChargeAt)))) &&
     snapshot.accountId === row.account_id &&
-    snapshot.workspaceId === row.workspace_id
+    snapshot.workspaceId === row.workspace_id &&
+    (snapshot.attribution === undefined ||
+      CreditDebitAttribution.safeParse(snapshot.attribution).success)
     ? snapshot
     : null;
+}
+
+/**
+ * The exact durable attempt holder is the worker's admission receipt. Direct,
+ * viewer and interaction requests instead carry host-authenticated context.
+ * Neither subjectId (a session disclosure label) nor a creator is a human.
+ */
+async function sandboxWarmAdmissionAttribution(
+  tx: Database,
+  input: AcquireLeaseInput,
+): Promise<CreditDebitAttribution> {
+  if (input.kind === "turn" && input.holderId.startsWith("turn-attempt:")) {
+    const attemptId = input.holderId.slice("turn-attempt:".length);
+    if (!z.uuid().safeParse(attemptId).success) return { kind: "unknown" };
+    const rows = await tx.execute<{
+      turn_id: string;
+      initiating_human_subject_id: string | null;
+    }>(sql`SELECT t.id AS turn_id, t.initiating_human_subject_id
+      FROM session_turn_attempts a
+      JOIN session_turns t ON t.id=a.turn_id AND t.account_id=a.account_id
+        AND t.workspace_id=a.workspace_id AND t.session_id=a.session_id
+      JOIN sessions s ON s.id=t.session_id AND s.account_id=t.account_id
+        AND s.workspace_id=t.workspace_id
+      WHERE a.id=${attemptId}::uuid AND a.account_id=${input.accountId}::uuid
+        AND a.workspace_id=${input.workspaceId}::uuid
+        AND s.sandbox_group_id=${input.sandboxGroupId}::uuid`);
+    if (!rows[0]) return { kind: "unknown" };
+    return CreditDebitAttribution.parse({
+      kind: "turn",
+      turnId: rows[0].turn_id,
+      initiatingHumanSubjectId: rows[0].initiating_human_subject_id,
+    });
+  }
+  return currentCreditDebitAttribution();
 }
 
 /**
@@ -46584,6 +46637,7 @@ async function acquireLeaseOnce(
         if (row.resume_state?.opengeniWarmBilling && !existingSnapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
         }
+        const admittedAttribution = await sandboxWarmAdmissionAttribution(tx, input);
 
         // Every new paid holder, including direct operations and interaction
         // controllers, passes the same account funding boundary before it can
@@ -46609,6 +46663,27 @@ async function acquireLeaseOnce(
               where lease_id = ${row.id} and kind = ${kind} and holder_id = ${holderId}) as held
           `);
           if (!alreadyHeld[0]?.held) {
+            const attribution =
+              liveness === "cold"
+                ? admittedAttribution
+                : (existingSnapshot?.attribution ?? { kind: "unknown" as const });
+            if (attribution.kind === "unknown") {
+              throw new SandboxDebitAttributionUnavailableError(workspaceId, sandboxGroupId);
+            }
+            const refusal = await checkWorkspaceAllowance(tx, {
+              accountId,
+              workspaceId,
+              subjectId:
+                attribution.kind === "turn" || attribution.kind === "human"
+                  ? attribution.initiatingHumanSubjectId
+                  : null,
+            });
+            if (refusal) {
+              throw Object.assign(
+                new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId),
+                refusal,
+              );
+            }
             const balance = await getBillingBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
@@ -46802,6 +46877,7 @@ async function acquireLeaseOnce(
                 rateMicrosPerSecond: warmPolicy.rateMicrosPerSecond,
                 accountId,
                 workspaceId,
+                attribution: admittedAttribution,
               })}::jsonb),`
                 : sql``
             }
@@ -52846,6 +52922,32 @@ export async function reArmDrainingLease(
           (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
+        }
+        if (
+          activeMode === "credits" &&
+          snapshot?.mode === "credits" &&
+          snapshot.rateMicrosPerSecond > 0
+        ) {
+          const attribution = snapshot.attribution ?? { kind: "unknown" as const };
+          if (attribution.kind === "unknown") {
+            throw new SandboxDebitAttributionUnavailableError(
+              input.workspaceId,
+              input.sandboxGroupId,
+            );
+          }
+          const refusal = await checkWorkspaceAllowance(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId:
+              attribution.kind === "turn" || attribution.kind === "human"
+                ? attribution.initiatingHumanSubjectId
+                : null,
+          });
+          if (refusal)
+            throw Object.assign(
+              new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId),
+              refusal,
+            );
         }
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
@@ -63077,6 +63179,7 @@ export async function accrueWarmSeconds(
             sourceType: "sandbox_lease",
             sourceId: `${input.sandboxGroupId}:${input.expectedEpoch}`,
             idempotencyKey: `debit:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`,
+            metadata: creditDebitAttributionMetadata(snapshot?.attribution ?? { kind: "unknown" }),
           });
         }
 
@@ -66015,7 +66118,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits";
+      reason: "max_auto_continuations" | "limits" | "allowance";
       goal: SessionGoal;
     }
   | {
@@ -66094,6 +66197,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
+    budgetPausedReason?: "limits" | "allowance" | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -66268,7 +66372,7 @@ export async function evaluateGoalContinuation(
             .update(schema.sessionGoals)
             .set({
               status: "paused",
-              pausedReason: "limits",
+              pausedReason: input.budgetPausedReason ?? "limits",
               rationale: input.budgetBlocked,
               autoContinuations,
               noProgressStreak: 0,
@@ -66279,7 +66383,7 @@ export async function evaluateGoalContinuation(
             .returning();
           return {
             decision: "paused",
-            reason: "limits",
+            reason: input.budgetPausedReason ?? "limits",
             goal: mapSessionGoal(paused!),
           } as const;
         }
@@ -66354,6 +66458,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
+    budgetPausedReason?: "limits" | "allowance" | undefined;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
       model: string;
@@ -66720,6 +66825,7 @@ export async function materializeGoalContinuation(
           sessionId: input.sessionId,
           defaultMaxAutoContinuations: input.defaultMaxAutoContinuations ?? null,
           budgetBlocked: input.budgetBlocked ?? null,
+          budgetPausedReason: input.budgetPausedReason,
         });
         if (decision.decision === "none" || decision.decision === "queue") {
           return { action: decision.decision, events: [] } as const;
@@ -75837,6 +75943,8 @@ export type ApplySessionTurnSettlementInput = {
    * input after a bounded terminal condition.
    */
   suppressGoalContinuation?: boolean;
+  /** Pause an active goal atomically with a recoverable allowance stop. */
+  allowanceGoalPause?: { rationale: string };
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -76794,6 +76902,44 @@ export async function applySessionTurnSettlement(
               },
             }
           : null;
+      let allowanceGoalEvent: AppendEventInput | null = null;
+      if (input.allowanceGoalPause && input.turnStatus === "completed") {
+        const [pausedGoal] = await tx
+          .update(schema.sessionGoals)
+          .set({
+            status: "paused",
+            pausedReason: "allowance",
+            rationale: input.allowanceGoalPause.rationale,
+            continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
+            version: sql`${schema.sessionGoals.version} + 1`,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+              eq(schema.sessionGoals.status, "active"),
+            ),
+          )
+          .returning({
+            id: schema.sessionGoals.id,
+            autoContinuations: schema.sessionGoals.autoContinuations,
+            noProgressStreak: schema.sessionGoals.noProgressStreak,
+          });
+        if (pausedGoal) {
+          allowanceGoalEvent = {
+            type: "goal.paused",
+            payload: {
+              goalId: pausedGoal.id,
+              actor: "system",
+              reason: "allowance",
+              rationale: input.allowanceGoalPause.rationale,
+              autoContinuations: pausedGoal.autoContinuations,
+              noProgressStreak: pausedGoal.noProgressStreak,
+            },
+          };
+        }
+      }
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
@@ -76801,6 +76947,7 @@ export async function applySessionTurnSettlement(
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
         ...input.events,
+        ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
         const payload =
@@ -78482,6 +78629,27 @@ export async function getSessionTurn(
       )
       .limit(1);
     return row ? mapSessionTurn(row) : null;
+  });
+}
+
+/**
+ * Read only the immutable causal human for one exact accepted turn. Public
+ * SessionTurn projections intentionally omit this execution-authority field.
+ */
+export async function getSessionTurnInitiatingHumanSubjectId(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ subjectId: schema.sessionTurns.initiatingHumanSubjectId })
+      .from(schema.sessionTurns)
+      .where(
+        and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
+      )
+      .limit(1);
+    return row?.subjectId ?? null;
   });
 }
 

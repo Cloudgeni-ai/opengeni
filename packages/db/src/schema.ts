@@ -6658,6 +6658,12 @@ export const documents = pgTable(
     // document from agent retrieval surfaces (docs MCP) while humans keep REST.
     visibility: text("visibility").notNull().default("workspace"),
     createdBy: text("created_by"),
+    // Trusted ingestion causality, frozen before async source preparation.
+    // createdBy/authority ownership is not verified initiating-human evidence.
+    billingAttribution: jsonb("billing_attribution")
+      .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+      .notNull()
+      .default({ kind: "unknown" }),
     agentAccess: boolean("agent_access").notNull().default(true),
     // Auto-curation output (knowledge drops).
     summary: text("summary"),
@@ -12490,6 +12496,184 @@ export const creditLedgerEntries = pgTable(
       table.accountId,
       table.createdAt,
     ),
+  }),
+);
+
+/** EXECUTE-only lifecycle/counter storage; migration 0542 owns FORCE-RLS policy. */
+export const workspaceUsageAllowances = pgTable(
+  "workspace_usage_allowances",
+  {
+    workspaceId: uuid("workspace_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    config: jsonb("config").$type<import("./usage-allowances").WorkspaceAllowanceConfig>(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    activePeriodKey: text("active_period_key"),
+    activeStartAt: timestamp("active_start_at", { withTimezone: true }),
+    activeEndAt: timestamp("active_end_at", { withTimezone: true }),
+    maintenanceNextAt: timestamp("maintenance_next_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    maintenanceCursor: text("maintenance_cursor"),
+    maintenanceError: text("maintenance_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    maintenanceDue: index("workspace_usage_allowances_maintenance_due")
+      .on(table.maintenanceNextAt, table.workspaceId)
+      .where(sql`${table.config} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceMemberAllowances = pgTable(
+  "workspace_member_allowances",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    rule: jsonb("rule").$type<import("./usage-allowances").MemberAllowanceRule>(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.subjectId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowanceGrants = pgTable(
+  "workspace_allowance_grants",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    credits: bigint("credits", { mode: "number" }).notNull(),
+    remaining: bigint("remaining", { mode: "number" }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorType: text("actor_type").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    fefo: index("workspace_allowance_grants_fefo")
+      .on(table.workspaceId, table.expiresAt, table.createdAt, table.operationId)
+      .where(sql`${table.remaining} > 0`),
+  }),
+);
+export const workspaceAllowanceCounters = pgTable(
+  "workspace_allowance_counters",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    subjectId: text("subject_id").notNull().default(""),
+    used: bigint("used", { mode: "number" }).notNull().default(0),
+    includedUsed: bigint("included_used", { mode: "number" }).notNull().default(0),
+    grantsUsed: bigint("grants_used", { mode: "number" }).notNull().default(0),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.periodKey, table.subjectId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowanceNotifications = pgTable(
+  "workspace_allowance_notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    subjectId: text("subject_id").notNull(),
+    threshold: numeric("threshold").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    crossing: uniqueIndex("workspace_allowance_notifications_crossing").on(
+      table.workspaceId,
+      table.periodKey,
+      table.subjectId,
+      table.threshold,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+export const workspaceAllowancePeriods = pgTable(
+  "workspace_allowance_periods",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    config: jsonb("config").$type<import("./usage-allowances").WorkspaceAllowanceConfig>(),
+    startAt: timestamp("start_at", { withTimezone: true }),
+    endAt: timestamp("end_at", { withTimezone: true }),
+    grantsRemaining: bigint("grants_remaining", { mode: "number" }).notNull().default(0),
+    grantsSnapshot: jsonb("grants_snapshot").$type<unknown[]>().notNull().default([]),
+    memberRules: jsonb("member_rules").$type<Record<string, unknown>>().notNull().default({}),
+    memberCount: integer("member_count").notNull().default(0),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.periodKey] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+export const workspaceVideoAllowanceAllocations = pgTable(
+  "workspace_video_allowance_allocations",
+  {
+    ledgerId: uuid("ledger_id")
+      .primaryKey()
+      .references(() => creditLedgerEntries.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    periodKey: text("period_key").notNull(),
+    humanSubjectId: text("human_subject_id"),
+    amount: bigint("amount", { mode: "number" }).notNull(),
+    includedUsed: bigint("included_used", { mode: "number" }).notNull(),
+    grantsUsed: bigint("grants_used", { mode: "number" }).notNull(),
+    grantAllocations: jsonb("grant_allocations")
+      .$type<Array<{ operationId: string; credits: number }>>()
+      .notNull(),
+    reversedByLedgerId: uuid("reversed_by_ledger_id").references(() => creditLedgerEntries.id),
+  },
+  (table) => ({
+    operation: uniqueIndex("workspace_video_allowance_allocations_operation_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.operationId,
+    ),
+    refund: uniqueIndex("workspace_video_allowance_allocations_refund_idx")
+      .on(table.reversedByLedgerId)
+      .where(sql`${table.reversedByLedgerId} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   }),
 );
 

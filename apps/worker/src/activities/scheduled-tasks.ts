@@ -917,6 +917,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           workspaceId: task.workspaceId,
           model: targetSessionExecution?.model ?? model,
           requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
+          initiatingHumanSubjectId: causalHumanSubjectId,
         },
       );
       if (admissionDenial) {

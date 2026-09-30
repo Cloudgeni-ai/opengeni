@@ -1,8 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { createDb, getKnowledgeEntry, type KnowledgeContext } from "@opengeni/db";
+import {
+  createDb,
+  getKnowledgeEntry,
+  withCreditDebitAttribution,
+  type KnowledgeContext,
+} from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import { indexDocumentNow, type DocumentServices } from "../src";
+import { addDocumentToBase, indexDocumentNow, type DocumentServices } from "../src";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -87,4 +92,52 @@ test("the document adapter retains exact parsed source without hidden findings o
     await shared.admin`SELECT (SELECT count(*)::int FROM knowledge_entry_revisions WHERE entry_id=${row!.id}) AS revisions,
     (SELECT count(*)::int FROM document_chunks WHERE document_id=${documentId}) AS chunks`;
   expect(counts).toEqual({ revisions: 1, chunks: 0 });
+  const [legacyJob] = await shared.admin`
+    SELECT billing_attribution FROM knowledge_index_jobs WHERE entry_id=${row!.id}`;
+  expect(legacyJob?.billing_attribution).toEqual({ kind: "unknown" });
+});
+
+test("new direct uploads freeze verified human before async source preparation", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  const fileId = crypto.randomUUID();
+  const baseId = crypto.randomUUID();
+  const subjectId = "human:upload-initiator";
+  const bytes = new TextEncoder().encode("Upload source");
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Upload attribution')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Upload workspace')`;
+  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key)
+    VALUES(${fileId},${accountId},${workspaceId},'ready','Upload.txt','Upload.txt','text/plain',${bytes.length},'test',${fileId})`;
+  await shared.admin`INSERT INTO document_bases(id,account_id,workspace_id,name)
+    VALUES(${baseId},${accountId},${workspaceId},'Uploads')`;
+  const document = await withCreditDebitAttribution(
+    { kind: "human", initiatingHumanSubjectId: subjectId },
+    () =>
+      addDocumentToBase(client.db, {
+        accountId,
+        workspaceId,
+        baseId,
+        fileId,
+        authorityKind: "workspace",
+        createdBy: subjectId,
+        initiatingSubjectId: subjectId,
+        access: { viewerSubjectId: subjectId },
+      }),
+  );
+  const services = {
+    parser: { name: "test", parse: async () => ({ text: "Upload source" }) },
+  } as unknown as DocumentServices;
+  const storage = { getObjectBytes: async () => ({ bytes }) } as unknown as ObjectStorage;
+  // No initiating actor is ambient when the asynchronous worker runs.
+  await indexDocumentNow(client.db, storage, workspaceId, document.id, services);
+  const [job] = await shared.admin`
+    SELECT j.billing_attribution FROM knowledge_index_jobs j
+    JOIN knowledge_entries e ON e.id=j.entry_id AND e.account_id=j.account_id
+    WHERE e.legacy_document_id=${document.id}`;
+  expect(job?.billing_attribution).toEqual({
+    kind: "human",
+    initiatingHumanSubjectId: subjectId,
+  });
+  await expect(shared.admin`UPDATE documents SET billing_attribution='{"kind":"service"}'::jsonb
+    WHERE id=${document.id}`).rejects.toMatchObject({ code: "23514" });
 });

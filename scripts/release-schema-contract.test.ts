@@ -143,6 +143,18 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
+          (migration) => migration.path === "0544_video_allowance_refunds.sql",
+        )
+          ? "0544_video_allowance_refunds.sql"
+          : sourceContract.migrations.some(
+                (migration) => migration.path === "0543_non_model_debit_attribution.sql",
+              )
+            ? "0543_non_model_debit_attribution.sql"
+            : sourceContract.migrations.some(
+                  (migration) => migration.path === "0542_usage_allowances.sql",
+                )
+              ? "0542_usage_allowances.sql"
+              : sourceContract.migrations.some(
           (migration) => migration.path === "0545_workspace_claude_models.sql",
         )
           ? "0545_workspace_claude_models.sql"
@@ -382,6 +394,15 @@ describe("release schema contract", () => {
     );
     const taskNoteRootLockMode = completeSourceContract.migrations.some(
       (migration) => migration.path === "0542_task_note_root_lock_mode.sql",
+    );
+    const usageAllowances = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0542_usage_allowances.sql",
+    );
+    const nonModelDebitAttribution = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0543_non_model_debit_attribution.sql",
+    );
+    const videoAllowanceRefunds = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0544_video_allowance_refunds.sql",
     );
     const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0540_external_workspace_member_permission_updates.sql",
@@ -658,6 +679,9 @@ describe("release schema contract", () => {
       fileCount:
         (workspaceClaudeModels ? 1 : 0) +
         (claudeModelConnections ? 1 : 0) +
+        (videoAllowanceRefunds ? 1 : 0) +
+        (nonModelDebitAttribution ? 1 : 0) +
+        (usageAllowances ? 1 : 0) +
         (usageEventWorkspaceLockOrder ? 1 : 0) +
         (taskNoteRootLockMode ? 1 : 0) +
         (externalWorkspaceMemberPermissionUpdates ? 1 : 0) +
@@ -1053,6 +1077,11 @@ describe("release schema contract", () => {
       ...(taskNoteRootLockMode ? { latestMigration: "0542_task_note_root_lock_mode.sql" } : {}),
       ...(claudeModelConnections ? { latestMigration: "0544_claude_model_connections.sql" } : {}),
       ...(workspaceClaudeModels ? { latestMigration: "0545_workspace_claude_models.sql" } : {}),
+      ...(usageAllowances ? { latestMigration: "0542_usage_allowances.sql" } : {}),
+      ...(nonModelDebitAttribution
+        ? { latestMigration: "0543_non_model_debit_attribution.sql" }
+        : {}),
+      ...(videoAllowanceRefunds ? { latestMigration: "0544_video_allowance_refunds.sql" } : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1089,6 +1118,9 @@ describe("release schema contract", () => {
             "0542_task_note_root_lock_mode.sql",
             "0544_claude_model_connections.sql",
             "0545_workspace_claude_models.sql",
+            "0542_usage_allowances.sql",
+            "0543_non_model_debit_attribution.sql",
+            "0544_video_allowance_refunds.sql",
           ].includes(migration.path),
       ),
     };
@@ -2574,6 +2606,9 @@ describe("release schema contract", () => {
       "0542_task_note_root_lock_mode.sql",
       "0544_claude_model_connections.sql",
       "0545_workspace_claude_models.sql",
+      "0542_usage_allowances.sql",
+      "0543_non_model_debit_attribution.sql",
+      "0544_video_allowance_refunds.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3111,6 +3146,9 @@ describe("release schema contract", () => {
       "0542_task_note_root_lock_mode.sql",
       "0544_claude_model_connections.sql",
       "0545_workspace_claude_models.sql",
+      "0542_usage_allowances.sql",
+      "0543_non_model_debit_attribution.sql",
+      "0544_video_allowance_refunds.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

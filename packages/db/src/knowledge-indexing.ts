@@ -4,6 +4,14 @@ import { z } from "zod";
 import { StoredKnowledgeEntryContent } from "@opengeni/contracts";
 import { rawRows, withRlsContext, withWorkspaceUsageLock, type Database } from "./database";
 import { fromPostgresLosslessJson, toPostgresLosslessText } from "./lossless-json";
+import { CreditDebitAttribution } from "./credit-debit-attribution";
+export {
+  CreditDebitAttribution,
+  creditDebitAttributionMetadata,
+  creditDebitAttributionForTurn,
+  currentCreditDebitAttribution,
+  withCreditDebitAttribution,
+} from "./credit-debit-attribution";
 
 const Claim = z.object({
   accountId: z.uuid(),
@@ -14,6 +22,7 @@ const Claim = z.object({
   dimensions: z.number().int().min(1).max(4096),
   generation: z.number().int().positive(),
   nextIndex: z.number().int().nonnegative(),
+  billingAttribution: CreditDebitAttribution,
 });
 export type KnowledgeIndexClaim = z.infer<typeof Claim>;
 

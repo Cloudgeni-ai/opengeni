@@ -93,6 +93,7 @@ import {
   decryptVariableSetValue,
   encryptVariableSetValue,
   getSession,
+  getScheduledTaskRevisionAuthoritySubject,
   getSessionGoal,
   getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
@@ -1682,13 +1683,24 @@ export function buildOpenGeniMcpServer(
             agentConfig: task.agentConfig,
             requireOnline: true,
           });
-          await requireLimit(deps, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            action: "agent_run:create",
-            quantity: 1,
-            model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
+          const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
+            accountId: task.accountId,
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+            taskAuthorityRevision: task.authorityRevision,
           });
+          await requireLimit(
+            { ...deps, settings: catalogSettings },
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              initiatingHumanSubjectId:
+                taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
+              action: "agent_run:create",
+              quantity: 1,
+              model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
+            },
+          );
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
         const agentRunUsageIdempotencyKey =

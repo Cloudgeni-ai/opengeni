@@ -1,4 +1,4 @@
-import { getBillingBalance, sumUsageQuantity } from "@opengeni/db";
+import { checkWorkspaceAllowance, getBillingBalance, sumUsageQuantity } from "@opengeni/db";
 import {
   configuredStaticUsageLimits,
   resolveTurnExecutionPolicyV1,
@@ -8,6 +8,7 @@ import { selectCodexCredentialId } from "@opengeni/codex";
 import { directPersonalConnectionSubjectId } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
+  type AllowanceExhaustedRefusal,
   type SessionEvent,
   type SessionTurn,
   type ToolAuthNeededPayload,
@@ -243,9 +244,22 @@ export class BudgetExhaustedError extends Error {
   constructor(
     message: string,
     readonly serializedRunState: string | null,
+    readonly allowance: AllowanceRefusal | null = null,
   ) {
     super(message);
     this.name = "BudgetExhaustedError";
+  }
+}
+
+export type AllowanceRefusal = AllowanceExhaustedRefusal;
+
+/** Account allowance exhaustion is recoverable state, never a provider failure. */
+export class AllowanceExhaustedError extends Error {
+  readonly code = "allowance_exhausted";
+
+  constructor(readonly refusal: AllowanceRefusal) {
+    super(refusal.message);
+    this.name = "AllowanceExhaustedError";
   }
 }
 
@@ -262,6 +276,7 @@ export async function ensureRunAllowed(
   entitlements?: ActivityServices["entitlements"],
   chargesOpenGeniCredits = !isExternallyBilledTurn,
   countsTowardTokenCap = !isExternallyBilledTurn,
+  initiatingHumanSubjectId: string | null = null,
 ): Promise<void> {
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
@@ -301,6 +316,14 @@ export async function ensureRunAllowed(
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient OpenGeni credits");
     }
+  }
+  if (chargesOpenGeniCredits) {
+    const refusal = await checkWorkspaceAllowance(db, {
+      accountId,
+      workspaceId,
+      subjectId: initiatingHumanSubjectId,
+    });
+    if (refusal) throw new AllowanceExhaustedError(refusal);
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);

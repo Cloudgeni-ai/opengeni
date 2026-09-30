@@ -1536,12 +1536,16 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     if (
       !(await eventing.settle!({
         events: [
+          ...(error.allowance
+            ? [{ type: "usage.exhausted" as const, payload: error.allowance }]
+            : []),
           {
             type: "turn.completed",
             payload: {
               output: "",
               segmentLimit: "budget_exhausted",
               detail: error.message,
+              ...(error.allowance ?? {}),
             },
           },
           { type: "session.status.changed", payload: { status: "idle" } },
@@ -1549,6 +1553,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        ...(error.allowance ? { allowanceGoalPause: { rationale: error.allowance.message } } : {}),
       }))
     ) {
       return claimedResult({ status: "cancelled" });
