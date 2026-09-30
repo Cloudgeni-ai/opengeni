@@ -6247,7 +6247,7 @@ export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
 export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
-export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_PROGRESS_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES = 512;
 export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES = 4 * 1024;
 export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS = 16;
@@ -6260,6 +6260,10 @@ function boundedSessionGoalString(maxBytes: number, field: string) {
   return z
     .string()
     .min(1)
+    .max(maxBytes)
+    .describe(
+      `${field}: at most ${maxBytes} UTF-8 bytes. Write concise, human-readable text with normal spacing; summarize instead of compressing words.`,
+    )
     .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
       message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
     });

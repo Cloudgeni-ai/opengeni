@@ -3,6 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { DEFAULT_FIRST_PARTY_MCP_TOOLS, type AccessGrant } from "@opengeni/contracts";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { z } from "zod";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const report = { id: "report", title: "Requested report" };
@@ -102,5 +103,47 @@ describe("goal MCP report field contracts", () => {
     expect(schema.safeParse({ evidence }).data).toEqual({ evidence });
     expect(schema.safeParse({ evidence: "x".repeat(8192) }).success).toBe(true);
     expect(schema.safeParse({ evidence: "x".repeat(8193) }).success).toBe(false);
+  });
+  test("every goal-tool text limit and purpose is model-visible, with normal spacing preserved", () => {
+    const registered = tools();
+    for (const [toolName, field, cap] of [
+      ["goal_set", "text", 8192],
+      ["goal_set", "successCriteria", 8192],
+      ["goal_update", "text", 8192],
+      ["goal_update", "rationale", 2048],
+      ["goal_progress", "progressNote", 8192],
+      ["goal_pause", "rationale", 2048],
+      ["wait_for_input", "reason", 2048],
+    ] as const) {
+      const schema = registered[toolName]!.inputSchema as unknown as z.ZodType;
+      const json = z.toJSONSchema(schema, { unrepresentable: "any" });
+      const property = (
+        json.properties as Record<string, { maxLength?: number; description?: string }>
+      )[field]!;
+      expect(property.maxLength).toBe(cap);
+      expect(property.description).toContain(`${cap} UTF-8 bytes`);
+      expect(property.description).toMatch(/normal spac/);
+    }
+    const progress = registered.goal_progress!.inputSchema;
+    const status = "Milestone verified with normal spaces. ".repeat(150);
+    expect(status.length).toBeGreaterThan(4096);
+    expect(progress.safeParse({ progressNote: status, idempotencyKey: id }).data).toEqual({
+      progressNote: status,
+      idempotencyKey: id,
+    });
+    expect(progress.safeParse({ progressNote: "x".repeat(8192), idempotencyKey: id }).success).toBe(
+      true,
+    );
+    expect(progress.safeParse({ progressNote: "x".repeat(8193), idempotencyKey: id }).success).toBe(
+      false,
+    );
+    expect(
+      progress.safeParse({ progressNote: "界".repeat(2731), idempotencyKey: id }).success,
+    ).toBe(false);
+    const reportSchema = z.toJSONSchema(registered.goal_set!.inputSchema as unknown as z.ZodType, {
+      unrepresentable: "any",
+    });
+    expect(JSON.stringify(reportSchema)).toContain("Short human-readable report title");
+    expect(JSON.stringify(reportSchema)).toContain('"maxLength":512');
   });
 });

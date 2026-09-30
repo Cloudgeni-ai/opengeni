@@ -556,6 +556,10 @@ fails or pauses the goal or defers later child-result wakes.
 Completed hosted tools qualify for that handoff across recovery. Structured
 developer/system text is converted to Chat-native text only in the request-local
 view; canonical reminders and history remain unchanged.
+Goal-tool text bounds are explicit in schemas and descriptions: objective and
+criteria 8 KiB UTF-8 each, progress status 8 KiB, rationale 2 KiB, evidence 8192
+characters. Keep human-readable sentences and normal spaces; summarize rather
+than compress words, and never substitute a ledger field for the final reply.
 
 Claude Messages changes: read `docs/model-providers.md#native-claude-messages`
 and `packages/runtime/src/anthropic-messages.ts`. Run the native adapter tests

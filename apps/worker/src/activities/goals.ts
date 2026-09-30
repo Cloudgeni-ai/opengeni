@@ -308,6 +308,7 @@ export function goalContinuationPrompt(
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
     "Goal evidence is a short proof for the ledger, not the deliverable. After goal_complete succeeds, finish this same turn with the requested user-facing answer, or a concise summary and retained artifact link. Goal completion stops future automatic continuations; it does not send the answer or end this turn. Never compress a report into evidence or omit the final reply.",
+    "Goal progress notes are short human-readable milestone statuses, not raw transcripts or continuation instructions. Keep normal spaces and summarize detail instead of squeezing words into a ledger field. The text and successCriteria fields each allow 8192 UTF-8 bytes, progressNote allows 8192 UTF-8 bytes, rationale allows 2048 UTF-8 bytes, and evidence allows 8192 characters.",
     "",
     ...waitingGuidance,
     ...childNoticeGuidance,

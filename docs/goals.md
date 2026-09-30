@@ -207,7 +207,13 @@ the session. An active goal remains active while the session waits; use
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
-and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
+and pause rationales to 2 KiB, and progress notes to 8 KiB. Agent schemas expose
+the character upper bound plus the exact UTF-8 byte limit and purpose.
+Progress is a short human-readable status, rationale is a short explanation,
+and objective/criteria describe the intended outcome—not the deliverable.
+Use normal spacing; summarize unnecessary detail instead of squeezing words.
+Evidence remains short ledger proof with an explicit 8192-character cap; the
+requested answer must still appear in the final user-facing reply. Root constraints
 are limited to 16 items, 512 UTF-8 bytes per item, and 4 KiB in aggregate.
 Pre-0257 goals remain exact and lifecycle-mutable even when larger. Their immutable
 accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
