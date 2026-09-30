@@ -1252,7 +1252,13 @@ export function ProviderConnectionPage({
               label={config.credentialLabelText ?? "API key"}
               icon={<KeyRoundIcon />}
             >
-              {state.connected ? "Stored encrypted" : "Not connected"}
+              {status.status === "loading"
+                ? "Loading…"
+                : status.status === "unavailable"
+                  ? "Unavailable"
+                  : state.connected
+                    ? "Stored encrypted"
+                    : "Not connected"}
             </DetailAsideItem>
             <DetailAsideItem
               label="Belongs to"
