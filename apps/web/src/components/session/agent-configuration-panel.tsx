@@ -8,7 +8,6 @@
 import {
   AGENT_IDENTITY_MAX_CHARACTERS,
   legacyEffectiveAgentCapabilities,
-  type AgentCapabilityId,
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { PencilIcon } from "lucide-react";
@@ -16,14 +15,14 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
-  AgentCapabilityList,
   AgentCapabilityPicker,
+  AgentCapabilitySummary,
 } from "@/components/agent/agent-capability-picker";
 import { Button } from "@/components/ui/button";
 import { Disclosure } from "@/components/ui/disclosure";
 import { Field, TextArea } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { RelativeTime } from "@/components/ui/relative-time";
 import { useAppContext } from "@/context";
 import {
   AGENT_CAPABILITY_GROUPS,
@@ -41,58 +40,10 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
-type ToolVisibility = "upfront" | "on_demand";
-
-/** Which tools the latest captured request sent up front, and whether a search router was there. */
-function useCapturedToolNames(session: Session): {
-  loading: boolean;
-  error: boolean;
-  names: ReadonlySet<string> | null;
-} {
-  const { client } = useAppContext();
-  const [state, setState] = useState<{
-    key: string;
-    loading: boolean;
-    error: boolean;
-    names: ReadonlySet<string> | null;
-  }>({ key: "", loading: true, error: false, names: null });
-  const key = `${session.workspaceId}:${session.id}:${session.lastSequence}`;
-  useEffect(() => {
-    let cancelled = false;
-    setState((current) => ({ ...current, key, loading: true }));
-    void client
-      .getSessionModelContext(session.workspaceId, session.id)
-      .then((response) => {
-        if (cancelled) return;
-        const body = response.snapshot?.providerRequest?.body;
-        let names: Set<string> | null = null;
-        if (body) {
-          try {
-            const tools = (JSON.parse(body) as { tools?: unknown }).tools;
-            names = new Set(
-              (Array.isArray(tools) ? tools : []).map((tool) => {
-                const record = tool as { name?: unknown; type?: unknown };
-                return String(record.name ?? record.type ?? "");
-              }),
-            );
-          } catch {
-            names = null;
-          }
-        }
-        setState({ key, loading: false, error: false, names });
-      })
-      .catch(() => {
-        if (!cancelled) setState({ key, loading: false, error: true, names: null });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, key, session.id, session.workspaceId]);
-  return state;
-}
-
 export function AgentConfigurationPanel(props: {
   session: Session;
+  /** The latest change to these settings, when one is in the loaded events. */
+  lastChange?: { at: string; pending: boolean } | null;
   onReloadSession: () => Promise<void>;
 }) {
   const { session } = props;
@@ -131,7 +82,6 @@ export function AgentConfigurationPanel(props: {
   const [identity, setIdentity] = useState(config?.identity ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const captured = useCapturedToolNames(session);
 
   // Someone else's save (or a reload) while not editing shows the new truth.
   const configKey = JSON.stringify(config);
@@ -184,9 +134,7 @@ export function AgentConfigurationPanel(props: {
           <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
             {editing
               ? "Applies from the next turn."
-              : config
-                ? `${startingPoint} · ${capabilitySummary(current.values, availability)}`
-                : "Started before agent settings"}
+              : `${config ? startingPoint : "Before agent settings"} · ${capabilitySummary(current.values, availability)}`}
           </p>
         </div>
         {!editing && canEdit ? (
@@ -207,7 +155,13 @@ export function AgentConfigurationPanel(props: {
           </Button>
         ) : null}
       </div>
-      <ScrollArea className="min-h-0 min-w-0 flex-1">
+      <div
+        // Focusable so keyboard users can scroll a long list.
+        tabIndex={0}
+        role="region"
+        aria-label={editing ? "Edit agent" : "Agent settings"}
+        className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
+      >
         <div className="flex min-w-0 flex-col gap-6 px-4 py-4">
           {editing ? (
             <>
@@ -249,10 +203,17 @@ export function AgentConfigurationPanel(props: {
           ) : (
             <>
               {!config ? (
-                <Notice title="Created before agent settings">
-                  This session keeps the tools it started with. Editing converts it to agent
-                  settings, starting from what it can do now.
+                <Notice>
+                  This session started before agent settings and keeps the tools it started with.
+                  Editing converts it, starting from what it can do now.
                 </Notice>
+              ) : props.lastChange ? (
+                <p className="text-xs leading-4.5 text-fg-muted">
+                  Changed <RelativeTime date={props.lastChange.at} inSentence />.{" "}
+                  {props.lastChange.pending
+                    ? "Applies from the next turn."
+                    : "The latest turn used these settings."}
+                </p>
               ) : null}
               {!canEdit ? (
                 <p className="text-xs leading-4.5 text-fg-muted">
@@ -270,13 +231,13 @@ export function AgentConfigurationPanel(props: {
                   {config?.identity ?? "The workspace's identity, or OpenGeni's default."}
                 </p>
               </div>
-              <AgentCapabilityList values={current.values} availability={availability} />
+              <AgentCapabilitySummary values={current.values} availability={availability} />
               <ConnectedApps session={session} />
-              <TechnicalDetails session={session} captured={captured} />
+              <TechnicalDetails session={session} />
             </>
           )}
         </div>
-      </ScrollArea>
+      </div>
       {editing ? (
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 border-t border-border px-4 py-3">
           <p className="mr-auto min-w-0 text-xs leading-4.5 text-fg-muted">
@@ -348,46 +309,30 @@ function ConnectedApps({ session }: { session: Session }) {
   );
 }
 
-function TechnicalDetails({
-  session,
-  captured,
-}: {
-  session: Session;
-  captured: ReturnType<typeof useCapturedToolNames>;
-}) {
+function TechnicalDetails({ session }: { session: Session }) {
   const tools = session.effectiveTools?.tools ?? [];
   const servers = session.effectiveTools?.mcpServers ?? [];
-  const router = captured.names?.has("tool_search") ?? false;
-  const visibility = (name: string): ToolVisibility | null =>
-    captured.names === null
-      ? null
-      : captured.names.has(name)
-        ? "upfront"
-        : router
-          ? "on_demand"
-          : null;
-  const owners: Array<AgentCapabilityId | "runtime"> = [
+  if (!session.effectiveTools) return null;
+  const owners: Array<AgentEffectiveToolOwner> = [
     ...AGENT_CAPABILITY_GROUPS.flatMap((group) => group.capabilities),
+    "product",
+    "sandbox",
     "runtime",
   ];
   const groups = owners
     .map((owner) => ({ owner, tools: tools.filter((tool) => tool.capability === owner) }))
     .filter((group) => group.tools.length > 0);
-  if (!session.effectiveTools) return null;
+  const anyVisibility = tools.some((tool) => tool.visibility !== undefined);
   return (
     <Disclosure
       title="Technical details"
-      summary={`${tools.length} built-in tools${servers.length ? `, ${servers.length} tool servers` : ""}`}
+      summary={`${tools.length} tools${servers.length ? ` · ${servers.length} tool servers` : ""}`}
     >
       <div className="flex min-w-0 flex-col gap-5 pt-2 pb-2">
         <p className="text-xs leading-4.5 text-fg-muted">
-          {captured.loading && captured.names === null
-            ? "Checking the last request…"
-            : captured.error
-              ? "Couldn't load the last request, so when each tool is sent isn't shown."
-              : captured.names === null
-                ? "Up front or on demand shows after the first turn. Sandbox tools are added whenever a sandbox is attached."
-                : "Up front: sent with every request. On demand: found by search when needed. Sandbox tools are added whenever a sandbox is attached."}
+          {anyVisibility
+            ? "Up front: sent with every request. On demand: the agent finds it by search when it needs it."
+            : "What this session can use. Each app lists its own tools when a turn starts."}
         </p>
         {groups.map((group) => (
           <section key={group.owner} className="min-w-0">
@@ -395,29 +340,26 @@ function TechnicalDetails({
               {toolOwnerLabel(group.owner)}
             </h4>
             <ul className="m-0 flex min-w-0 list-none flex-col p-0">
-              {group.tools.map((tool) => {
-                const shown = visibility(tool.name);
-                return (
-                  <li
-                    key={tool.name}
-                    className="flex min-h-7 min-w-0 items-center justify-between gap-3"
-                  >
-                    <code className="min-w-0 font-mono text-xs break-all text-fg">{tool.name}</code>
-                    {shown ? (
-                      <span
-                        className={cn(
-                          "shrink-0 rounded-full border px-2 text-2xs leading-4.5",
-                          shown === "upfront"
-                            ? "border-brand/30 text-brand"
-                            : "border-border text-fg-muted",
-                        )}
-                      >
-                        {shown === "upfront" ? "Up front" : "On demand"}
-                      </span>
-                    ) : null}
-                  </li>
-                );
-              })}
+              {group.tools.map((tool) => (
+                <li
+                  key={`${tool.source}:${tool.name}`}
+                  className="flex min-h-7 min-w-0 items-center justify-between gap-3"
+                >
+                  <code className="min-w-0 font-mono text-xs break-all text-fg">{tool.name}</code>
+                  {tool.visibility ? (
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full border px-2 text-2xs leading-4.5",
+                        tool.visibility === "upfront"
+                          ? "border-brand/30 text-brand"
+                          : "border-border text-fg-muted",
+                      )}
+                    >
+                      {tool.visibility === "upfront" ? "Up front" : "On demand"}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
             </ul>
           </section>
         ))}
@@ -445,3 +387,7 @@ function TechnicalDetails({
     </Disclosure>
   );
 }
+
+type AgentEffectiveToolOwner = NonNullable<
+  Session["effectiveTools"]
+>["tools"][number]["capability"];

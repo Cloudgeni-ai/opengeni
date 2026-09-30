@@ -485,7 +485,6 @@ export function InstructionsTab({
  */
 function AgentIdentityBlock({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
-  const navigate = useNavigate();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const canManage = canManageWorkspaceSettings(
     context.accessContext,
@@ -510,22 +509,18 @@ function AgentIdentityBlock({ workspaceId }: { workspaceId: string }) {
         }
         actions={
           canManage ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="pointer-coarse:h-11"
-              onClick={() =>
-                void navigate({
-                  to: "/workspaces/$workspaceId/settings",
-                  params: { workspaceId },
-                  search: { section: "general", view: "agent-defaults" },
-                })
-              }
+            // Edited with the other agent defaults, like organization identity
+            // is edited in organization settings.
+            <InAppHelpLink
+              href={`/workspaces/${workspaceId}/settings?section=general&view=agent-defaults`}
+              className="text-sm leading-5"
             >
-              <PencilIcon aria-hidden="true" />
-              Edit
-            </Button>
+              Edit in workspace settings
+              <ArrowUpRightIcon
+                aria-hidden="true"
+                className="ml-0.5 inline size-3.5 align-[-2px]"
+              />
+            </InAppHelpLink>
           ) : undefined
         }
       />

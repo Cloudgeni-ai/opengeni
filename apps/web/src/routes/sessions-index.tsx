@@ -145,8 +145,10 @@ import {
   type WorkspaceModelCatalogState,
 } from "@/lib/use-workspace-model-catalog";
 import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
+import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
 import {
   capabilityAvailability,
+  capabilitySummary,
   draftFromRequest,
   requestFromDraft,
   workspaceAgentDefaultsDraft,
@@ -293,6 +295,9 @@ function SessionsIndexRouteContent({
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const [capabilitiesOpenRequest, setCapabilitiesOpenRequest] = useState<
+    { panel: "capabilities"; nonce: number } | undefined
+  >(undefined);
   // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
   const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
   const agentAvailability = useMemo(
@@ -1615,103 +1620,123 @@ function SessionsIndexRouteContent({
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
-              <ComposerMobilePlus
-                connectorActions={{
-                  accountControls: {
-                    groups: connectionAccounts.availableAccountGroups,
-                    choices: connectionAccounts.accountChoices,
-                    onChoose: connectionAccounts.selectAccount,
-                    loading: connectionAccounts.loading,
-                    error: connectionAccounts.error,
-                    accessDenied: connectionAccounts.accessDenied,
-                    onRefresh: () => void connectionAccounts.refresh(),
-                    disabled: busy || newSessionDraft.loading,
-                  },
-                }}
-                menuSide="bottom"
-                {...(composerAgentCapabilities
-                  ? {
-                      agentCapabilities: {
-                        ...composerAgentCapabilities,
-                        disabled: busy || newSessionDraft.loading,
-                      },
+              <>
+                <ComposerMobilePlus
+                  openRequest={capabilitiesOpenRequest}
+                  connectorActions={{
+                    accountControls: {
+                      groups: connectionAccounts.availableAccountGroups,
+                      choices: connectionAccounts.accountChoices,
+                      onChoose: connectionAccounts.selectAccount,
+                      loading: connectionAccounts.loading,
+                      error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
+                      onRefresh: () => void connectionAccounts.refresh(),
+                      disabled: busy || newSessionDraft.loading,
+                    },
+                  }}
+                  menuSide="bottom"
+                  {...(composerAgentCapabilities
+                    ? {
+                        agentCapabilities: {
+                          ...composerAgentCapabilities,
+                          disabled: busy || newSessionDraft.loading,
+                        },
+                      }
+                    : {})}
+                  draftChatSettings={{
+                    workspaceId,
+                    scope:
+                      createVisibility === "private" || personalWorkspace
+                        ? "personal"
+                        : "workspace",
+                    value: draft.agentLearning ?? {},
+                    onChange: (agentLearning) =>
+                      setDraft((current) => ({ ...current, agentLearning })),
+                  }}
+                  workspaceId={workspaceId}
+                  disabled={busy || newSessionDraft.loading}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={context.toolMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={{
+                    mcpServerIds: context.selectedCapabilityToolIds,
+                    firstPartyToolIds: draft.firstPartyMcpTools,
+                  }}
+                  toolsDisabled={busy || newSessionDraft.loading}
+                  connectorCustomizing={connectorCustomizing}
+                  onConnectorCustomizingChange={(next) => {
+                    if (next) setConnectorCustomizing(true);
+                    else followWorkspaceConnectors();
+                  }}
+                  onToolSelectionChange={(selection) => {
+                    changeConnectorSelection(selection);
+                  }}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        repositories: {
+                          selectedCount:
+                            context.selectedRepoIds.size +
+                            context.selectedPersonalGitHubRepoIds.size +
+                            context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <WorkspaceRepositoryMenuBody
+                              workspaceId={workspaceId}
+                              disabled={busy || newSessionDraft.loading}
+                              catalogRefresh={repositoryCatalogRefresh}
+                              onConnectWorkspaceApp={githubAppConnect.open}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        variableSets: {
+                          selectedCount: draft.variableSetIds.length,
+                          panel: (
+                            <ManagedSandboxFields
+                              variableSetsOnly
+                              variableSetWorkspaceId={workspaceId}
+                              canAttachVariableSets={canAttachVariableSets}
+                              canUseVariableSets={canUseVariableSets}
+                              draft={draft}
+                              onChange={setDraft}
+                              disabled={busy || newSessionDraft.loading}
+                              variableSets={selectableVariableSets}
+                              rigs={selectableRigs}
+                              personalResourceAccess={{
+                                names: selectedPersonalResourceNames,
+                                visibility: createVisibility,
+                              }}
+                              catalogRecovery={{
+                                error: fixedResourceCatalogError,
+                                refreshing: personalResourceCatalogRefreshPending,
+                                onRetry: () => void refreshPersonalResourceCatalogs(),
+                              }}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                />
+                {composerAgentCapabilities?.customized ? (
+                  <ComposerCapabilitiesChip
+                    summary={capabilitySummary(
+                      composerAgentCapabilities.draft.values,
+                      composerAgentCapabilities.availability,
+                    )}
+                    disabled={busy || newSessionDraft.loading}
+                    onOpen={() =>
+                      setCapabilitiesOpenRequest((current) => ({
+                        panel: "capabilities",
+                        nonce: (current?.nonce ?? 0) + 1,
+                      }))
                     }
-                  : {})}
-                draftChatSettings={{
-                  workspaceId,
-                  scope:
-                    createVisibility === "private" || personalWorkspace ? "personal" : "workspace",
-                  value: draft.agentLearning ?? {},
-                  onChange: (agentLearning) =>
-                    setDraft((current) => ({ ...current, agentLearning })),
-                }}
-                workspaceId={workspaceId}
-                disabled={busy || newSessionDraft.loading}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={context.toolMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={{
-                  mcpServerIds: context.selectedCapabilityToolIds,
-                  firstPartyToolIds: draft.firstPartyMcpTools,
-                }}
-                toolsDisabled={busy || newSessionDraft.loading}
-                connectorCustomizing={connectorCustomizing}
-                onConnectorCustomizingChange={(next) => {
-                  if (next) setConnectorCustomizing(true);
-                  else followWorkspaceConnectors();
-                }}
-                onToolSelectionChange={(selection) => {
-                  changeConnectorSelection(selection);
-                }}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      repositories: {
-                        selectedCount:
-                          context.selectedRepoIds.size +
-                          context.selectedPersonalGitHubRepoIds.size +
-                          context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <WorkspaceRepositoryMenuBody
-                            workspaceId={workspaceId}
-                            disabled={busy || newSessionDraft.loading}
-                            catalogRefresh={repositoryCatalogRefresh}
-                            onConnectWorkspaceApp={githubAppConnect.open}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      variableSets: {
-                        selectedCount: draft.variableSetIds.length,
-                        panel: (
-                          <ManagedSandboxFields
-                            variableSetsOnly
-                            variableSetWorkspaceId={workspaceId}
-                            canAttachVariableSets={canAttachVariableSets}
-                            canUseVariableSets={canUseVariableSets}
-                            draft={draft}
-                            onChange={setDraft}
-                            disabled={busy || newSessionDraft.loading}
-                            variableSets={selectableVariableSets}
-                            rigs={selectableRigs}
-                            personalResourceAccess={{
-                              names: selectedPersonalResourceNames,
-                              visibility: createVisibility,
-                            }}
-                            catalogRecovery={{
-                              error: fixedResourceCatalogError,
-                              refreshing: personalResourceCatalogRefreshPending,
-                              onRetry: () => void refreshPersonalResourceCatalogs(),
-                            }}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-              />
+                  />
+                ) : null}
+              </>
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">

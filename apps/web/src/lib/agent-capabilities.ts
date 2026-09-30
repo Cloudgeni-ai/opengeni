@@ -232,23 +232,6 @@ export function capabilitySummary(
   return `${on} of ${offered.length} capabilities`;
 }
 
-/** Product words for the state of one capability, for read-only views. */
-export function capabilityStateLabel(
-  values: ResolvedAgentCapabilities,
-  id: AgentCapabilityId,
-  availability: CapabilityAvailability,
-): string {
-  if (!availability.isAvailable(id)) return UNAVAILABLE_CAPABILITY_REASON;
-  if (id === "skills") {
-    return values.skills === "manage"
-      ? "Read and manage"
-      : values.skills === "read"
-        ? "Read"
-        : "Off";
-  }
-  return values[id] ? "On" : "Off";
-}
-
 /** The workspace's saved defaults, or null when it follows OpenGeni's defaults. */
 export function workspaceAgentDefaultsDraft(input: {
   capabilities: AgentCapabilities | undefined;

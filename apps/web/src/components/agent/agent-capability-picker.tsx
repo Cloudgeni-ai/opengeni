@@ -19,7 +19,6 @@ import {
   UNAVAILABLE_CAPABILITY_REASON,
   capabilityDescription,
   capabilityLabel,
-  capabilityStateLabel,
   skillsFromOption,
   skillsOptionValue,
   withCapability,
@@ -192,55 +191,70 @@ function CapabilityRow({
   );
 }
 
-/** Read-only list: each capability with its state in words. */
-export function AgentCapabilityList({
+/**
+ * Read-only summary for narrow views (the session dock): what is on, grouped,
+ * with its one-line description; then one line each for what is off and what
+ * this server doesn't offer.
+ */
+export function AgentCapabilitySummary({
   values,
   availability,
-  onlyOn = false,
 }: {
   values: ResolvedAgentCapabilities;
   availability: CapabilityAvailability;
-  /** Show only what is on (compact views). */
-  onlyOn?: boolean;
 }) {
+  const on = (id: AgentCapabilityId) =>
+    availability.isAvailable(id) &&
+    (id === "skills" ? values.skills !== false : values[id] === true);
+  const off = AGENT_CAPABILITY_GROUPS.flatMap((group) => group.capabilities).filter(
+    (id) => availability.isAvailable(id) && !on(id),
+  );
+  const unavailable = AGENT_CAPABILITY_GROUPS.flatMap((group) => group.capabilities).filter(
+    (id) => !availability.isAvailable(id),
+  );
   return (
-    <div className="flex min-w-0 flex-col gap-5">
+    <div className="flex min-w-0 flex-col gap-4" data-slot="agent-capability-summary">
       {AGENT_CAPABILITY_GROUPS.map((group) => {
-        const ids = group.capabilities.filter(
-          (id) =>
-            !onlyOn ||
-            (availability.isAvailable(id) &&
-              (id === "skills" ? values.skills !== false : values[id])),
-        );
+        const ids = group.capabilities.filter(on);
         if (ids.length === 0) return null;
         return (
           <CapabilityGroup key={group.id} label={group.label}>
-            {ids.map((id) => {
-              const state = capabilityStateLabel(values, id, availability);
-              const on = state !== "Off" && availability.isAvailable(id);
-              return (
-                <li
-                  key={id}
-                  data-capability={id}
-                  className="flex min-h-11 min-w-0 items-center justify-between gap-4 py-2"
-                >
-                  <span className="min-w-0">
-                    <span className="block text-sm text-fg">{capabilityLabel(id)}</span>
-                  </span>
-                  <span
-                    className={cn(
-                      "shrink-0 text-right text-xs leading-4.5",
-                      on ? "text-fg" : "text-fg-subtle",
-                    )}
-                  >
-                    {state}
-                  </span>
-                </li>
-              );
-            })}
+            {ids.map((id) => (
+              <li key={id} data-capability={id} className="min-w-0 py-2">
+                <span className="flex min-w-0 items-baseline justify-between gap-3">
+                  <span className="text-sm font-medium text-fg">{capabilityLabel(id)}</span>
+                  {id === "skills" ? (
+                    <span className="shrink-0 text-xs text-fg-muted">
+                      {values.skills === "manage" ? "Read and manage" : "Read only"}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="mt-0.5 block text-xs leading-4.5 text-fg-muted">
+                  {id === "skills"
+                    ? values.skills === "manage"
+                      ? "Reads installed Skills and can save, install, and publish them."
+                      : "Reads installed Skills."
+                    : capabilityDescription(id)}
+                </span>
+              </li>
+            ))}
           </CapabilityGroup>
         );
       })}
+      {off.length > 0 ? (
+        <p className="text-xs leading-4.5 text-fg-muted">
+          <span className="font-medium text-fg">Off: </span>
+          {off.map(capabilityLabel).join(", ")}.
+        </p>
+      ) : null}
+      {unavailable.length > 0 ? (
+        <p className="flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-fg-muted">
+          <LockIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
+          <span className="min-w-0">
+            {UNAVAILABLE_CAPABILITY_REASON}: {unavailable.map(capabilityLabel).join(", ")}.
+          </span>
+        </p>
+      ) : null}
     </div>
   );
 }

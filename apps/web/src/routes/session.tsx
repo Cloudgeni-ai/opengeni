@@ -1243,6 +1243,17 @@ export function SessionRoute({
   }
 }
 
+/** The latest agent-settings change, and whether a turn has started since. */
+function lastAgentChange(events: readonly SessionEvent[]): { at: string; pending: boolean } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "session.agent.updated") continue;
+    const pending = !events.slice(index + 1).some((later) => later.type === "turn.started");
+    return { at: event.occurredAt, pending };
+  }
+  return null;
+}
+
 /**
  * The resizable Workspace dock: chat on the left, a collapsible/maximizable dock
  * on the right with the capability-gated sandbox surfaces (Files |
@@ -1380,6 +1391,7 @@ function SessionDock(props: {
           <LazyAgentConfigurationPanel
             key={props.session.id}
             session={props.session}
+            lastChange={lastAgentChange(props.events)}
             onReloadSession={props.onReloadSession}
           />
         </Suspense>

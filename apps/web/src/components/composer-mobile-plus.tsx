@@ -1,5 +1,5 @@
 import { PlusIcon } from "lucide-react";
-import { lazy, Suspense, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import type { ComposerPlusProps, Panel } from "./composer-mobile-plus-panel";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export type { ComposerPlusProps } from "./composer-mobile-plus-panel";
+export type { ComposerPlusProps, Panel as ComposerPlusPanel } from "./composer-mobile-plus-panel";
 
 const LazyComposerPanel = lazy(() =>
   import("./composer-mobile-plus-panel")
@@ -50,10 +50,22 @@ function ComposerPanelLoadFailed(props: ComposerPlusProps) {
 }
 
 /** Keep the composer trigger/state eager; load its optional menu only when opened. */
-export function ComposerMobilePlus(props: ComposerPlusProps) {
+export function ComposerMobilePlus(
+  props: ComposerPlusProps & {
+    /** Opens the menu on one panel, for example from the capabilities chip. */
+    openRequest?: { panel: Panel; nonce: number } | undefined;
+  },
+) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
+  const openNonce = props.openRequest?.nonce;
+  useEffect(() => {
+    if (openNonce === undefined || !props.openRequest) return;
+    setPanel(props.openRequest.panel);
+    setOpen(true);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- react to a new request only
+  }, [openNonce]);
   const dialogOpen =
     open &&
     panel !== "root" &&

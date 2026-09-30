@@ -40,7 +40,7 @@ export type SessionConnectorsMenuProps = {
   accountControls?: ConnectionAccountControls;
 };
 
-/** Connection availability belongs here; built-in tools remain in workspace settings. */
+/** Connected apps for one chat. Built-in tools follow the agent's capabilities (+ > Capabilities). */
 export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
   const connectors = props.servers.filter(isComposerConnector);
   const customizing = props.customizing === true;
@@ -133,7 +133,11 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           </div>
         }
       />
-      <div className="min-h-0 shrink overflow-y-auto overscroll-contain p-2">
+      <div
+        role="group"
+        tabIndex={0}
+        className="min-h-0 shrink overflow-y-auto overscroll-contain p-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
+      >
         {accounts?.loading ? (
           <p role="status" className="px-2 py-2 text-xs text-fg-muted">
             Loading accounts…
@@ -252,11 +256,9 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   )}
                 </ConnectorAction>
               ) : (
-                <span
-                  aria-label={`${server.name}, ${selected ? "on" : "off"} for this session`}
-                  className="flex size-11 shrink-0 items-center justify-center"
-                >
+                <span className="flex size-11 shrink-0 items-center justify-center">
                   {selected ? <CheckIcon className="size-4 text-fg-muted" aria-hidden /> : null}
+                  <span className="sr-only">{`${server.name}, ${selected ? "on" : "off"} for this session`}</span>
                 </span>
               )}
             </div>

@@ -9,11 +9,7 @@ import { CheckIcon, ChevronRightIcon, LockIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { ConnectorAction } from "@/components/session-connectors-menu-body";
-import {
-  ComposerMenuHeader,
-  ComposerMenuSwitch,
-  ComposerMenuSwitchIndicator,
-} from "@/components/ui/composer-menu";
+import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
 import {
   AGENT_CAPABILITY_GROUPS,
   UNAVAILABLE_CAPABILITY_REASON,
@@ -55,52 +51,73 @@ export function ComposerCapabilitiesMenuBody(props: {
   return (
     <>
       <ComposerMenuHeader title="Capabilities" leading={props.leading} />
-      <div className="min-h-0 shrink overflow-y-auto overscroll-contain p-2">
-        <div className="flex min-h-14 items-center gap-3 rounded-md px-2 py-2">
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm font-medium" id="composer-capabilities-customize">
-              Customize for this chat
-            </span>
-            <span className="mt-0.5 block text-xs leading-4.5 text-fg-muted">
-              {customized
-                ? "This chat uses the choices below."
-                : `Off uses the workspace's defaults: ${capabilitySummary(draft.values, availability).toLowerCase()}.`}
-            </span>
-          </span>
-          <ComposerMenuSwitch
-            label="Customize for this chat"
+      <div
+        role="group"
+        tabIndex={0}
+        className="min-h-0 shrink overflow-y-auto overscroll-contain p-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand/55"
+      >
+        <div className="flex min-w-0 items-center gap-1">
+          <ConnectorAction
+            presentation={props.presentation}
+            keepOpen
             checked={customized}
+            label="Customize for this chat"
             disabled={capabilities.disabled}
-            onCheckedChange={(next) => capabilities.onCustomizedChange(next)}
-          />
+            className="flex min-h-14 flex-1 items-center gap-3 rounded-md px-2 py-2"
+            onAction={() => capabilities.onCustomizedChange(!customized)}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium text-fg">Customize for this chat</span>
+              <span className="mt-0.5 block text-xs leading-4.5 font-normal text-fg-muted">
+                {customized
+                  ? "This chat uses the choices below."
+                  : `Off uses the workspace's defaults: ${capabilitySummary(draft.values, availability).toLowerCase()}.`}
+              </span>
+            </span>
+            <ComposerMenuSwitchIndicator checked={customized} />
+          </ConnectorAction>
+          <span aria-hidden className="size-11 shrink-0" />
         </div>
         {AGENT_CAPABILITY_GROUPS.map((group) => (
-          <section key={group.id} aria-label={group.label} className="mt-2">
-            <h3 className="px-2 pt-1 pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
+          <div key={group.id} role="group" aria-label={group.label} className="mt-2">
+            <p
+              aria-hidden
+              className="px-2 pt-1 pb-1 text-xs leading-4.5 font-medium text-fg-subtle"
+            >
               {group.label}
-            </h3>
+            </p>
             {group.capabilities.map((id) => {
               const available = availability.isAvailable(id);
               const on = effectiveCapabilityOn(draft.values, id, availability);
               const editable = customized && available && !capabilities.disabled;
-              const description = available ? capabilityDescription(id) : null;
+              // The menu stays scannable: labels only, plus the one line that
+              // changes the decision (unavailable, or which apps are on).
+              const note = !available ? (
+                <span className="mt-0.5 flex items-start gap-1.5 text-xs leading-4.5 font-normal text-fg-muted">
+                  <LockIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
+                  {UNAVAILABLE_CAPABILITY_REASON}
+                </span>
+              ) : id === "workspaceConnectors" && on ? (
+                <span className="mt-0.5 block text-xs leading-4.5 font-normal text-fg-muted">
+                  {props.connectorsTotal === 0
+                    ? "No apps connected yet."
+                    : `${props.connectorsSelected} of ${props.connectorsTotal} connected apps on`}
+                </span>
+              ) : null;
               const text = (
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium text-fg">{capabilityLabel(id)}</span>
-                  {available ? (
-                    <span className="mt-0.5 block text-xs leading-4.5 font-normal text-fg-muted">
-                      {id === "workspaceConnectors" && on
-                        ? props.connectorsTotal === 0
-                          ? "No apps connected yet."
-                          : `${props.connectorsSelected} of ${props.connectorsTotal} connected apps on.`
-                        : description}
-                    </span>
-                  ) : (
-                    <span className="mt-0.5 flex items-start gap-1.5 text-xs leading-4.5 font-normal text-fg-muted">
-                      <LockIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" />
-                      {UNAVAILABLE_CAPABILITY_REASON}
-                    </span>
-                  )}
+                <span
+                  className="min-w-0 flex-1"
+                  title={available ? capabilityDescription(id) : undefined}
+                >
+                  <span
+                    className={cn(
+                      "block text-sm font-medium",
+                      on || editable ? "text-fg" : "text-fg-muted",
+                    )}
+                  >
+                    {capabilityLabel(id)}
+                  </span>
+                  {note}
                 </span>
               );
               const row = (
@@ -111,27 +128,29 @@ export function ComposerCapabilitiesMenuBody(props: {
                       keepOpen
                       checked={on}
                       label={capabilityLabel(id)}
-                      className="flex min-h-14 flex-1 items-center gap-3 rounded-md px-2 py-2"
+                      className="flex min-h-11 flex-1 items-center gap-3 rounded-md px-2 py-1.5"
                       onAction={() => set(id, id === "skills" ? (on ? false : "read") : !on)}
                     >
                       {text}
                       <ComposerMenuSwitchIndicator checked={on} />
                     </ConnectorAction>
                   ) : (
-                    <div
-                      className={cn(
-                        "flex min-h-14 flex-1 items-center gap-3 px-2 py-2",
-                        !available && "opacity-70",
-                      )}
-                      aria-label={`${capabilityLabel(id)}, ${
+                    // Read-only until "Customize for this chat" is on: a
+                    // disabled item that still reads as the current value.
+                    <ConnectorAction
+                      presentation={props.presentation}
+                      disabled
+                      label={`${capabilityLabel(id)}, ${
                         !available ? UNAVAILABLE_CAPABILITY_REASON : on ? "on" : "off"
                       }`}
+                      className="flex min-h-11 flex-1 items-center gap-3 rounded-md px-2 py-1.5 data-[disabled]:opacity-100 disabled:opacity-100"
+                      onAction={() => {}}
                     >
                       {text}
-                      <span className="flex size-7 shrink-0 items-center justify-center">
-                        {on ? <CheckIcon aria-hidden className="size-4 text-fg-muted" /> : null}
+                      <span className="flex h-7 min-w-7 shrink-0 items-center justify-end text-xs text-fg-subtle">
+                        {on ? <CheckIcon aria-hidden className="size-4 text-fg-muted" /> : "Off"}
                       </span>
-                    </div>
+                    </ConnectorAction>
                   )}
                   {id === "workspaceConnectors" && on ? (
                     <ConnectorAction
@@ -143,7 +162,10 @@ export function ComposerCapabilitiesMenuBody(props: {
                     >
                       <ChevronRightIcon aria-hidden className="size-4 text-fg-subtle" />
                     </ConnectorAction>
-                  ) : null}
+                  ) : (
+                    // Keeps every toggle in one column with the connectors row.
+                    <span aria-hidden className="size-11 shrink-0" />
+                  )}
                 </div>
               );
               if (id !== "skills" || !on) return row;
@@ -158,7 +180,7 @@ export function ComposerCapabilitiesMenuBody(props: {
                       keepOpen
                       checked={manage}
                       label="Also save and install Skills"
-                      className="flex min-h-11 items-center gap-3 rounded-md py-2 pr-2 pl-6"
+                      className="mr-11 flex min-h-11 items-center gap-3 rounded-md py-1.5 pr-2 pl-6"
                       onAction={() => set("skills", manage ? "read" : "manage")}
                     >
                       <span className="min-w-0 flex-1 text-sm text-fg">
@@ -167,14 +189,20 @@ export function ComposerCapabilitiesMenuBody(props: {
                       <ComposerMenuSwitchIndicator checked={manage} />
                     </ConnectorAction>
                   ) : (
-                    <p className="py-1 pr-2 pl-6 text-xs leading-4.5 text-fg-muted">
-                      {manage ? "Can also save and install Skills." : "Can read Skills only."}
-                    </p>
+                    <ConnectorAction
+                      presentation={props.presentation}
+                      disabled
+                      label={manage ? "Can also save and install Skills" : "Reads Skills only"}
+                      className="mr-11 flex min-h-9 items-center py-1 pr-2 pl-6 text-xs leading-4.5 text-fg-muted data-[disabled]:opacity-100 disabled:opacity-100"
+                      onAction={() => {}}
+                    >
+                      {manage ? "Can also save and install Skills" : "Reads Skills only"}
+                    </ConnectorAction>
                   )}
                 </div>
               );
             })}
-          </section>
+          </div>
         ))}
       </div>
     </>

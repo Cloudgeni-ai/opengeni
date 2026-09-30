@@ -16,7 +16,10 @@ export function ComposerMenuHeader(props: {
   return (
     <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-border px-2 pb-2">
       {props.leading}
-      <h2 className="min-w-0 flex-1 text-sm font-medium">{props.title}</h2>
+      {/* A menu may only contain menu items: the title stays visual text there. */}
+      <h2 role="none" className="min-w-0 flex-1 text-sm font-medium">
+        {props.title}
+      </h2>
       {props.trailing}
     </div>
   );
