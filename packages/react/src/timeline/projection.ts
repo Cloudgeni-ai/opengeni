@@ -1797,15 +1797,25 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     }
     const workForTurn = () => {
       let group = turns.get(key);
+      const firstMessage = messages.get(key)?.[0];
+      const messageStart = firstMessage?.startedAt ?? firstMessage?.occurredAt;
+      const startedAt =
+        messageStart && Date.parse(messageStart) < Date.parse(item.occurredAt)
+          ? messageStart
+          : item.occurredAt;
       if (!group) {
         group = {
           kind: "activity",
           id: `work-${key}`,
           items: [],
-          work: { startedAt: item.occurredAt, details: [] },
+          work: { startedAt, details: [] },
         };
         turns.set(key, group);
         groups.push(group);
+      } else if (Date.parse(startedAt) < Date.parse(group.work!.startedAt)) {
+        // Completion-only startup receipts can reveal an earlier phase start
+        // after another activity has already established the work row.
+        group.work!.startedAt = startedAt;
       }
       return group;
     };
@@ -1888,7 +1898,7 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         messages.set(key, prose);
         // A text-only turn still has one overall activity surface. An explicit
         // final-only response does not manufacture an empty work disclosure.
-        if (item.phase !== "final_answer") workForTurn();
+        if (item.phase !== "final_answer" || prose.length > 1) workForTurn();
       }
     }
   }
@@ -1974,14 +1984,18 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
     if (!settledAt) {
       // Keep the same row at the tail of this turn, after every live progress
       // message and attention surface, without crossing a newer input/turn.
-      let tailIndex = (nextBoundary.get(group) ?? groups.length) - 1;
+      // A visible steer is not a turn boundary when later prose still belongs
+      // to this turn. New input without that evidence remains a hard boundary.
+      const lastProseIndex = Math.max(...prose.map((message) => positions.get(message) ?? -1));
+      let tailIndex = groups.length - 1;
       for (let index = (positions.get(group) ?? 0) + 1; index <= tailIndex; index += 1) {
         const entry = groups[index]!;
         if (
-          entry.kind === "item" &&
-          "turnId" in entry.item &&
-          entry.item.turnId &&
-          entry.item.turnId !== key
+          (entry.kind === "activity" && entry.work) ||
+          (entry.kind === "item" &&
+            (("turnId" in entry.item && entry.item.turnId && entry.item.turnId !== key) ||
+              (index > lastProseIndex &&
+                (entry.item.kind === "user-message" || entry.item.kind === "machine-input-batch"))))
         ) {
           tailIndex = index - 1;
           break;
