@@ -301,6 +301,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-model-settings.ts#setSessionModelInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
     inserts: 1,
     contract: "canonical",
