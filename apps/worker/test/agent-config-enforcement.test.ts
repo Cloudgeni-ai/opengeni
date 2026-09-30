@@ -449,7 +449,9 @@ describe("agent configuration reaches the production model request", () => {
       expect(legacyConfig).toBeNull();
       const legacy = await captureWorkerRequest({ agent: legacyConfig });
       const configured = await captureWorkerRequest({ agent: allConfig });
-      expect(configured.request).toEqual(legacy.request);
+      // "all" keeps the legacy tool surface; its prompt is the modular composition (M4).
+      expect(configured.request.tools).toEqual(legacy.request.tools);
+      expect(configured.names).toEqual(legacy.names);
       expect({
         names: legacy.names,
         hosted: legacy.request.tools.filter((tool) => tool.type === "hosted_tool"),
@@ -480,7 +482,12 @@ describe("agent configuration reaches the production model request", () => {
     expect(all.request.tools).toEqual(legacy.request.tools);
     expect(all.request.input).toEqual(legacy.request.input);
     expect(all.request.modelSettings).toEqual(legacy.request.modelSettings);
-    expect(all.request).toEqual(legacy.request);
+    // Instructions differ by design: configured sessions use the modular composer.
+    expect({ ...all.request, instructions: undefined, systemInstructions: undefined }).toEqual({
+      ...legacy.request,
+      instructions: undefined,
+      systemInstructions: undefined,
+    });
     expect(all.preparation.firstPartyTools).toEqual(legacy.preparation.firstPartyTools);
   });
 

@@ -108,7 +108,6 @@ import {
   type FirstPartyMcpToolName,
   type LatencyMode,
   type ReasoningEffort,
-  type ResolvedAgentConfig,
   type ResourceRef,
   type SessionGoalSnapshot,
   type ToolAuthNeededPayload,
@@ -1999,8 +1998,6 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
-  /** Null/omitted retains the historical tool and provider request surface. */
-  agentConfig?: ResolvedAgentConfig | null;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
@@ -2221,9 +2218,10 @@ export type BuildAgentOptions = {
    */
   persistentSessionSettings?: PersistentSessionSettings;
   /**
-   * The session's frozen agent configuration. Absent or null composes the
-   * legacy instructions byte-for-byte; a configuration selects the modular
-   * composer (identity, base behavior, runtime mechanics, capability modules).
+   * The session's frozen agent configuration. Absent or null keeps the legacy
+   * instructions byte-for-byte and the historical tool/provider request surface;
+   * a configuration selects the modular composer (identity, base behavior,
+   * runtime mechanics, capability modules) and gates tool families.
    */
   agentConfig?: ResolvedAgentConfig | null;
   /**
