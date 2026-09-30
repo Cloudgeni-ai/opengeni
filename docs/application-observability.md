@@ -10,7 +10,7 @@ must not be serialized into telemetry.
 `withTraceContext` scopes identity through asynchronous calls. `startSpan`
 inherits that identity and exports `parentSpanId`; explicitly passing
 `parent: null` starts an independent root. The context contains only validated
-nonzero trace/span IDs, not baggage or customer attributes. Links are limited
+nonzero trace/span IDs and optional W3C trace flags, not baggage or customer attributes. Links are limited
 to eight validated identities. W3C traceparent helpers are provided for trusted
 adapters; public HTTP headers are not automatically admitted as trusted context.
 
@@ -19,6 +19,54 @@ Model-call, MCP-tool-call and startup-phase measurements export child spans
 under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
 phase deduplication is unchanged; model-call and MCP timing are per invocation.
+
+### MCP execution phases
+
+API and worker roots install a host-owned `withMcpTelemetry` scope. The shared
+gateway, native credential broker, MCP transport and worker persistence paths
+emit live `mcp.phase.<phase>` spans and
+`opengeni_mcp_phase_duration_seconds{phase,outcome}` histograms. Durations use
+`performance.now()`; wall-clock span timestamps are only for trace placement.
+Phases are **inclusive and non-additive**:
+
+- `gateway_policy`: catalog, input validation, approval and preparation;
+  `preflight`, `lifecycle_prepare`, `lifecycle_begin`, `lifecycle_complete` and
+  `provider_authorization` expose the existing nested boundaries. Preflight can
+  include approval wait; it is not provider execution.
+- `credential_resolution`: native credential acquisition; `oauth_refresh` is
+  the physical token exchange, while `oauth_wait` is refresh-lock or shared
+  in-flight refresh waiting. These do not invent another credential lookup.
+- `client_setup`: physical MCP connection setup, including negotiation.
+- `execution`: the prepared gateway executor, output validation and settlement.
+- `network_headers`: destination policy/DNS/pinning and fetch through response
+  headers. It is not a pure socket or provider-processing measurement.
+- `network_body`: response-body consumption through EOF, cancellation or error.
+  A persistent SSE stream may outlive a tool call; never use its duration as
+  tool completion or sum it with the inclusive execution phase.
+- `event_persistence`: Codemode created/output persistence and publication, or
+  the model tool-output batcher's durable push. Model history reconciliation and
+  pending-call-ledger cleanup remain outside this interval.
+
+Spans carry an opaque `mcpCallKey` derived from host scope plus the existing
+source-call/operation identity. Physical attempt replacement changes the scope;
+physical requests within a call carry a one-based `attempt` index (not the
+session's execution-attempt number). Setup requests without a call have no call
+key. No IDs become metric labels. Prepared execution and external dispatcher
+callbacks retain diagnostic context without retaining or substituting authority.
+
+The guarded MCP transport sends the live host span's W3C `traceparent`, retaining
+host trace flags (legacy contexts without flags retain `01`). It does not adopt
+caller-supplied trace headers, forward baggage/tracestate, or change credential
+header replacement semantics. A provider can parent its own server span to this
+header; tracing is never an authorization or idempotency signal. No new request,
+retry, catalog disclosure, per-token event, argument, result, URL or secret is
+introduced by this instrumentation.
+
+Completed, rejected, failed and cancelled phase observations are not sampled by
+this code, including under a host `00` trace flag. Export remains the bounded,
+best-effort mechanism below; an unsampled observation is not a delivery guarantee
+or durable receipt. Missing setup, queue, history or exporter evidence must not
+be presented as a measured provider delay.
 
 Periodic capture cadence uses a durable attempt clock,
 not only the last successful archive: a failed provider call releases its exact

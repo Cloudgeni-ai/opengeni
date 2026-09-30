@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { bindMcpTelemetry, withMcpCallIdentity, measureMcpPhase } from "@opengeni/observability";
 import Ajv, {
   _,
   str,
@@ -215,6 +216,19 @@ export class ToolGateway {
     context: ToolGatewayCallContext,
     modelApprovalConfirmed: boolean,
   ): Promise<PreparedToolGatewayCall> {
+    return withMcpCallIdentity(context.sourceCallId ?? input.operationId, async () => {
+      const prepared = await measureMcpPhase("gateway_policy", () =>
+        this.prepareCallCore(input, context, modelApprovalConfirmed),
+      );
+      return { ...prepared, execute: bindMcpTelemetry(prepared.execute) };
+    });
+  }
+
+  private async prepareCallCore(
+    input: ToolGatewayCall,
+    context: ToolGatewayCallContext,
+    modelApprovalConfirmed: boolean,
+  ): Promise<PreparedToolGatewayCall> {
     const request = ToolGatewayCallRequest.parse({
       operationId: input.operationId,
       catalogDigest: input.catalogDigest,
@@ -250,19 +264,25 @@ export class ToolGateway {
       arguments: request.arguments,
       caller,
     } satisfies ToolGatewayCall;
-    await this.authorize?.({ call, entry: definition.entry });
+    await measureMcpPhase("provider_authorization", () =>
+      this.authorize?.({ call, entry: definition.entry }),
+    );
     if (definition.entry.approval === "human") {
-      await definition.preflightCall?.({
+      await measureMcpPhase("preflight", () =>
+        definition.preflightCall?.({
+          call,
+          entry: definition.entry,
+          context,
+        }),
+      );
+    }
+    const lifecycle = await measureMcpPhase("lifecycle_prepare", () =>
+      definition.lifecycle?.prepare({
         call,
         entry: definition.entry,
         context,
-      });
-    }
-    const lifecycle = await definition.lifecycle?.prepare({
-      call,
-      entry: definition.entry,
-      context,
-    });
+      }),
+    );
     return {
       call,
       entry: definition.entry,
@@ -273,36 +293,47 @@ export class ToolGateway {
           catalogDigest: this.catalogDigest,
           identity: definition.entry.identity,
         }),
-      execute: async () => {
-        await lifecycle?.begin?.();
-        let result: ToolGatewayResultValue;
-        try {
-          result = ToolGatewayResult.parse(
-            await definition.execute(request.arguments, {
-              operationId,
-              caller,
-              ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
-              ...(context.transportMeta === undefined
-                ? {}
-                : { transportMeta: context.transportMeta }),
-              ...(context.signal === undefined ? {} : { signal: context.signal }),
-            }),
-          );
-          if (!result.isError && definition.validateOutput) {
-            const outputMatchesSchema =
-              result.structuredContent !== undefined &&
-              definition.validateOutput(result.structuredContent);
-            if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
-              throw new ToolGatewayOutputValidationError();
+      execute: async () =>
+        measureMcpPhase(
+          "execution",
+          async () => {
+            await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
+            let result: ToolGatewayResultValue;
+            try {
+              result = ToolGatewayResult.parse(
+                await definition.execute(request.arguments, {
+                  operationId,
+                  caller,
+                  ...(context.sourceCallId === undefined
+                    ? {}
+                    : { sourceCallId: context.sourceCallId }),
+                  ...(context.transportMeta === undefined
+                    ? {}
+                    : { transportMeta: context.transportMeta }),
+                  ...(context.signal === undefined ? {} : { signal: context.signal }),
+                }),
+              );
+              if (!result.isError && definition.validateOutput) {
+                const outputMatchesSchema =
+                  result.structuredContent !== undefined &&
+                  definition.validateOutput(result.structuredContent);
+                if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
+                  throw new ToolGatewayOutputValidationError();
+                }
+              }
+            } catch (error) {
+              await measureMcpPhase("lifecycle_complete", () =>
+                lifecycle?.complete?.({ outcome: "failed", error }),
+              );
+              throw error;
             }
-          }
-        } catch (error) {
-          await lifecycle?.complete?.({ outcome: "failed", error });
-          throw error;
-        }
-        await lifecycle?.complete?.({ outcome: "completed", result });
-        return result;
-      },
+            await measureMcpPhase("lifecycle_complete", () =>
+              lifecycle?.complete?.({ outcome: "completed", result }),
+            );
+            return result;
+          },
+          (result) => (result.isError ? "rejected" : "completed"),
+        ),
     };
   }
 
