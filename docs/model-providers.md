@@ -1277,7 +1277,9 @@ Cache breakpoints cover the final tool, system block and eligible history block,
 without mutating stored history. Usage includes fresh input, cache reads, cache
 writes and output. Organization connections use conservative 200k context / 168k
 input / 150k compaction limits and 32k maximum output; configurable registry
-providers can declare model-specific limits. Select models supporting adaptive
-thinking when enabling reasoning. Invalid streams fail closed, incomplete tools
+providers can declare model-specific limits. The managed connection catalog enables
+reasoning only for the captured adaptive model `claude-opus-5-5`; other model IDs
+remain available without a reasoning option. Registry providers can explicitly
+declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
 does not silently retry failed requests or rotate credentials.

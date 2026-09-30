@@ -444,3 +444,90 @@ test("forced tool selection suppresses incompatible adaptive thinking", () => {
   expect(body.tool_choice).toEqual({ type: "any", disable_parallel_tool_use: true });
   expect(body.thinking).toBeUndefined();
 });
+
+test("HTTP and SSE rate limits preserve retry timing without leaking response data", async () => {
+  const { providerRetryAfterMs } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const streamed of [false, true]) {
+    const headers = { "retry-after": "120", "set-cookie": "private-cookie" };
+    const model = new AnthropicMessagesModel(provider, "claude-test", (async () =>
+      streamed
+        ? new Response(
+            stream([
+              {
+                type: "error",
+                error: { type: "rate_limit_error", message: "private-provider-message" },
+              },
+            ]).body,
+            { headers },
+          )
+        : new Response(
+            JSON.stringify({
+              error: { type: "rate_limit_error", message: "private-provider-message" },
+            }),
+            { status: 429, headers },
+          )) as typeof fetch);
+    let error: any;
+    try {
+      if (streamed) {
+        for await (const _ of model.getStreamedResponse(request())) {
+        }
+      } else await model.getResponse(request());
+    } catch (e) {
+      error = e;
+    }
+    expect(error.status).toBe(429);
+    expect(providerRetryAfterMs(error)).toBe(120000);
+    expect(JSON.stringify(error)).not.toContain("private");
+  }
+});
+
+test("malformed completed responses cannot create duplicate tools or unsigned thinking", () => {
+  const call = { type: "tool_use", id: "same", name: "lookup", input: {} };
+  expect(() => anthropicResponse(response([call, call], "tool_use"))).toThrow("Duplicate");
+  expect(() => anthropicResponse(response([], "tool_use"))).toThrow("no tool calls");
+  expect(() => anthropicResponse(response([{ type: "thinking", thinking: "hello" }]))).toThrow(
+    "signature",
+  );
+  expect(() => anthropicResponse(response([{ type: "text", text: null }]))).toThrow(
+    "response text",
+  );
+});
+
+test("forced namespaced tools use their wire name and ambiguous identities fail locally", () => {
+  const req = request();
+  req.tools = [
+    {
+      type: "function",
+      name: "lookup",
+      namespace: "catalog",
+      description: "lookup",
+      parameters: { type: "object", properties: {} },
+      strict: false,
+    },
+  ];
+  req.modelSettings = { toolChoice: "lookup" };
+  const body = buildAnthropicRequest(req, "claude-test", provider, false);
+  expect(body.tool_choice.name).toBe(body.tools[0].name);
+  req.tools.push({ ...req.tools[0]!, namespace: "other" } as any);
+  expect(() => buildAnthropicRequest(req, "claude-test", provider, false)).toThrow("exactly one");
+  req.modelSettings = {};
+  req.tools = [req.tools[0]!, req.tools[0]!];
+  expect(() => buildAnthropicRequest(req, "claude-test", provider, false)).toThrow("Duplicate");
+});
+
+test("stream authentication failures remain permanent rather than becoming retryable server errors", async () => {
+  const model = new AnthropicMessagesModel(provider, "claude-test", (async () =>
+    stream([
+      { type: "error", error: { type: "authentication_error", message: "do not persist" } },
+    ])) as typeof fetch);
+  let error: any;
+  try {
+    for await (const _ of model.getStreamedResponse(request())) {
+    }
+  } catch (e) {
+    error = e;
+  }
+  expect(error.status).toBe(401);
+  expect(String(error)).not.toContain("do not persist");
+});

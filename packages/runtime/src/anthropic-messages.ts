@@ -35,14 +35,18 @@ export function anthropicToolName(name: string, namespace?: string): string {
 }
 function toolNames(request: ModelRequest): Map<string, { name: string; namespace?: string }> {
   const names = new Map<string, { name: string; namespace?: string }>();
+  const add = (wireName: string, identity: { name: string; namespace?: string }) => {
+    if (names.has(wireName)) throw new AnthropicProtocolError("Duplicate Claude wire tool name");
+    names.set(wireName, identity);
+  };
   for (const tool of request.tools)
     if (tool.type === "function")
-      names.set(anthropicToolName(tool.name, tool.namespace), {
+      add(anthropicToolName(tool.name, tool.namespace), {
         name: tool.name,
         ...(tool.namespace ? { namespace: tool.namespace } : {}),
       });
   for (const handoff of request.handoffs)
-    names.set(anthropicToolName(handoff.toolName), { name: handoff.toolName });
+    add(anthropicToolName(handoff.toolName), { name: handoff.toolName });
   return names;
 }
 function imageSource(value: unknown): Json {
@@ -194,6 +198,15 @@ export function buildAnthropicRequest(
   if (request.prompt)
     throw new AnthropicProtocolError("OpenAI prompt templates cannot be used with Claude");
   const settings = request.modelSettings;
+  const names = toolNames(request);
+  const forcedName = (name: string): string => {
+    const matches = [...names].filter(([, identity]) => identity.name === name);
+    if (matches.length !== 1)
+      throw new AnthropicProtocolError(
+        "Claude forced tool must identify exactly one available tool",
+      );
+    return matches[0]![0];
+  };
   const messages = anthropicMessages(request.input);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   const system = request.systemInstructions
@@ -239,7 +252,7 @@ export function buildAnthropicRequest(
         ? { type: "any" }
         : ["auto", "none"].includes(settings.toolChoice)
           ? { type: settings.toolChoice }
-          : { type: "tool", name: anthropicToolName(settings.toolChoice) };
+          : { type: "tool", name: forcedName(settings.toolChoice) };
   if (settings.parallelToolCalls === false && tools.length)
     body.tool_choice = {
       ...(body.tool_choice ?? { type: "auto" }),
@@ -291,6 +304,10 @@ export function anthropicResponse(
     )
   )
     throw new AnthropicProtocolError(`Claude response did not finish: ${message.stop_reason}`);
+  text(message.id, "message ID");
+  if (!Array.isArray(message.content))
+    throw new AnthropicProtocolError("Claude response content must be an array");
+  const callIds = new Set<string>();
   const output: ModelResponse["output"] = [];
   for (const [index, block] of (message.content as Json[]).entries()) {
     const id = `${message.id}:${index}`;
@@ -301,10 +318,13 @@ export function anthropicResponse(
           role: "assistant",
           id,
           status: message.stop_reason === "max_tokens" ? "incomplete" : "completed",
-          content: [{ type: "output_text", text: block.text }],
+          content: [{ type: "output_text", text: text(block.text, "response text") }],
         });
         break;
       case "tool_use":
+        if (callIds.has(block.id))
+          throw new AnthropicProtocolError("Duplicate Claude response tool call ID");
+        callIds.add(text(block.id, "tool ID"));
         if (message.stop_reason !== "tool_use")
           throw new AnthropicProtocolError("Claude tool call did not finish with tool_use");
         output.push({
@@ -321,6 +341,10 @@ export function anthropicResponse(
         break;
       case "thinking":
       case "redacted_thinking":
+        if (block.type === "thinking") {
+          text(block.thinking, "thinking text");
+          text(block.signature, "thinking signature");
+        } else text(block.data, "redacted thinking data");
         output.push({
           type: "reasoning",
           id,
@@ -332,6 +356,8 @@ export function anthropicResponse(
         throw new AnthropicProtocolError(`Unsupported Claude response block: ${block.type}`);
     }
   }
+  if (message.stop_reason === "tool_use" && callIds.size === 0)
+    throw new AnthropicProtocolError("Claude tool_use stop has no tool calls");
   return {
     output,
     usage: normalizeUsage(message.usage ?? {}),
@@ -419,6 +445,9 @@ export class AnthropicMessagesModel implements Model {
       throw Object.assign(new Error(message), {
         status: response.status,
         request_id: response.headers.get("request-id"),
+        headers: response.headers.has("retry-after")
+          ? { "retry-after": response.headers.get("retry-after")! }
+          : {},
         code: contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
       });
     }
@@ -445,8 +474,29 @@ export class AnthropicMessagesModel implements Model {
       this.provider.anthropic?.streamIdleTimeoutMs ?? 600000,
     )) {
       request.signal?.throwIfAborted();
-      if (event.type === "error")
-        throw new AnthropicProtocolError(`Claude stream failed: ${event.error?.type ?? "unknown"}`);
+      if (event.type === "error") {
+        const kind = event.error?.type;
+        // Preserve retry classification without retaining arbitrary provider text.
+        const statuses: Record<string, number> = {
+          invalid_request_error: 400,
+          authentication_error: 401,
+          permission_error: 403,
+          not_found_error: 404,
+          request_too_large: 413,
+          rate_limit_error: 429,
+          api_error: 500,
+          overloaded_error: 529,
+        };
+        const status = typeof kind === "string" ? (statuses[kind] ?? 502) : 502;
+        throw Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
+          status,
+          code: status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+          request_id: response.headers.get("request-id"),
+          headers: response.headers.has("retry-after")
+            ? { "retry-after": response.headers.get("retry-after")! }
+            : {},
+        });
+      }
       switch (event.type) {
         case "message_start":
           if (message) throw new AnthropicProtocolError("Duplicate Claude message_start");

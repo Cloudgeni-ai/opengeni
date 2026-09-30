@@ -8008,7 +8008,6 @@ export function withClaudeConnectionCatalog(
     const connection = connections[kind];
     if (!connection) continue;
     const id = claudeProviderId(kind);
-    const prior = providers.find((provider) => provider.id === id);
     providers = providers.filter((provider) => provider.id !== id);
     if (!connection.models.length) continue;
     providers.push({
@@ -8018,44 +8017,44 @@ export function withClaudeConnectionCatalog(
       api: "anthropic-messages",
       wireProfile: "openai",
       baseUrl: "https://api.anthropic.com/v1",
-      ...(prior?.apiKey &&
-      prior.kind ===
-        (kind === "anthropic" ? "anthropic-organization" : "claude-subscription-organization")
-        ? { apiKey: prior.apiKey }
-        : {}),
       anthropic: {
         auth: kind === "anthropic" ? "api-key" : "oauth",
         cacheTtl: "5m",
         maxOutputTokens: 32000,
         streamIdleTimeoutMs: 600000,
       },
-      models: connection.models.map((model) => ({
-        contextWindowTokens: 200000,
-        effectiveContextWindowTokens: 168000,
-        autoCompactTokenLimit: 150000,
-        id: id + "/" + model.upstreamModelId,
-        upstreamModelId: model.upstreamModelId,
-        label: model.label ?? model.upstreamModelId,
-        reasoningEffort: true,
-        hostedWebSearch: false,
-        capabilities: {
-          ...legacyModelCapabilities(settings, {
-            reasoningEffort: true,
-            hostedWebSearch: false,
-            vision: true,
-          }),
-          inputFileMediaTypes: [],
-          reasoning: {
-            upstream: "supported",
-            runnable: true,
-            efforts: ["low", "medium", "high"],
-            defaultEffort: "high",
-            required: false,
+      models: connection.models.map((model) => {
+        // Only captured adaptive-thinking models are enabled by the managed catalog.
+        // Operators can explicitly declare other capabilities in a registry provider.
+        const adaptiveThinking = model.upstreamModelId === "claude-opus-5-5";
+        return {
+          contextWindowTokens: 200000,
+          effectiveContextWindowTokens: 168000,
+          autoCompactTokenLimit: 150000,
+          id: id + "/" + model.upstreamModelId,
+          upstreamModelId: model.upstreamModelId,
+          label: model.label ?? model.upstreamModelId,
+          reasoningEffort: adaptiveThinking,
+          hostedWebSearch: false,
+          capabilities: {
+            ...legacyModelCapabilities(settings, {
+              reasoningEffort: adaptiveThinking,
+              hostedWebSearch: false,
+              vision: true,
+            }),
+            inputFileMediaTypes: [],
+            reasoning: {
+              upstream: adaptiveThinking ? "supported" : "unknown",
+              runnable: adaptiveThinking,
+              efforts: adaptiveThinking ? ["low", "medium", "high"] : [],
+              defaultEffort: adaptiveThinking ? "high" : null,
+              required: false,
+            },
+            functionCalling: { upstream: "supported", runnable: true },
+            promptCaching: { upstream: "supported", runnable: true, mode: "automatic" },
           },
-          functionCalling: { upstream: "supported", runnable: true },
-          promptCaching: { upstream: "supported", runnable: true, mode: "automatic" },
-        },
-      })),
+        };
+      }),
     });
   }
   return { ...settings, modelProvidersJson: JSON.stringify(providers) };

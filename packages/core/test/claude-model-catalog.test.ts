@@ -15,12 +15,12 @@ import {
 test("Claude keys and subscription tokens remain separate scoped routes and readiness", () => {
   const settings = testSettings();
   const claudeConnections = {
-    anthropic: { active: true, models: [{ upstreamModelId: "claude-sonnet-4-6" }] },
-    claude_subscription: { active: false, models: [{ upstreamModelId: "claude-sonnet-4-6" }] },
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+    claude_subscription: { active: false, models: [{ upstreamModelId: "claude-opus-5-5" }] },
   };
   const catalog = withClaudeConnectionCatalog(settings, claudeConnections);
-  const keyId = "organization-anthropic/claude-sonnet-4-6";
-  const subscriptionId = "organization-claude-subscription/claude-sonnet-4-6";
+  const keyId = "organization-anthropic/claude-opus-5-5";
+  const subscriptionId = "organization-claude-subscription/claude-opus-5-5";
   const selection = resolveWorkspaceModelSelection({
     settings,
     policy: null,
@@ -34,7 +34,7 @@ test("Claude keys and subscription tokens remain separate scoped routes and read
   expect(workspaceCustomModelReference(catalog, keyId)).toEqual({
     scope: "organization",
     providerKind: "anthropic",
-    upstreamModelId: "claude-sonnet-4-6",
+    upstreamModelId: "claude-opus-5-5",
   });
   expect(workspaceCustomModelReference(catalog, subscriptionId)?.providerKind).toBe(
     "claude_subscription",
@@ -84,9 +84,59 @@ test("deployment credentials cannot become organization Claude credentials", () 
     ]),
   });
   const scoped = withClaudeConnectionCatalog(settings, {
-    anthropic: { models: [{ upstreamModelId: "claude-sonnet-4-6" }] },
+    anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
   });
   expect(
     configuredProviders(scoped).find((p) => p.id === "organization-anthropic")?.apiKey,
   ).toBeUndefined();
+});
+
+test("rebuilding a Claude catalog clears old credentials before live authorization", () => {
+  const model = { upstreamModelId: "claude-opus-5-5" };
+  let settings = withClaudeConnectionCatalog(testSettings(), {
+    anthropic: { active: true, models: [model] },
+    claude_subscription: { active: true, models: [model] },
+  });
+  settings = withClaudeConnectionCredential(settings, "anthropic", "old-api-secret");
+  settings = withClaudeConnectionCredential(settings, "claude_subscription", "subscription-secret");
+  const rebuilt = withClaudeConnectionCatalog(settings, {
+    anthropic: { active: false, models: [model] },
+  });
+  const providers = configuredProviders(rebuilt);
+  expect(
+    providers.find((provider) => provider.id === "organization-anthropic")?.apiKey,
+  ).toBeUndefined();
+  expect(
+    providers.find((provider) => provider.id === "organization-claude-subscription")?.apiKey,
+  ).toBe("subscription-secret");
+  const authorized = withClaudeConnectionCredential(rebuilt, "anthropic", "new-api-secret");
+  expect(
+    configuredProviders(authorized).find((provider) => provider.id === "organization-anthropic")
+      ?.apiKey,
+  ).toBe("new-api-secret");
+});
+
+test("managed Claude catalog enables reasoning only for verified adaptive models", () => {
+  const settings = withClaudeConnectionCatalog(testSettings(), {
+    anthropic: {
+      models: ["claude-opus-5-5", "claude-haiku-4-5-20251001", "claude-custom-future"].map(
+        (upstreamModelId) => ({ upstreamModelId }),
+      ),
+    },
+  });
+  const models = configuredModels(settings).filter(
+    (model) => model.providerId === "organization-anthropic",
+  );
+  const verified = models.find((model) => model.upstreamModelId === "claude-opus-5-5")!;
+  expect(verified.capabilities.reasoning.runnable).toBe(true);
+  expect(verified.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
+  for (const model of models.filter((model) => model !== verified)) {
+    expect(model.reasoningEffort).toBe(false);
+    expect(model.capabilities.reasoning).toMatchObject({
+      upstream: "unknown",
+      runnable: false,
+      efforts: [],
+      defaultEffort: null,
+    });
+  }
 });

@@ -1,11 +1,27 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { analyticsClickEvent } from "@/components/analytics-consent";
-import { ProviderConnectPage, type ProviderConnection } from "@/components/ai-gateway-connection";
+import {
+  ProviderConnectPage,
+  ReplaceKeyDialog,
+  type ProviderConnection,
+} from "@/components/ai-gateway-connection";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
+
+// Radix reads DOM availability before this isolated test installs Happy DOM.
+// Keep replacement dialog content inspectable without exercising its portal.
+mock.module("@/components/ui/form-dialog", () => ({
+  FormDialog: ({ open, title, children }: { open: boolean; title: string; children: ReactNode }) =>
+    open ? (
+      <div role="dialog">
+        <h2>{title}</h2>
+        {children}
+      </div>
+    ) : null,
+}));
 
 // The click observer reads `data-analytics-action` only from a clickable
 // control, so a provider connect label must sit on the Connect button itself.
@@ -117,4 +133,22 @@ test("Claude credentials use distinct accessible forms and explain subscription 
       expect(container.textContent).toContain("does not refresh");
     }
   }
+});
+
+test("subscription replacement identifies the credential as a token", async () => {
+  const { ORGANIZATION_PROVIDER_META } = await import("../organization-model-provider-connection");
+  const state = {
+    config: ORGANIZATION_PROVIDER_META.claude_subscription,
+    saveKey: async () => true,
+  } as unknown as ProviderConnection;
+  await act(async () =>
+    root.render(<ReplaceKeyDialog state={state} open onOpenChange={() => {}} />),
+  );
+  expect(document.body.textContent).toContain("Replace the Claude subscription token");
+  expect(document.body.textContent).not.toContain("Replace the Claude subscription key");
+  expect(
+    document
+      .querySelector('input[aria-label="Claude subscription setup token"]')
+      ?.getAttribute("type"),
+  ).toBe("password");
 });

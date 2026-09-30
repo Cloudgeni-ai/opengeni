@@ -1036,8 +1036,8 @@ export function ReplaceKeyDialog({
       onOpenChange={onOpenChange}
       size="sm"
       leading={<ProviderTile provider={config.provider} />}
-      title={`Replace the ${config.title} key`}
-      description="New work uses the new key right away. Work already running finishes on the old one."
+      title={`Replace the ${config.title} ${config.credentialLabelText === "Setup token" ? "token" : "key"}`}
+      description="New work uses the new credential right away. Work already running finishes on the old one."
       submitLabel="Replace credential"
       pendingLabel="Saving…"
       submitDisabled={!key.trim()}
