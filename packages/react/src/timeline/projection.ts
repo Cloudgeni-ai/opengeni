@@ -489,11 +489,22 @@ export function buildTimeline(
           break;
         }
         closeStreamingTail();
+        // Background command receipts are agent-facing inputs, not chat messages.
+        // The durable event remains available to the agent and audit history.
+        const visibleInputs = inputs.filter(
+          (member) => member.kind !== "background_command_result",
+        );
+        if (
+          visibleInputs.length === 0 ||
+          visibleInputs.every((member) => member.kind === "goal_continuation")
+        ) {
+          break;
+        }
         items.push({
           kind: "machine-input-batch",
           id: event.id,
           turnId,
-          members: inputs,
+          members: visibleInputs,
           occurredAt: event.occurredAt,
         });
         break;
