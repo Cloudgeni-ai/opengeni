@@ -59,9 +59,9 @@ export type EditableArtifactViewProps = Readonly<{
 }>;
 
 type LoadState =
-  | Readonly<{ kind: "loading" }>
-  | Readonly<{ kind: "ready"; value: OpenedEditableArtifact }>
-  | Readonly<{ kind: "error"; error: unknown }>;
+  | Readonly<{ key: string | null; kind: "loading" }>
+  | Readonly<{ key: string; kind: "ready"; value: OpenedEditableArtifact }>
+  | Readonly<{ key: string; kind: "error"; error: unknown }>;
 
 /**
  * One editable document, spreadsheet, or presentation with its first-party
@@ -80,30 +80,32 @@ export function EditableArtifactView({
   onTitle,
   loadingLabel,
 }: EditableArtifactViewProps) {
-  const labels = useArtifactLabels();
   const [loadEpoch, setLoadEpoch] = useState(0);
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const labels = useArtifactLabels();
+  const loadKey = JSON.stringify([artifactId, authorityKey, baseUrl.href, workspaceId, loadEpoch]);
+  const [state, setState] = useState<LoadState>({ key: null, kind: "loading" });
+  const current = state.key === loadKey ? state : null;
   const openRef = useRef(open);
   openRef.current = open;
   const onTitleRef = useRef(onTitle);
   onTitleRef.current = onTitle;
   useEffect(() => {
     const abort = new AbortController();
-    setState({ kind: "loading" });
+    setState({ key: loadKey, kind: "loading" });
     void openRef
       .current(abort.signal)
       .then((value) => {
         if (abort.signal.aborted) return;
-        setState({ kind: "ready", value });
+        setState({ key: loadKey, kind: "ready", value });
         onTitleRef.current?.(value.artifact.title);
       })
       .catch((error: unknown) => {
-        if (!abort.signal.aborted) setState({ kind: "error", error });
+        if (!abort.signal.aborted) setState({ key: loadKey, kind: "error", error });
       });
     return () => abort.abort();
-  }, [artifactId, authorityKey, baseUrl.href, loadEpoch, workspaceId]);
+  }, [loadKey]);
 
-  const ready = state.kind === "ready" ? state.value : null;
+  const ready = current?.kind === "ready" ? current.value : null;
   const transportRef = useRef(transport);
   transportRef.current = transport;
   const sessionKey = useMemo(
@@ -111,6 +113,7 @@ export function EditableArtifactView({
       ready
         ? JSON.stringify({
             baseUrl: baseUrl.href,
+            authorityKey,
             workspaceId,
             artifact: { id: ready.artifact.id, modality: ready.artifact.modality },
             authority: ready.authority,
@@ -118,7 +121,7 @@ export function EditableArtifactView({
             workerUrl: runtimes.workerUrl,
           })
         : "",
-    [baseUrl.href, ready, runtimes.workerUrl, workspaceId],
+    [authorityKey, baseUrl.href, ready, runtimes.workerUrl, workspaceId],
   );
   const createSession = useCallback(() => {
     if (!ready) throw new Error("Artifact is not open");
@@ -140,20 +143,21 @@ export function EditableArtifactView({
     });
   }, [baseUrl, ready, runtimes, workspaceId]);
 
-  if (state.kind === "loading") return <ArtifactLoading label={loadingLabel ?? labels.opening} />;
-  if (state.kind === "error") {
+  if (!current || current.kind === "loading")
+    return <ArtifactLoading label={loadingLabel ?? labels.opening} />;
+  if (current.kind === "error") {
     return (
       <ArtifactProblem
         view={
           describeError
-            ? describeError(state.error)
-            : artifactLoadErrorView(state.error, "editable", labels)
+            ? describeError(current.error)
+            : artifactLoadErrorView(current.error, "editable", labels)
         }
         onRetry={() => setLoadEpoch((value) => value + 1)}
       />
     );
   }
-  const { artifact } = state.value;
+  const { artifact } = current.value;
   const surface = { title: artifact.title, showHeader };
   return (
     <div className="h-full min-h-0 bg-og-bg text-og-fg">

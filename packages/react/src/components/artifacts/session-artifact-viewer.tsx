@@ -1,13 +1,15 @@
 import { SESSION_SCOPE_HEADER, type ClientConfig, type OpenGeniClient } from "@opengeni/sdk";
 import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "../../lib/cn";
 import { useOpenGeni, type ClientOverride } from "../../session-context";
 import {
   ArtifactLabelsProvider,
+  ArtifactLoading,
   ArtifactProblem,
   ArtifactViewerHeader,
+  artifactLoadErrorView,
   useArtifactLabels,
   type ArtifactKind,
   type ArtifactLabels,
@@ -53,6 +55,17 @@ type ViewerClient = Pick<
   | "getWorkspaceArtifactHtml"
 >;
 
+const viewerClientKeys = new WeakMap<ViewerClient, string>();
+
+function viewerClientKey(client: ViewerClient): string {
+  let key = viewerClientKeys.get(client);
+  if (!key) {
+    key = crypto.randomUUID();
+    viewerClientKeys.set(client, key);
+  }
+  return key;
+}
+
 /**
  * A host-mountable viewer for one editable artifact or Site from a session,
  * with its own header (title, Back, Close). Mount it in any sized container
@@ -90,18 +103,34 @@ function Viewer({
   );
   const [loaded, setLoaded] = useState<{
     key: string;
+    client: ViewerClient;
+    workspaceId: string;
     title: string;
     kind: ArtifactKind | null;
   } | null>(null);
   const targetKey = `${target.kind}:${target.artifactId}`;
-  const current = loaded?.key === targetKey ? loaded : null;
+  const current =
+    loaded?.key === targetKey && loaded.client === client && loaded.workspaceId === workspaceId
+      ? loaded
+      : null;
   const kind: ArtifactKind | null = target.kind === "site" ? "site" : (current?.kind ?? null);
-  const [unavailable, setUnavailable] = useState<string | null>(null);
-  const markUnavailable = useCallback(() => setUnavailable(targetKey), [targetKey]);
+  const [unavailable, setUnavailable] = useState<{
+    key: string;
+    client: ViewerClient;
+    workspaceId: string;
+  } | null>(null);
+  const markUnavailable = useCallback(
+    () => setUnavailable({ key: targetKey, client, workspaceId }),
+    [client, targetKey, workspaceId],
+  );
   const title =
     current?.title ??
     target.title ??
-    (unavailable === targetKey ? labels.artifact : labels.opening);
+    (unavailable?.key === targetKey &&
+    unavailable.client === client &&
+    unavailable.workspaceId === workspaceId
+      ? labels.artifact
+      : labels.opening);
   return (
     <section
       aria-label={title}
@@ -126,17 +155,20 @@ function Viewer({
             theme={theme}
             toolBridge={siteToolBridge}
             showTitle={false}
-            onTitle={(next) => setLoaded({ key: targetKey, title: next, kind: "site" })}
+            onTitle={(next) =>
+              setLoaded({ key: targetKey, client, workspaceId, title: next, kind: "site" })
+            }
           />
         ) : (
           <EditableBody
             key={targetKey}
             client={client}
             workspaceId={workspaceId}
+            sessionId={sessionId}
             artifactId={target.artifactId}
             runtimes={editableRuntimes}
             onOpened={(next, modality) =>
-              setLoaded({ key: targetKey, title: next, kind: modality })
+              setLoaded({ key: targetKey, client, workspaceId, title: next, kind: modality })
             }
             onUnavailable={markUnavailable}
           />
@@ -149,6 +181,7 @@ function Viewer({
 function EditableBody({
   client,
   workspaceId,
+  sessionId,
   artifactId,
   runtimes,
   onOpened,
@@ -156,23 +189,55 @@ function EditableBody({
 }: {
   client: ViewerClient;
   workspaceId: string;
+  sessionId: string;
   artifactId: string;
   runtimes: EditableArtifactRuntimes | undefined;
   onOpened: (title: string, modality: ArtifactKind) => void;
   onUnavailable: () => void;
 }) {
   const labels = useArtifactLabels();
-  const [config, setConfig] = useState<ClientConfig["artifacts"] | null | undefined>(undefined);
+  const clientKey = viewerClientKey(client);
+  const [retryEpoch, setRetryEpoch] = useState(0);
+  const [configState, setConfigState] = useState<{
+    client: ViewerClient;
+    workspaceId: string;
+    sessionId: string;
+    result:
+      | { kind: "ready"; config: NonNullable<ClientConfig["artifacts"]> }
+      | { kind: "unavailable" }
+      | { kind: "error"; error: unknown };
+  } | null>(null);
+  const current =
+    configState?.client === client &&
+    configState.workspaceId === workspaceId &&
+    configState.sessionId === sessionId
+      ? configState.result
+      : null;
+  const config = current?.kind === "ready" ? current.config : null;
+  const scopeRef = useRef({ client, workspaceId, sessionId });
+  scopeRef.current = { client, workspaceId, sessionId };
   useEffect(() => {
     let live = true;
+    setConfigState(null);
     client.getClientConfig().then(
-      (value) => live && setConfig(value.artifacts ?? null),
-      () => live && setConfig(null),
+      (value) =>
+        live &&
+        setConfigState({
+          client,
+          workspaceId,
+          sessionId,
+          result: value.artifacts
+            ? { kind: "ready", config: value.artifacts }
+            : { kind: "unavailable" },
+        }),
+      (error: unknown) =>
+        live &&
+        setConfigState({ client, workspaceId, sessionId, result: { kind: "error", error } }),
     );
     return () => {
       live = false;
     };
-  }, [client]);
+  }, [client, retryEpoch, sessionId, workspaceId]);
   const baseUrl = useMemo(
     () => new URL(client.apiUrl("/"), globalThis.location?.href ?? "http://localhost/"),
     [client],
@@ -180,20 +245,80 @@ function EditableBody({
   const transport = useMemo(() => {
     if (!config) return undefined;
     const socket = new URL(config.editableLiveUrl);
+    let scope = new AbortController();
+    const checkCurrent = (signal: AbortSignal) => {
+      signal.throwIfAborted();
+      if (
+        scopeRef.current.client !== client ||
+        scopeRef.current.workspaceId !== workspaceId ||
+        scopeRef.current.sessionId !== sessionId
+      ) {
+        throw new DOMException("Artifact viewer scope changed", "AbortError");
+      }
+    };
     return {
-      fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
-        client.fetchApi(input instanceof Request ? input.url : input, init)) as typeof fetch,
+      activate: () => {
+        if (scope.signal.aborted) scope = new AbortController();
+      },
+      abort: () => scope.abort(),
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const signal = AbortSignal.any([scope.signal, ...(init?.signal ? [init.signal] : [])]);
+        checkCurrent(signal);
+        const url = new URL(input instanceof Request ? input.url : input, baseUrl);
+        if (
+          init?.method === "POST" &&
+          url.pathname ===
+            new URL(
+              `v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/live-ticket`,
+              baseUrl,
+            ).pathname
+        ) {
+          // A reconnect must revalidate the current host principal before
+          // minting a ticket for the editor's retained cache partition.
+          const next = (await client.getClientConfig({ signal })).artifacts;
+          checkCurrent(signal);
+          if (!next || artifactCapabilityKey(next) !== artifactCapabilityKey(config)) {
+            setConfigState({
+              client,
+              workspaceId,
+              sessionId,
+              result: next ? { kind: "ready", config: next } : { kind: "unavailable" },
+            });
+            scope.abort();
+            signal.throwIfAborted();
+          }
+          const { replicaId } = (await new Request(input, init).json()) as {
+            replicaId?: unknown;
+          };
+          if (typeof replicaId !== "string") throw new TypeError("Artifact replica is required");
+          await client.getEditableArtifact(workspaceId, artifactId, { replicaId, signal });
+          checkCurrent(signal);
+        }
+        return client.fetchApi(url, { ...init, signal });
+      }) as typeof fetch,
       webSocketUrl: socket,
       ...(isLoopback(baseUrl) && isLoopback(socket)
         ? { allowInsecureDevelopmentTransport: true }
         : {}),
     };
-  }, [baseUrl, client, config]);
-  const blocked = config === null || (config !== undefined && !runtimes);
+  }, [artifactId, baseUrl, client, config, sessionId, workspaceId]);
+  useEffect(() => {
+    transport?.activate();
+    return () => transport?.abort();
+  }, [transport]);
+  const blocked = current !== null && (current.kind !== "ready" || !runtimes);
   useEffect(() => {
     if (blocked) onUnavailable();
   }, [blocked, onUnavailable]);
-  if (config === undefined) return null;
+  if (!current) return <ArtifactLoading label={labels.opening} />;
+  if (current.kind === "error") {
+    return (
+      <ArtifactProblem
+        view={artifactLoadErrorView(current.error, "editable", labels)}
+        onRetry={() => setRetryEpoch((value) => value + 1)}
+      />
+    );
+  }
   if (!config || !transport) {
     return <ArtifactProblem view={{ ...labels.viewingDisabled, retryable: false }} />;
   }
@@ -205,6 +330,7 @@ function EditableBody({
       baseUrl={baseUrl}
       workspaceId={workspaceId}
       artifactId={artifactId}
+      authorityKey={JSON.stringify([clientKey, sessionId, artifactCapabilityKey(config)])}
       runtimes={{
         ...runtimes,
         ...(isLoopback(baseUrl) ? { allowInsecureDevelopmentAssets: true } : {}),
@@ -217,6 +343,7 @@ function EditableBody({
           replicaId,
           signal,
         });
+        signal.throwIfAborted();
         onOpened(artifact.title, artifact.modality);
         return {
           artifact,
@@ -230,6 +357,15 @@ function EditableBody({
       }}
     />
   );
+}
+
+function artifactCapabilityKey(config: NonNullable<ClientConfig["artifacts"]>): string {
+  return JSON.stringify([
+    config.editableLiveUrl,
+    config.cachePartition.accountId,
+    config.cachePartition.principalId,
+    config.cachePartition.authorizationEpoch,
+  ]);
 }
 
 function isLoopback(url: URL): boolean {

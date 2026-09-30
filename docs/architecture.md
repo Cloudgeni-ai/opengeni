@@ -542,8 +542,9 @@ Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
 `scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
 
-The root client in `packages/sdk/src/embedding-client.ts` adds server-side
-administration; `/browser` and `/artifacts` keep narrower dependency boundaries.
+`embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
+narrow. `/session-proxy` adds grants, exact authorization, session-bound
+tickets, bounded streaming ([embedding](embedding.md)).
 
 ### 3.11 Work discovery remains advisory and permission-first
 

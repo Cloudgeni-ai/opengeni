@@ -82,7 +82,11 @@ session working directory without following symlinks.
 `opengeni-site` fences render the console's inline Site preview, and
 `onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
 open editable artifacts and Sites in a host container through the proxy's
-opt-in `artifacts: true`. Other routing uses `resolveLink` (also on
+opt-in `artifacts: true`. The proxy checks exact session associations on every
+request and refreshes effective workspace grants for the browser cache
+partition. Its Site HTML delivery streams with cancellation and a 25 MiB
+actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
 `@opengeni/sdk` outside React. See
 [links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).

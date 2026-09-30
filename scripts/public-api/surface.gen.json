@@ -1064,6 +1064,18 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/access/grant",
+      "sdk": [
+        "createSessionProxyHandler",
+        "getSessionProxyWorkspaceGrant"
+      ],
+      "request": [],
+      "response": [
+        "AccessGrant"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/agent-learning",
       "sdk": [
@@ -5013,7 +5025,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/html",
       "sdk": [
-        "OpenGeniClient.getWorkspaceArtifactHtml"
+        "OpenGeniClient.getWorkspaceArtifactHtml",
+        "downloadSessionProxySiteHtml"
       ],
       "request": [],
       "response": []
@@ -5489,6 +5502,15 @@
       "response": [
         "Session"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/artifact-associations/:artifactId",
+      "sdk": [
+        "getSessionProxyArtifactAssociation"
+      ],
+      "request": [],
+      "response": []
     },
     {
       "method": "GET",
@@ -25706,6 +25728,22 @@
       "WorkspaceRealtimeModelCatalogItem": "type",
       "WorkspaceRealtimeModelCatalogResponse": "type"
     },
+    "@opengeni/sdk/session-proxy": {
+      "artifactViewerCapability": "value",
+      "createSessionProxyHandler": "value",
+      "downloadSessionProxySiteHtml": "value",
+      "getSessionProxyArtifactAssociation": "value",
+      "getSessionProxyWorkspaceGrant": "value",
+      "SESSION_PROXY_SITE_HTML_MAX_BYTES": "value",
+      "SessionProxyContext": "type",
+      "SessionProxyCreateInput": "type",
+      "SessionProxyHandlerOptions": "type",
+      "SessionProxyMessageExtras": "type",
+      "SessionProxyMessageInput": "type",
+      "SessionProxyResolution": "type",
+      "SessionProxyResolve": "type",
+      "SessionProxySiteHtmlTooLargeError": "value"
+    },
     "@opengeni/sdk/site": {
       "createOpenGeniSiteClient": "value",
       "createSiteToolBridge": "value",
@@ -28085,6 +28123,10 @@
     ],
     "OpenGeniToolsClient": [
       "forWorkspace"
+    ],
+    "SessionProxySiteHtmlTooLargeError": [
+      "code",
+      "limitBytes"
     ],
     "SiteAuthConnectionCollection": [
       "connection",

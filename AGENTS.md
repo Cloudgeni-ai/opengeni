@@ -503,6 +503,11 @@ unit corpus in one shared test process. Prepared-runtime tests, including native
 report delivery, remain separate package-contract checks with their required
 runtime configuration.
 
+For native PostgreSQL test fixtures, set `OPENGENI_REQUIRE_REAL_DB=1` and
+`OPENGENI_TEST_PG_URL` to an isolated pgvector-enabled test cluster's superuser
+maintenance URL. The shared harness retains full migrations, restricted app
+roles and FORCE-RLS checks; it never starts or stops that external server.
+
 Bun services launched by the test harness ignore implicit checkout `.env` files.
 Supply fixture settings through the service environment, or use an explicit
 `--env-file` argument when testing dotenv behavior itself.

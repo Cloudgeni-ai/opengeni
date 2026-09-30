@@ -790,16 +790,33 @@ createSessionProxyHandler(og, { resolve, authorizeMutation, artifacts: true });
 
 Every artifact request names its session in `x-opengeni-session-id` (the
 viewer and conversation send it); the proxy runs `authorizeSession`, then
-serves only artifacts OpenGeni lists for that session: the artifact read and
+performs an exact authorized association lookup for that session on every
+request (no cached authorization or bounded list scan): the artifact read and
 editor live ticket, and Site detail and HTML (served as a sandboxed download,
 never as a page on the product origin). Writes, exports, version changes, and
 Site tool calls are not proxied. The editor's live socket is ticket-authenticated
 and connects to the OpenGeni API directly (`artifacts.editableLiveUrl`
-overrides the derived URL); client config advertises it with the user's
-browser cache partition. A host with its own proxy adds the same capability to
+overrides the derived URL). Tickets minted through the proxy bind the source
+session, whose authority the API also revalidates while connected.
+Sockets bound this way have a 15-second lease from ticket issuance and reconnect
+through the proxy, so its product-level `authorizeSession` also checks renewal.
+Unbound console tickets keep their existing socket lifecycle. Client
+config resolves fresh effective workspace permissions (including external
+users and organization-key ceilings) and advertises the user's browser cache
+partition; permission changes produce a new authorization epoch. A host with
+its own proxy adds the same capability to
 its `/v1/config/client` response with `artifactViewerCapability({ client:
 og.asUser(user, { source }), workspaceId, source })` from `@opengeni/sdk`, and
 forwards the same artifact routes under its own authorization.
+
+The server-only helpers for exact association, effective grant and streaming
+HTML reads live on `@opengeni/sdk/session-proxy`, not the browser client.
+The proxy streams Site HTML with backpressure and cancellation and caps actual
+bytes at `SESSION_PROXY_SITE_HTML_MAX_BYTES` (25 MiB). An oversized stream fails
+with `SessionProxySiteHtmlTooLargeError` (`site_html_too_large`); once response
+headers have been sent, the body errors instead of replacing the HTTP status.
+The OpenGeni console's direct HTML delivery is unchanged. Temporary viewer
+config failures show Retry; absence of the capability remains unavailable.
 
 For any other routing, `resolveLink` returns `{ href }` for a host page or
 `{ open }` for an action, and `null` to keep the default; `viewerLinkResolver`
