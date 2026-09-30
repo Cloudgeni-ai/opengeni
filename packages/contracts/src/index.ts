@@ -7,6 +7,8 @@ export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
+export * from "./agent-config";
+import { WorkspaceAgentDefaults } from "./agent-config";
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 export * from "./skill-use";
@@ -2379,9 +2381,40 @@ export const WorkspaceSettingsSchema = z
     // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
     // null uses the deployment image.
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+    // Agent configuration defaults for new sessions ("Defaults for new
+    // sessions"). Validated leniently here and resolved by
+    // resolveWorkspaceAgentDefaults, so a value written by a newer release can
+    // never fail this bag and revert unrelated settings; writes are strict.
+    sessionAgentDefaults: z.unknown().optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** Explicit agent defaults for new sessions, or null when unset/unreadable. */
+export function resolveWorkspaceAgentDefaults(settings: unknown): WorkspaceAgentDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success || parsed.data.sessionAgentDefaults == null) return null;
+  const defaults = WorkspaceAgentDefaults.safeParse(parsed.data.sessionAgentDefaults);
+  return defaults.success ? defaults.data : null;
+}
+
+/**
+ * The workspace default agent identity as the settings page shows it: an
+ * explicit default identity, else the legacy white-label persona
+ * (`agentInstructions`) with the CORE placeholder removed. Legacy personas stay
+ * live at compose time; only explicit defaults are frozen into new sessions.
+ */
+export function resolveWorkspaceDefaultAgentIdentity(
+  settings: unknown,
+  legacyAgentInstructions: string | null | undefined,
+): { identity: string | null; source: "explicit" | "legacy_agent_instructions" | null } {
+  const explicit = resolveWorkspaceAgentDefaults(settings)?.identity;
+  if (explicit) return { identity: explicit, source: "explicit" };
+  const legacy = legacyAgentInstructions?.split("{{core}}").join("").trim();
+  return legacy
+    ? { identity: legacy, source: "legacy_agent_instructions" }
+    : { identity: null, source: null };
+}
 
 /** The workspace sandbox image override, or null for the deployment image. */
 export function resolveWorkspaceDefaultSandboxImage(settings: unknown): string | null {
