@@ -19,6 +19,10 @@ import { CdpConnection } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
+const chromiumE2e =
+  process.env.OPENGENI_BROWSERD_E2E === "1" || process.env.OPENGENI_BROWSERD_HEADED_E2E === "1"
+    ? test
+    : test.skip;
 
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
@@ -1218,7 +1222,7 @@ for (const mode of [
   "small coordinate target",
   "removed target",
 ] as const) {
-  headedE2e(
+  chromiumE2e(
     `completes native drag lifecycle with ${mode}`,
     async () => {
       const directory = await mkdtemp("/tmp/ogb-drag-");
@@ -1229,7 +1233,7 @@ for (const mode of [
         profileDirectory: join(directory, "profile"),
         downloadDirectory: join(directory, "downloads"),
         screenshotDirectory: join(directory, "screenshots"),
-        headed: true,
+        headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),
