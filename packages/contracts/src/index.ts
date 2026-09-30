@@ -10469,6 +10469,18 @@ export const UpdateScheduledTaskRequest =
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
+      // Narrow, lossless update: never reconstruct agentConfig from its
+      // bounded MCP projection. Full agentConfig retains replacement semantics.
+      agentConfigPatch: z
+        .object({
+          model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
+          reasoningEffort: ReasoningEffort.optional(),
+        })
+        .strict()
+        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
+          message: "agentConfigPatch requires model or reasoningEffort",
+        })
+        .optional(),
       status: ScheduledTaskStatus.optional(),
       variableSetId: z.string().uuid().nullable().optional(),
       environmentId: z.string().uuid().nullable().optional(),
@@ -10479,6 +10491,13 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.agentConfig && value.agentConfigPatch) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfigPatch"],
+        message: "agentConfigPatch cannot be combined with agentConfig replacement",
+      });
+    }
     if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
       context.addIssue({
         code: "custom",

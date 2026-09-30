@@ -3,14 +3,19 @@ import { createHash, randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { AccessGrant } from "@opengeni/contracts";
+import { UpdateScheduledTaskRequest, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { updateScheduledTaskForApi, validatedScheduledTaskUpdate } from "@opengeni/core";
 import {
   createDb,
   createConnection,
   createOrganizationApiKey,
   createScheduledTask,
+  createSession,
   getScheduledTask,
+  getScheduledTaskCreatorPolicy,
+  getSession,
+  updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -127,6 +132,276 @@ function resultText(result: unknown): string {
   const content = (result as { content?: Array<{ type?: string; text?: string }> }).content ?? [];
   return content.map((item) => item.text ?? "").join("\n");
 }
+
+describe("lossless scheduled-task model updates", () => {
+  async function fixture(status: "active" | "paused" = "paused", frozen = true) {
+    const workspace = await workspaceFixture();
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Retained task configuration",
+      status,
+      schedule: { type: "interval", everySeconds: 7_200 },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "buffer_one",
+      agentConfig: {
+        prompt: `  Preserve every byte.\n${"long retained instructions ".repeat(500)}\n  `,
+        resources: [
+          { kind: "repository", uri: "https://example.test/team/repository.git", ref: "main" },
+        ],
+        tools: [{ kind: "mcp", id: "opengeni", eager: true }],
+        metadata: { nested: { retained: ["complete", "values"] } },
+        ...(frozen ? { connectionAccounts: [], connectionAccountsFrozen: true as const } : {}),
+        approvalTimeoutSeconds: 300,
+        maxNestedAgentDepth: 0,
+        model: "scripted-model",
+        reasoningEffort: "low",
+      },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      creatorPolicy: {
+        firstPartyMcpTools: ["sessions_list"],
+        firstPartyMcpPermissions: ["sessions:read"],
+        sessionPolicy: { agentAccess: "session", scopeSubjectId: null, memoryScope: null },
+      },
+      metadata: { retain: { taskMetadata: true } },
+    });
+    return { workspace, task };
+  }
+
+  test.each([
+    ["active", true],
+    ["paused", true],
+    ["active", false],
+    ["paused", false],
+  ] as const)(
+    "MCP changes only model settings: status=%s frozen=%s, including beyond the read projection",
+    async (status, frozen) => {
+      if (!available) return;
+      const { workspace, task } = await fixture(status, frozen);
+      const creatorPolicy = await getScheduledTaskCreatorPolicy(
+        client.db,
+        workspace.workspaceId,
+        task.id,
+      );
+      const connected = await connectedClient(
+        buildOpenGeniMcpServer(deps(client.db), grantFor(workspace)),
+      );
+      try {
+        const result = await connected.client.callTool({
+          name: "scheduled_tasks_update",
+          arguments: {
+            id: task.id,
+            agentConfigPatch: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+          },
+        });
+        expect(result).not.toMatchObject({ isError: true });
+        expect(JSON.parse(resultText(result))).toMatchObject({ outcome: "updated", changed: true });
+        const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
+        expect(
+          await getScheduledTaskCreatorPolicy(client.db, workspace.workspaceId, task.id),
+        ).toEqual(creatorPolicy);
+        expect(after?.agentConfig).toEqual({
+          ...task.agentConfig,
+          model: "gpt-5.6-sol",
+          reasoningEffort: "high",
+        });
+        for (const key of [
+          "name",
+          "schedule",
+          "status",
+          "runMode",
+          "overlapPolicy",
+          "metadata",
+          "variableSetId",
+          "rigId",
+          "targetSessionId",
+          "reusableSessionId",
+          "ownerSubjectId",
+        ] as const) {
+          expect(after?.[key]).toEqual(task[key]);
+        }
+      } finally {
+        await connected.close();
+      }
+    },
+  );
+
+  test("HTTP accepts the same narrow patch under existing service-task authority", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const [sharedWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${workspace.accountId}, 'Service task fixture') returning id`;
+    workspace.workspaceId = sharedWorkspace!.id;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace.workspaceId}, ${workspace.accountId})`;
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Service task",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: {
+        prompt: "  Keep this byte exact  ",
+        tools: [],
+        resources: [],
+        metadata: { keep: true },
+        model: "scripted-model",
+      },
+      createdBy: { kind: "service", subjectId: "scheduler" },
+      metadata: {},
+    });
+    const token = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Model patch fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "scheduled_tasks:manage"],
+    });
+    const app = new Hono();
+    registerScheduledTaskRoutes(app, {
+      ...deps(client.db),
+      settings: testSettings({ productAccessMode: "managed", sandboxBackend: "none" }),
+    });
+    const response = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${task.id}`,
+      {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ agentConfigPatch: { reasoningEffort: "high" } }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(
+      (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig,
+    ).toEqual({
+      ...task.agentConfig,
+      reasoningEffort: "high",
+    });
+  });
+
+  test.each(["existing_session", "reusable_session"] as const)(
+    "%s retains the current session model and warns rather than retargeting it",
+    async (runMode) => {
+      if (!available) return;
+      const { workspace, task } = await fixture();
+      const session = await createSession(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        initialMessage: "Keep the already selected model",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      const previousSession = await getSession(client.db, workspace.workspaceId, session.id);
+      await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+        runMode,
+        ...(runMode === "existing_session"
+          ? { targetSessionId: session.id }
+          : { reusableSessionId: session.id }),
+      });
+      const connected = await connectedClient(
+        buildOpenGeniMcpServer(deps(client.db), {
+          ...grantFor(workspace),
+          permissions: ["scheduled_tasks:manage", "sessions:control"],
+        }),
+      );
+      try {
+        const result = await connected.client.callTool({
+          name: "scheduled_tasks_update",
+          arguments: {
+            id: task.id,
+            agentConfigPatch: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+          },
+        });
+        expect(result).not.toMatchObject({ isError: true });
+        expect(JSON.parse(resultText(result)).warnings).toEqual([
+          "The task uses an existing session, whose model and reasoning are unchanged. Change that session separately if intended.",
+        ]);
+        expect(await getSession(client.db, workspace.workspaceId, session.id)).toEqual(
+          previousSession,
+        );
+        expect(
+          (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig,
+        ).toEqual({
+          ...task.agentConfig,
+          model: "gpt-5.6-sol",
+          reasoningEffort: "high",
+        });
+      } finally {
+        await connected.close();
+      }
+    },
+  );
+
+  test("model patches retain the Variable Set permission boundary", async () => {
+    if (!available) return;
+    const { workspace, task } = await fixture();
+    await expect(
+      validatedScheduledTaskUpdate({
+        settings: deps(client.db).settings,
+        db: client.db,
+        objectStorage: null,
+        grant: grantFor(workspace),
+        existing: { ...task, variableSetId: crypto.randomUUID() },
+        payload: UpdateScheduledTaskRequest.parse({
+          agentConfigPatch: { reasoningEffort: "high" },
+        }),
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+  });
+
+  test("a concurrent config edit is not overwritten by the validated model patch", async () => {
+    if (!available) return;
+    const { workspace, task } = await fixture();
+    const grant = grantFor(workspace);
+    const update = await validatedScheduledTaskUpdate({
+      settings: deps(client.db).settings,
+      db: client.db,
+      objectStorage: null,
+      grant,
+      existing: task,
+      payload: UpdateScheduledTaskRequest.parse({ agentConfigPatch: { reasoningEffort: "high" } }),
+      toolsProvided: false,
+    });
+    expect(update.expectedExecutionDigest).toBe(task.executionDigest);
+    const concurrent = await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+      agentConfig: { ...task.agentConfig, prompt: "New instructions from another editor" },
+    });
+    await expect(
+      updateScheduledTaskForApi(client.db, grant, task.id, update),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(concurrent);
+  });
+
+  test("model patches cannot bypass model allowlists or schedule ownership", async () => {
+    if (!available) return;
+    const { workspace, task } = await fixture();
+    for (const [grant, model] of [
+      [grantFor(workspace), "forbidden-model"],
+      [{ ...grantFor(workspace), subjectId: "user:other-participant" }, "gpt-5.6-sol"],
+    ] as const) {
+      const connected = await connectedClient(buildOpenGeniMcpServer(deps(client.db), grant));
+      try {
+        expect(
+          await connected.client.callTool({
+            name: "scheduled_tasks_update",
+            arguments: { id: task.id, agentConfigPatch: { model } },
+          }),
+        ).toMatchObject({ isError: true });
+        expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+      } finally {
+        await connected.close();
+      }
+    }
+  });
+});
 
 describe("first-party MCP scheduled task connectionAccounts", () => {
   test.each([false, true])(

@@ -34,6 +34,11 @@ operation id cannot be approved again after execution may have started.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
+For lossless scheduled-task model edits, use
+`scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
+The read tool's bounded projection is not full replacement input. Existing
+sessions keep their own model; see [scheduled-task update semantics](scheduled-task-access.md).
+
 ### Human integration setup in chat
 
 The shared operational guidance tells the agent to use available integration

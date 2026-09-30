@@ -5602,6 +5602,11 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
+  /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
+   * Existing target/reusable sessions retain their own model and reasoning. */
+  agentConfigPatch?:
+    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
