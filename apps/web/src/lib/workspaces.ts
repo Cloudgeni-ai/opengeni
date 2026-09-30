@@ -32,10 +32,10 @@ export function workspaceCreationAccountId(
 /**
  * Whether this person administers the organization: an owner or admin in a
  * session that may administer one (a signed-in person, or the single local
- * user). Administrators manage its workspaces, so this also decides whether the
- * picker's "New workspace in <organization>" is available. Kept here, in the
- * startup graph, because the rail's picker needs it; organization settings
- * build on it.
+ * user). Administrators manage its workspaces, so this also decides who has
+ * Organization settings > Workspaces to create on, and who instead creates by
+ * name in the picker (a deployment key). Kept here, in the startup graph,
+ * because the rail's picker needs it; organization settings build on it.
  */
 export function administersOrganization(input: {
   accessContext: AccessContext;

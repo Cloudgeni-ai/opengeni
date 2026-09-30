@@ -312,11 +312,17 @@ describe("compact session view on the live local workspace route (API fixture)",
           const hold = fixture.holdRead;
           fixture.holdRead = undefined;
           fixture.readStarted = true;
+          // A held read was answered by the server when it started; only its
+          // delivery is delayed, so it keeps the outcome of that moment.
+          const failedAtStart = fixture.failReads;
           await hold?.promise;
           const firstPage = !url.searchParams.has("cursor");
           const allowStaleFirstPage = firstPage && fixture.allowStaleFirstPage;
           if (firstPage) fixture.allowStaleFirstPage = false;
-          if (fixture.failReads || (fixture.failFirstPage && firstPage && !allowStaleFirstPage))
+          if (
+            (hold ? failedAtStart : fixture.failReads) ||
+            (fixture.failFirstPage && firstPage && !allowStaleFirstPage)
+          )
             return json({ message: "Deliberate read failure" }, 500);
         }
         return json(response);
@@ -614,8 +620,9 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(await rootRow.count()).toBe(0);
       const pendingRows = await rail.locator("a[data-session-row]").count();
       expect(pendingRows).toBe(continuationFirst ? 4 : 0);
-      // Start another browse read BEFORE completion, but deliver it AFTER
-      // the successful receipt and its deliberately failed refresh.
+      // Start another browse read BEFORE completion, but deliver its stale
+      // pre-commit page AFTER the successful receipt. The rail's own refresh
+      // queues behind that read, then deliberately fails.
       const delayed = deferred();
       archiveFixture.holdRead = delayed;
       archiveFixture.readStarted = false;
@@ -627,6 +634,12 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(await rail.locator("a[data-session-row]").count()).toBe(pendingRows);
       archiveFixture.failReads = true;
       archiveFixture.mutation.resolve();
+      await page.waitForResponse(
+        (response) =>
+          response.request().method() !== "GET" &&
+          new URL(response.url()).pathname.endsWith(`/sessions/${root.id}/archive`),
+      );
+      delayed.resolve();
       await page
         .getByText(localArchived ? "Chat archived" : "Chat restored", { exact: true })
         .waitFor();

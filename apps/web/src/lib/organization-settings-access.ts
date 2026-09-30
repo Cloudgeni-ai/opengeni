@@ -62,7 +62,7 @@ export function organizationSettingsAccess(input: {
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
   const organizationAdministratorSession = managedHumanSession || singleUser;
-  // The one rule the rail's picker also uses for "New workspace in <organization>".
+  // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
 
   const visible = new Set<OrganizationAdminSection>();

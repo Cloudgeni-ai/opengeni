@@ -226,6 +226,21 @@ opacity-muted text.
   2 more", the empty note) is `fg-muted` or `fg-subtle`. The open session row is a selected row:
   `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is the `hover` wash. The
   settings rail follows the same rule, with its group labels in `fg-muted`.
+- Rail top and footer: the top row is the mark and wordmark with the collapse toggle (a ghost
+  icon button, chevrons) at its right end; collapsed, the toggle sits under the mark. The footer is
+  one row: the account button (16px avatar-sm plus the name in 14/400 `fg-label`, one target, a
+  10px `status-waiting` dot on the avatar while organization invitations are pending) and a
+  Settings gear (cog icon, tooltip "Settings", one click to the current workspace's settings).
+  Collapsed, the avatar and the gear stack. The rail footer holds nothing else: no feedback, help
+  or collapse buttons.
+- Account menu (opens up from the footer, 16rem): name and email header; Invitations with a count
+  only while some are pending; New organization only for people who can create one; then
+  Appearance (a submenu: Light, Dark, System, the chosen one checked) and Help & feedback (a
+  submenu: Documentation when the deployment publishes a link, Send feedback when the person may
+  send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
+  settings or Privacy preferences: both live in Settings > Your account (Privacy preferences only
+  where analytics consent is configured). Deployments with browser accounts keep the same footer
+  and put their account list and "Add another account" first in the same menu.
 - Every page works at 390px wide with no horizontal scroll and 44px touch targets on coarse
   pointers.
 
@@ -250,7 +265,7 @@ them, so a call site sets a width and nothing else.
   of a choice list reserves the check's slot so meta lines up.
 - **Group heading:** 12/500 `fg-muted`, sentence case (never uppercase). **Separator:** one
   `border` hairline inside the 6px inset, 6px above and below.
-- **Create action** ("New project", "New workspace in Acme", "Add repository URL"): an ordinary
+- **Create action** ("New project", "Add repository URL"): an ordinary
   row with a plus icon and `fg` label, last in the list it adds to, with no separator before it.
 - **Drill-in (submenu inside the same panel):** a header with a 32px back button (chevron-left)
   and the title in 14/500 `fg`, over a hairline. Radix side submenus use the same panel.
@@ -463,7 +478,7 @@ Main column: DetailSection ...        | Quiet aside card:
   (`useFocusOnNavigation`). Back on the list, focus returns to the row that was opened.
 
 **Settings is a mode of the rail.** Entering settings (the rail footer's Settings, any workspace,
-organization or personal settings URL, and the Agents, Insights and runtime pages listed in the
+organization or personal settings URL, and the Insights and runtime pages listed in the
 settings rail) swaps the main rail for the settings rail, drawn by `SettingsShell`
 (`components/settings/settings-sidebar.tsx`, sections from `settings-rail.tsx`): a back link that
 leaves settings ("Back to sessions"), then the one workspace picker (the same component and menu as
@@ -488,7 +503,7 @@ its scope ("Organization · Acme Robotics", since the picker is out of sight unt
 opens), and a Menu button that opens it in a drawer. Settings pages render full width beside
 the rail in the standard 960px column, with the section's page header; a sub-page (an account, a
 key, a person, a form) hides that header and declares its own back link and title. Pages that own
-their layout (Agents, Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
+their layout (Insights, Variable sets) render their own `ContentPage`. Every sub-page has its own URL param (`?account=`, `?key=`, `?view=`), so
 reload and browser Back work, and its back link returns to the tab or list it was opened from.
 Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 `FlushFormPage` (or `FLUSH_FORM_PAGE_CLASS`) for `FormPage`, and the flush `AccessList`, so the
@@ -523,7 +538,7 @@ All picks are the kit's decided versions. Build these; the alternatives in the k
 | --- | --- |
 | Page header | Icon on main-rail pages only; settings pages drop the icon because the settings rail gives context. |
 | Navigation | Settings swaps the rail for the settings rail (240px, grouped, icons) with a back link that restores the main rail. No settings sub-nav inside the content. |
-| Workspace picker | The trigger names the workspace and, under it, its organization; a Personal workspace shows a lock tile and "Private · <organization>" instead of a chip, so names keep the width (menu rows use the same lock tile, no chip). Privacy is said once per place and only where it is true: the new-chat page of a Personal workspace has one quiet line ("Private: only you can see chats here."), and its session header a read-only lock + "Private" whose tooltip says admins can't open it and billing shows only usage amounts. Shared workspaces show no privacy marks except an actual Only me chat, whose access control already reads "Private". The same picker heads the settings rail. The menu shows the current organization as a header with its workspaces and "New workspace in <organization>" (disabled with the reason when the person can't create there; never created in another organization), then Organization settings, then the other organizations under "Switch organization" and New organization. Switching organization returns to the workspace last used there (else its first shared workspace, else the Personal one). New workspace is one flow: the organization's New workspace page (Organization settings > Workspaces), opened with a back link to where you were; created from the picker, you land in the new workspace. |
+| Workspace picker | The trigger names the workspace and, under it, its organization; a Personal workspace shows a lock tile and "Private · <organization>" instead of a chip, so names keep the width (menu rows use the same lock tile, no chip). Privacy is said once per place and only where it is true: the new-chat page of a Personal workspace has one quiet line ("Private: only you can see chats here."), and its session header a read-only lock + "Private" whose tooltip says admins can't open it and billing shows only usage amounts. Shared workspaces show no privacy marks except an actual Only me chat, whose access control already reads "Private". The same picker heads the settings rail. The menu is only places to go: the current organization as a header with its workspaces (the current one checked), then, only for a person who belongs to more than one organization, the others under "Switch organization". Its only action is a quiet "New workspace" row at the end of the workspace list, shown only to people who can create workspaces there. New workspace is one flow, the organization's New workspace page (Organization settings > Workspaces), and that row opens it with a back link to where you were; Organization settings is the settings rail (the rail footer's Settings); New organization is in the account menu (bottom-left), for people who can create one. The one exception is a deployment key that may create workspaces without administering the organization: it has no settings page to create on, so its menu keeps a "New workspace in <organization>" row that names one in place. Switching organization returns to the workspace last used there (else its first shared workspace, else the Personal one). |
 | Section | 16px title (one step above the 14px row titles), 12px description. In settings the rows below sit in one grouped card; elsewhere they sit open with one hairline between sections. |
 | Tabs and toolbar | Underline tabs; search, filter and the primary action in a toolbar that keeps its shape. Status filters are not a second tab row. |
 | List row | Divided resource row (56-64px, 32px tile, one meta line) for things you own; the catalog row (76px, 40px tile, 2 columns) for discovery. Same tile, type and hover. |

@@ -1,22 +1,11 @@
-import { AppearanceMenu } from "@/components/appearance-menu";
+import { AppearanceSubmenu } from "@/components/appearance-menu";
 import { HelpMenu } from "@/components/help-menu";
-import { Link } from "@tanstack/react-router";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
-import {
-  ChartColumnIcon,
-  CheckIcon,
-  Loader2Icon,
-  LogOutIcon,
-  RefreshCwIcon,
-  ShieldCheckIcon,
-  UserRoundPlusIcon,
-  UsersIcon,
-} from "lucide-react";
+import { CheckIcon, LogOutIcon, RefreshCwIcon, UserRoundPlusIcon, UsersIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -39,11 +28,11 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { AccountTrigger } from "@/components/rail/account-trigger";
 import { useRail } from "@/components/rail/rail-context";
+import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
-  OrganizationInvitationCountBadge,
-  OrganizationInvitationRailNotice,
   OrganizationInvitationsDialog,
   OrganizationInvitationsMenuItem,
   useOrganizationInvitations,
@@ -51,11 +40,6 @@ import {
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
-import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
-
-function userInitial(label: string): string {
-  return (label.trim()[0] ?? "U").toUpperCase();
-}
 
 type ManagedAuthLoginSlot = ManagedAuthSessionSetProjection["slots"][number];
 
@@ -63,7 +47,11 @@ function slotLabel(slot: ManagedAuthLoginSlot): string {
   return `${slot.displayName}, ${slot.verifiedClaim.value}`;
 }
 
-export function BrowserAccountMenu() {
+export function BrowserAccountMenu({
+  onSendFeedback,
+}: {
+  onSendFeedback?: (() => void) | undefined;
+}) {
   const rail = useRail();
   const context = useAppContext();
   const accounts = useBrowserAccounts();
@@ -77,18 +65,14 @@ export function BrowserAccountMenu() {
   const projection = accounts.projection;
   const selected = projection?.slots.find((slot) => slot.id === projection.selectedSlotId) ?? null;
   const busy = accounts.phase === "committing" || accounts.phase === "loading";
-  const showAnalyticsPreferences = analyticsPreferencesAvailable(context.clientConfig.analytics);
   const displayName =
     selected?.displayName ??
     context.authSession?.user.name ??
     context.authSession?.user.email ??
     context.accessContext.subjectLabel ??
     context.accessContext.subjectId;
-  const secondary =
-    selected?.verifiedClaim.value ??
-    context.authSession?.user.email ??
-    context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const newOrganization = useNewOrganizationMenuItem();
   const organizationInvitations = useOrganizationInvitations({
     client: context.client,
     enabled: true,
@@ -196,14 +180,15 @@ export function BrowserAccountMenu() {
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
-      {!rail.collapsed ? (
-        <OrganizationInvitationRailNotice controller={organizationInvitations} />
-      ) : null}
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
-          <button
+          <AccountTrigger
             ref={triggerRef}
-            type="button"
+            collapsed={rail.collapsed}
+            displayName={displayName}
+            image={image}
+            pendingCount={organizationInvitations.pendingCount}
+            busy={busy}
             aria-label={accountMenuAriaLabel({
               displayName,
               pendingCount: organizationInvitations.pendingCount,
@@ -215,34 +200,7 @@ export function BrowserAccountMenu() {
               event.preventDefault();
               setMenuOpen(true);
             }}
-            className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none forced-colors:border forced-colors:border-transparent forced-colors:focus:border-[Highlight]"
-          >
-            <span className="relative shrink-0">
-              <Avatar size="sm">
-                {image ? <AvatarImage src={image} alt="" /> : null}
-                <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-                  {userInitial(displayName)}
-                </AvatarFallback>
-              </Avatar>
-              <OrganizationInvitationCountBadge
-                pendingCount={organizationInvitations.pendingCount}
-              />
-            </span>
-            {!rail.collapsed ? (
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium text-fg">{displayName}</span>
-                {secondary !== displayName ? (
-                  <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
-                ) : null}
-              </span>
-            ) : null}
-            {busy && !rail.collapsed ? (
-              <Loader2Icon
-                className="size-3.5 shrink-0 animate-spin text-fg-subtle motion-reduce:animate-none"
-                aria-hidden="true"
-              />
-            ) : null}
-          </button>
+          />
         </DropdownMenuTrigger>
         <DropdownMenuContent
           tabIndex={0}
@@ -319,20 +277,14 @@ export function BrowserAccountMenu() {
             className="forced-colors:text-[CanvasText]!"
             disabled={busy}
           />
-          <AppearanceMenu />
-          <DropdownMenuItem asChild disabled={busy}>
-            <Link to="/settings/security">
-              <ShieldCheckIcon className="size-4" />
-              Personal settings
-            </Link>
-          </DropdownMenuItem>
-          {showAnalyticsPreferences ? (
-            <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
-              <ChartColumnIcon className="size-4" />
-              Analytics preferences
-            </DropdownMenuItem>
-          ) : null}
-          <HelpMenu documentationUrl={context.clientConfig.documentationUrl} leadingSeparator />
+          {newOrganization.item}
+          <DropdownMenuSeparator />
+          <AppearanceSubmenu />
+          <HelpMenu
+            documentationUrl={context.clientConfig.documentationUrl}
+            onSendFeedback={onSendFeedback}
+          />
+          <DropdownMenuSeparator />
           <DropdownMenuItem
             className="forced-colors:text-[CanvasText]!"
             variant="destructive"
@@ -366,6 +318,7 @@ export function BrowserAccountMenu() {
       </DropdownMenu>
 
       <OrganizationInvitationsDialog controller={organizationInvitations} />
+      {newOrganization.dialog}
 
       <Dialog open={logoutTarget !== null} onOpenChange={(open) => !open && setLogoutTarget(null)}>
         <DialogContent className="motion-reduce:duration-0">
