@@ -45,6 +45,7 @@ export {
   type CodeSearchStats,
   type CodeSearchStatus,
 } from "./code-search/search";
+export { CODE_SEARCH_CREDENTIAL_DIRS, isCodeSearchCredentialPath } from "./code-search/recall";
 export {
   CODE_SEARCH_MAX_PATTERN_CHARS,
   CodeSearchRipgrepMissingError,
