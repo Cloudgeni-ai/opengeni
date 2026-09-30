@@ -168,7 +168,7 @@ alone removes its warning receipt through the legitimate parent cascade.
 This adds canonical-human consent for singleton managed-home Modal recovery only.
 Consent itself never recovers shared groups, replays commands, resets to an empty
 workspace or changes the cancellation/reaper protocol. System continuity after
-definitive loss is separate (0526 and 0541 below). See [run lifecycle](run-lifecycle.md).
+definitive loss is separate (0526 and 0547 below). See [run lifecycle](run-lifecycle.md).
 
 ## Automatic checkpoint continuity (0526)
 
@@ -182,7 +182,7 @@ role default, pool configuration or deployment environment.
 
 The worker may automatically select the registered CURRENT native Modal
 checkpoint of a managed home when definitive provider loss made its archive
-generation older than the workspace generation (shared groups since 0541).
+generation older than the workspace generation (shared groups since 0547).
 Selection is a separate system-attributed durable receipt, not human consent or
 proof of restore. The ordinary provider snapshot and artifact verification must
 finish before the box is usable. Live writers in any group member still block.
@@ -196,9 +196,9 @@ indexed private ledger, committed with their RLS-verified source audit events.
 The ledger stores only event IDs and fixed kinds, not tenant or provider data;
 normal role provisioning grants exact EXECUTE-only capabilities, not table reads.
 
-## Lost sandbox group continuity (0541)
+## Lost sandbox group continuity (0547)
 
-`0541_lost_sandbox_group_continuity.sql` is rolling. It only extends guards for a
+`0547_lost_sandbox_group_continuity.sql` is rolling. It only extends guards for a
 new receipt kind and adds one fixed operator-ledger kind; rows and receipts that
 older images write keep their exact 0526 behavior, and older images never create
 the new receipt. Apply it before rolling API/control/turn images, then provision

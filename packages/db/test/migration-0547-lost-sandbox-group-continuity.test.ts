@@ -15,13 +15,13 @@ import {
 } from "../src/index";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
 
-const MIGRATION = "0541_lost_sandbox_group_continuity.sql";
+const MIGRATION = "0547_lost_sandbox_group_continuity.sql";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("migration-0541-lost-sandbox-continuity");
+  const acquired = await acquireSharedTestDatabase("migration-0547-lost-sandbox-continuity");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl);

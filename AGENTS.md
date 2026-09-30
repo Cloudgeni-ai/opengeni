@@ -418,7 +418,7 @@ retaining its full projection in the new audit receipt. Never clear public state
 alone, erase permanent consent receipts, or reuse completed consent for automatic
 recovery after a later loss.
 
-System continuity after definitive managed-provider loss (0526/0541) decides for
+System continuity after definitive managed-provider loss (0526/0547) decides for
 the complete quiescent sandbox group: its latest verified checkpoint, or else a
 new EMPTY workspace. Both write a permanent warning receipt for every member before
 any box exists; the empty lane hydrates nothing, not even a per-session legacy
