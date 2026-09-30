@@ -7,6 +7,7 @@ import {
   failSandboxRematerialization,
   failWarmingToCold,
   markSandboxRestoreVerifying,
+  sessionHoldsFreshWorkspaceRecovery,
   recordWarmingSandboxCreated,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
@@ -73,8 +74,9 @@ async function materializeArchiveObjectRef(
   }
   if (!objectStorage) {
     throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
+      "archive_storage_unavailable",
       "workspace archive object storage is not configured",
+      { retryable: true },
     );
   }
   const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
@@ -136,13 +138,29 @@ export async function establishApiSandboxSpawner(input: {
   dataPlaneUrl: string | null;
   objectStorage?: ObjectStorage | null;
 }): Promise<{ established: EstablishedSandboxSession; lease: LeaseSnapshot }> {
+  // An audited decision to continue a definitively lost workspace on a new
+  // EMPTY box: hydrate nothing, including a per-session legacy archive, and
+  // never resume a prior provider identity. Commit verifies the decision.
+  const freshWorkspaceRecoveryId = input.acquiredLease.freshWorkspaceRecoveryId ?? null;
+  // Backstop: a session already told its workspace is empty never gets a
+  // legacy per-session archive back, even if the lease marker was lost.
+  const legacyFallbackRefused =
+    !freshWorkspaceRecoveryId &&
+    input.acquiredLease.recovery.archive.status === "none" &&
+    hasWorkspaceArchive(input.fallbackEnvelope) &&
+    (await sessionHoldsFreshWorkspaceRecovery(input.db, input.workspaceId, input.sessionId));
   const fallbackArchiveEnvelope =
+    !freshWorkspaceRecoveryId &&
+    !legacyFallbackRefused &&
     input.acquiredLease.recovery.archive.status === "none" &&
     hasWorkspaceArchive(input.fallbackEnvelope)
       ? withoutSandboxProviderIdentity(input.fallbackEnvelope)
       : null;
-  let spawnEnvelope =
-    fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope;
+  let spawnEnvelope = freshWorkspaceRecoveryId
+    ? null
+    : legacyFallbackRefused
+      ? (input.acquiredLease.resumeState ?? null)
+      : (fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope);
   const archiveSource =
     input.acquiredLease.recovery.archive.status === "none"
       ? fallbackArchiveEnvelope
@@ -161,10 +179,12 @@ export async function establishApiSandboxSpawner(input: {
   const continuityRecovery = input.acquiredLease.recovery.continuity;
   try {
     if (
-      (input.acquiredLease.recovery.archive.status === "available" &&
+      !freshWorkspaceRecoveryId &&
+      ((input.acquiredLease.recovery.archive.status === "available" &&
         (input.acquiredLease.archiveComplete ||
           input.acquiredLease.historicalRecoveryAuthorized === true)) ||
-      (input.acquiredLease.recovery.archive.status === "none" && hasWorkspaceArchive(archiveSource))
+        (input.acquiredLease.recovery.archive.status === "none" &&
+          hasWorkspaceArchive(archiveSource)))
     ) {
       const id = crypto.randomUUID();
       const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -207,7 +227,11 @@ export async function establishApiSandboxSpawner(input: {
         legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
         legacyProviderBinding: null,
       };
-    } else if (input.acquiredLease.recovery.archive.status !== "none" && !continuityRecovery) {
+    } else if (
+      !freshWorkspaceRecoveryId &&
+      input.acquiredLease.recovery.archive.status !== "none" &&
+      !continuityRecovery
+    ) {
       throw new SandboxLeaseRecoveryBlockedError(
         input.sandboxGroupId,
         input.expectedEpoch,
@@ -384,16 +408,18 @@ export async function establishApiSandboxSpawner(input: {
       dataPlaneUrl: input.dataPlaneUrl,
       resumeBackendId: established.backendId,
       resumeState,
-      ...(established.providerContinuity
-        ? { continuityRecovery: established.providerContinuity }
-        : rematerialization
-          ? {
-              rematerialization: {
-                id: rematerialization.id,
-                verifiedRevision: rematerialization.selectedRevision,
-              },
-            }
-          : {}),
+      ...(freshWorkspaceRecoveryId
+        ? { freshWorkspace: { operationId: freshWorkspaceRecoveryId } }
+        : established.providerContinuity
+          ? { continuityRecovery: established.providerContinuity }
+          : rematerialization
+            ? {
+                rematerialization: {
+                  id: rematerialization.id,
+                  verifiedRevision: rematerialization.selectedRevision,
+                },
+              }
+            : {}),
       leaseTtlMs: input.settings.sandboxLeaseTtlMs,
     });
     if (!committed.committed || !committed.lease) {

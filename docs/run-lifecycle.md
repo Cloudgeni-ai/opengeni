@@ -1719,7 +1719,8 @@ The selection binds session/group, tenancy and route epochs, lease identity/epoc
 CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
 The generation gap is not a count of missing edits or files. Conversation and tool
 receipts remain; changes after the checkpoint are unavailable and external effects
-are not undone. No empty reset or command replay occurs.
+are not undone. Consent never resets to an empty workspace or replays commands
+(the separate system lane below is the only empty-workspace continuation).
 
 Consent takes the existing workspace tenancy fence exclusively before checking
 complete group membership, including actor-hidden sessions. It then takes the
@@ -1763,8 +1764,9 @@ filesystem-discontinuity warning in session instructions. This warning is outsid
 compactable transcript state and is reconstructed after worker restart. Prior tool
 success must not be treated as proof those files still exist. Consent alone does
 not claim restore success. Failed/stale public restores and a later loss after
-verified recovery remain explicit blockers requiring operator review; this slice
-does not introduce an abandon/reset or automatic re-consent operation.
+verified recovery remain explicit blockers requiring operator review: a non-null
+public recovery also excludes the automatic lanes below, and there is no
+automatic re-consent operation.
 
 A fresh exact operator historical-checkpoint authorization may supersede a
 `verified` public recovery after a later loss. Under the existing quiescence,
@@ -1793,31 +1795,122 @@ No cancellation/reaper protocol changes are included.
 ### Automatic continuity after a missing managed provider
 
 This is separate from human consent. Before agent construction (including
-on-demand sandbox turns), an exact live attempt may select the singleton
-session's registered CURRENT native Modal checkpoint only when the provider is
-definitively missing, the cold lease has an archive-generation mismatch, and
-no other holders, processes, mutations, pending tools or competing attempts
-remain. It records a distinct system-attributed audit and immutable per-session
-receipt before a replacement can be elected. The same attempt reuses that
-selection; stale attempts cannot change it. Retry may admit this narrowly
-recoverable route, but does not itself restore files or replay unknown effects.
-The lease pins group membership, route and CURRENT archive while selection is
-pending; restore admission recounts all group members, including private
-siblings. Only verified warm publication releases that pin.
+on-demand sandbox turns), an exact live attempt may decide how a definitively
+lost managed Modal sandbox continues. A lost box never dead-ends its sessions:
+the decision covers the complete sandbox group at once, including parents,
+shared children and members private to another human.
 
-The existing cold election and native provider/artifact checks still decide
-whether a replacement becomes usable. No archive, uncertain provider, corrupt
-checkpoint, active writer or shared group remains blocked. Newer filesystem
-changes can be unavailable while conversation and external effects remain.
-Provider loss and fallback selection are also committed as audit facts before
-process-local counters; the reaper rebuilds a fresh, release-scoped alert
-inventory from those receipts if a worker exits after the transaction.
-Every agent reconstruction appends the same checkpoint-specific discontinuity
-warning to session instructions, after the stable workspace prompt prefix.
-Maintenance migration 0526 requires warning protocol v2 at attempt claim for
-every session with an automatic receipt, including after failed restoration or
-lease churn; old workers fail closed. Human-consented recovery keeps its
-independent v1 gate.
+**Loss evidence.** Both lanes need durable proof that this lease lineage's
+provider object was definitively lost: the reaper's missing-before-capture
+cold commit or an exact warm-instance `NOT_FOUND`. Each records
+`opengeniProviderLoss` on the lease (source, lost epoch and instance, workspace
+generation, observation time, stamped provider deadline); cold and warming
+rebuilds carry it and a verified warm publication ends it. A failed or reset
+replacement box writes provider `not_created` with diagnostic
+`replacement_failed` and is never evidence. Rows committed before this release
+qualify from their own loss transition's exact shape (the
+`provider_not_found_before_workspace_capture` diagnostic, or the lost-instance
+shape) or, when a replacement attempt overwrote that record (older code wrote
+`missing`, current code `replacement_failed`), from the committed
+`sandbox.provider_missing_before_capture` audit for the same lease and unchanged
+workspace generation, so stuck sessions recover on their next turn or Retry. A
+plain `not_created` (an ordinary drain, operator restore or capture failure)
+never revives an older loss. Turn start takes the workspace-control fence only
+for a lease with an incomplete archive and a loss-shaped provider record (or a
+pending decision), so the ordinary resume of a complete archive stays unlocked. A decision pins the evidence it used. Provider
+`unknown`, `creating` or `exists`, an unresolved provider create, an explicit
+public or operator authorization in force, or a complete archive (or one at the
+workspace generation) is never eligible: an ordinary restore failure stops for
+an operator exactly as before. A drain capture that was in flight when the box
+vanished (`lateArchiveCapture`) may publish the lost generation only within a
+durable one-hour window enforced by `persistDrainSnapshot`; both lanes wait
+slightly longer than that window before deciding. Every such deadline is
+compared with the database clock, never a host clock.
+
+**Quiescence.** Checked under the exclusive workspace-control fence: no lease
+holder, open workspace admission, active retained process, unclosed or
+unquiesced attempt, or live pending tool call may exist in ANY member. A pending
+call is live while its attempt is open or awaits quiescence, or while its turn is
+not terminal; a row stranded by a terminal turn whose attempt settled is not a
+writer.
+
+The decision prefers the latest registered CURRENT native Modal checkpoint
+older than the lost workspace (lane `checkpoint`; singleton or shared). It
+records a system-attributed audit, one immutable `sandbox.recovery.automatic`
+receipt per member (the deciding attempt is the actor for its own session, the
+system recovery subject for the others) and a lease marker. Restore then uses
+the existing cold election, native provider binding and artifact checks. Only a
+definitive, non-retryable integrity failure of that exact checkpoint's content
+(its metadata, bytes or registered artifact) abandons it. A missing archive
+object (`archive_object_missing`) or unconfigured archive storage
+(`archive_storage_unavailable`) is never definitive, so a bad storage deploy
+cannot abandon checkpoints. Any other failed system restore (capacity, a worker
+death or reset, a rejected commit, a changed provider binding) is decided
+again after a backoff of 1 minute, 5, 15, 60 and 240 minutes; after six attempts
+an operator decides and the checkpoint is kept. The lease pins group
+membership, route and CURRENT archive while a checkpoint selection is pending;
+only verified warm publication releases that pin. Newer filesystem changes can
+be unavailable while conversation and external effects remain.
+
+#### Empty-workspace continuity when no checkpoint survives
+
+When the loss leaves no checkpoint OpenGeni can restore automatically (no
+archive, an unverified archive, a legacy or unregistered descriptor, an invalid
+artifact, or a definitive integrity failure of the selected checkpoint), the
+decision is lane `fresh_workspace`: continue on a new EMPTY workspace. Because
+that is irreversible for the running sandbox, it also waits until the lost
+object is past its hard provider lifetime: its stamped provider deadline plus a
+one-hour create grace, or, for rows without one, the loss observation plus 24
+hours. OpenGeni validates the Modal timeout to at most 24 hours (Modal's own
+cap) and never renews it, so no Modal sandbox can outlive that bound in any
+workspace. A misconfigured credential or namespace that turned a live box into
+a false `NOT_FOUND` therefore cannot cause an empty reset; this deadline proof
+subsumes a provider-binding check and needs no provider call on the turn path.
+Staging's 24-hour deadline kills satisfy it at loss time. The decision writes
+its own audit (`sandbox.fresh_workspace_recovery.authorized`), one immutable
+`sandbox.recovery.fresh_workspace` receipt per member naming the loss time and
+reason, and a pending lease marker, and retires any late-capture receipt in the
+same commit.
+
+This is truthful rather than a silent reset. Every member is told, on every
+later agent build, that the previous sandbox was lost at that time, that no
+checkpoint exists that OpenGeni can restore automatically, that files, clones,
+installs and processes from before it are not available in this workspace, and
+never to replay operations with unknown outcomes. The next spawner (worker or
+API) hydrates nothing, not even a per-session legacy archive, and resumes no
+prior provider identity; `beginSandboxRematerialization` refuses under the
+marker and `commitWarmingToWarm` accepts only an archive-free publication that
+names the exact decision. A failed empty create, a reaper reset, or a drain of
+its unpublished box keeps the decision for the next spawner, and spawners refuse
+a per-session legacy archive for any session that already holds an
+empty-workspace receipt. Human consent and a pending decision are mutually
+exclusive. Nothing is deleted: the lost archive fields and checkpoint references
+stay on the lease (and are listed in the audit) until ordinary capture rotation
+supersedes them, and a later loss of the new box may still select that older
+checkpoint with its own warning. Members that join the group while a decision is
+pending receive the same receipt on their first turn start.
+
+Retry may admit either lane once the group is quiescent, but does not itself
+restore files or replay unknown effects. Nothing re-decides by itself: a timed
+wait (restore backoff, provider lifetime, late capture) projects `availableAt`,
+the earliest time a Retry or a new message can decide again. It never reopens a turn whose own
+pending call has no recorded outcome; the projection then asks for a new
+message, whose turn start makes the same decision. Human consent stays
+singleton-only: it needs one accountable human for a single session, and the
+system lanes already cover shared groups without widening what a person may
+accept. Provider loss and both decisions are committed as audit facts before
+process-local counters (`opengeni_sandbox_checkpoint_fallback_total` outcomes
+`selected`, `selected_shared` and `fresh_workspace`); the reaper rebuilds a
+fresh, release-scoped alert inventory from those receipts if a worker exits
+after the transaction.
+
+Every agent reconstruction appends the newest decision's warning to session
+instructions, after the stable workspace prompt prefix. Maintenance migration
+0526 requires warning protocol v2 at attempt claim for every session with an
+automatic checkpoint receipt; rolling migration 0548 additionally requires v3
+for a session with an empty-workspace receipt, including after lease churn.
+Older workers fail closed only for affected sessions. Human-consented recovery
+keeps its independent v1 gate.
 
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base

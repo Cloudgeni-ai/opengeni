@@ -435,10 +435,10 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.ts`)
-or proved provider loss (`packages/db/src/index.ts`). Both require a verified
-CURRENT checkpoint, singleton, quiescence and durable warning; no command
-replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
+Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
+or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
+verified checkpoint, else continues empty, warning every member; never replays.
+See migrations 0495/0526/0548, [run lifecycle](run-lifecycle.md).
 Operator reauthorization supersedes verified public recovery;
 [provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
 
