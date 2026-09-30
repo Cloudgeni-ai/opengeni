@@ -95,8 +95,8 @@ describeWithRipgrep("symbol discovery, call sites and the coverage map end to en
       question: "How does the artifact list load more rows?",
       keywords: ["ArtifactList", "onLoadMore"],
       workspace: new LocalCodeSearchWorkspace(root),
-      // two symbol rounds and no name index, so each round's sources are asserted exactly
-      config: codeSearchConfig({ symbols: { maxRounds: 2 }, recall: { nameIndex: false } }),
+      // two symbol rounds, so each round's sources are asserted exactly
+      config: codeSearchConfig({ symbols: { maxRounds: 2 } }),
       jev: fakeJevClient({
         good: ["useArtifactPaging", "fetchRowPage"],
         symbolGood: ["useArtifactPaging"],

@@ -35,13 +35,6 @@ export interface CodeSearchConfig {
     changelogWeight: number;
     /** Time limit per ripgrep call; a timed-out search continues with partial output. */
     ripgrepTimeoutMs: number;
-    /** Match the question's own words against declared names (no Jev); the best files join file triage. */
-    nameIndex: boolean;
-    nameIndexFiles: number;
-    /** When many keywords match nothing relevant, recall again with this many real names from the name index. */
-    secondRoundNames: number;
-    /** Share of keywords that must be bad (zero hits, or hits only in files triage judged irrelevant). */
-    secondRoundBadShare: number;
   };
   wave1: {
     filesPerRequest: number;
@@ -216,10 +209,6 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     searchHidden: true,
     changelogWeight: 0.6,
     ripgrepTimeoutMs: 30_000,
-    nameIndex: true,
-    nameIndexFiles: 8,
-    secondRoundNames: 8,
-    secondRoundBadShare: 0.4,
   },
   wave1: {
     filesPerRequest: 60,

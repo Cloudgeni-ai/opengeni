@@ -41,7 +41,6 @@ import {
 } from "./pack";
 import {
   bestHitLines,
-  cleanPrefix,
   excludeArgs,
   idfOf,
   recall,
@@ -50,7 +49,6 @@ import {
   type RecallResult,
 } from "./recall";
 import { mapLimit, READ_CONCURRENCY, WorkspaceSession } from "./session";
-import { nameIndex } from "./nameindex";
 import { locateUsages, specificName, symbolCandidates } from "./symbols";
 import { keywordNotes } from "./vocab";
 import {
@@ -323,28 +321,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
 
   // ---- 1. recall
   let ts = performance.now();
-  const scopePaths = (o.paths ?? []).map(cleanPrefix).filter((p): p is string => p !== null && p !== ".");
-  const [rec, ni] = await Promise.all([
-    recall({
-      session,
-      question: ctx.question + " " + subQuestions.join(" "),
-      keywords: o.keywords,
-      pathPrefixes: o.paths ?? [],
-      config: cfg,
-    }),
-    cfg.recall.nameIndex
-      ? nameIndex({
-          session,
-          question: ctx.question + " " + subQuestions.join(" "),
-          files: [],
-          paths: scopePaths,
-          cfg,
-          excludeArgs: exArgs,
-          allowTests,
-          maxFiles: cfg.recall.nameIndexFiles * 3,
-        }).catch(() => null)
-      : Promise.resolve(null),
-  ]);
+  const rec: RecallResult = await recall({
+    session,
+    question: ctx.question + " " + subQuestions.join(" "),
+    keywords: o.keywords,
+    pathPrefixes: o.paths ?? [],
+    config: cfg,
+  });
   mark("recall", ts);
   const kws = [...rec.keywords];
   const userKeywords = rec.keywords.length;
@@ -388,40 +371,6 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   ts = performance.now();
   const cands: FileCandidate[] = [...rec.candidates];
   const byPath = new Map(cands.map((c, i) => [c.path, i]));
-  // files whose declared names carry the question's own words join triage (no Jev spent to find them)
-  const nameIndexAdded: string[] = [];
-  if (ni && ni.files.length) {
-    const qk = kws.length;
-    kws.push({
-      index: qk,
-      raw: "(question words)",
-      variants: [],
-      mode: "phrase",
-      pattern: ni.stems.map(escapeRegex).join("|") || "(?!)",
-      rgPattern: "",
-      df: ni.files.length,
-      pathDf: 0,
-      hitLines: 0,
-      idf: 1,
-      fragments: [],
-      symbol: true,
-    });
-    for (const f of ni.files) {
-      if (nameIndexAdded.length >= cfg.recall.nameIndexFiles) break;
-      if (byPath.has(f.path) || (!allowTests && isTestPath(f.path))) continue;
-      byPath.set(f.path, cands.length);
-      cands.push({
-        path: f.path,
-        lexScore: f.score / 10,
-        kwHits: { [qk]: f.hits.length },
-        pathKws: [],
-        hitLines: new Map(f.hits.map((h) => [h.line, { line: h.line, text: h.text, kws: [qk] }])),
-        isTest: isTestPath(f.path),
-        isDoc: isDocPath(f.path),
-      });
-      nameIndexAdded.push(f.path);
-    }
-  }
   const fileIds = cands.map((_, i) => `f${String(i).padStart(3, "0")}`);
   const maxLex = cands[0]?.lexScore || 1;
   const fileItem = (i: number): FileItem => {
@@ -625,35 +574,6 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     return take.map((x) => x.ci);
   };
 
-  // ---- 2a. second recall round: most keywords matched nothing relevant, so recall again with real names
-  // that carry the question's own words
-  let recall2: { bad: string[]; names: string[]; added: string[] } | null = null;
-  if (ni && ni.names.length && cfg.recall.secondRoundNames > 0) {
-    const bad = rec.keywords.filter((k) => {
-      if (k.df === 0 && k.pathDf === 0) return true;
-      const hit = cands.filter((c) => c.kwHits[k.index] || c.pathKws.includes(k.index));
-      return !hit.some((c) => pOf(byPath.get(c.path)!) >= thr.T1);
-    });
-    if (rec.keywords.length && bad.length >= Math.max(1, Math.ceil(cfg.recall.secondRoundBadShare * rec.keywords.length))) {
-      const names = ni.names
-        .map((n) => n.name)
-        .filter((n) => specificName(n) && !searched.has(n.toLowerCase()))
-        .slice(0, cfg.recall.secondRoundNames);
-      if (names.length) {
-        const t2 = performance.now();
-        const trace2: Record<string, unknown> = { round: "recall 2", bad: bad.map((k) => k.raw), chosen: names };
-        const added = await followNames(
-          "recall 2",
-          names.map((name) => ({ it: { name }, p: 1 })),
-          trace2,
-        );
-        symbolRounds.push(trace2);
-        recall2 = { bad: bad.map((k) => k.raw), names, added: added.map((i) => cands[i]!.path) };
-        mark("recall2", t2);
-      }
-    }
-  }
-
   // ---- 2b. symbol discovery: identifiers of the selected files, judged, then their definitions and usages
   ts = performance.now();
   if (cfg.symbols.enabled) {
@@ -724,8 +644,6 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   }
   mark("symbols", ts);
   emit("symbols", {
-    nameIndex: ni ? { stems: ni.stems, ms: ni.ms, declarations: ni.declarations, added: nameIndexAdded, names: ni.names.slice(0, 20).map((n) => n.name) } : null,
-    recall2,
     rounds: symbolRounds,
     added: symbolAdded,
     selected: selected.map((i) => cands[i]!.path),
@@ -1227,10 +1145,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     excludeArgs: exArgs,
   });
   mark("vocab", ts);
-  const recall2Note = recall2
-    ? `Second recall round: ${recall2.bad.length} keywords matched nothing relevant (${recall2.bad.join(", ")}), so the search also looked up real names that carry the question's words: ${recall2.names.join(", ")}${recall2.added.length ? `; files added: ${recall2.added.join(", ")}` : "; no file passed triage"}.`
-    : undefined;
-  const widenedNote = [prefixNote(rec), recall2Note].filter(Boolean).join(" ") || undefined;
+  const widenedNote = prefixNote(rec);
   const footer = renderFooter({
     coverage,
     cuts,
