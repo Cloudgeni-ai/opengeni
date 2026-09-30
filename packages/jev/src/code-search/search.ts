@@ -1332,6 +1332,13 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       .slice(0, cfg.wave3.maxLeadsFollowed);
     // the adaptive round only improves a complete pack: a Jev failure here keeps the first pack and rating
     let added = 0;
+    // on a Jev failure the round is rolled back: its passages were never verified
+    const mark0 = {
+      evidence: evidence.length,
+      items: passageItems.length,
+      followed: leadsFollowed.length,
+      chosen: new Set(chosenNames),
+    };
     try {
       if (nextLeads.length) added = await followLeads(nextLeads, defsForLeads);
     } catch (error) {
@@ -1340,22 +1347,31 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         !(error instanceof JevUnavailableError || error instanceof JevRequestError)
       )
         throw error;
+      evidence.length = mark0.evidence;
+      passageItems.length = mark0.items;
+      leadsFollowed.length = mark0.followed;
+      chosenNames.clear();
+      for (const n of mark0.chosen) chosenNames.add(n);
+      added = 0;
       adaptive.push(`follow-up round failed: ${error.message.slice(0, 120)}`);
     }
     adaptive.push(
       `rating ${r2(firstRating)}: followed ${nextLeads.length} more leads (${added} passages)`,
     );
     const firstStatus = status;
+    const packedBefore = body.included.map((x) => `${x.id}@${x.start}-${x.end}`).join(",");
     body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
+    const repacked =
+      body.included.map((x) => `${x.id}@${x.start}-${x.end}`).join(",") !== packedBefore;
     if (added > 0) {
       await check(body);
       if (statusCheckError) {
         // keep the valid first rating; the failed recheck is reported, not propagated to the breaker
         status = { ...firstStatus };
         statusCheckError = undefined;
-        refilled = true;
+        refilled = repacked;
       }
-    } else refilled = true;
+    } else refilled = repacked;
   } else if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.fillBelowRating) {
     // compare what is packed, not how many blocks: a refilled passage can be joined onto a shown neighbour
     const before = body.included.map((x) => `${x.id}@${x.start}-${x.end}`).join(",");
