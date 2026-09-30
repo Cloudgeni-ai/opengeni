@@ -28,6 +28,8 @@ import {
   type loadWorkspaceEnvironmentForRunWithCredentials,
 } from "../environment";
 import type { mergeResourceRefs } from "../common";
+import type { withFirstPartyTools } from "../goals";
+import { expandMcpAccountRoutes } from "../mcp-account-routes";
 import { startGitCredentialRenewalLoop } from "../git-credential-renewal";
 import {
   RUN_CREDENTIAL_EXPIRY_LEAD_MS,
@@ -74,6 +76,7 @@ import type {
 
 export type PrepareRunCredentialsDeps = {
   localMcpServerIds?: readonly string[];
+  turnTools: ReturnType<typeof withFirstPartyTools>;
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
@@ -153,6 +156,14 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   const platformGitResources = turnResources.filter(
     (resource) => resource.kind !== "repository" || repositoryHasExplicitGitConnection(resource),
   );
+  // Credential targets follow the same accepted-account narrowing as execution.
+  // A canonical connection without an accepted account does not execute, and
+  // account-qualified aliases never inherit an attachment's product headers.
+  const accountRoutes = expandMcpAccountRoutes({
+    settings: runSettings,
+    tools: deps.turnTools,
+    bindings: turn.mcpAccountBindings,
+  });
 
   const runCredentialResolver =
     effectiveRunCredentialBackend === "none" || effectiveRunCredentialBackend === "selfhosted"
@@ -160,10 +171,11 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       : await waitForTurnOperation(
           bindRunCredentialResolver({
             db,
-            settings: runSettings,
+            settings: accountRoutes.settings,
             initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
             connectionCredentials: connectionCredentials ?? null,
             localMcpServerIds: deps.localMcpServerIds ?? [],
+            effectiveTools: accountRoutes.tools,
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             session,
@@ -214,9 +226,9 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     : null;
   const runMcpCredentials = new RunMcpCredentials(
     selectedSessionRemoteMcpTargets(
-      runSettings,
+      accountRoutes.settings,
       session.mcpServers ?? [],
-      turn.tools ?? [],
+      accountRoutes.tools,
       (deps.localMcpServerIds ?? []).map((id) => ({ id })),
     ),
     {

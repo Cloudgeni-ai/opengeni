@@ -52,6 +52,7 @@ describe("worker integration adapter without PostgreSQL", () => {
     spyOn(database, "getSessionRootId").mockResolvedValue(scope.sessionId);
     let called = false;
     const resolver = await bindRunCredentialResolver({
+      effectiveTools: [],
       db: {} as Database,
       settings,
       ...scope,
@@ -133,6 +134,7 @@ describe("worker integration adapter without PostgreSQL", () => {
   test("sandbox-free turns do not expand deployment run-credential port use", async () => {
     let called = false;
     const resolver = await bindRunCredentialResolver({
+      effectiveTools: [],
       db: {} as Database,
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,

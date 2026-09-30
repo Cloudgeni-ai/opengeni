@@ -224,6 +224,9 @@ Return `mcp` entries from the credential provider's `ok` response. `url`
 matches only a selected, session-attached remote MCP by its exact normalized
 URL (WHATWG URL normalization), never by id. The request's `mcpServers` lists
 these selected product-supplied targets so your provider can authorize each URL.
+Selection uses the same effective turn policy as execution, including session
+defaults on composer and omitted-tools Send follow-ups. Optional and deferred
+servers remain selected; frozen scheduled selections are not widened.
 A reused id at a different endpoint cannot receive credentials for your URL.
 Deployment MCPs, workspace connectors and local bridges are not eligible.
 Provider headers override same-named static headers

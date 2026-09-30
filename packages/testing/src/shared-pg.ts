@@ -485,12 +485,20 @@ async function ensureTemplateBuilt(): Promise<void> {
 async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
   return withLock(async () => {
     const priorState = await readContainerState();
+    // Explicitly opt into a prestarted, disposable native PostgreSQL fixture
+    // with this harness's loopback port and role/password contract. Never
+    // control or remove that server through Docker.
+    const native = process.env.OPENGENI_TEST_PG_NATIVE === "1";
     // A warm fixture's data plane is the authoritative fast path. Docker
     // Desktop/OrbStack's control API can briefly stop answering under a heavily
     // parallel suite even while PostgreSQL remains completely healthy. The
     // fingerprinted immutable template proves this is our exact fixture, so a
     // transient `docker inspect` outage must not turn into skipped DB tests.
-    let generation = priorState && (await templateReady()) ? priorState.generation : null;
+    let generation = native
+      ? new Bun.CryptoHasher("sha256").update(`native:${ADMIN_BASE_URL}`).digest("hex")
+      : priorState && (await templateReady())
+        ? priorState.generation
+        : null;
     if (!generation) {
       const probe = await probeContainer();
       if (!probe.available) {
