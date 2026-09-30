@@ -110,6 +110,21 @@ async function call(
 }
 
 describe("workspace integration routes", () => {
+  test("concurrent first provider PUT returns a secret only on the single create", async () => {
+    await call("DELETE", "/credential-provider");
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        call("PUT", "/credential-provider", {
+          url: `https://product.example/credentials/${index}`,
+        }),
+      ),
+    );
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+    expect(responses.filter((response) => response.status === 200)).toHaveLength(7);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    expect(bodies.filter((body) => body.secret !== undefined)).toHaveLength(1);
+    await call("DELETE", "/credential-provider");
+  });
   test("credential provider secret is shown once and survives updates", async () => {
     expect(await (await call("GET", "/credential-provider")).json()).toEqual({ provider: null });
     const created = await call("PUT", "/credential-provider", {
@@ -130,9 +145,22 @@ describe("workspace integration routes", () => {
     expect(updatedBody.provider).toMatchObject({
       url: "http://127.0.0.1:9/v2",
       enabled: false,
-      timeoutMs: 4000,
+      timeoutMs: 10_000,
     });
+    const rotated = await call("POST", "/credential-provider/rotate-secret");
+    expect(rotated.status).toBe(200);
+    const rotatedBody = await rotated.json();
+    expect(rotatedBody.secret).not.toBe(createdBody.secret);
+    expect(rotatedBody.provider).toMatchObject({
+      url: updatedBody.provider.url,
+      enabled: false,
+      timeoutMs: 10_000,
+      createdAt: updatedBody.provider.createdAt,
+      workspaceId,
+    });
+    expect((await (await call("GET", "/credential-provider")).json()).secret).toBeUndefined();
     expect((await call("DELETE", "/credential-provider")).status).toBe(204);
+    expect((await call("POST", "/credential-provider/rotate-secret")).status).toBe(404);
     expect(await (await call("GET", "/credential-provider")).json()).toEqual({ provider: null });
   });
 
@@ -207,11 +235,20 @@ describe("workspace integration routes", () => {
       });
       const flaky = (await flakyResponse.json()).webhook;
       const listed = await (await call("GET", "/webhooks")).json();
+      const fetched = await call("GET", `/webhooks/${webhook.id}`);
+      expect(fetched.status).toBe(200);
+      expect((await fetched.json()).id).toBe(webhook.id);
+      expect(fetched.headers.get("cache-control")).toBe("private, no-store");
+      expect((await call("GET", `/webhooks/${crypto.randomUUID()}`)).status).toBe(404);
       expect(listed.webhooks.map((entry: { id: string }) => entry.id)).toEqual([
         webhook.id,
         flaky.id,
       ]);
       expect(JSON.stringify(listed)).not.toContain("whsec_");
+      const rotated = await call("POST", `/webhooks/${webhook.id}/rotate-secret`);
+      expect(rotated.status).toBe(200);
+      const newSecret = (await rotated.json()).secret;
+      expect(newSecret).not.toBe(secret);
 
       const [event] = await appendSessionEvents(client.db, workspaceId, sessionId, [
         { type: "session.status.changed", payload: { status: "idle", reason: "done" } },
@@ -226,11 +263,12 @@ describe("workspace integration routes", () => {
       const verified = await verifyWebhookEvent({
         body: delivered!.body,
         headers: delivered!.headers,
-        secret,
+        secret: newSecret,
       });
       expect(verified.event).toMatchObject({
         id: event!.id,
         type: "session.status.changed",
+        lane: "workspace",
         workspaceId,
         sessionId,
         data: { status: "idle", reason: "done" },
@@ -239,7 +277,7 @@ describe("workspace integration routes", () => {
         verifyWebhookEvent({
           body: delivered!.body,
           headers: delivered!.headers,
-          secret: "whsec_wrong",
+          secret,
         }),
       ).rejects.toThrow("signature verification failed");
 

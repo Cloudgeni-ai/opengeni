@@ -752,6 +752,8 @@ function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "com
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+  /** Opt-in void response handling for focused helpers using the shared transport. */
+  responseType?: "json" | "void";
 };
 
 export type SharedSessionReadOptions = {
@@ -8866,6 +8868,13 @@ export class OpenGeniClient {
             apiErrorFromResponse(response, { method, correlationId }),
             abort.signal,
           );
+        }
+        if (options.responseType === "void") {
+          await awaitWithAbort(
+            cancelResponseBody(response, "discarding void API response"),
+            abort.signal,
+          );
+          return undefined as T;
         }
         await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
         return (await awaitWithAbort(response.json(), abort.signal)) as T;

@@ -1,7 +1,9 @@
-import type {
-  RunCredentialAuthNeeded,
-  RunCredentialFile,
-  RunCredentialsResolution,
+import {
+  CredentialProviderMcpMaterial,
+  type CredentialProviderMcpMaterial as McpMaterial,
+  type RunCredentialAuthNeeded,
+  type RunCredentialFile,
+  type RunCredentialsResolution,
 } from "@opengeni/contracts";
 import type {
   ExecCommandArgs,
@@ -38,6 +40,7 @@ export type NormalizedRunCredentialMaterial = {
   fileEnvironment: Record<string, string>;
   expiresAt: Date | null;
   authNeeded: RunCredentialAuthNeeded[];
+  mcp?: McpMaterial;
 };
 
 export type RunCredentialCommandSession = Pick<SandboxSessionLike, "exec" | "execCommand">;
@@ -362,12 +365,23 @@ export function normalizeRunCredentialsResolution(
       throw new RunCredentialValidationError("run credential expiry is invalid or already expired");
     }
   }
+  const parsedMcp = CredentialProviderMcpMaterial.safeParse(
+    candidate.mcp === undefined ? [] : candidate.mcp,
+  );
+  if (!parsedMcp.success) {
+    // Zod issues can contain untrusted inputs. Never expose credential values
+    // through errors that a worker may publish or log.
+    throw new RunCredentialValidationError("run MCP credential material is invalid");
+  }
+  // Per-target expiry is enforced by the attempt-local MCP controller. A
+  // stale or unselected entry must not prevent unrelated sandbox material.
   return {
     environment,
     files: normalizedFiles,
     fileEnvironment,
     expiresAt,
     authNeeded,
+    ...(parsedMcp.data.length ? { mcp: parsedMcp.data } : {}),
   };
 }
 

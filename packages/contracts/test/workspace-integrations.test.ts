@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   CreateWorkspaceWebhookRequest,
+  CreateOrganizationWebhookRequest,
   CredentialProviderResponse,
+  InitiatingHuman,
+  PutOrganizationCredentialProviderRequest,
   resolveWorkspaceDefaultSandboxImage,
   signOpenGeniPayload,
   UpdateWorkspaceSettingsRequest,
@@ -57,6 +60,127 @@ describe("OpenGeni signatures", () => {
 });
 
 describe("workspace integration contracts", () => {
+  test("organization filters are exact and may be cleared without changing workspace inputs", () => {
+    const request = {
+      url: "https://product.example/credentials",
+      workspaceFilter: { externalSource: "Product " },
+    };
+    expect(PutOrganizationCredentialProviderRequest.parse(request)).toEqual(request);
+    expect(
+      PutOrganizationCredentialProviderRequest.parse({ ...request, workspaceFilter: null })
+        .workspaceFilter,
+    ).toBeNull();
+    expect(
+      CreateWorkspaceWebhookRequest.safeParse({
+        url: request.url,
+        eventTypes: ["turn.completed"],
+        workspaceFilter: {},
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateOrganizationWebhookRequest.safeParse({
+        url: request.url,
+        eventTypes: ["turn.completed"],
+        workspaceFilter: {},
+      }).success,
+    ).toBe(false);
+    expect(PutOrganizationCredentialProviderRequest.safeParse({ url: request.url }).success).toBe(
+      false,
+    );
+    expect(
+      CreateOrganizationWebhookRequest.safeParse({
+        url: request.url,
+        eventTypes: ["turn.completed"],
+      }).success,
+    ).toBe(false);
+    for (const workspaceFilter of [
+      { externalSource: "" },
+      { externalId: "tenant" },
+      { externalSource: "x".repeat(201) },
+      { externalSource: "é".repeat(101) },
+      { externalSource: "nul\0" },
+      { externalSource: "\uD800" },
+    ]) {
+      expect(
+        PutOrganizationCredentialProviderRequest.safeParse({ ...request, workspaceFilter }).success,
+      ).toBe(false);
+    }
+  });
+
+  test("human attribution represents internal and external identities without granting authority", () => {
+    expect(
+      InitiatingHuman.parse({ subjectId: "user:alice", externalIdentity: null }).externalIdentity,
+    ).toBeNull();
+    expect(
+      InitiatingHuman.parse({
+        subjectId: "external_user:internal",
+        externalIdentity: { source: "product", externalId: "user-7" },
+      }).externalIdentity?.externalId,
+    ).toBe("user-7");
+  });
+
+  test("MCP headers validate targets, dates, bounds, token names, duplicates and unsafe headers", () => {
+    const entry = {
+      url: "https://product.example/mcp",
+      headers: { Authorization: "Bearer test-only" },
+      expiresAt: "2026-09-30T12:00:00+00:00",
+    };
+    const parse = (mcp: unknown) => CredentialProviderResponse.safeParse({ status: "ok", mcp });
+    expect(parse([entry]).success).toBe(true);
+    for (const headers of [
+      {},
+      { Host: "example.com" },
+      { CONNECTION: "keep-alive" },
+      { "Transfer-Encoding": "chunked" },
+      { "Proxy-Authorization": "test-only" },
+      { "content-length": "1" },
+      { "MCP-Session-ID": "session" },
+      { "mcp-protocol-version": "2025-03-26" },
+      { "content-type": "application/json" },
+      { Accept: "application/json" },
+      { "bad name": "value" },
+      { "Authorization\n": "value" },
+      { Authorization: "one", authorization: "two" },
+      { Authorization: "value\r\nHost: example.com" },
+      { Authorization: "\0" },
+      { Authorization: "unsupported-😀" },
+      { Authorization: "x".repeat(16385) },
+      Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`x-${i}`, "v"])),
+      Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`x-${i}`, "v".repeat(16384)])),
+    ]) {
+      expect(parse([{ ...entry, headers }]).success).toBe(false);
+    }
+    expect(parse([{ ...entry, expiresAt: "not-a-date" }]).success).toBe(false);
+    expect(parse([{ ...entry, url: "" }]).success).toBe(false);
+    expect(parse([{ server: "product-capabilities", headers: entry.headers }]).success).toBe(false);
+    for (const url of [
+      "product-capabilities",
+      "file:///tmp/mcp",
+      "https://user:secret@product.example/mcp",
+      "https://product.example/mcp#fragment",
+    ]) {
+      expect(parse([{ ...entry, url }]).success).toBe(false);
+    }
+    expect(
+      CredentialProviderResponse.parse({
+        status: "ok",
+        mcp: [{ ...entry, url: "HTTPS://PRODUCT.EXAMPLE:443/mcp" }],
+      }),
+    ).toMatchObject({ mcp: [{ url: entry.url }] });
+    expect(parse([entry, entry]).success).toBe(false);
+    expect(parse([entry, { ...entry, url: "https://PRODUCT.EXAMPLE:443/mcp" }]).success).toBe(
+      false,
+    );
+    expect(
+      parse(
+        Array.from({ length: 33 }, (_, i) => ({
+          ...entry,
+          url: `https://product.example/mcp/${i}`,
+        })),
+      ).success,
+    ).toBe(false);
+  });
+
   test("webhook event types are a closed set and deduplicated", () => {
     expect(
       CreateWorkspaceWebhookRequest.parse({
