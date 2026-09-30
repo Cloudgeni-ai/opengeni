@@ -800,8 +800,76 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       }
     }
   };
-  applyScores(await judge.scorePassages(passageItems, ctx, "wave2"));
+  // "must change together": a shortlist of the declarations of the most relevant code files, judged while
+  // wave 2 runs (no added latency); a chosen declaration gets its own passage when no window holds it
+  const changeDecls: Array<{ id: string; name: string; path: string; line: number; p?: number }> = [];
+  const changeItems: LeadItem[] = [];
+  if (cfg.change.enabled) {
+    const top = selected
+      .filter((i) => pOf(i) >= thr.T1 && !isDocPath(cands[i]!.path) && !isChangelogPath(cands[i]!.path) && (allowTests || !cands[i]!.isTest))
+      .sort((a, b) => pOf(b) - pOf(a))
+      .slice(0, cfg.change.files);
+    for (const i of top) {
+      const path = cands[i]!.path;
+      const lines = readLines(path);
+      const lang = langOf(path);
+      for (const d of outlineRanges(lines, lang, [[1, lines.length]], cfg.change.perFile)) {
+        if (changeItems.length >= cfg.change.maxJudged) break;
+        const l = lines[d.line - 1] ?? "";
+        // functions, handlers, hooks, components and classes; not types or values
+        if (!/\(|=>|\bfunction\b|\bclass\b|\bdef\b|\bfn\b/.test(l)) continue;
+        const id = `c${String(changeItems.length).padStart(3, "0")}`;
+        const body = lines
+          .slice(d.line - 1, d.line + 3)
+          .map((x) => x.trim())
+          .join(" ")
+          .slice(0, 280);
+        changeItems.push({ id, name: d.name, seenAt: `${path}:${d.line}`, context: body, lex: 0 });
+        changeDecls.push({ id, name: d.name, path, line: d.line });
+      }
+    }
+  }
+  const [wave2Scores, changeScores] = await Promise.all([
+    judge.scorePassages(passageItems, ctx, "wave2"),
+    judge.scoreChange(changeItems, ctx),
+  ]);
+  applyScores(wave2Scores);
+  for (const d of changeDecls) d.p = changeScores.get(d.id) ?? 0;
+  const changeChosen = changeDecls
+    .filter((d) => (d.p ?? 0) >= cfg.change.threshold)
+    .sort((a, b) => (b.p ?? 0) - (a.p ?? 0));
+  if (changeChosen.length > cfg.change.maxChosen)
+    cuts.push(
+      `must change together: kept ${cfg.change.maxChosen} of ${changeChosen.length} declarations; not kept: ${changeChosen
+        .slice(cfg.change.maxChosen)
+        .map((d) => `${d.name} ${d.path}:${d.line} (${r2(d.p ?? 0)})`)
+        .join(", ")}`,
+    );
+  const changeNew: PassageItem[] = [];
+  for (const d of changeChosen.slice(0, cfg.change.maxChosen)) {
+    const holder = evidence.find((e) => e.path === d.path && d.line >= e.start && d.line <= e.end);
+    if (holder) {
+      if ((holder.ct ?? 0) < d.p!) {
+        holder.ct = d.p;
+        holder.ctName = d.name;
+      }
+      continue;
+    }
+    const lines = readLines(d.path);
+    const w = definitionWindow(lines, d.line, langOf(d.path), cfg, renderFor(d.path, [new RegExp(`\\b${escapeRegex(d.name)}\\b`)]));
+    const before = passageItems.length;
+    makePassage(d.path, w, 0, { lead: d.name });
+    const e = evidence[evidence.length - 1]!;
+    e.ct = d.p;
+    e.ctName = d.name;
+    changeNew.push(...passageItems.slice(before));
+  }
+  if (changeNew.length) applyScores(await judge.scorePassages(changeNew, ctx, "change_defs"));
   mark("wave2", ts);
+  emit("change", {
+    judged: changeDecls.map((d) => ({ name: d.name, at: `${d.path}:${d.line}`, p: round(d.p ?? Number.NaN) })),
+    chosen: changeChosen.slice(0, cfg.change.maxChosen).map((d) => `${d.name}@${d.path}:${d.line}`),
+  });
   emit("wave2", {
     T2: thr.T2,
     tiled: [...tiled].map((i) => cands[i]!.path),

@@ -216,8 +216,16 @@ describe("config", () => {
       fileCriteriaPerQuestion: false,
       warmConnections: 12,
     });
+    expect(DEFAULT_CODE_SEARCH_CONFIG.change).toEqual({
+      enabled: true,
+      files: 3,
+      perFile: 25,
+      maxJudged: 60,
+      threshold: 0.6,
+      maxChosen: 6,
+    });
     expect(Object.keys(DEFAULT_CODE_SEARCH_CONFIG).sort()).toEqual(
-      ["jev", "pack", "recall", "status", "symbols", "thresholds", "wave1", "wave2", "wave3"],
+      ["change", "jev", "pack", "recall", "status", "symbols", "thresholds", "wave1", "wave2", "wave3"],
     );
     expect(Object.isFrozen(DEFAULT_CODE_SEARCH_CONFIG.recall)).toBe(true);
     expect(Object.isFrozen(DEFAULT_CODE_SEARCH_CONFIG.symbols)).toBe(true);

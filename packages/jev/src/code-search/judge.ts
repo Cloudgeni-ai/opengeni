@@ -116,6 +116,15 @@ export const PROMPTS = {
   symbolQuestion: (id: string, name: string, q: string) =>
     `Would reading where \`${name}\` (\`symbols.${id}\`) is defined or used help answer the question${q}? Apply \`criteria\`.`,
 
+  changeTask:
+    "Change planning for a request about a software repository. A developer asked `question`. `declarations` lists functions, handlers, hooks and components declared in files already judged relevant, each with where it is declared and its first lines. Beyond the code that directly answers the question, a correct change often has to touch or re-check sibling code: other places that mutate or invalidate the same state, other entry points to the same outcome, callers that must pass something new.",
+  changeCriteria: {
+    yes: "A correct answer or change must also read or change this declaration: it mutates, invalidates, produces or consumes the same state or data, it is another entry point or sibling path for the same behavior, or it is where the change itself goes.",
+    no: "It is unrelated to the asked behavior, or it is a generic helper, formatting or UI plumbing that the change would not touch.",
+  },
+  changeQuestion: (id: string, name: string, q: string) =>
+    `Must a developer who answers or implements the question${q} also read or change \`${name}\` (\`declarations.${id}\`)? Apply \`criteria\`.`,
+
   statusTask:
     "Sufficiency check. `evidence` is a set of verbatim excerpts of repository files (with original line numbers) collected to answer `question`.",
   statusQuestion: (q: string) =>
@@ -235,6 +244,21 @@ export function buildSymbolRequest(items: LeadItem[], ctx: JudgeContext, cfg: Co
   };
   const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
     items.map((l) => [l.id, noul(PROMPTS.symbolQuestion(l.id, l.name, q))]),
+  );
+  return { state, questions };
+}
+
+export function buildChangeRequest(items: LeadItem[], ctx: JudgeContext, cfg: CodeSearchConfig) {
+  const q = inlineQ(ctx.question, cfg.jev.inlineQuestionMaxChars);
+  const state = {
+    task: PROMPTS.changeTask,
+    question: ctx.question,
+    ...withSubs(ctx),
+    criteria: PROMPTS.changeCriteria,
+    declarations: Object.fromEntries(items.map((l) => [l.id, `${l.name}  (${l.seenAt})\n${l.context}`])),
+  };
+  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
+    items.map((l) => [l.id, noul(PROMPTS.changeQuestion(l.id, l.name, q))]),
   );
   return { state, questions };
 }
@@ -426,6 +450,16 @@ export class JevJudge {
       chunkEven(items, 120),
       (b) => buildSymbolRequest(b, ctx, this.o.config),
       (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), l.lex)]),
+    );
+  }
+
+  async scoreChange(items: LeadItem[], ctx: JudgeContext): Promise<Map<string, number>> {
+    if (!items.length) return new Map();
+    return this.stage(
+      "change",
+      chunkEven(items, 80),
+      (b) => buildChangeRequest(b, ctx, this.o.config),
+      (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), 0)]),
     );
   }
 

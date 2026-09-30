@@ -106,6 +106,18 @@ export interface CodeSearchConfig {
     /** New files selected per round (p >= T1, best first). */
     maxNewFilesSelected: number;
   };
+  change: {
+    /** "Must change together": judge the declarations of the most relevant files against the question. */
+    enabled: boolean;
+    /** Most relevant code files (by triage) whose declarations are judged. */
+    files: number;
+    /** Declarations judged per file and in total (a shortlist, never every function of every candidate). */
+    perFile: number;
+    maxJudged: number;
+    threshold: number;
+    /** Declarations kept (best first) and put right after each sub-question's best passage. */
+    maxChosen: number;
+  };
   wave3: {
     enabled: boolean;
     maxLeadCandidates: number;
@@ -250,6 +262,14 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     maxRefFiles: 40,
     maxNewFilesTriaged: 40,
     maxNewFilesSelected: 6,
+  },
+  change: {
+    enabled: true,
+    files: 3,
+    perFile: 25,
+    maxJudged: 60,
+    threshold: 0.6,
+    maxChosen: 6,
   },
   wave3: {
     enabled: true,

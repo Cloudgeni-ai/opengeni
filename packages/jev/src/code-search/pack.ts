@@ -31,6 +31,10 @@ export interface EvidencePassage {
   importOnly?: boolean | undefined;
   /** A call site of a followed lead (not its definition). */
   caller?: string | undefined;
+  /** "Must change together" probability of the declaration this passage holds. */
+  ct?: number | undefined;
+  /** The declaration judged "must change together". */
+  ctName?: string | undefined;
 }
 
 export interface PackedPassage {
@@ -194,6 +198,12 @@ export function priorityOrder(
       for (const x of byCov.filter((y) => (y.cov[j] ?? 0) >= p.subFloor).slice(0, p.subFallback))
         add(x);
   });
+  // declarations a correct change must also touch (sibling mutations, other entry points), best first
+  for (const x of [...passages]
+    .filter((y) => (y.ct ?? 0) >= o.cfg.change.threshold)
+    .sort((a, b) => (b.ct ?? 0) - (a.ct ?? 0))
+    .slice(0, o.cfg.change.maxChosen))
+    add(x);
   for (const x of diverseOrder(
     byRel.filter((y) => irel(y) >= o.T2 && !out.includes(y)),
     eff,
@@ -225,6 +235,7 @@ function blockHeader(x: EvidencePassage, start: number, end: number, o: PackOpti
   if (covTags.length) parts.push(`[${covTags.join(" ")}]`);
   if (x.kind === "def" && x.lead) parts.push(`(definition of ${x.lead})`);
   if (x.caller) parts.push(`(uses ${x.caller})`);
+  if (x.ctName && (x.ct ?? 0) >= o.cfg.change.threshold) parts.push(`[change together: ${x.ctName}]`);
   if (start !== x.start || end !== x.end) parts.push(`(trimmed from ${x.start}-${x.end})`);
   let h = parts.join("  ");
   if (x.label && x.label.line < start) h += `\n   in L${x.label.line}: ${x.label.text}`;
