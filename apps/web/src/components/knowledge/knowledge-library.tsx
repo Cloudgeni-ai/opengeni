@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
+import { ErrorMessage } from "@/components/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { MetaChip } from "@/components/ui/meta-chip";
@@ -31,6 +32,7 @@ import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
 import {
   Toolbar,
   ToolbarFilterChips,
@@ -412,18 +414,17 @@ export function LibraryTab({
     );
   } else if (list.error && list.entries.length === 0) {
     body = (
-      <Notice
-        tone="failed"
+      <ErrorMessage
         title="Couldn't load the Library"
+        {...apiErrorDetails(list.errorCause)}
         action={
           <Button type="button" size="sm" variant="outline" onClick={list.reload}>
             Try again
           </Button>
         }
-        actionLayout="responsive"
       >
-        {list.error}
-      </Notice>
+        {userErrorTextWithoutReference(list.errorCause)}
+      </ErrorMessage>
     );
   } else if (nothingAtAll) {
     body = <LibraryEmpty canAdd={canAdd} canUpload={canUpload} onAdd={onAdd} onUpload={onUpload} />;

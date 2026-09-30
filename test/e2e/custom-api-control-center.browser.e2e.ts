@@ -408,6 +408,7 @@ describe("custom API control center browser acceptance", () => {
       sheet = await openOutlookMailSheet(repair);
       const account = sheet.locator('[data-integration-access-item="account-finance"]');
       await expectText(account, "Needs attention");
+      await assertAccessibleAndBounded(repair, "[data-capability-page]");
       const reconnect = account.getByRole("button", { name: "Reconnect" });
       await reconnect.click();
       await expectVisible(repair.getByText("Could not start setup.", { exact: false }));
@@ -462,10 +463,11 @@ describe("custom API control center browser acceptance", () => {
       await setTheme(page, "dark");
 
       const row = page
-        .getByRole("button", { name: /^Outlook Mail\s/ })
-        .filter({ hasText: "Connected" });
+        .getByRole("list", { name: "Connected", exact: true })
+        .getByRole("button", { name: "Outlook Mail", exact: true });
       await expectVisible(row);
-      expect(await row.locator(".og-capability-catalog-sr-only").textContent()).toBe("Connected");
+      // The named list conveys connection state; healthy rows have no redundant badge.
+      expect(await row.count()).toBe(1);
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -567,16 +569,11 @@ async function openCapabilities(page: Page): Promise<void> {
 
 /** Opens the one Outlook Mail provider row's page (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
-  // A connected provider is a row in the Connected list; otherwise a catalog row.
+  // These fixtures have a connected account. An unhealthy account adds its
+  // attention status to the resource row's accessible name.
   const row = page
     .getByRole("list", { name: "Connected", exact: true })
-    .getByRole("button", { name: "Outlook Mail", exact: true })
-    .or(
-      page
-        .locator(".og-capability-catalog-row")
-        .and(page.getByRole("button", { name: /^Outlook Mail\s/ })),
-    )
-    .first();
+    .getByRole("button", { name: /^Outlook Mail(?: Needs attention)?$/ });
   await expectVisible(row);
   await row.click();
   const sheet = page.locator("[data-capability-page]");

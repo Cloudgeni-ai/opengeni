@@ -662,7 +662,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
 
       // Nest a new collection: create it, then put it inside Contracts.
-      await page.getByRole("button", { name: "Add", exact: true }).click();
+      await page.getByRole("button", { name: "More knowledge actions", exact: true }).click();
       await page.getByRole("menuitem", { name: "New collection", exact: true }).click();
       const dialog = page.getByRole("dialog");
       await dialog
@@ -875,39 +875,44 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         expectedVersion: 0,
         entry: { title: "Review unsupported claim", kind: "note", content: "Reject this claim." },
       });
+      const otherId = crypto.randomUUID();
       await saveKnowledgeEntry(dbClient.db, otherAgent, {
         operationId: crypto.randomUUID(),
-        entryId: crypto.randomUUID(),
+        entryId: otherId,
         expectedVersion: 0,
         entry: { title: "Other batch proposal", kind: "note", content: "Another review." },
       });
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
       await page.getByRole("tab", { name: /^Review/ }).click();
-      // The list groups changes by the chat that proposed them; the selected
-      // change shows beside it, never in a dialog.
-      const acmeChanges = page.getByRole("list", {
-        name: "Changes from Review acceptance Acme",
+      // A flat list names each change's origin; each row opens its own page,
+      // with a back link to Review, never a side panel or dialog.
+      const changes = page.getByRole("list", {
+        name: "Changes waiting for review",
         exact: true,
       });
-      const otherChanges = page.getByRole("list", {
-        name: "Changes from Review acceptance another batch",
-        exact: true,
+      const acmeChanges = changes.locator('[data-slot="list-row"]').filter({
+        hasText: "Review acceptance Acme",
+      });
+      const otherChanges = changes.locator('[data-slot="list-row"]').filter({
+        hasText: "Review acceptance another batch",
       });
       const change = (title: string) =>
-        page
-          .locator("figure")
-          .getByRole("button", { name: title, exact: true })
-          .and(page.locator(":visible"));
+        page.getByRole("heading", { level: 1, name: title, exact: true });
+      const backToReview = async () => {
+        await page.getByRole("button", { name: "Review", exact: true }).click();
+        await changes.waitFor();
+      };
       const approveAndNext = page.getByRole("button", { name: "Approve and next", exact: true });
-      await acmeChanges.getByRole("button").first().waitFor();
+      await acmeChanges.getByRole("link").first().waitFor();
       expect(await page.getByRole("dialog").count()).toBe(0);
-      expect(await acmeChanges.getByRole("button").count()).toBe(4);
-      await otherChanges
-        .getByRole("button", { name: "Other batch proposal", exact: true })
-        .waitFor();
+      expect(await acmeChanges.getByRole("link").count()).toBe(4);
+      await otherChanges.getByRole("link", { name: "Other batch proposal", exact: true }).waitFor();
       // The finding needs its unpublished collection and source reviewed first.
-      await acmeChanges.getByRole("button", { name: "Review Acme renewal", exact: true }).click();
+      await acmeChanges.getByRole("link", { name: "Review Acme renewal", exact: true }).focus();
+      await page.keyboard.press("Enter");
       await change("Review Acme collection").waitFor();
+      expect(await page.getByRole("dialog").count()).toBe(0);
+      expect(await changes.count()).toBe(0);
       await page
         .getByText("Review this first", { exact: true })
         .filter({ visible: true })
@@ -916,14 +921,14 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         .getByText("“Review Acme renewal” depends on this change", { exact: false })
         .filter({ visible: true })
         .waitFor();
+      await backToReview();
       await acmeChanges
-        .getByRole("button", { name: "Review unsupported claim", exact: true })
+        .getByRole("link", { name: "Review unsupported claim", exact: true })
         .click();
       await change("Review unsupported claim").waitFor();
-      expect(await acmeChanges.locator('[aria-current="true"]').innerText()).toContain(
-        "Review unsupported claim",
-      );
-      await acmeChanges.getByRole("button", { name: "Review Acme renewal", exact: true }).click();
+      expect(new URL(page.url()).searchParams.get("proposal")).toBe(`knowledge:${noteId}`);
+      await backToReview();
+      await acmeChanges.getByRole("link", { name: "Review Acme renewal", exact: true }).click();
       await change("Review Acme collection").waitFor();
       await approveAndNext.click();
       await change("Review Acme contract").waitFor();
@@ -935,15 +940,16 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await change("Review Acme renewal").waitFor();
       // Approved prerequisites leave the list at once, so no later step can
       // open or advance onto a decided proposal.
+      await backToReview();
       for (const decided of ["Review Acme collection", "Review Acme contract"])
-        expect(await acmeChanges.getByRole("button", { name: decided, exact: true }).count()).toBe(
-          0,
-        );
-      expect(await acmeChanges.getByRole("button").count()).toBe(2);
-      const diff = page
-        .locator("figure")
-        .filter({ visible: true })
-        .filter({ hasText: "Review Acme renewal" });
+        expect(await acmeChanges.getByRole("link", { name: decided, exact: true }).count()).toBe(0);
+      expect(await acmeChanges.getByRole("link").count()).toBe(2);
+      await acmeChanges.getByRole("link", { name: "Review Acme renewal", exact: true }).click();
+      await change("Review Acme renewal").waitFor();
+      const diff = page.getByRole("figure", {
+        name: "Changes to Review Acme renewal",
+        exact: true,
+      });
       await expectAmountDiff(diff);
       expect(
         await page
@@ -952,9 +958,12 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           .count(),
       ).toBe(0);
 
-      // The change's title opens its entry page: sources and history, then
+      // Open entry reveals sources and history, then
       // back to Review with the proposal still waiting.
-      await change("Review Acme renewal").click();
+      await page
+        .getByRole("button", { name: "More actions for Review Acme renewal", exact: true })
+        .click();
+      await page.getByRole("menuitem", { name: "Open entry", exact: true }).click();
       await page
         .getByRole("heading", { level: 1, name: "Review Acme renewal", exact: true })
         .waitFor();
@@ -973,7 +982,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         .getByRole("heading", { level: 1, name: "Review Acme contract", exact: true })
         .waitFor();
       await page.getByRole("button", { name: "Review", exact: true }).click();
-      await acmeChanges.getByRole("button", { name: "Review Acme renewal", exact: true }).click();
+      await acmeChanges.getByRole("link", { name: "Review Acme renewal", exact: true }).click();
       await change("Review Acme renewal").waitFor();
       await expectAmountDiff(diff);
       await expectNoAxeViolations(page, contentPageSelector, "knowledge-review-light");
@@ -998,7 +1007,8 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       });
       await approveAndNext.click();
       await received;
-      await otherChanges.getByRole("button", { name: "Other batch proposal", exact: true }).click();
+      await backToReview();
+      await otherChanges.getByRole("link", { name: "Other batch proposal", exact: true }).click();
       await change("Other batch proposal").waitFor();
       const completed = page.waitForResponse((response) =>
         response.url().endsWith(`/knowledge/entries/${findingId}/review`),
@@ -1013,9 +1023,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           ),
       );
       expect(await change("Other batch proposal").isVisible()).toBe(true);
-      expect(await otherChanges.locator('[aria-current="true"]').innerText()).toContain(
-        "Other batch proposal",
-      );
+      expect(new URL(page.url()).searchParams.get("proposal")).toBe(`knowledge:${otherId}`);
       await page.getByRole("button", { name: "Reject", exact: true }).click();
       await change("Review unsupported claim").waitFor();
       await page.getByRole("button", { name: "Reject", exact: true }).click();
@@ -1029,17 +1037,19 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
   }, 120_000);
 
-  /** The removed and added lines of the finding, with the changed words highlighted. */
+  /** The prose diff preserves both versions and announces the changed words. */
   async function expectAmountDiff(diff: Locator): Promise<void> {
-    await waitFor(
-      async () =>
-        (await diff.locator("del").allTextContents()).join() === "20" &&
-        (await diff.locator("ins").allTextContents()).join() === "21",
-      { timeoutMs: 10_000 },
+    await diff.locator("del").waitFor();
+    expect(await diff.locator("del").allTextContents()).toEqual(["removed 20"]);
+    expect(await diff.locator("ins").allTextContents()).toEqual(["added 21"]);
+    const versions = await diff.evaluate((element) =>
+      ["ins", "del"].map((omit) => {
+        const copy = element.cloneNode(true) as HTMLElement;
+        copy.querySelectorAll(`${omit}, .sr-only`).forEach((node) => node.remove());
+        return copy.textContent?.trim();
+      }),
     );
-    const text = await diff.textContent();
-    expect(text).toContain("Acme pays EUR 20,000 annually.");
-    expect(text).toContain("Acme pays EUR 21,000 annually.");
+    expect(versions).toEqual(["Acme pays EUR 20,000 annually.", "Acme pays EUR 21,000 annually."]);
   }
 
   async function exerciseTruthfulStates(
@@ -1091,8 +1101,21 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       .getByText("Opengeni couldn't finish the request. Try again in a moment.", { exact: false })
       .first()
       .waitFor();
+    expect(
+      await page.getByText("Intentional knowledge-list failure", { exact: true }).isVisible(),
+    ).toBe(false);
     await page.getByText("Technical details", { exact: true }).first().click();
     await page.getByText("Intentional knowledge-list failure", { exact: false }).first().waitFor();
+    await page.getByText("HTTP 503", { exact: true }).waitFor();
+    await expectNoAxeViolations(page, contentPageSelector, "knowledge-library-error");
+    await page.screenshot({ path: "/tmp/opengeni-knowledge-library-error.png" });
+    await page.setViewportSize({ width: 375, height: 812 });
+    await setTheme(page, "dark");
+    await expectNoPageOverflow(page);
+    await expectNoAxeViolations(page, contentPageSelector, "knowledge-library-error-dark-mobile");
+    await page.screenshot({ path: "/tmp/opengeni-knowledge-library-error-dark-mobile.png" });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await setTheme(page, "light");
     expect(await page.getByRole("button", { name: "Retained entry 19", exact: true }).count()).toBe(
       0,
     );
@@ -1181,8 +1204,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.getByText(tailKnowledgeText, { exact: true }).waitFor();
     await expectNoPageOverflow(page);
     await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-    await page.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Add knowledge", exact: true }).click();
+    await page.getByRole("button", { name: "Add knowledge", exact: true }).click();
     await page.getByRole("heading", { level: 1, name: "Add knowledge", exact: true }).waitFor();
     await page
       .getByRole("textbox", { name: "Title", exact: true })
@@ -1533,8 +1555,9 @@ async function openSurface(
     await page.getByRole("button", { name: "Remove filter Type: Files", exact: true }).waitFor();
     await page.getByText("Nothing matches these filters.", { exact: true }).waitFor();
     expect(new URL(page.url()).searchParams.get("view")).toBeNull();
-    await page.getByRole("button", { name: "Add", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Add knowledge", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Add knowledge", exact: true }).waitFor();
+    await page.getByRole("button", { name: "More knowledge actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "New collection", exact: true }).waitFor();
     expect(await page.getByRole("menuitem", { name: "Upload files", exact: true }).count()).toBe(0);
     await page.keyboard.press("Escape");
     await page.getByRole("menu").waitFor({ state: "hidden" });
@@ -1760,7 +1783,8 @@ async function expectOwnedTouchTargets(
         : surface === "documents"
           ? [page.getByRole("button", { name: /^Filter/ })]
           : [
-              page.getByRole("button", { name: "Add", exact: true }),
+              page.getByRole("button", { name: "Add knowledge", exact: true }),
+              page.getByRole("button", { name: "More knowledge actions", exact: true }),
               page.getByRole("button", { name: /^Filter/ }),
               page.getByRole("button", { name: "More actions for Retained entry 20", exact: true }),
             ];

@@ -123,9 +123,18 @@ describe("Workspace switcher trigger in Chromium", () => {
       name: "Organization settings",
       exact: true,
     });
-    // Home, then past the three workspaces and New workspace.
+    // Radix defers roving focus. Verify each key's destination before sending
+    // the next key, including Home from the pointer-selected create action.
+    const items = page.getByRole("menuitem");
     await page.keyboard.press("Home");
-    for (let step = 0; step < 4; step += 1) await page.keyboard.press("ArrowDown");
+    for (let step = 0; step <= 4; step += 1) {
+      if (step > 0) await page.keyboard.press("ArrowDown");
+      await page.waitForFunction(
+        (element) => document.activeElement === element,
+        await items.nth(step).elementHandle(),
+        { timeout: 2_000 },
+      );
+    }
     expect(
       await organizationSettings.evaluate((element) => document.activeElement === element),
     ).toBe(true);

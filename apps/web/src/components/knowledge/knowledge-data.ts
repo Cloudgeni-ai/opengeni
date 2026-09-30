@@ -25,6 +25,8 @@ export interface KnowledgeListState {
   cursor: string | null;
   loading: boolean;
   error: string | null;
+  /** Preserve API facts for a failed section's Technical details. */
+  errorCause: unknown;
   fallbackReason: KnowledgeEntryListResponse["fallbackReason"];
   loadMore: () => Promise<void>;
   reload: () => void;
@@ -45,7 +47,8 @@ export function useKnowledgeList(
   const [entries, setEntries] = useState<KnowledgeEntrySummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(request !== null);
-  const [error, setError] = useState<string | null>(null);
+  const [errorCause, setError] = useState<unknown>(null);
+  const error = errorCause === null ? null : errorText(errorCause);
   const [fallbackReason, setFallbackReason] =
     useState<KnowledgeEntryListResponse["fallbackReason"]>();
   const [retry, setRetry] = useState(0);
@@ -71,7 +74,7 @@ export function useKnowledgeList(
         setFallbackReason(result.fallbackReason);
       })
       .catch((reason: unknown) => {
-        if (generation.current === current) setError(errorText(reason));
+        if (generation.current === current) setError(reason);
       })
       .finally(() => {
         if (generation.current === current) setLoading(false);
@@ -103,14 +106,14 @@ export function useKnowledgeList(
         setCursor(result.nextCursor);
       }
     } catch (reason) {
-      if (isCurrent()) setError(errorText(reason));
+      if (isCurrent()) setError(reason);
     } finally {
       if (isCurrent()) setLoading(false);
     }
   }, [context, cursor, loading, requestKey, workspaceId]);
 
   const reload = useCallback(() => setRetry((value) => value + 1), []);
-  return { entries, cursor, loading, error, fallbackReason, loadMore, reload };
+  return { entries, cursor, loading, error, errorCause, fallbackReason, loadMore, reload };
 }
 
 /**
