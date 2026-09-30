@@ -4384,8 +4384,81 @@ describe("buildTimeline — memory writes", () => {
 });
 
 describe("delivered-input landmarks", () => {
+  test("command-only delivery does not split an in-flight agent message", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Checking " }),
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "command",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+        ],
+      }),
+      event("agent.message.delta", { text: "the result." }),
+    ]);
+    expect(items).toMatchObject([
+      { kind: "agent-message", text: "Checking the result.", streaming: true },
+    ]);
+  });
+
+  test("omits background command receipts, including failed results, from the chat timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "success",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+          {
+            id: "failure",
+            kind: "background_command_result",
+            sourceId: "command-2",
+            summary: "execCommand: failed.",
+            classification: "failure",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test("keeps other updates in a batch without showing its command receipts", () => {
+    reset();
+    const items = buildTimeline([
+      event("system.update.delivered", {
+        members: [
+          {
+            id: "command",
+            kind: "background_command_result",
+            sourceId: "command-1",
+            summary: "execCommand: completed successfully.",
+            classification: "success",
+          },
+          {
+            id: "agent",
+            kind: "agent_message",
+            sourceId: "agent-1",
+            summary: "Verification finished.",
+            classification: "info",
+          },
+        ],
+      }),
+    ]);
+    expect(items).toMatchObject([
+      { kind: "machine-input-batch", members: [{ id: "agent", kind: "agent_message" }] },
+    ]);
+  });
+
   for (const kind of [
-    "background_command_result",
     "session_wait_timeout",
     "agent_message",
     "child_terminal_result",
