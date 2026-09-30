@@ -16,6 +16,15 @@ export class RunMcpCredentialError extends Error {
   }
 }
 
+/** Never lets a hostile thrown value (e.g. a trapping Proxy) replace the source failure. */
+export function isRunMcpCredentialError(error: unknown): error is RunMcpCredentialError {
+  try {
+    return error instanceof RunMcpCredentialError;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Attempt-local secrets only. Nothing from this controller enters a server
  * configuration, tool catalog, model input, or persisted event.

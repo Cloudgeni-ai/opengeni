@@ -7,7 +7,7 @@ export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-c
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { RunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
+import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
@@ -5392,7 +5392,7 @@ async function prepareToolGatewayDefinitionsFromServers(
             try {
               runMcpCredentials?.assertAvailable(config.id);
             } catch (error) {
-              if (!(error instanceof RunMcpCredentialError)) throw error;
+              if (!isRunMcpCredentialError(error)) throw error;
               return {
                 isError: true,
                 content: [{ type: "text", text: error.message }],
@@ -7755,7 +7755,7 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
-      if (error instanceof RunMcpCredentialError) {
+      if (isRunMcpCredentialError(error)) {
         recordOutcome("auth_needed");
         return boundedMcpToolResult({
           isError: true,
