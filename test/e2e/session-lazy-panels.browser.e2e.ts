@@ -73,6 +73,8 @@ describe("production session conditional loading", () => {
     for (const [key, entry] of Object.entries(manifest))
       if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
+    // The Variable Set editor is its own chunk, outside the session's static graph.
+    expect(eager.has("src/components/session/session-variable-set-picker.tsx")).toBe(false);
     expect(panelAsset).toBeTruthy();
     expect(attachmentAsset).toBeTruthy();
     expect(variableSetAsset).toBeTruthy();
@@ -356,31 +358,36 @@ describe("production session conditional loading", () => {
         commandReads: 0,
         fileReads: 0,
       });
-      try {
-        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
-        const transcript = page
-          .locator('[data-testid="timeline-user"]')
-          .getByText("Keep this message visible.", { exact: true });
-        await transcript.waitFor({ timeout: 20_000 });
-        // A direct session load does not carry the editor.
-        expect(assets.some((url) => url.endsWith(variableSetAsset))).toBe(false);
-        if (outcome === "failed") {
-          // Preload recovery has already spent its one reload for this build,
-          // so the failed import reaches React instead of reloading the page.
-          await page.evaluate(() =>
+      if (outcome === "failed") {
+        // Preload recovery has already spent its one reload for this build, so
+        // the failed import reaches React instead of reloading the page. Mark it
+        // before the composer's idle preload can fail.
+        await page.addInitScript(() =>
+          document.addEventListener("DOMContentLoaded", () =>
             sessionStorage.setItem(
               "opengeni:vite-preload-recovery-build",
               Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]'))
                 .map((script) => script.src)
                 .join("|") || document.baseURI,
             ),
-          );
-        }
+          ),
+        );
+      }
+      try {
+        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        const transcript = page
+          .locator('[data-testid="timeline-user"]')
+          .getByText("Keep this message visible.", { exact: true });
+        await transcript.waitFor({ timeout: 20_000 });
+        // The editor is outside the session's static graph (checked on the
+        // manifest above). The composer preloads it once idle or when "+" is
+        // hovered, so it may already be requested here; held until release().
         await page.getByRole("button", { name: "More composer actions", exact: true }).click();
         await page.getByRole("menuitem", { name: /Variable sets/ }).click();
         const menu = page.getByRole("menu");
         if (outcome === "loaded") {
-          await menu.getByText("Loading variable sets…", { exact: true }).waitFor();
+          // A cold open shows skeleton rows at the final height, never a sentence.
+          await menu.getByRole("status", { name: "Loading variable sets", exact: true }).waitFor();
           await menu.getByRole("button", { name: "Back", exact: true }).waitFor();
           await page.screenshot({ path: `${evidenceDir}/variables-${width}-loading.png` });
           release();

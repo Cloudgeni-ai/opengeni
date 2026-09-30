@@ -289,7 +289,7 @@ export function WorkspaceCapabilityDefaultsView({
             {custom ? (
               <Button
                 size="sm"
-                variant="secondary"
+                variant="outline"
                 disabled={!canManage || saving}
                 onClick={() => setResetting(true)}
               >
@@ -298,7 +298,7 @@ export function WorkspaceCapabilityDefaultsView({
             ) : null}
             <Button
               size="sm"
-              variant="secondary"
+              variant="outline"
               disabled={!canManage || saving}
               onClick={() => setEditing(true)}
             >

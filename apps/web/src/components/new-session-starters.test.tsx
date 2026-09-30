@@ -76,6 +76,8 @@ test("route keeps suggestions below recent sessions and uses the ordinary draft/
   expect(route).toContain("setMessage(prompt)");
   expect(route).toContain("value: message");
   expect(route).toContain("setValue: setMessage");
-  expect(route).toContain("<SessionVisibilityPicker");
+  // Visibility and where it runs are "+" drill-ins, not controls under the composer.
+  expect(route).toContain("<VisibilityMenuBody");
+  expect(route).toContain("<RunsOnMenuBody");
   expect(route).toContain("<ComputeTargetControl");
 });

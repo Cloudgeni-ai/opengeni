@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { DiffView, buildDiffRows, diffLines, diffStats, diffWords } from "./diff-view";
+import {
+  DiffView,
+  buildDiffRows,
+  diffLines,
+  diffStats,
+  diffWords,
+  failedLoadParts,
+} from "./diff-view";
 import { RevisionHistory, previousContent, type Revision } from "./revision-history";
 
 const BEFORE =
@@ -101,6 +108,43 @@ describe("DiffView", () => {
   test("says so when nothing changed", () => {
     const html = renderToStaticMarkup(<DiffView before={BEFORE} after={BEFORE} />);
     expect(html).toContain("No changes. This version matches the one before it.");
+  });
+
+  test("a failed load says what to do, with the reference behind Technical details", () => {
+    const cause = Object.assign(
+      new Error("OpenGeni API 500: internal error Reference: req_diff_1."),
+      { status: 500 },
+    );
+    const html = renderToStaticMarkup(
+      <DiffView error={{ message: "Couldn't load the changes.", cause }} />,
+    );
+    expect(html).toContain("Couldn&#x27;t load the changes.");
+    expect(html).toContain("Opengeni couldn&#x27;t finish the request. Try again in a moment.");
+    expect(html).toContain("Technical details");
+    expect(html).toContain("req_diff_1");
+    expect(html).not.toContain("OpenGeni API 500");
+  });
+});
+
+describe("failedLoadParts", () => {
+  test("replaces a raw API error string passed as the detail", () => {
+    const parts = failedLoadParts({
+      detail: "OpenGeni API 404: knowledge entry not found Reference: req_404.",
+    });
+    expect(parts.detail).toBe("It may have been removed. Reload the page and try again.");
+    expect(parts.details).toContainEqual({ label: "Status", value: "HTTP 404" });
+    expect(parts.details).toContainEqual({
+      label: "Reference",
+      value: "req_404",
+      copyable: true,
+    });
+  });
+
+  test("keeps a detail the caller wrote", () => {
+    expect(failedLoadParts({ detail: "Check your connection and try again." })).toEqual({
+      detail: "Check your connection and try again.",
+      details: [],
+    });
   });
 });
 

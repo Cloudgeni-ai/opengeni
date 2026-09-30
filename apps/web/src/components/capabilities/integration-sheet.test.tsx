@@ -23,7 +23,7 @@ function model(overrides: Partial<IntegrationViewModel> = {}): IntegrationViewMo
   return {
     id: "slack",
     name: "Slack",
-    description: "Chat with OpenGeni and start work from Slack.",
+    description: "Chat with Opengeni and start work from Slack.",
     mark: { monogram: "S" },
     chip: { label: "Connected", tone: "ok" },
     connection: [
@@ -31,7 +31,7 @@ function model(overrides: Partial<IntegrationViewModel> = {}): IntegrationViewMo
       { label: "Installed", value: "12 Aug 2026" },
     ],
     access: {
-      title: "What OpenGeni can see",
+      title: "What Opengeni can see",
       items: [
         { name: "All public channels", meta: "searchable without joining" },
         { name: "#engineering", meta: "invited" },
@@ -42,7 +42,7 @@ function model(overrides: Partial<IntegrationViewModel> = {}): IntegrationViewMo
         kind: "toggle",
         id: "reaction",
         label: "Start work with a reaction",
-        description: "React with :genie: on any message OpenGeni can see.",
+        description: "React with :genie: on any message Opengeni can see.",
         checked: true,
         onChange: () => {},
       },
@@ -205,7 +205,7 @@ describe("IntegrationRow", () => {
             id: "skill:infra-ops",
             name: "Infrastructure operations",
             chip: { label: "Not installed", tone: "idle" },
-            accessibleDetail: "Skill, curated by OpenGeni",
+            accessibleDetail: "Skill, curated by Opengeni",
           })}
           onOpen={() => {}}
         />
@@ -220,7 +220,7 @@ describe("IntegrationRow", () => {
         rendered.container
           .querySelector('button[data-integration-row="skill:infra-ops"]')
           ?.getAttribute("aria-label"),
-      ).toBe("Infrastructure operations. Skill, curated by OpenGeni. Not installed");
+      ).toBe("Infrastructure operations. Skill, curated by Opengeni. Not installed");
       // Nothing meaningful to add: the name reads exactly as it did before.
       expect(
         rendered.container
@@ -290,7 +290,7 @@ describe("IntegrationSheet", () => {
       const sheet = document.querySelector('[data-integration-sheet="slack"]')!;
       expect(sheet).not.toBeNull();
       const headings = [...sheet.querySelectorAll("h3")].map((node) => node.textContent);
-      expect(headings).toEqual(["Connection", "What OpenGeni can see", "Options"]);
+      expect(headings).toEqual(["Connection", "What Opengeni can see", "Options"]);
       expect(sheet.querySelector("h2, [data-slot=sheet-title]")?.textContent).toBe("Slack");
       const toggle = sheet.querySelector('[role="switch"]');
       expect(toggle?.getAttribute("aria-checked")).toBe("true");

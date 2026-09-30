@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ManagedAuthPanel } from "./managed-auth-panel";
 import { SignedOutPage } from "./signed-out-page";
 
-test("signed-out page presents the approved copy around the existing social/email form", () => {
+test("signed-out page presents the landing copy around the existing social/email form", () => {
   const html = renderToStaticMarkup(
     <SignedOutPage>
       <ManagedAuthPanel
@@ -14,12 +14,12 @@ test("signed-out page presents the approved copy around the existing social/emai
       />
     </SignedOutPage>,
   );
-  expect(html).toContain("Your AI workspace");
-  expect(html).toContain("Open-source cloud agents");
-  expect(html).toContain("Work on research, documents, and code.");
-  expect(html).toContain("Choose your models and tools");
-  expect(html).toContain("Schedule one-off or recurring tasks");
-  expect(html).toContain("Your agents keep working, even when you close your laptop");
+  expect(html).toContain("Infrastructure");
+  expect(html).toContain("that actually finish the job.");
+  expect(html).toContain("Build AI products without building the infrastructure from scratch.");
+  expect(html).toContain("Durable sessions that keep working, even when you close your laptop");
+  expect(html).toContain("Tools and sandboxes, with approvals and permissions");
+  expect(html).toContain("Observability out of the box");
   expect(html.match(/<li\b/g)).toHaveLength(3);
   expect(html.match(/<h1\b/g)).toHaveLength(1);
   expect(html).toContain('<h2 class="text-base font-semibold">Sign in</h2>');

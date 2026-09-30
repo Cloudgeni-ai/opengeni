@@ -236,8 +236,10 @@ describe("session control surface architecture", () => {
     expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
     expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
-    expect(route).toContain("onChange={props.onComputeChange}");
-    expect(route).toContain("props.onComputeChange({");
+    // Machine and folder choices live under "+" > Runs on and go through the
+    // explicit compute path, never the launch-selection draft setter.
+    const runsOn = await source("components/session/new-session-settings-menu.tsx");
+    expect(runsOn).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
@@ -463,7 +465,8 @@ describe("session control surface architecture", () => {
   test("hands keyboard focus across optimistic project-move remounts", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
-    expect(list).toContain('void onMoveToChannel(session, null, "actions")');
+    // Default (channel id null) is the first row of the same project list.
+    expect(list).toContain('[{ id: null, name: "Default" }, ...channels].map');
     expect(list).toContain("pendingSessionFocus.current = {");
     expect(list).toContain("if (!remountSelection.current) return;");
     expect(list).toContain("event.preventDefault();");
@@ -588,7 +591,7 @@ describe("session control surface architecture", () => {
     expect(panel).not.toMatch(
       /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
     );
-    expect(panel).toContain(".catch(() => ({ default: SessionVariableSetPickerLoadFailed }))");
+    expect(panel).toContain(".catch(() => SessionVariableSetPickerLoadFailed)");
   });
 
   test("the retired client-side queue model is gone", async () => {

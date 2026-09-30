@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
+import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows
@@ -47,7 +48,8 @@ export function useOrganizationCodexSubscriptions({
     } catch (error) {
       if (cancelled.current) return;
       setData(null);
-      setLoadError(error instanceof Error ? error.message : "Failed to load subscriptions");
+      // Shown under "Couldn't load ..." as what to do; never the raw API message.
+      setLoadError(apiErrorAdvice(error));
     } finally {
       if (!cancelled.current) setLoading(false);
     }
@@ -112,13 +114,13 @@ export function useOrganizationCodexSubscriptions({
           .catch((error) => {
             if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
-            toast.error(
-              error instanceof Error ? error.message : "Couldn't confirm the ChatGPT sign-in",
-            );
+            toast.error("Couldn't confirm the ChatGPT sign-in", {
+              description: userErrorText(error),
+            });
           });
       } catch (error) {
         setPending(null);
-        toast.error(error instanceof Error ? error.message : "Couldn't start the ChatGPT sign-in");
+        toast.error("Couldn't start the ChatGPT sign-in", { description: userErrorText(error) });
       } finally {
         setBusy(false);
       }
@@ -134,7 +136,7 @@ export function useOrganizationCodexSubscriptions({
       await refresh();
       toast.success(success);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't update Codex");
+      toast.error("Couldn't update Codex", { description: userErrorText(error) });
     } finally {
       setBusy(false);
       setWorking(null);
@@ -165,7 +167,7 @@ export function useOrganizationCodexSubscriptions({
         : "New work uses the organization's primary account only",
     );
 
-  /** Throws with a user-facing message so the prompt can show it. */
+  /** Throws so the rename prompt can say what to do (API facts go in Technical details). */
   const rename = async (account: CodexAccount, label: string): Promise<void> => {
     setBusy(true);
     setWorking(`rename:${account.id}`);
@@ -178,17 +180,16 @@ export function useOrganizationCodexSubscriptions({
       await refresh();
       toast.success("Name saved");
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message ? error.message : "Couldn't save the name.",
-        { cause: error },
-      );
+      throw error instanceof Error && error.message
+        ? error
+        : new Error("Couldn't save the name.", { cause: error });
     } finally {
       setBusy(false);
       setWorking(null);
     }
   };
 
-  /** Throws with a user-facing message so the confirm dialog can show it. */
+  /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
   const disconnect = async (account: CodexAccount): Promise<void> => {
     setBusy(true);
     setWorking(`disconnect:${account.id}`);
@@ -201,12 +202,11 @@ export function useOrganizationCodexSubscriptions({
       await refresh();
       toast.success(`Disconnected ${codexAccountName(account)}`);
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? error.message
-          : `Couldn't disconnect ${codexAccountName(account)}. Try again.`,
-        { cause: error },
-      );
+      throw error instanceof Error && error.message
+        ? error
+        : new Error(`Couldn't disconnect ${codexAccountName(account)}. Try again.`, {
+            cause: error,
+          });
     } finally {
       setBusy(false);
       setWorking(null);

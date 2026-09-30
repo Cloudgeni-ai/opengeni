@@ -883,7 +883,7 @@ export function scheduledTaskPolicyDriftLines(
   if (drift.missingOpenGeniTools.length > 0) {
     const count = drift.missingOpenGeniTools.length;
     lines.push(
-      `${count} newer OpenGeni ${count === 1 ? "tool is" : "tools are"} not available to it: ${namedList(
+      `${count} newer Opengeni ${count === 1 ? "tool is" : "tools are"} not available to it: ${namedList(
         drift.missingOpenGeniTools.map(openGeniToolLabel),
         4,
       )}.`,

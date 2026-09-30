@@ -52,6 +52,45 @@ describe("CopyButton", () => {
     await r.unmount();
   });
 
+  test("memoized controls use updated content, labels, and visibility without remounting", async () => {
+    const writes: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (value: string) => void writes.push(value) },
+    });
+    const r = await renderComponent(
+      <TooltipProvider>
+        <CopyButton text="previous message" label="Copy message" />
+      </TooltipProvider>,
+    );
+    const button = r.container.querySelector("button[data-og-copy]");
+    expect(button).not.toBeNull();
+    expect(button?.className).toContain("group-hover/copy:opacity-100");
+
+    await r.rerender(
+      <TooltipProvider>
+        <CopyButton
+          text={() => "current message"}
+          label="Copy current message"
+          reveal="always"
+          className="updated-copy-control"
+        />
+      </TooltipProvider>,
+    );
+    expect(r.container.querySelector("button[data-og-copy]")).toBe(button);
+    expect(button?.getAttribute("aria-label")).toBe("Copy current message");
+    expect(button?.className).toContain("updated-copy-control");
+    expect(button?.className).not.toContain("group-hover/copy:opacity-100");
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(writes).toEqual(["current message"]);
+    expect(button?.getAttribute("data-state")).toBe("copied");
+    expect(button?.getAttribute("aria-label")).toBe("Copied");
+    await r.unmount();
+  });
+
   test("resets Copied after the flash even when clipboard write is async", async () => {
     let releaseWrite!: () => void;
     const writeGate = new Promise<void>((resolve) => {

@@ -86,8 +86,8 @@ export function OpenGeniCreditsRow({
     });
   return (
     <ListRow
-      leading={<LogoTile icon={<BrandMark className="text-fg" />} name="OpenGeni" />}
-      title="OpenGeni credits"
+      leading={<LogoTile icon={<BrandMark className="text-fg" />} name="Opengeni" />}
+      title="Opengeni credits"
       meta={["Pay as you go", credits.balanceLabel]}
       {...(credits.canOpenBilling ? { onOpen: openBilling, indicator: "open" as const } : {})}
     />

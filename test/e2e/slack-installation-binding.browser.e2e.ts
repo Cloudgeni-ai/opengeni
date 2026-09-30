@@ -122,21 +122,25 @@ describe("Slack installation binding browser acceptance", () => {
 
 async function openSlackSettings(page: Page, chip: string) {
   await page.getByRole("tab", { name: "Connections", exact: true }).click();
-  // One row per provider; its status sits at the end of the row.
-  const row = page.getByRole("button", { name: new RegExp(`^Slack\\b.*${chip}$`) });
+  // One row per connected provider in the Connected list. A healthy row is
+  // named for the provider alone; a row that needs attention also says so.
+  const healthy = chip === "Connected";
+  const row = page
+    .getByRole("list", { name: "Connected", exact: true })
+    .getByRole("button", { name: healthy ? "Slack" : `Slack ${chip}`, exact: true });
   await row.waitFor({ state: "visible", timeout: 15_000 });
-  expect(await row.locator("[data-status]").textContent()).toBe(chip);
   await row.click();
   // The connection opens as its own Capabilities page.
   const settings = page.locator("[data-capability-page]");
   await settings.waitFor({ state: "visible", timeout: 15_000 });
   expect(await settings.locator("h1").textContent()).toBe("Slack");
   expect(new URL(page.url()).searchParams.get("open")).toBe("integration:slack");
-  expect(
-    await settings
-      .locator('[data-slot="detail-page-header"] [data-slot="status-badge"]')
-      .textContent(),
-  ).toBe(chip);
+  // A healthy connection carries no badge in the header; attention does.
+  const headerBadge = settings.locator(
+    '[data-slot="detail-page-header"] [data-slot="status-badge"]',
+  );
+  if (healthy) expect(await headerBadge.count()).toBe(0);
+  else expect(await headerBadge.textContent()).toBe(chip);
   await settings.getByRole("button", { name: /^Technical details/ }).click();
   return settings;
 }

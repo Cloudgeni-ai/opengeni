@@ -56,7 +56,7 @@ const PUBLISHERS: Array<[RegExp, string]> = [
  * provider publishes it (official) or OpenGeni built it; otherwise null.
  */
 export function capabilityPublisher(item: CapabilityCatalogItem): string | null {
-  if (item.source === "built_in" || item.surfaceType?.startsWith("first_party_")) return "OpenGeni";
+  if (item.source === "built_in" || item.surfaceType?.startsWith("first_party_")) return "Opengeni";
   if (!capabilityCuration(item).official) return null;
   const domain = item.providerDomain?.toLowerCase() ?? "";
   for (const [pattern, name] of PUBLISHERS) if (pattern.test(domain)) return name;

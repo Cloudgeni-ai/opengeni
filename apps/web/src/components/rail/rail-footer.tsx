@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
@@ -75,7 +76,9 @@ export function RailFooter() {
     onUseInvitedAccount: () => {
       void context
         .handleManagedSignOut()
-        .catch((error) => toast.error("Sign out failed", { description: String(error) }));
+        .catch((error: unknown) =>
+          toast.error("Couldn't sign out", { description: userErrorText(error) }),
+        );
     },
     onAccepted: context.revalidatePrincipalAccess,
   });
@@ -125,7 +128,7 @@ export function RailFooter() {
                     displayName,
                     pendingCount: organizationInvitations.pendingCount,
                   })}
-                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
+                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
                 >
                   <span className="relative shrink-0">
                     <Avatar size="sm">
@@ -140,7 +143,7 @@ export function RailFooter() {
                   </span>
                   {!rail.collapsed ? (
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-medium text-fg">
+                      <span className="block truncate text-xs font-normal text-fg">
                         {displayName}
                       </span>
                       {secondary && secondary !== displayName ? (
@@ -155,10 +158,10 @@ export function RailFooter() {
                 side={rail.collapsed ? "right" : "top"}
                 className="w-[min(18rem,calc(100vw-1rem))]"
               >
-                <DropdownMenuLabel className="grid gap-0.5">
-                  <span className="truncate text-sm">{displayName}</span>
+                <DropdownMenuLabel className="grid gap-0.5 pb-1.5">
+                  <span className="truncate text-sm text-fg">{displayName}</span>
                   {secondary && secondary !== displayName ? (
-                    <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
+                    <span className="truncate text-xs font-normal text-fg-muted">{secondary}</span>
                   ) : null}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -167,7 +170,7 @@ export function RailFooter() {
                 ) : null}
                 <AppearanceMenu />
                 {managed ? (
-                  <DropdownMenuItem asChild className="min-h-11">
+                  <DropdownMenuItem asChild>
                     <Link to="/settings/security">
                       <LockIcon className="size-4" />
                       Personal settings
@@ -182,7 +185,6 @@ export function RailFooter() {
                 ) : null}
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
-                  itemClassName="min-h-11"
                   leadingSeparator={managed || showAnalyticsPreferences}
                 />
                 {managed ? (
@@ -191,8 +193,8 @@ export function RailFooter() {
                     onSelect={() => {
                       void context
                         .handleManagedSignOut()
-                        .catch((error) =>
-                          toast.error("Sign out failed", { description: String(error) }),
+                        .catch((error: unknown) =>
+                          toast.error("Couldn't sign out", { description: userErrorText(error) }),
                         );
                     }}
                   >
@@ -226,7 +228,7 @@ export function RailFooter() {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                className="shrink-0 text-fg-muted pointer-coarse:size-10"
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
                 aria-label="Send feedback"
                 onClick={() => setFeedbackOpen(true)}
               >
@@ -246,7 +248,7 @@ export function RailFooter() {
                 size="icon-sm"
                 aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
                 onClick={rail.toggleCollapsed}
-                className="shrink-0 text-fg-subtle hover:text-fg pointer-coarse:size-10"
+                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
               >
                 {rail.collapsed ? (
                   <ChevronsRightIcon className="size-4" />
@@ -289,7 +291,7 @@ function AccountTrigger(props: {
       </Avatar>
       {!props.collapsed ? (
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium text-fg">{props.displayName}</span>
+          <span className="block truncate text-xs font-normal text-fg">{props.displayName}</span>
           {props.secondary !== props.displayName ? (
             <span className="block truncate text-2xs text-fg-subtle">{props.secondary}</span>
           ) : null}

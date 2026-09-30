@@ -38,6 +38,9 @@ mock.module("@/components/insights/count-up", () => ({
   CountUp: ({ value }: { value: number }) => <span>{value}</span>,
 }));
 mock.module("@/components/insights/causal-sheet", () => ({ CausalSheet: () => null }));
+const navigate = mock(async (_options: unknown) => undefined);
+const RouterPackage = await import("@tanstack/react-router");
+mock.module("@tanstack/react-router", () => ({ ...RouterPackage, useNavigate: () => navigate }));
 
 function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): WorkspaceInsightsSnapshot {
   return {
@@ -159,12 +162,12 @@ beforeEach(() => {
 
 const { InsightsRoute } = await import("./insights");
 
-async function renderRoute() {
+async function renderRoute(returnTo?: { path: string; label: string }) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<InsightsRoute workspaceId={workspaceId} />);
+    root.render(<InsightsRoute workspaceId={workspaceId} returnTo={returnTo} />);
   });
   return {
     container,
@@ -199,6 +202,28 @@ describe("Insights route presentation", () => {
     }
   });
 
+  test("opened from Billing & usage, the back link returns there", async () => {
+    const rendered = await renderRoute({
+      path: "/workspaces/w/organization?section=billing",
+      label: "Billing & usage",
+    });
+    try {
+      const back = Array.from(rendered.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Billing & usage",
+      );
+      await click(back ?? null);
+      expect(navigate).toHaveBeenCalledWith({ href: "/workspaces/w/organization?section=billing" });
+    } finally {
+      await rendered.unmount();
+    }
+    const plain = await renderRoute();
+    try {
+      expect(plain.container.textContent).not.toContain("Billing & usage");
+    } finally {
+      await plain.unmount();
+    }
+  });
+
   test("shows a permission message without requesting usage", async () => {
     canRead = false;
     const rendered = await renderRoute();
@@ -219,11 +244,31 @@ describe("Insights route presentation", () => {
       expect(rendered.container.querySelector('[role="alert"]')?.textContent).toContain(
         "Insights couldn't load",
       );
+      expect(rendered.container.textContent).not.toContain("Service unavailable");
       nextError = null;
       await click(rendered.container.querySelector<HTMLButtonElement>("button"));
       expect(getWorkspaceInsights).toHaveBeenCalledTimes(2);
       expect(rendered.container.textContent).toContain("Total tokens");
     } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a refusal from the server reads as missing access, without the raw API string", async () => {
+    nextError = Object.assign(
+      new Error("OpenGeni API 403: missing permission: workspace:admin Reference: req_403."),
+      { status: 403 },
+    );
+    const rendered = await renderRoute();
+    try {
+      const alert = rendered.container.querySelector('[role="alert"]')?.textContent ?? "";
+      expect(alert).toContain("Workspace access required");
+      expect(alert).not.toContain("Insights couldn't load");
+      expect(rendered.container.textContent).not.toContain("OpenGeni API");
+      expect(rendered.container.textContent).not.toContain("req_403");
+      expect(rendered.container.querySelector("button")).toBeNull();
+    } finally {
+      nextError = null;
       await rendered.unmount();
     }
   });

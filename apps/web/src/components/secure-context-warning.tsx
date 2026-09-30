@@ -39,7 +39,7 @@ export function SecureContextWarning({
     <div role="alert" className="shrink-0 px-3 pt-3">
       <Notice tone="waiting" title="Secure connection required">
         {issue === "insecure_context"
-          ? "OpenGeni is open over HTTP. Configure HTTPS or use a secure URL. File uploads, microphone access, voice recordings, and some artifact features may not work."
+          ? "Opengeni is open over HTTP. Configure HTTPS or use a secure URL. File uploads, microphone access, voice recordings, and some artifact features may not work."
           : "This browser does not expose secure cryptography. Use a current browser over HTTPS. File uploads and some voice or artifact features may not work."}
       </Notice>
     </div>

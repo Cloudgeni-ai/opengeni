@@ -532,7 +532,7 @@ export function CatalogItemPage({
                       : "You choose when you connect",
                 }
               : null,
-            community ? { label: "Source", value: "Community - not reviewed by OpenGeni" } : null,
+            community ? { label: "Source", value: "Community - not reviewed by Opengeni" } : null,
             category ? { label: "Category", value: category } : null,
           ]}
         />

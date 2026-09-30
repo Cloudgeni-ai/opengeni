@@ -71,7 +71,7 @@ export function CustomApiSection({
 
       {instances.length === 0 ? (
         <div className="mt-4 rounded-xl border border-dashed border-border bg-bg/40 p-5 text-sm text-fg-muted">
-          Paste a URL or domain. OpenGeni detects OpenAPI or GraphQL, shows the immutable revision,
+          Paste a URL or domain. Opengeni detects OpenAPI or GraphQL, shows the immutable revision,
           tools, permissions, warnings, ownership, and account label before installation.
         </div>
       ) : (

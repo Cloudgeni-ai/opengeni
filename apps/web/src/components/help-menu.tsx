@@ -32,12 +32,12 @@ export function HelpMenu({ documentationUrl, itemClassName, leadingSeparator }: 
   return (
     <>
       {leadingSeparator ? <DropdownMenuSeparator /> : null}
-      <DropdownMenuLabel className="text-xs font-normal text-fg-muted">Help</DropdownMenuLabel>
+      <DropdownMenuLabel>Help</DropdownMenuLabel>
       <DropdownMenuItem asChild className={itemClassName}>
         <a href={href} target="_blank" rel="noopener noreferrer">
           <BookOpenIcon className="size-4" />
           Documentation
-          <ExternalLinkIcon className="ml-auto size-3.5" aria-hidden="true" />
+          <ExternalLinkIcon className="ml-auto size-3.5 text-fg-muted" aria-hidden="true" />
           <span className="sr-only">(opens in a new tab)</span>
         </a>
       </DropdownMenuItem>

@@ -322,9 +322,7 @@ function PriorityTierSection(props: {
   return (
     <section className="pt-7">
       <div className="flex items-baseline gap-2.5 pb-1">
-        <h2 className="text-2xs font-semibold uppercase tracking-wider text-fg-muted">
-          {props.title}
-        </h2>
+        <h2 className="text-2xs font-semibold uppercase tracking-wider text-fg">{props.title}</h2>
         <span className="font-mono text-2xs tabular-nums text-fg-subtle">
           {props.entries.length}
         </span>

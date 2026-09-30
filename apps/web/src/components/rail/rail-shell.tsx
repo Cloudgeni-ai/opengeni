@@ -8,7 +8,7 @@ import type { SessionSummary } from "@opengeni/sdk";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon } from "lucide-react";
 
-import { BrandMark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@/components/brand-mark";
 import {
   useCallback,
   useEffect,
@@ -37,7 +37,7 @@ import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-
 import { PrimaryNav, WorkspaceShortcutLinks } from "@/components/rail/primary-nav";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import {
-  SessionSandboxSwitcher,
+  SessionComputeIndicator,
   sessionSupportsFleetSwitching,
 } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
@@ -47,6 +47,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { matchesShortcut, NEW_SESSION_SHORTCUT } from "@/lib/keyboard-shortcuts";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";
+import { PrivateSessionIndicator } from "@/components/session/private-session-indicator";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
 import type { Session } from "@/types";
@@ -74,7 +76,10 @@ function RailBody() {
     );
   };
   return (
-    <div className="isolate flex h-full min-h-0 flex-col overflow-hidden bg-surface/40 pt-[env(safe-area-inset-top)]">
+    <div
+      data-rail
+      className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
+    >
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
@@ -110,10 +115,10 @@ function RailBody() {
                   tabIndex={mobileSection === "sessions" ? 0 : -1}
                   onClick={() => setMobileSection("sessions")}
                   className={cn(
-                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
                     mobileSection === "sessions"
                       ? "bg-surface-3 text-fg shadow-sm"
-                      : "text-fg-muted hover:text-fg",
+                      : "text-fg-label hover:text-fg",
                   )}
                 >
                   <MessagesSquareIcon className="size-4" />
@@ -129,10 +134,10 @@ function RailBody() {
                   tabIndex={mobileSection === "workspace" ? 0 : -1}
                   onClick={() => setMobileSection("workspace")}
                   className={cn(
-                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-normal transition-colors",
                     mobileSection === "workspace"
                       ? "bg-surface-3 text-fg shadow-sm"
-                      : "text-fg-muted hover:text-fg",
+                      : "text-fg-label hover:text-fg",
                   )}
                 >
                   <Settings2Icon className="size-4" />
@@ -173,9 +178,11 @@ function RailBody() {
           )}
         </div>
       </div>
-      {/* Keep the persistent controls opaque and above the scroll viewport,
-          including session-row actions with their own stacking levels. */}
-      <div data-rail-footer className="relative z-10 shrink-0 border-t border-border bg-surface">
+      {/* Keep the persistent controls above the scroll viewport, including
+          session-row actions with their own stacking levels. The footer is a
+          sibling of the clipped viewport, so it can stay transparent and let
+          the rail glow run to the bottom edge. */}
+      <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
         <RailFooter />
       </div>
     </div>
@@ -346,7 +353,7 @@ export function RailShell({ children }: { children: ReactNode }) {
         ) : null}
 
         {/* Main canvas. */}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div data-canvas className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             <WorkspacePausedBanner workspaceId={rail.workspaceId} />
@@ -432,17 +439,15 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
 
   // Mobile, off a session route: the slim brand strip.
   return (
-    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4">
+    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-canvas/75 px-3 backdrop-blur sm:px-4">
       {hamburger}
       <Link
         to="/workspaces/$workspaceId/sessions"
         params={{ workspaceId: rail.workspaceId }}
-        className="flex items-center gap-2 text-sm font-semibold"
+        className="flex items-center gap-2 text-fg"
       >
-        <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
-          <BrandMark className="size-3.5" />
-        </span>
-        OpenGeni
+        <BrandMark className="w-5" />
+        <Wordmark className="text-[17px]" />
       </Link>
     </header>
   );
@@ -525,15 +530,18 @@ function SessionRouteHeader({
           <Suspense fallback={null}>
             <LazySessionTenancyRouteControl session={session} events={events} />
           </Suspense>
+        ) : isPersonalWorkspace(
+            context.workspaces.find((candidate) => candidate.id === session.workspaceId) ?? null,
+            context.managedSelfContext,
+          ) ? (
+          // Without a tenancy record there is no access control to show, but a
+          // Personal workspace chat is still private: say so, read-only.
+          <PrivateSessionIndicator />
         ) : null
       }
       sandboxSlot={
         sessionSupportsFleetSwitching(session.sandboxBackend) ? (
-          <SessionSandboxSwitcher
-            workspaceId={session.workspaceId}
-            sessionId={session.id}
-            sandboxBackend={session.sandboxBackend}
-          />
+          <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
         ) : null
       }
       codexSlot={

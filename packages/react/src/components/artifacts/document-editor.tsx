@@ -901,7 +901,7 @@ function DocumentEditorCore({
                 <button
                   type="button"
                   onClick={addFirstParagraph}
-                  className="mt-3 rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm text-og-fg hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+                  className="mt-3 rounded-og-md border border-og-primary-border bg-og-primary px-3 py-1.5 text-og-sm text-og-primary-fg hover:bg-og-primary-hover focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 >
                   Start writing
                 </button>

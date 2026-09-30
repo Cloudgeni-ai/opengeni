@@ -654,7 +654,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       ["Capped account", "ChatGPT returned fewer details than its count, so these are view only."],
       [
         "Unknown account",
-        "ChatGPT returned reset data OpenGeni doesn't recognize, so these are view only.",
+        "ChatGPT returned reset data Opengeni doesn't recognize, so these are view only.",
       ],
       ["Error account", "Couldn't check usage limit resets. Refresh usage to try again."],
     ];
@@ -772,7 +772,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await page.getByRole("button", { name: "Redeem Full reset" }).click();
     await dialog.getByRole("button", { name: "Redeem reset" }).click();
     await page
-      .getByText(/API 503|ambiguous/i)
+      .getByText(/The outcome is uncertain/i)
       .first()
       .waitFor({ timeout: 10_000 });
     expect(provider.consumeBodies).toHaveLength(1);

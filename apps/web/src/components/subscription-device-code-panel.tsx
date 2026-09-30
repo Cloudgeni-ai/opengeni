@@ -45,7 +45,7 @@ export function SubscriptionDeviceCodePanel({
             </code>
             <Button
               type="button"
-              variant={codex ? "secondary" : "outline"}
+              variant="outline"
               size="sm"
               aria-label={copied ? "Code copied" : "Copy code"}
               onClick={() => void copy()}
@@ -58,7 +58,7 @@ export function SubscriptionDeviceCodePanel({
               {copied ? "Copied" : "Copy code"}
             </Button>
             {verificationHref ? (
-              <Button asChild variant={codex ? "secondary" : "outline"} size="sm">
+              <Button asChild size="sm">
                 <a href={verificationHref} target="_blank" rel="noopener noreferrer">
                   {codex ? "Open auth page" : "Open xAI"}
                   <ExternalLinkIcon className="size-3.5" aria-hidden="true" />

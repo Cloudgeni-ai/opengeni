@@ -124,7 +124,7 @@ function DependencyList({
   const headingId = useId();
   return (
     <section aria-labelledby={headingId} className="min-w-0">
-      <h3 id={headingId} className="text-xs font-medium text-fg-muted">
+      <h3 id={headingId} className="text-xs font-medium text-fg">
         {title}
       </h3>
       <ul className="mt-2 -mx-2 flex min-w-0 flex-col">

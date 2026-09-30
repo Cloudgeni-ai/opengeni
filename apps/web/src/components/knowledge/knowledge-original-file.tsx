@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { KnowledgeOriginalFileDownload } from "@opengeni/sdk";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 
 /** Download authority follows the selected Knowledge revision, including private originals. */
 export function KnowledgeOriginalFile(props: {
@@ -54,8 +55,7 @@ function OriginalFilePreview(props: {
         if (current) setFile(result);
       })
       .catch((reason: unknown) => {
-        if (current)
-          setError(reason instanceof Error ? reason.message : "Could not open the original file");
+        if (current) setError(userErrorText(reason));
       })
       .finally(() => {
         if (current) setBusy(false);
@@ -138,7 +138,7 @@ function OriginalFilePreview(props: {
       ) : null}
       {error ? (
         <p role="alert" className="text-sm text-status-error">
-          {error}
+          Couldn't open the original file. {error}
         </p>
       ) : null}
     </div>

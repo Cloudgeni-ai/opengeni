@@ -1508,7 +1508,7 @@ function QueuePanel({
                   </button>
                   <button
                     type="button"
-                    className="rounded-og-sm bg-og-accent px-2 py-1 font-medium text-og-accent-fg hover:opacity-90 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                    className="rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-og-accent/40"
                     onClick={onConfirmReplace}
                   >
                     Replace and edit

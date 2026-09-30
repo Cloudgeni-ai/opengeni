@@ -114,7 +114,7 @@ describe("signed-out browser account recovery", () => {
 
       expect(container.textContent).toContain("Continue with email");
       expect(container.querySelector("h1")).toBeNull();
-      expect(container.querySelector("h2")?.textContent).toBe("Sign in to OpenGeni");
+      expect(container.querySelector("h2")?.textContent).toBe("Sign in to Opengeni");
       expect(container.querySelector(".max-w-sm")).toBeNull();
       expect(container.textContent).toContain("Create an account");
       expect(container.querySelector('[data-registration="true"]')).toBeNull();

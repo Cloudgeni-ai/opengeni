@@ -23,7 +23,7 @@ export function personalGitHubOAuthFailureMessage(reason: string | null): string
     case "account_mismatch":
       return "Reconnect with the same GitHub account, or disconnect it first.";
     case "not_authorized":
-      return "Your OpenGeni access changed. Sign in again and retry.";
+      return "Your Opengeni access changed. Sign in again and retry.";
     case "client_changed":
       return "The GitHub sign-in configuration changed. Start again.";
     case "disabled":

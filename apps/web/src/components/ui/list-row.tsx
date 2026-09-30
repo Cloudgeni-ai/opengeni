@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LogoTileSizeProvider, type LogoTileSize } from "@/components/ui/logo-tile";
+import { useSectionListFrame } from "@/components/ui/section-variant";
 import { RelativeTimeDefaultsContext } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -174,6 +175,11 @@ export function RowList({
   children,
 }: RowListProps) {
   const value = useMemo<RowListContextValue>(() => ({ variant, columns }), [variant, columns]);
+  // In settings (grouped sections) a flush list that is not already inside a
+  // section card becomes the card itself: rows keep their 12px padding, the
+  // card adds 8px so titles sit 20px in, like setting rows.
+  const frame = useSectionListFrame();
+  const flushCard = flush && frame === "card";
   const templateStyle = {
     "--row-list-template": gridTemplate(columns, variant),
   } as CSSProperties;
@@ -260,7 +266,12 @@ export function RowList({
           data-slot="row-list"
           data-variant={variant}
           data-flush={flush || undefined}
-          className={cn("@container/list min-w-0", flush && "-mx-3", className)}
+          data-frame={flushCard ? "card" : undefined}
+          className={cn(
+            "@container/list min-w-0",
+            flushCard ? "rounded-lg border border-border bg-surface px-2 py-1" : flush && "-mx-3",
+            className,
+          )}
         >
           {busyNote}
           {body}
@@ -318,7 +329,7 @@ function HeaderCell({
           })
         }
         className={cn(
-          "-mx-1.5 inline-flex max-w-full items-center gap-1 rounded-[6px] px-1.5 py-0.5 transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg pointer-coarse:min-h-11",
+          "-mx-1.5 inline-flex max-w-full items-center gap-1 rounded-[6px] px-1.5 py-0.5 transition-colors duration-[120ms] hover:bg-hover hover:text-fg pointer-coarse:min-h-11",
           text,
           active && "text-fg",
           align === "end" && "flex-row-reverse",
@@ -441,6 +452,12 @@ export interface ListRowProps {
   description?: ReactNode;
   /** Quiet facts joined with " · " (the meta line). */
   meta?: ReactNode[];
+  /**
+   * The row's state, usually a dot StatusBadge ("Suspended", "Invited ·
+   * expires in 14 days"). It sits at the right of the name area on wide lists
+   * and joins the meta line on narrow ones: a status never adds a line.
+   */
+  status?: ReactNode;
   /** Values for the list's fact columns, by column id. */
   cells?: Record<string, ReactNode>;
   /** Display-only trailing glyph. A kind, or a kind with its state in words. */
@@ -495,6 +512,7 @@ export function ListRow({
   titleAddon,
   description,
   meta = NO_META,
+  status,
   cells = NO_CELLS,
   indicator,
   control,
@@ -533,21 +551,68 @@ export function ListRow({
   /* The meta line: quiet facts, then the fact columns folded in on narrow lists. */
   const facts = columns.filter((column) => cells[column.id] != null);
   const metaItems = meta.filter((item) => item != null && item !== false && item !== "");
+  // On one line the facts give way from the end: a later part truncates (and
+  // then disappears) before an earlier one, so a narrow row reads "Fact ·
+  // Staging runs on walrus-2…" instead of every part cut to a few letters.
+  // Only the last meta item and the folded facts after it shrink at all: any
+  // shrink, however small, would put an ellipsis into a short fact ("Fa…").
   const metaParts: ReactNode[] = [
-    // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
-    ...metaItems.map((item, index) => <MetaPart key={`meta-${index}`}>{item}</MetaPart>),
-    ...facts.map((column) => (
-      <MetaPart key={column.id} className={hasColumns ? "@[640px]/list:hidden" : undefined}>
+    ...metaItems.map((item, index) => (
+      // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
+      <MetaPart key={`meta-${index}`} order={index} keep={index < metaItems.length - 1}>
+        {item}
+      </MetaPart>
+    )),
+    ...facts.map((column, index) => (
+      <MetaPart
+        key={column.id}
+        order={metaItems.length + index}
+        className={cn(
+          hasColumns && "@[640px]/list:hidden",
+          // A phone-width line has room for one folded fact (none next to a
+          // status); more would only be cut to a dot and a few letters.
+          (index > 0 || status) && "@max-[479px]/list:hidden",
+        )}
+      >
         {column.hideLabel ? null : <span className="text-fg-subtle">{column.label} </span>}
         <span className="text-fg-muted">{cells[column.id]}</span>
       </MetaPart>
     )),
   ];
+  // Resource and table rows keep one fixed height: the description, the meta
+  // facts and (on narrow lists) the status and indicator words share ONE
+  // secondary line that truncates. Catalog rows keep a two-line description
+  // with the facts under it.
+  const singleLine = !catalog;
+  const statusPart = status ? (
+    <MetaPart key="status" keep className="@[480px]/list:hidden">
+      {status}
+    </MetaPart>
+  ) : null;
+  const narrowStatePart =
+    singleLine && narrowState ? (
+      <MetaPart
+        key="narrow-state"
+        keep
+        hidden
+        className={cn(
+          "hidden font-medium @max-[479px]/list:flex",
+          indicatorSpec?.kind === "attention" ? "text-status-waiting" : "text-fg-subtle",
+        )}
+      >
+        {narrowState}
+      </MetaPart>
+    ) : null;
+  const lineParts = [
+    ...metaParts,
+    ...(singleLine && statusPart ? [statusPart] : []),
+    ...(narrowStatePart ? [narrowStatePart] : []),
+  ];
   // Every part leads with its separator and the line is shifted left by one
   // separator and clipped, so no line of a wrapped meta line starts or ends
   // with a dot.
   const metaLine =
-    metaParts.length > 0 ? (
+    !singleLine && metaParts.length > 0 ? (
       <div
         className={cn(
           "mt-0.5 min-w-0 overflow-hidden text-xs leading-4.5 text-fg-subtle",
@@ -704,29 +769,59 @@ export function ListRow({
         <div className="flex min-w-0 items-center gap-2">
           {titleNode}
           {titleAddon ? (
-            <span className="flex shrink-0 items-center gap-1.5">{titleAddon}</span>
+            // Held to the title's 20px line: a chip never makes its row taller.
+            <span className="flex h-5 shrink-0 items-center gap-1.5">{titleAddon}</span>
           ) : null}
         </div>
-        {secondary ? (
+        {secondary && (catalog || (disabled && disabledReason)) ? (
           <p
             id={secondaryId}
             className={cn(
               "mt-0.5 min-w-0 text-xs leading-4.5 text-fg-muted",
               // A disabled reason is the point of the row: it never truncates.
-              disabled && disabledReason
-                ? "break-words"
-                : catalog
-                  ? "line-clamp-2 break-words"
-                  : "truncate",
-              // Tables keep rows to one line once the columns show.
-              table && "@[640px]/list:hidden",
+              disabled && disabledReason ? "break-words" : "line-clamp-2 break-words",
             )}
           >
             {secondary}
           </p>
         ) : null}
+        {singleLine && ((secondary && !(disabled && disabledReason)) || lineParts.length > 0) ? (
+          <p
+            className={cn(
+              "m-0 mt-0.5 flex min-w-0 items-center overflow-hidden text-xs leading-4.5 whitespace-nowrap text-fg-subtle",
+              // Tables keep rows to one line once the columns show, unless
+              // the line still has facts that aren't columns.
+              table && metaItems.length === 0 && "@[640px]/list:hidden",
+              // Only folded facts: the line disappears once the columns show.
+              !table &&
+                !secondary &&
+                hasColumns &&
+                metaItems.length === 0 &&
+                !status &&
+                !narrowState &&
+                "@[640px]/list:hidden",
+            )}
+          >
+            {secondary && !(disabled && disabledReason) ? (
+              <span id={secondaryId} className="min-w-0 shrink truncate text-fg-muted">
+                {secondary}
+              </span>
+            ) : null}
+            {lineParts.length > 0 ? (
+              <span
+                className={cn(
+                  "flex min-w-0 shrink-[2] items-center overflow-hidden",
+                  // No description: drop the first part's leading dot.
+                  !(secondary && !(disabled && disabledReason)) && "-ml-4",
+                )}
+              >
+                {lineParts}
+              </span>
+            ) : null}
+          </p>
+        ) : null}
         {metaLine}
-        {narrowState ? (
+        {!singleLine && narrowState ? (
           <p
             aria-hidden="true"
             className={cn(
@@ -738,6 +833,11 @@ export function ListRow({
           </p>
         ) : null}
       </div>
+      {status ? (
+        <div className="relative z-10 hidden shrink-0 items-center @[480px]/list:flex">
+          {status}
+        </div>
+      ) : null}
       {controlInline ? controlNode : null}
     </div>
   );
@@ -790,12 +890,14 @@ export function ListRow({
     "group/row relative isolate min-w-0 items-center transition-colors duration-[120ms]",
     "[&_[data-slot=relative-time]]:relative [&_[data-slot=relative-time]]:z-10 [&_[data-slot=status-badge]]:relative [&_[data-slot=status-badge]]:z-10",
     catalog && "flex min-h-[76px] gap-3 rounded-[14px] px-3 py-3.5",
-    variant === "resource" && cn(SUBGRID, "min-h-14 px-3 py-3"),
+    // One fixed height per list type: 64px resource rows (title plus one
+    // secondary line; a title-only row centers in the same height).
+    variant === "resource" && cn(SUBGRID, "min-h-16 px-3 py-3"),
     table && cn(SUBGRID, "min-h-11 px-3 py-2"),
-    actionable && "hover:bg-surface-2",
+    actionable && "hover:bg-hover",
     selected &&
       cn(
-        "bg-surface-2",
+        "bg-selection hover:bg-selection",
         "before:absolute before:top-1/2 before:left-0 before:h-4 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-brand before:content-['']",
       ),
     // Focus ring on the whole row when its target has keyboard focus.
@@ -865,9 +967,31 @@ export function ListRow({
   );
 }
 
-function MetaPart({ className, children }: { className?: string; children: ReactNode }) {
+function MetaPart({
+  className,
+  children,
+  hidden = false,
+  order = 0,
+  keep = false,
+}: {
+  className?: string;
+  children: ReactNode;
+  /** A visual copy of something already announced elsewhere. */
+  hidden?: boolean;
+  /** Position on the line: later parts give way first when it runs out of room. */
+  order?: number;
+  /** Never shrinks (a status): it stays whole while the facts before it give way. */
+  keep?: boolean;
+}) {
   return (
-    <span className={cn("flex max-w-full min-w-0 items-center whitespace-nowrap", className)}>
+    <span
+      aria-hidden={hidden || undefined}
+      style={{ flexShrink: keep ? 0 : 64 ** Math.min(order, 4) }}
+      className={cn(
+        "flex max-w-full min-w-0 items-center overflow-hidden whitespace-nowrap",
+        className,
+      )}
+    >
       <span aria-hidden="true" className="w-4 shrink-0 text-center text-fg-subtle">
         ·
       </span>
@@ -927,7 +1051,9 @@ export function ListRowSkeleton({ count = 3 }: { count?: number }) {
         const rowClass = cn(
           "min-w-0 items-center",
           catalog && "flex min-h-[76px] gap-3 px-3 py-3.5",
-          variant === "resource" && cn(SUBGRID, "min-h-14 px-3 py-3"),
+          // One fixed height per list type: 64px resource rows (title plus one
+          // secondary line; a title-only row centers in the same height).
+          variant === "resource" && cn(SUBGRID, "min-h-16 px-3 py-3"),
           table && cn(SUBGRID, "min-h-11 px-3 py-2"),
         );
         return table ? (

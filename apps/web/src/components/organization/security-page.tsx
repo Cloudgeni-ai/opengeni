@@ -11,11 +11,18 @@ import { OrganizationRecoverySection } from "@/components/organization-recovery"
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SelectMenu } from "@/components/ui/select-menu";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -129,8 +136,32 @@ function useOwnedOperations(
   return { claim, owns };
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/**
+ * A setting that didn't load: calm and without Try again when the viewer lacks
+ * the permission, otherwise what happened and what to do.
+ */
+function RowLoadFailure({
+  title,
+  error,
+  onRetry,
+}: {
+  title: string;
+  error: Error;
+  onRetry: () => void;
+}) {
+  if (isPermissionDenied(error)) {
+    return <Notice title="You can't see this setting.">Ask an organization owner.</Notice>;
+  }
+  return (
+    <ErrorMessage
+      variant="inline"
+      title={title}
+      action={<RowButton onClick={onRetry}>Try again</RowButton>}
+      {...apiErrorDetails(error)}
+    >
+      {userErrorTextWithoutReference(error)}
+    </ErrorMessage>
+  );
 }
 
 /* ------------------------------------------------------------ Only me chats */
@@ -165,13 +196,11 @@ function PrivateChatsRow({
 
   if (error && !settings) {
     return (
-      <ErrorMessage
-        variant="inline"
+      <RowLoadFailure
         title="Couldn't load the Only me chats setting."
-        action={<RowButton onClick={() => void load()}>Try again</RowButton>}
-      >
-        {error.message}
-      </ErrorMessage>
+        error={error}
+        onRetry={() => void load()}
+      />
     );
   }
   if (!settings) return <SettingRowSkeleton />;
@@ -190,7 +219,7 @@ function PrivateChatsRow({
             disabled={unavailable}
             disabledReason={
               unavailable
-                ? "Private chats aren't turned on for this installation. Ask whoever runs your OpenGeni to enable them."
+                ? "Private chats aren't turned on for this installation. Ask whoever runs your Opengeni to enable them."
                 : undefined
             }
             onCheckedChange={async (enabled) => {
@@ -212,7 +241,9 @@ function PrivateChatsRow({
               } catch (saveError) {
                 if (!owns(operation)) return;
                 if (isOrganizationConflict(saveError)) await load();
-                toast.error("Couldn't change Only me chats", { description: errorText(saveError) });
+                toast.error("Couldn't change Only me chats", {
+                  description: userErrorText(saveError),
+                });
               } finally {
                 if (owns(operation)) setPending(null);
               }
@@ -234,7 +265,7 @@ function choiceOf(policy: OrganizationRetentionPolicy): RetentionChoice {
 
 function retentionSentence(choice: RetentionChoice): string {
   return choice === "retain"
-    ? "Kept until someone who runs your OpenGeni deletes it."
+    ? "Kept until someone who runs your Opengeni deletes it."
     : `Deleted ${choice} days after the person is removed.`;
 }
 
@@ -270,13 +301,11 @@ function RetentionRow({
 
   if (error && !policy) {
     return (
-      <ErrorMessage
-        variant="inline"
+      <RowLoadFailure
         title="Couldn't load the retention policy."
-        action={<RowButton onClick={() => void load()}>Try again</RowButton>}
-      >
-        {error.message}
-      </ErrorMessage>
+        error={error}
+        onRetry={() => void load()}
+      />
     );
   }
   if (!policy) return <SettingRowSkeleton />;
@@ -322,7 +351,7 @@ function RetentionRow({
         title="Change how long removed people's data is kept?"
         description={
           draft === "retain"
-            ? "Their personal data is kept until someone who runs your OpenGeni deletes it. This doesn't give back any access."
+            ? "Their personal data is kept until someone who runs your Opengeni deletes it. This doesn't give back any access."
             : `Their personal data becomes eligible for deletion ${draft} days after they're removed. Access still ends right away.`
         }
         submitLabel="Change retention"

@@ -104,6 +104,8 @@ describe("organization workspace administration in Chromium", () => {
       .waitFor();
     await people
       .getByText(/^Invited · expires in \d+ days$/)
+      // The status sits in the status column on wide lists and in the meta line on narrow ones.
+      .filter({ visible: true })
       .first()
       .waitFor();
 
@@ -269,6 +271,8 @@ describe("organization workspace administration in Chromium", () => {
     await people.getByText("new-member@example.test", { exact: true }).waitFor();
     await people
       .getByText(/^Invited · expires in \d+ days$/)
+      // The status sits in the status column on wide lists and in the meta line on narrow ones.
+      .filter({ visible: true })
       .first()
       .waitFor();
 

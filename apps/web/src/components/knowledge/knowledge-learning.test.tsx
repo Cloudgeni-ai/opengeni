@@ -30,7 +30,7 @@ const context = {
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: Object.assign(() => 0, { error: () => 0 }) }));
-const { LearningPage, learningSummary, reviewLearningLine, useLearningDefaults } =
+const { LearningPage, learningSummary, reviewEmptyLine, useLearningDefaults } =
   await import("./knowledge-learning");
 
 beforeAll(() => {
@@ -66,21 +66,23 @@ async function settle() {
   }
 }
 
-test("one vocabulary, a summary for the header and a reason on Review", () => {
+test("one vocabulary, a summary for the menu and a reason on an empty Review", () => {
   expect(learningSummary({ knowledge: "off", instructions: "off", skills: "off" })).toBe("Off");
   expect(
     learningSummary({ knowledge: "automatic", instructions: "review_first", skills: "off" }),
   ).toBe("Mixed");
   expect(
-    reviewLearningLine({
+    reviewEmptyLine({
       knowledge: "review_first",
       instructions: "automatic",
       skills: "review_first",
     }),
-  ).toBe("These wait for you because Knowledge and Skills are set to Review first.");
+  ).toBe(
+    "Changes agents propose to knowledge and skills wait here for your OK. Agents save other changes on their own.",
+  );
   expect(
-    reviewLearningLine({ knowledge: "automatic", instructions: "automatic", skills: "automatic" }),
-  ).toContain("won't wait here");
+    reviewEmptyLine({ knowledge: "automatic", instructions: "automatic", skills: "automatic" }),
+  ).toContain("so nothing waits here");
 });
 
 test("shared and private chats are two labelled groups; a change saves at once", async () => {

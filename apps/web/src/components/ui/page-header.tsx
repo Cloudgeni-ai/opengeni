@@ -5,8 +5,9 @@ import { cn } from "@/lib/utils";
 /**
  * One header for every page: title, one-line description, primary action and
  * optional tabs. Title 20/28 semibold, description 14/20 muted, actions pinned
- * right with `shrink-0` (they never push past the column), and a hairline 16px
- * below. A `tabs` slot replaces the hairline with the tab row's own rule.
+ * right with `shrink-0` (they never push past the column), and 16px of space
+ * below. No hairline by default: the title and the first section breathe
+ * instead (pass `divider` to draw one). A `tabs` slot brings its own rule.
  *
  * Variants:
  * - `default`: 20px title, optional 16px brand icon (Capabilities style).
@@ -72,7 +73,7 @@ export interface PageHeaderProps extends Omit<ComponentProps<"header">, "title">
   variant?: PageHeaderVariant;
   /** Overrides the provider: force the icon on or off. */
   showIcon?: boolean;
-  /** The hairline under the header when there are no tabs. Default true. */
+  /** A hairline under the header when there are no tabs. Default false. */
   divider?: boolean;
 }
 
@@ -86,7 +87,7 @@ export function PageHeader({
   tabs,
   variant: variantProp,
   showIcon,
-  divider = true,
+  divider = false,
   className,
   ...props
 }: PageHeaderProps) {
@@ -107,7 +108,7 @@ export function PageHeader({
         className={cn(
           "flex min-w-0 flex-col gap-3 @xl/page-header:flex-row @xl/page-header:items-center @xl/page-header:justify-between @xl/page-header:gap-6",
           ruled && "border-b border-border",
-          ruled && (large ? "pb-6" : "pb-4"),
+          !tabs && (large ? "pb-6" : "pb-4"),
         )}
       >
         <div className="min-w-0 flex-1">

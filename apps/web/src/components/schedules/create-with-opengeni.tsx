@@ -47,7 +47,7 @@ export function CreateWithOpenGeniButton({ onClick }: { onClick: () => void }) {
   return (
     <Button type="button" variant="outline" onClick={onClick} className="pointer-coarse:h-11">
       <SparklesIcon aria-hidden="true" />
-      Create with OpenGeni
+      Create with Opengeni
     </Button>
   );
 }
@@ -96,7 +96,7 @@ function CreateWithOpenGeniDialog({
         }
       }}
       size="sm"
-      title="Create a schedule with OpenGeni"
+      title="Create a schedule with Opengeni"
       description="It starts a chat, finds the repositories, variable sets and integrations the schedule needs, and creates it. It asks you only for what it can't find."
       submitLabel="Start chat"
       pendingLabel="Starting…"

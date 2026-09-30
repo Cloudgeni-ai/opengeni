@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { formatMoneyMicros, validTopupAmount } from "@/lib/format";
+import { userErrorText } from "@/lib/api-error";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   applyConnectedModelToNewSessionDraft,
@@ -59,7 +60,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   supergrok: "SuperGrok",
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
-  credits: "OpenGeni credits",
+  credits: "Opengeni credits",
 };
 
 /** ChatGPT keeps device code login behind a per-account (or workspace-admin) setting. */
@@ -177,7 +178,7 @@ export function ModelAccessOnboardingPanel({
       } catch (error) {
         setSelectionRetry(family);
         toast.error("Model connected, but your new-chat selection could not be saved", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
         return false;
       } finally {
@@ -233,7 +234,7 @@ export function ModelAccessOnboardingPanel({
       }
     } catch (error) {
       setPending(null);
-      toast.error(error instanceof Error ? error.message : `Failed to start ${label} login`);
+      toast.error(`Couldn't start the ${label} sign-in`, { description: userErrorText(error) });
       return;
     } finally {
       setBusy(false);
@@ -271,11 +272,7 @@ export function ModelAccessOnboardingPanel({
       if (controller.signal.aborted || cancelled.current) return;
       pollAbort.current = null;
       setPending(null);
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : `Failed to verify ${label} authorization. Try again.`,
-      );
+      toast.error(`Couldn't confirm the ${label} sign-in`, { description: userErrorText(error) });
     }
   }
 
@@ -310,7 +307,7 @@ export function ModelAccessOnboardingPanel({
       toast.success(`${config.label} connected`);
       if (await finishWithConnectedModel(config.family)) providerKeyOperation.current = null;
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Failed to connect ${config.label}`);
+      toast.error(`Couldn't connect ${config.label}`, { description: userErrorText(error) });
     } finally {
       setBusy(false);
     }
@@ -334,9 +331,7 @@ export function ModelAccessOnboardingPanel({
       });
       window.location.assign(session.url);
     } catch (error) {
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Checkout failed", { description: userErrorText(error) });
       setBusy(false);
     }
   }
@@ -400,7 +395,7 @@ export function ModelAccessOnboardingPanel({
       <p className="rounded-md bg-bg px-4 py-4 text-center font-mono text-2xl tracking-[0.18em] select-all">
         {pending.userCode}
       </p>
-      <Button asChild type="button" variant="secondary">
+      <Button asChild type="button">
         <a href={pending.verificationUri} target="_blank" rel="noreferrer">
           Open authorization <ArrowUpRightIcon className="size-4" />
         </a>
@@ -494,7 +489,7 @@ export function ModelAccessOnboardingPanel({
       </div>
       <Button
         type="button"
-        variant="secondary"
+        variant="outline"
         disabled={busy}
         onClick={() => void retryConnectedModelSelection()}
       >
@@ -511,11 +506,11 @@ export function ModelAccessOnboardingPanel({
       <div className="mt-6 grid gap-4 border-t border-border pt-6">
         <div>
           <CreditsHeading className="text-sm font-medium">
-            {startingCredits ? "Buy more OpenGeni credits" : "Use OpenGeni credits"}
+            {startingCredits ? "Buy more Opengeni credits" : "Use Opengeni credits"}
           </CreditsHeading>
           <p className="mt-1 text-xs leading-relaxed text-fg-muted">
             {startingCredits
-              ? "Top up anytime to keep chatting on OpenGeni credits."
+              ? "Top up anytime to keep chatting on Opengeni credits."
               : includedModel
                 ? "Pay as you go for more capable hosted models."
                 : "Pay for hosted models as you go."}{" "}
@@ -529,7 +524,7 @@ export function ModelAccessOnboardingPanel({
         />
         <Button
           type="button"
-          variant={secondaryCredits ? "secondary" : "default"}
+          variant={secondaryCredits ? "outline" : "default"}
           className="h-10 w-full"
           disabled={!client || busy || !!pending || !validAmount}
           onClick={() => void buyCredits()}
@@ -553,12 +548,12 @@ export function ModelAccessOnboardingPanel({
       <section className="flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
         <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
           <h1 className="text-xl font-semibold tracking-tight">
-            Start chatting with OpenGeni credits
+            Start chatting with Opengeni credits
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
             {startingCredits.balance
-              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of OpenGeni credits included.`
-              : "OpenGeni credits are included with your account."}{" "}
+              ? `${formatMoneyMicros(startingCredits.balance.balanceMicros, startingCredits.balance.currency)} of Opengeni credits included.`
+              : "Opengeni credits are included with your account."}{" "}
             New chats use {describeCreditsModel(startingCredits.model)}. No card or API key needed.
           </p>
           {freeAfterCredits ? (
@@ -579,7 +574,7 @@ export function ModelAccessOnboardingPanel({
             <h2 className="text-sm font-medium">Prefer your own subscription or key? (optional)</h2>
             <p className="mt-1 text-xs leading-relaxed text-fg-muted">
               Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or buy more OpenGeni credits" : ""}. You can also do
+              {billingMode === "stripe" ? ", or buy more Opengeni credits" : ""}. You can also do
               this later.
             </p>
             <div className="mt-3">{connectOptions}</div>
@@ -616,7 +611,7 @@ export function ModelAccessOnboardingPanel({
             <h2 className="text-sm font-medium">Want a more capable model? (optional)</h2>
             <p className="mt-1 text-xs leading-relaxed text-fg-muted">
               Connect a subscription or API key you already have
-              {billingMode === "stripe" ? ", or add OpenGeni credits" : ""}. You can also do this
+              {billingMode === "stripe" ? ", or add Opengeni credits" : ""}. You can also do this
               later.
             </p>
             <div className="mt-3">{connectOptions}</div>
@@ -634,7 +629,7 @@ export function ModelAccessOnboardingPanel({
         <h1 className="text-xl font-semibold tracking-tight">Choose how to power your chats</h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
           Connect a service you already use
-          {billingMode === "stripe" ? ", or get started with OpenGeni credits" : ""}.
+          {billingMode === "stripe" ? ", or get started with Opengeni credits" : ""}.
         </p>
 
         <div className="mt-7">{connectOptions}</div>

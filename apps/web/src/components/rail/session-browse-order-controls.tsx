@@ -2,6 +2,7 @@ import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "@/lib/sessions-g
 import type { SessionBrowseStatus } from "@/lib/session-browse-preferences";
 import {
   DropdownMenuCheckboxItem,
+  DropdownMenuMeta,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -41,9 +42,9 @@ function ViewSubmenu<T extends string>({
 }) {
   return (
     <DropdownMenuSub>
-      <DropdownMenuSubTrigger className="pointer-coarse:min-h-11 [&>svg]:ml-0">
+      <DropdownMenuSubTrigger className="[&>svg]:ml-0">
         {label}
-        <span className="ml-auto mr-1 text-xs text-fg-subtle">{choices[value]}</span>
+        <DropdownMenuMeta>{choices[value]}</DropdownMenuMeta>
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent className="w-44">
         <DropdownMenuRadioGroup
@@ -52,7 +53,7 @@ function ViewSubmenu<T extends string>({
           onValueChange={(next) => onChange(next as T)}
         >
           {(Object.keys(choices) as T[]).map((choice) => (
-            <DropdownMenuRadioItem key={choice} value={choice} className="pointer-coarse:min-h-11">
+            <DropdownMenuRadioItem key={choice} value={choice}>
               {choices[choice]}
             </DropdownMenuRadioItem>
           ))}
@@ -91,7 +92,6 @@ export function SessionBrowseOrderControls({
       <DropdownMenuCheckboxItem
         checked={showEmptyGroups}
         disabled={groupBy === "none"}
-        className="pointer-coarse:min-h-11"
         onCheckedChange={(checked) => onShowEmptyGroupsChange(checked === true)}
       >
         Show empty groups

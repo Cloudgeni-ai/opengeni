@@ -56,7 +56,8 @@ describe("console composer in a split desktop pane", () => {
           }
         },
         captureWorkspaceInvocation: () => ({}), ownsWorkspaceInvocation: () => true
-      }; export function useAppContext() { return context; }`,
+      }; export function useAppContext() { return context; }
+      export function useOptionalAppContext() { return context; }`,
       }),
     );
     await page.goto(url, { waitUntil: "networkidle" });
