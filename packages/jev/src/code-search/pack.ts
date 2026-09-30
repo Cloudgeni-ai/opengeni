@@ -87,7 +87,7 @@ export function isImportOnly(lines: string[]): boolean {
         l,
       );
     if (inBlock || start) n++;
-    if (!inBlock && /^\s*(?:import|export)\b[^'"]*\{\s*$/.test(l)) inBlock = true;
+    if (!inBlock && /^\s*(?:import|export)(?:\s+type)?\s*(?:[\w$]+\s*,\s*)?\{[^}]*$/.test(l)) inBlock = true;
     else if (inBlock && /\}/.test(l)) inBlock = false;
   }
   return n / code.length >= 0.6;

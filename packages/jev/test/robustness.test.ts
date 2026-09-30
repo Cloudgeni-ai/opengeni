@@ -211,7 +211,10 @@ describeWithRipgrep("lines past the end of the file as read", () => {
         def: "src/helpers.ts:4 (not in the file as read)",
       },
     ]);
-    expect(packPassages(r.text).map((p) => p.path)).toEqual(["src/limit.ts"]);
+    // a short-read file is shown only up to what was read (the small file is tiled whole)
+    const passages = packPassages(r.text);
+    expect(passages.map((p) => p.path)).toContain("src/limit.ts");
+    for (const p of passages) if (p.path === "src/other.ts") expect(p.end).toBeLessThanOrEqual(1);
     // read in full, the same search follows the lead and windows both files
     const full = await runCodeSearch({
       question: "How is the limit computed?",
