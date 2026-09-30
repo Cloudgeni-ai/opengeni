@@ -19,6 +19,8 @@ import {
   createDb,
   createScheduledTask,
   createSession,
+  createOrganizationModelProviderCustomModel,
+  upsertOrganizationModelProviderConnection,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
   upsertWorkspaceModelPolicy,
@@ -120,6 +122,13 @@ beforeAll(async () => {
     subjectId: "user:gateway-custom-admin",
   });
   grant = access.workspaceGrants[0]!;
+  const [personal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${grant.accountId}, 'Model admission test personal workspace') returning id`;
+  await shared.admin`
+    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${grant.accountId}, ${grant.subjectId}, 'owner', 'active', ${personal!.id})
+    on conflict (account_id, subject_id) do update set role = 'owner', status = 'active'`;
   await createConnection(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -241,6 +250,45 @@ async function callMcpTool(
 }
 
 describe("workspace Gateway custom model API", () => {
+  for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+    test(`admits an organization ${providerKind} model through the public session boundary`, async () => {
+      if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+      await upsertOrganizationModelProviderConnection(client.db, {
+        organizationId: grant.accountId,
+        actorSubjectId: grant.subjectId,
+        providerKind,
+        credentialEncrypted: "metadata-only-test-credential",
+        credentialDigest: "metadata-only-test-digest",
+        operationId: crypto.randomUUID(),
+      });
+      await createOrganizationModelProviderCustomModel(client.db, {
+        organizationId: grant.accountId,
+        actorSubjectId: grant.subjectId,
+        providerKind,
+        upstreamModelId: "claude-opus-5-5",
+        operationId: crypto.randomUUID(),
+      });
+      const model = `${providerKind === "anthropic" ? "organization-anthropic" : "organization-claude-subscription"}/claude-opus-5-5`;
+      const response = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Local admission regression; no inference",
+            model,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      const body = await response.json();
+      expect(response.status).toBe(202);
+      expect(body.model).toBe(model);
+    });
+  }
+
   test("requires workspace admin and rejects invalid or curated-collision inputs", async () => {
     if (!app || !grant) return;
 

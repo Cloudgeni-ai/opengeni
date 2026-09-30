@@ -1266,7 +1266,8 @@ The `anthropic-messages` protocol is implemented by
 model interface and instrumented transport. It posts full projected history to
 `/v1/messages`, without remote conversation or thread state. Tool calls/results,
 parallel calls, images, streaming text, signed thinking and redacted thinking are
-preserved. Tool names unsupported on the wire receive stable reversible names.
+preserved. Initial system/developer history items join the top-level system field
+in order; later system items keep their conversation position. Tool names unsupported on the wire receive stable reversible names.
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and OpenGeni's text compaction remain available.
 
@@ -1312,7 +1313,10 @@ user-approved nonstreaming Opus 5.5 probe on 2026-09-30 returned HTTP 200 and th
 requested text with this profile and no `cch`. Omission therefore did not prevent
 that request; this does not establish a universal requirement or the cause of
 the earlier HTTP 429. The profile is not a byte-exact reproduction. Separately,
-98 completed captured response streams passed offline adapter replay.
+98 completed captured response streams passed offline adapter replay. A user-requested
+full local OpenGeni session subsequently completed an SSB population chart with
+streaming tool loops, signed thinking, cache reads/writes, and retained PNG/SVG/CSV
+artifacts using this profile without `cch`.
 
 The profile enables `claude-code-20250219` and `oauth-2025-04-20`. Thinking requests
 also enable interleaved thinking, thinking token counts, effort, and summarized

@@ -130,7 +130,7 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
   const verified = models.find((model) => model.upstreamModelId === "claude-opus-5-5")!;
   expect(verified.capabilities.reasoning.runnable).toBe(true);
   expect(verified.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
-  for (const model of models.filter((model) => model !== verified)) {
+  for (const model of models.filter((candidate) => candidate !== verified)) {
     expect(model.reasoningEffort).toBe(false);
     expect(model.capabilities.reasoning).toMatchObject({
       upstream: "unknown",
@@ -180,8 +180,8 @@ test("accepted model definition tracks Claude generation options but excludes ac
     claude_subscription: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
   });
   const modelId = "organization-claude-subscription/claude-opus-5-5";
-  const version = (settings: ReturnType<typeof testSettings>) =>
-    configuredModels(settings).find((model) => model.id === modelId)!.definitionVersion;
+  const version = (candidateSettings: ReturnType<typeof testSettings>) =>
+    configuredModels(candidateSettings).find((model) => model.id === modelId)!.definitionVersion;
   const initial = version(settings);
   for (const identity of [
     { accountUuid: "10000000-0000-4000-8000-000000000001", deviceId: "a".repeat(64) },
@@ -205,7 +205,7 @@ test("accepted model definition tracks Claude generation options but excludes ac
   ]) {
     const providers = JSON.parse(settings.modelProvidersJson!);
     const provider = providers.find(
-      (provider: { id: string }) => provider.id === "organization-claude-subscription",
+      (candidate: { id: string }) => candidate.id === "organization-claude-subscription",
     );
     Object.assign(provider.anthropic, change);
     expect(version({ ...settings, modelProvidersJson: JSON.stringify(providers) })).not.toBe(

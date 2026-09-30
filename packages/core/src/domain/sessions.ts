@@ -19,6 +19,8 @@ import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
 
 import {
+  CLAUDE_CONNECTION_KINDS,
+  claudeProviderId,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   withCodexCatalogProvider,
@@ -249,7 +251,8 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX) === true ||
-    modelId?.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX) === true
+    modelId?.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX) === true ||
+    CLAUDE_CONNECTION_KINDS.some((kind) => modelId?.startsWith(claudeProviderId(kind) + "/"))
   );
 }
 // RFC 9110 field-name token characters.
@@ -1016,9 +1019,13 @@ export async function createAndStartSessionWithOutcome(input: {
               scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
                 ? ("organization" as const)
                 : ("workspace" as const),
-              providerKind: input.turnExecutionPolicy.providerId.includes("openrouter")
-                ? ("openrouter" as const)
-                : ("vercel_gateway" as const),
+              providerKind:
+                CLAUDE_CONNECTION_KINDS.find(
+                  (kind) => claudeProviderId(kind) === input.turnExecutionPolicy.providerId,
+                ) ??
+                (input.turnExecutionPolicy.providerId.includes("openrouter")
+                  ? ("openrouter" as const)
+                  : ("vercel_gateway" as const)),
               upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
             };
             const active = await lockActiveCustomModelForAdmission(tx, {

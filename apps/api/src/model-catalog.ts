@@ -25,11 +25,13 @@ export {
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const anonymousProvider =
     model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
+  const organizationProvider = model.credentialSource.kind === "organization_connection";
   // Keep the established closed `source` enum compatible for older same-major
   // clients. OpenRouter remains truthfully identified by its public provider
   // id/label and billing metadata; omitting this optional legacy grouping field
   // lets tolerant older contracts parse the additive provider.
   const source =
+    organizationProvider ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
     model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
       ? undefined
@@ -42,19 +44,20 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
           : anonymousProvider
             ? undefined
             : "opengeni";
-  const publicProvider = anonymousProvider
-    ? { provider: model.providerId, providerLabel: model.providerLabel }
-    : model.providerId === OPENROUTER_PROVIDER_ID
-      ? { provider: "openrouter", providerLabel: "OpenRouter" }
-      : model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
-        ? { provider: "workspace-openrouter", providerLabel: "Your OpenRouter" }
-        : source === "codex"
-          ? { provider: "codex", providerLabel: "Codex" }
-          : source === "supergrok"
-            ? { provider: "supergrok", providerLabel: "SuperGrok" }
-            : source === "workspace_gateway"
-              ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-              : { provider: "opengeni", providerLabel: "OpenGeni" };
+  const publicProvider =
+    anonymousProvider || organizationProvider
+      ? { provider: model.providerId, providerLabel: model.providerLabel }
+      : model.providerId === OPENROUTER_PROVIDER_ID
+        ? { provider: "openrouter", providerLabel: "OpenRouter" }
+        : model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+          ? { provider: "workspace-openrouter", providerLabel: "Your OpenRouter" }
+          : source === "codex"
+            ? { provider: "codex", providerLabel: "Codex" }
+            : source === "supergrok"
+              ? { provider: "supergrok", providerLabel: "SuperGrok" }
+              : source === "workspace_gateway"
+                ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+                : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,

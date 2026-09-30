@@ -48,9 +48,39 @@ const response = (content: unknown[], stop = "end_turn") => ({
     output_tokens: 7,
   },
 });
-function stream(events: unknown[], oneByte = false) {
+
+test("initial system and developer instructions move to top-level while later policy stays in place", () => {
+  const input: ModelRequest["input"] = [
+    { role: "system", content: "Skill catalog" },
+    { role: "developer", content: "Initial policy" },
+    { role: "user", content: "Draw a chart" },
+    { role: "system", content: "Later policy" },
+    { role: "user", content: "Continue" },
+  ];
+  const before = JSON.stringify(input);
+  const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, true);
+  expect(body.system.map((block: any) => block.text)).toEqual([
+    "Instructions",
+    "Skill catalog",
+    "Initial policy",
+  ]);
+  expect(body.system.at(-1).cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
+  expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system", "user"]);
+  expect(body.messages[1].content[0].text).toBe("Later policy");
+  expect(JSON.stringify(input)).toBe(before);
+  expect(() =>
+    buildAnthropicRequest(
+      request([{ role: "system", content: "Only instructions" }]),
+      "claude-opus-5-5",
+      provider,
+      true,
+    ),
+  ).toThrow("conversation message");
+});
+
+function stream(frames: unknown[], oneByte = false) {
   const bytes = new TextEncoder().encode(
-    events.map((event) => `data: ${JSON.stringify(event)}\r\n\r\n`).join(""),
+    frames.map((event) => `data: ${JSON.stringify(event)}\r\n\r\n`).join(""),
   );
   return new Response(
     new ReadableStream({

@@ -213,6 +213,11 @@ export function buildAnthropicRequest(
   const system = request.systemInstructions
     ? ([{ type: "text", text: request.systemInstructions }] as Json[])
     : [];
+  // Even with mid-conversation-system enabled, initial system/developer
+  // instructions belong in the top-level system field. Keep later system
+  // messages at their original history position.
+  while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
+  if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
   const tools: Json[] = request.tools.map((tool) => {
     if (tool.type !== "function")
       throw new AnthropicProtocolError(`Claude does not support the ${tool.type} tool transport`);

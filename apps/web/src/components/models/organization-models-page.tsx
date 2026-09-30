@@ -16,7 +16,6 @@ import {
   ProviderConnectionPage,
   ProviderConnectionRow,
   providerListed,
-  type ProviderConnection,
 } from "@/components/ai-gateway-connection";
 import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
 import {

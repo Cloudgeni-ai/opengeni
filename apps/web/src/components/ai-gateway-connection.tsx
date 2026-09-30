@@ -1028,13 +1028,14 @@ function useClaudeIdentityFields(provider: ProviderPresentation["provider"]) {
   );
   const deviceValid = /^[a-f0-9]{64}$/.test(deviceId.trim());
   const valid = !enabled || (accountValid && deviceValid);
+  const reset = useCallback(() => {
+    setAccountUuid("");
+    setDeviceId("");
+  }, []);
   return {
     valid,
     identity: enabled ? { accountUuid: accountUuid.trim(), deviceId: deviceId.trim() } : undefined,
-    reset: () => {
-      setAccountUuid("");
-      setDeviceId("");
-    },
+    reset,
     fields: enabled ? (
       <FieldStack>
         <Field
@@ -1088,12 +1089,13 @@ export function ReplaceKeyDialog({
   const [key, setKey] = useState("");
   const { config } = state;
   const claude = useClaudeIdentityFields(config.provider);
+  const resetIdentity = claude.reset;
   useEffect(() => {
     if (!open) {
       setKey("");
-      claude.reset();
+      resetIdentity();
     }
-  }, [open]);
+  }, [open, resetIdentity]);
   return (
     <FormDialog
       open={open}

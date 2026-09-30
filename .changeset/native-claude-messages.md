@@ -15,3 +15,5 @@ Support native Claude Messages with separate encrypted Anthropic API-key and Cla
 Pin the Claude subscription client identity headers, persist account/device metadata with encrypted credentials, and add request-scoped attribution. Existing token-only connections require replacement with identity metadata. The captured billing checksum remains unverified and is not replayed.
 
 Preserve Claude session identity across worker turns and recovery while keeping prompt lineage scoped to each run.
+
+Admit organization Claude models through session creation and lock their correct connection kind. Preserve Claude provider labels in the client catalog. Project initial system/developer instructions into Anthropic’s top-level system field so full agent sessions with skill instructions execute successfully.
