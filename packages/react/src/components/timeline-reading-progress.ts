@@ -1,5 +1,6 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { TimelineGroup } from "../timeline/types";
+import { timelineHasReader } from "./timeline-anchor";
 
 /**
  * Settlement may compact history, but cannot remove prose beneath a reader.
@@ -7,11 +8,16 @@ import type { TimelineGroup } from "../timeline/types";
  * settled history never expands it. An explicit work toggle or tip return ends
  * the protection. Keeping the original sibling keys also preserves selection.
  */
-export function useReadingProgress(projected: TimelineGroup[], pinned: boolean) {
+export function useReadingProgress(
+  projected: TimelineGroup[],
+  pinned: boolean,
+  scroller: HTMLElement | null,
+) {
+  const following = pinned && !timelineHasReader(scroller);
   const previous = useRef<TimelineGroup[]>([]);
   const [released, setReleased] = useState<ReadonlySet<string>>(() => new Set());
   const groups = useMemo(() => {
-    if (pinned) return projected;
+    if (following) return projected;
     const key = (group: TimelineGroup) => (group.kind === "item" ? group.item.id : group.id);
     const visible = new Set(previous.current.map(key));
     const retained = new Map<string, TimelineGroup>();
@@ -52,11 +58,11 @@ export function useReadingProgress(projected: TimelineGroup[], pinned: boolean) 
       ...compact.flatMap((group) => [...(before.get(key(group)) ?? []), group]),
       ...(before.get(null) ?? []),
     ];
-  }, [projected, pinned, released]);
+  }, [projected, following, released]);
   useLayoutEffect(() => {
     previous.current = groups;
-    if (pinned && released.size) setReleased(new Set());
-  }, [groups, pinned, released]);
+    if (following && released.size) setReleased(new Set());
+  }, [groups, following, released]);
   const release = useCallback(
     (id: string | null) => {
       if (
