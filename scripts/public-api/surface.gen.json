@@ -13934,7 +13934,7 @@
         "$.entry.relationships[]": "ref(KnowledgeEntryRelationship)",
         "$.entry.source": "ref(KnowledgeEntrySource)?",
         "$.entry.title": "string!",
-        "$.entryId": "string!",
+        "$.entryId": "string?",
         "$.expectedVersion": "integer!",
         "$.operationId": "string!",
         "$.scope": "ref(KnowledgeEntryScope)?"
