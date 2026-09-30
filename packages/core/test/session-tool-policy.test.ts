@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   defaultSessionMcpServerIds,
   resolveSessionToolPolicy,
+  resolveTurnToolPolicy,
   type SessionToolPolicyInput,
 } from "../src/domain/session-tool-policy";
 import type { ToolRef } from "@opengeni/contracts";
@@ -11,6 +12,71 @@ const mcp = (id: string, optional?: boolean, eager?: boolean): ToolRef => ({
   id,
   ...(optional ? { optional: true } : {}),
   ...(eager ? { eager: true } : {}),
+});
+
+test("ordinary turn projections and execution retain session refs, including optional/eager", () => {
+  for (const mode of ["explicit", "inherited"] as const) {
+    for (const tools of [[], [mcp("other")]]) {
+      const input = {
+        toolPolicy: { mode, inheritedFromSessionId: null },
+        session: { tools: [mcp("attached", true, true)] },
+        turn: { tools, metadata: {} },
+        availableMcpServerIds: ["attached", "other"],
+      };
+      expect(resolveTurnToolPolicy(input)).toEqual(
+        resolveSessionToolPolicy({ ...input, sessionTools: input.session.tools }),
+      );
+      expect(resolveTurnToolPolicy(input).toolRefs).toEqual([mcp("attached", true, true)]);
+    }
+  }
+});
+
+test("ordinary follow-ups resolve current defaults and exclusions without widening", () => {
+  const input = {
+    toolPolicy: {
+      mode: "workspace_default" as const,
+      inheritedFromSessionId: null,
+      excludedMcpServerIds: ["excluded"],
+    },
+    session: { tools: [mcp("attached", true, true), mcp("removed")] },
+    turn: { tools: [], metadata: {} },
+    availableMcpServerIds: ["attached", "default", "excluded", "unselected", "opengeni"],
+    defaultMcpServerIds: ["default", "excluded"],
+  };
+  const effective = resolveTurnToolPolicy(input);
+  expect(effective).toEqual(
+    resolveSessionToolPolicy({ ...input, sessionTools: input.session.tools }),
+  );
+  expect(effective.toolRefs).toEqual([
+    mcp("attached", true, true),
+    mcp("default", true),
+    mcp("opengeni"),
+  ]);
+  expect(effective.effectivePolicy.droppedIds).toEqual(["removed"]);
+});
+
+test("scheduled selections stay frozen and an empty scheduled override never inherits", () => {
+  const input = {
+    toolPolicy: { mode: "workspace_default" as const, inheritedFromSessionId: null },
+    session: { tools: [mcp("session", true, true)] },
+    availableMcpServerIds: ["session", "scheduled", "new"],
+    defaultMcpServerIds: ["new"],
+  };
+  expect(
+    resolveTurnToolPolicy({
+      ...input,
+      turn: {
+        tools: [mcp("scheduled", true, true)],
+        metadata: { scheduledEffectiveMcpServerIds: ["scheduled", "removed"] },
+      },
+    }).toolRefs,
+  ).toEqual([mcp("scheduled", true, true)]);
+  expect(
+    resolveTurnToolPolicy({
+      ...input,
+      turn: { tools: [], metadata: { scheduledEffectiveMcpServerIds: [] } },
+    }).toolRefs,
+  ).toEqual([]);
 });
 
 function resolve(overrides: Partial<SessionToolPolicyInput> = {}) {

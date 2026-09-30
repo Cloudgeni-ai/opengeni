@@ -4,10 +4,7 @@
 
 ## Navigation
 
-1. Read §2–4, §6.
-2. **Subsystems:** §13 sources.
-3. **Behavior:** source links.
-4. **Stale boundaries:** update per §14.
+Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
@@ -22,21 +19,27 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
 NATS transports reconstructible events. The API authorizes; workers execute.
 
-External users require live membership. `asUser()` supplies identity; labels do
-not. Visibility differs from `agentAccess`. Personal Knowledge follows the
-verified active-turn user; task notes coordinate temporarily. Linking never
-merges users. See [product integration](product-integration.md),
+External users require live membership; `asUser()` supplies identity, labels do
+not. Visibility differs from `agentAccess`; Personal Knowledge follows the
+verified active-turn user. Task notes coordinate; linking never merges users.
+[Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
-[Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal deletes the scoped registry head and revisions through exact
-approval and Learning enforcement.
-Accepted conversation context remains unchanged.
+[Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
+Skill removal deletes scoped heads/revisions with exact approval and Learning
+enforcement, preserving conversation context.
 
 Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors but grant no capabilities or credentials.
 
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+
+[`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
+owns effective turn refs: ordinary work uses session policy; scheduled work
+retains its frozen selection. Credential-provider targeting and MCP preparation
+consume those execution refs, never the queue's omitted-tools empty array.
+Connection-backed MCPs remain exclusively native-authenticated and are excluded
+from provider targeting and header application, even for historical work.
 
 ---
 

@@ -69,7 +69,8 @@ import {
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
-  resolveSessionToolPolicy,
+  resolveTurnToolPolicy,
+  scheduledTurnMcpServerIds,
   hasPermission,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
@@ -223,32 +224,20 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   // sessions follow the current configured MCP set,
   // while explicit, inherited-fixed, and legacy sessions remain narrowed
   // to their stored materialized allow-list.
-  const scheduledEffectiveMcpServerIds = (() => {
-    const value =
-      turn.metadata && typeof turn.metadata === "object" && !Array.isArray(turn.metadata)
-        ? (turn.metadata as Record<string, unknown>).scheduledEffectiveMcpServerIds
-        : null;
-    return Array.isArray(value) && value.every((id) => typeof id === "string")
-      ? [...new Set(value)].sort()
-      : null;
-  })();
-  const currentMcpServerIds = new Set(runSettings.mcpServers.map((server) => server.id));
-  const resolvedToolPolicy = resolveSessionToolPolicy({
+  const resolvedToolPolicy = resolveTurnToolPolicy({
     toolPolicy: session.toolPolicy,
-    sessionTools: scheduledEffectiveMcpServerIds ? turn.tools : session.tools,
-    availableMcpServerIds: scheduledEffectiveMcpServerIds
-      ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
-      : [...currentMcpServerIds],
+    session,
+    turn,
+    availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
     defaultMcpServerIds:
-      scheduledEffectiveMcpServerIds ??
-      (session.toolPolicy.mode === "workspace_default"
+      scheduledTurnMcpServerIds(turn) === null && session.toolPolicy.mode === "workspace_default"
         ? await workspaceSessionToolPolicyDefaultServerIds(
             db,
             input.workspaceId,
             capabilitySettings,
             fileAuthoritySubjectId ?? undefined,
           )
-        : []),
+        : [],
   });
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
@@ -1110,7 +1099,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionAttachedRemoteMcpTargets: selectedSessionRemoteMcpTargets(
           githubRestMcp.settings,
           session.mcpServers ?? [],
-          turn.tools ?? [],
+          githubRestMcp.tools,
           localMcpServers,
         ),
         ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
