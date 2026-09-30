@@ -2341,6 +2341,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
         const selectedModel = "gpt-5.6-terra";
         await page.getByTestId(`model-picker-choice-${selectedModel}`).click();
+        expect(
+          await page.getByRole("dialog", { name: "Model and effort", exact: true }).isVisible(),
+        ).toBe(true);
+        await page.keyboard.press("Escape");
         await page
           .getByRole("dialog", { name: "Model and effort", exact: true })
           .waitFor({ state: "detached" });
