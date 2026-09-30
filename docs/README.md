@@ -42,6 +42,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Jev-backed `code_search` tool and Jev settings | `docs/code-search.md` | Architecture, deployment notes, and the `@opengeni/jev` README should link instead of restating the switches or the sandbox command contract. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
+| Agent behavior eval (real model, manual/nightly) | `scripts/agent-behavior-eval/README.md` | Scenario scoring, variants, and the prompt/agent-configuration release gate; not a CI lane. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
 | Personal GitHub identity, repository authority, local setup, and propagation | `docs/personal-github.md` | `docs/github-app.md`, `docs/deployment.md`, API/runtime/UI copy should link instead of restating token custody or grant semantics. |
