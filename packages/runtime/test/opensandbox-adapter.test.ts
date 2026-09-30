@@ -112,6 +112,27 @@ class FakeOpenSandbox {
         handlers: any,
       ) {
         self.executedCommands.push(command);
+        if (command.includes("__OPENGENI_CONFINED_READ_OK__")) {
+          if (!self.sandboxExists) throw self.notFound();
+          const root = JSON.parse(/root = ("[^"]*")/u.exec(command)![1]!);
+          const relative = JSON.parse(/path = ("[^"]*")/u.exec(command)![1]!);
+          const limit = Number(/limit = (\d+)/u.exec(command)![1]);
+          const file = self.files.get(`${root}/${relative}`);
+          const bytes = file?.data?.slice(0, limit);
+          await handlers?.onInit?.({ id: "read-1", timestamp: Date.now() });
+          if (bytes && !self.filesystemReadError)
+            await handlers?.onStdout?.({
+              text: `__OPENGENI_CONFINED_READ_OK__${Buffer.from(bytes).toString("base64")}__OPENGENI_CONFINED_READ_END__`,
+              timestamp: Date.now(),
+            });
+          return {
+            id: "read-1",
+            logs: { stdout: [], stderr: [] },
+            result: [],
+            complete: { timestamp: Date.now(), executionTimeMs: 1 },
+            exitCode: bytes && !self.filesystemReadError ? 0 : 66,
+          };
+        }
         const cwd = options?.workingDirectory;
         if (
           cwd &&

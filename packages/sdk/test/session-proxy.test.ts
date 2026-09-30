@@ -515,4 +515,93 @@ describe("createSessionProxyHandler", () => {
       ).status,
     ).toBe(404);
   });
+
+  test("sandbox link downloads forward only the file read, unless disabled", async () => {
+    const { upstream, browser, handler } = setup({ sandboxFiles: true });
+    await browser.fsRead(WORKSPACE_ID, SESSION_ID, {
+      path: "reports/weekly.pdf",
+      encoding: "base64",
+      maxBytes: 1024,
+      workspaceOnly: true,
+    });
+    expect(upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read-workspace`,
+    );
+    expect(upstream.requests.at(-1)!.body).toEqual({
+      path: "reports/weekly.pdf",
+      encoding: "base64",
+      maxBytes: 1024,
+      workspaceOnly: true,
+    });
+    // A browser cannot pick another compute route or smuggle extra fields.
+    const smuggled = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: "a.txt", route: { sandboxId: "other" }, extra: true }),
+        },
+      ),
+    );
+    expect(smuggled.status).toBe(200);
+    expect(upstream.requests.at(-1)!.body).toEqual({ path: "a.txt", workspaceOnly: true });
+    const count = upstream.requests.length;
+    for (const body of [
+      {},
+      { path: "a.txt", encoding: "hex" },
+      { path: "a", maxBytes: "1" },
+      { path: "a", maxBytes: 0 },
+      { path: "a", maxBytes: -1 },
+      { path: "a", maxBytes: 26214401 },
+    ]) {
+      const rejected = await handler(
+        new Request(
+          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/read`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        ),
+      );
+      expect(rejected.status).toBe(400);
+    }
+    // Writes stay outside the conversation allowlist.
+    expect(
+      (
+        await rejection(
+          browser.fsWrite(WORKSPACE_ID, SESSION_ID, { path: "a.txt", content: "x" } as never),
+        )
+      ).status,
+    ).toBe(404);
+    expect(upstream.requests).toHaveLength(count);
+    const off = setup({ sandboxFiles: false });
+    expect(
+      (await rejection(off.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a.txt" } as never)))
+        .status,
+    ).toBe(404);
+    expect(off.upstream.requests).toHaveLength(0);
+  });
+
+  test("sandbox reads are opt-in independently of file-id downloads and pin workspaceOnly", async () => {
+    for (const options of [{}, { files: false }]) {
+      const off = setup(options);
+      expect(
+        (await rejection(off.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a" }))).status,
+      ).toBe(404);
+      expect(off.upstream.requests).toHaveLength(0);
+      expect((await off.browser.getClientConfig()).sandboxFiles).toBe(false);
+    }
+    const enabled = setup({ sandboxFiles: true });
+    await enabled.browser.fsRead(WORKSPACE_ID, SESSION_ID, { path: "src/a", workspaceOnly: false });
+    expect(enabled.upstream.requests.at(-1)!.body).toEqual({ path: "src/a", workspaceOnly: true });
+    expect((await enabled.browser.getClientConfig()).sandboxFiles).toBe(true);
+    const defaults = setup();
+    await defaults.browser.createFileDownloadUrl(
+      WORKSPACE_ID,
+      "33333333-3333-4333-8333-333333333333",
+    );
+    expect(defaults.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
+  });
 });

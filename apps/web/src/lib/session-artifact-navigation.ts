@@ -1,3 +1,4 @@
+import { openGeniConsolePath, type OpenGeniLinkTarget } from "@opengeni/sdk";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const EDITABLE_ID = /^[0-9a-f]{32}$/iu;
 
@@ -28,4 +29,14 @@ export function sessionArtifactFromHref(href: string, origin: string, workspaceI
   } catch {
     return null;
   }
+}
+
+/**
+ * In the console, agent-authored object links keep their own console routes.
+ * `ArtifactLinkBoundary` still intercepts them for the session dock.
+ */
+export function consoleLinkResolver(target: OpenGeniLinkTarget): { href: string } | null {
+  if (target.kind === "sandbox-file" || target.workspaceId === null) return null;
+  const href = openGeniConsolePath(target, target.workspaceId);
+  return href ? { href } : null;
 }

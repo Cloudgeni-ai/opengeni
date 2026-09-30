@@ -188,6 +188,15 @@ export type {
   SessionProxyResolution,
   SessionProxyResolve,
 } from "./session-proxy";
+export {
+  openGeniConsolePath,
+  parseOpenGeniLink,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
+  parseRetainedFileReference,
+  parseSandboxLink,
+} from "./message-links";
+export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
