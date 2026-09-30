@@ -20,8 +20,25 @@ import {
   type LeadItem,
   type PassageItem,
 } from "./judge";
-import { chooseDefinitions, extractLeads, locateDefinitions, type LeadCandidate } from "./leads";
-import { packBody, renderFooter, type EvidencePassage } from "./pack";
+import {
+  chooseDefinitions,
+  extractLeads,
+  locateDefinitions,
+  type DefinitionHit,
+  type LeadCandidate,
+} from "./leads";
+import {
+  complementRanges,
+  fmtRanges,
+  inclusionRel,
+  isImportOnly,
+  mergeRanges,
+  packBody,
+  renderFooter,
+  type CoverageFile,
+  type EvidencePassage,
+  type PackBody,
+} from "./pack";
 import {
   bestHitLines,
   excludeArgs,
@@ -32,12 +49,16 @@ import {
   type RecallResult,
 } from "./recall";
 import { mapLimit, READ_CONCURRENCY, WorkspaceSession } from "./session";
+import { locateUsages, specificName, symbolCandidates } from "./symbols";
+import { keywordNotes } from "./vocab";
 import {
   contentTerms,
   escapeRegex,
   estTokens,
   fmtK,
+  isChangelogPath,
   isDocPath,
+  isTestPath,
   keywordVariants,
   overlap,
   questionMentionsHistory,
@@ -47,20 +68,24 @@ import {
   trimAround,
 } from "./text";
 import {
-  buildFileWindows,
   definitionWindow,
+  enclosingWindow,
   keywordRegex,
   keywordsInRange,
   langOf,
+  outlineRanges,
+  rankFileWindows,
   renderLines,
+  scoreWindow,
   splitLines,
+  tileFile,
   type RenderOpts,
   type Window,
 } from "./windows";
 import type { CodeSearchWorkspace } from "./workspace";
 
-/** The validated research version this engine ports (ranking, thresholds and defaults are unchanged). */
-export const CODE_SEARCH_ENGINE_VERSION = "scout-0.3.1";
+/** Engine version: scout-0.3.1 (the validated research port) plus symbol discovery, tiling, callers and the adaptive, gap-reporting pack. */
+export const CODE_SEARCH_ENGINE_VERSION = "scout-0.4.0";
 export const CODE_SEARCH_DEFAULT_BUDGET_TOKENS = 12_000;
 
 export interface CodeSearchInput {
@@ -261,7 +286,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const t0 = performance.now();
   const stageMs: Record<string, number> = {};
   const mark = (stage: string, since: number) => {
-    stageMs[stage] = Math.round(performance.now() - since);
+    stageMs[stage] = (stageMs[stage] ?? 0) + Math.round(performance.now() - since);
   };
   const emit = (stage: string, data: Record<string, unknown>) => {
     try {
@@ -279,6 +304,10 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   const ctx: JudgeContext = { question: o.question.trim(), subQuestions };
   const budgetTokens = o.budgetTokens ?? CODE_SEARCH_DEFAULT_BUDGET_TOKENS;
   const thr = cfg.thresholds;
+  const allowTests = questionMentionsTests(ctx.question);
+  const exArgs = excludeArgs(cfg);
+  /** What each cap cut, one pre-rendered line per cap, for the footer. */
+  const cuts: string[] = [];
   emit("start", {
     version: CODE_SEARCH_ENGINE_VERSION,
     question: ctx.question,
@@ -300,7 +329,8 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     config: cfg,
   });
   mark("recall", ts);
-  const kws = rec.keywords;
+  const kws = [...rec.keywords];
+  const userKeywords = rec.keywords.length;
   emit("recall", {
     ms: rec.ms,
     totalFiles: rec.totalFiles,
@@ -329,12 +359,20 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       test: c.isTest,
     })),
   });
+  if (rec.scoredFiles > rec.candidates.length) {
+    cuts.push(
+      `recall: ${rec.scoredFiles} files matched the keywords; only the best ${rec.candidates.length} by keyword score were triaged (the other ${rec.scoredFiles - rec.candidates.length} match fewer or more common keywords).`,
+    );
+  }
 
   // ---- 2. wave 1: file triage
   ts = performance.now();
-  const maxLex = rec.candidates[0]?.lexScore || 1;
-  const fileIds = rec.candidates.map((_, i) => `f${String(i).padStart(3, "0")}`);
-  const fileItems: FileItem[] = rec.candidates.map((c, i) => {
+  const cands: FileCandidate[] = [...rec.candidates];
+  const byPath = new Map(cands.map((c, i) => [c.path, i]));
+  const fileIds = cands.map((_, i) => `f${String(i).padStart(3, "0")}`);
+  const maxLex = cands[0]?.lexScore || 1;
+  const fileItem = (i: number): FileItem => {
+    const c = cands[i]!;
     const hits = bestHitLines(c, kws, cfg.wave1.hitLinesPerFile);
     const needles = Object.keys(c.kwHits).flatMap((k) => kws[Number(k)]!.variants);
     const lines = hits.map(
@@ -344,25 +382,37 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       id: fileIds[i]!,
       path: c.path,
       descriptor: [c.path, ...lines].join("\n"),
-      lex: c.lexScore / maxLex,
+      lex: Math.min(1, c.lexScore / maxLex),
     };
-  });
-  const fileScores = await judge.scoreFiles(fileItems, ctx);
-  const { selected, ranked } = selectFiles(rec.candidates, fileScores, fileIds, thr.T1, cfg);
+  };
+  const fileScores = await judge.scoreFiles(
+    cands.map((_, i) => fileItem(i)),
+    ctx,
+  );
+  const pOf = (i: number) => fileScores.get(fileIds[i]!) ?? 0;
+  const first = selectFiles(cands, fileScores, fileIds, thr.T1, cfg);
+  const selected = [...first.selected];
+  const ranked = [...first.ranked];
   mark("wave1", ts);
   emit("wave1", {
     T1: thr.T1,
-    scores: rec.candidates.map((c, i) => ({
+    scores: cands.map((c, i) => ({
       path: c.path,
       p: round(fileScores.get(fileIds[i]!) ?? Number.NaN),
-      lex: round(fileItems[i]!.lex),
+      lex: round(c.lexScore / maxLex),
     })),
-    selected: selected.map((i) => rec.candidates[i]!.path),
+    selected: selected.map((i) => cands[i]!.path),
   });
+  const triageCut = ranked.filter((i) => !selected.includes(i) && pOf(i) >= thr.T1);
+  if (triageCut.length) {
+    cuts.push(
+      `file triage: ${triageCut.length} more file${triageCut.length === 1 ? "" : "s"} passed (limit ${cfg.wave1.maxFiles}): ${triageCut
+        .map((i) => `${cands[i]!.path} (${r2(pOf(i))})`)
+        .join(", ")}`,
+    );
+  }
 
-  // ---- 3. wave 2: windows + verification
-  ts = performance.now();
-  // file contents are read in parallel up front; the windowing below is synchronous
+  // file contents are read in parallel as needed; windowing is synchronous
   const fileLines = new Map<string, string[]>();
   const loadLines = async (paths: string[]) => {
     const missing = [...new Set(paths)].filter((p) => !fileLines.has(p));
@@ -376,36 +426,292 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     });
   };
   const readLines = (path: string): string[] => fileLines.get(path) ?? [];
-  await loadLines(selected.map((i) => rec.candidates[i]!.path));
-  const kwNeedles = kws
-    .filter((k) => k.idf > 0)
-    .map((k) => keywordRegex(k))
-    .filter((re): re is RegExp => re !== null);
-  const renderFor = (path: string, needles: RegExp[] = kwNeedles): RenderOpts => ({
+  await loadLines(selected.map((i) => cands[i]!.path));
+
+  // words already searched (keywords, variants, fragments) and the question's words
+  const searched = new Set<string>();
+  for (const k of rec.keywords) {
+    for (const v of [...k.variants, ...k.fragments.flatMap((f) => keywordVariants(f))]) {
+      searched.add(v.toLowerCase());
+      searched.add(splitWords(v).join(" "));
+    }
+  }
+  const qWords = new Set(
+    [
+      ...splitWords(ctx.question + " " + subQuestions.join(" ")),
+      ...rec.keywords.flatMap((k) => splitWords(k.raw)),
+    ].filter((w) => w.length >= 3 && !STOPWORDS.has(w)),
+  );
+  const nFiles = Math.max(rec.totalFiles, 1);
+
+  // ---- 2b. symbol discovery: identifiers of the selected files, judged, then their definitions and usages
+  ts = performance.now();
+  const symbolRounds: Array<Record<string, unknown>> = [];
+  const symbolAdded: Array<{ path: string; p: number; via: string[] }> = [];
+  const followedSymbols: string[] = [];
+  if (cfg.symbols.enabled) {
+    const judged = new Set<string>();
+    // identifiers come from relevant code files (not docs, release notes or unrelated tests)
+    const codeFile = (i: number) =>
+      !isDocPath(cands[i]!.path) &&
+      !isChangelogPath(cands[i]!.path) &&
+      (allowTests || !cands[i]!.isTest);
+    let sources = selected.filter((i) => pOf(i) >= thr.T1 && codeFile(i));
+    if (!sources.length) sources = selected.filter(codeFile).slice(0, 3);
+    for (let round_ = 1; round_ <= cfg.symbols.maxRounds && sources.length; round_++) {
+      const srcFiles = sources.map((i) => ({
+        path: cands[i]!.path,
+        lines: readLines(cands[i]!.path),
+        p: pOf(i),
+        hitLines: [...cands[i]!.hitLines.keys()],
+      }));
+      const exclude = new Set([...searched, ...judged]);
+      const all = symbolCandidates(srcFiles, exclude, qWords);
+      const judgedNow = all.slice(0, cfg.symbols.maxJudged);
+      judgedNow.forEach((c) => judged.add(c.name));
+      if (all.length > judgedNow.length) {
+        cuts.push(
+          `symbols round ${round_}: judged the ${judgedNow.length} strongest of ${all.length} identifiers in ${srcFiles.length} files; not judged: ${all
+            .slice(judgedNow.length, judgedNow.length + 12)
+            .map((c) => c.name)
+            .join(", ")}${all.length - judgedNow.length > 12 ? ", ..." : ""}`,
+        );
+      }
+      const maxW = Math.max(...judgedNow.map((c) => c.weight), 1e-9);
+      const items: LeadItem[] = judgedNow.map((c, j) => ({
+        id: `y${round_}${String(j).padStart(3, "0")}`,
+        name: c.name,
+        seenAt: `${c.seenAt.path}:${c.seenAt.line}`,
+        context: c.context,
+        lex: c.weight / maxW,
+      }));
+      const symScores = await judge.scoreSymbols(items, ctx);
+      const passing = items
+        .map((it) => ({ it, p: symScores.get(it.id) ?? 0 }))
+        .filter((x) => x.p >= cfg.symbols.threshold)
+        .sort((a, b) => b.p - a.p || (a.it.id < b.it.id ? -1 : 1));
+      const chosen = passing.slice(0, cfg.symbols.maxFollowed);
+      if (passing.length > chosen.length) {
+        cuts.push(
+          `symbols round ${round_}: followed ${chosen.length} of ${passing.length} relevant identifiers; not followed: ${passing
+            .slice(chosen.length)
+            .map((x) => `${x.it.name} (${r2(x.p)})`)
+            .join(", ")}`,
+        );
+      }
+      const roundTrace: Record<string, unknown> = {
+        round: round_,
+        sources: srcFiles.map((f) => f.path),
+        candidates: all.length,
+        judged: items.map((it) => ({ name: it.name, p: round(symScores.get(it.id) ?? Number.NaN), ctx: it.context })),
+        chosen: chosen.map((x) => x.it.name),
+      };
+      symbolRounds.push(roundTrace);
+      if (!chosen.length) break;
+      const usage = await locateUsages(
+        session,
+        chosen.map((x) => x.it.name),
+        cfg,
+        exArgs,
+        allowTests,
+      );
+      if (usage.cappedFiles)
+        cuts.push(
+          `symbols round ${round_}: usage search kept at most 30 matching lines per file (${usage.cappedFiles} file${usage.cappedFiles === 1 ? "" : "s"} had more).`,
+        );
+      const fileGain = new Map<number, { score: number; via: Set<string> }>();
+      const generic: string[] = [];
+      for (const x of chosen) {
+        const name = x.it.name;
+        followedSymbols.push(name);
+        const files = usage.files.get(name) ?? new Set<string>();
+        const isGeneric = files.size > cfg.symbols.maxRefFiles;
+        if (isGeneric) generic.push(`${name} (${files.size} files)`);
+        const hits = usage.hits.filter((h) => h.name === name && (!isGeneric || h.kind === "def"));
+        if (!hits.length) continue;
+        const kwIndex = kws.length;
+        const esc = escapeRegex(name);
+        kws.push({
+          index: kwIndex,
+          raw: name,
+          variants: [name],
+          mode: "phrase",
+          pattern: `\\b${esc}\\b`,
+          rgPattern: `(?-u:\\b)${esc}(?-u:\\b)`,
+          df: files.size,
+          pathDf: 0,
+          hitLines: hits.length,
+          idf: idfOf(files.size, nFiles),
+          fragments: [],
+          symbol: true,
+        });
+        for (const h of hits) {
+          let ci = byPath.get(h.path);
+          if (ci === undefined) {
+            ci = cands.length;
+            cands.push({
+              path: h.path,
+              lexScore: 0,
+              kwHits: {},
+              pathKws: [],
+              hitLines: new Map(),
+              isTest: isTestPath(h.path),
+              isDoc: isDocPath(h.path),
+            });
+            byPath.set(h.path, ci);
+            fileIds.push(`s${round_}${String(ci).padStart(4, "0")}`);
+          }
+          const c = cands[ci]!;
+          c.kwHits[kwIndex] = (c.kwHits[kwIndex] ?? 0) + 1;
+          let hl = c.hitLines.get(h.line);
+          if (!hl) c.hitLines.set(h.line, (hl = { line: h.line, text: h.text, kws: [] }));
+          if (!hl.kws.includes(kwIndex)) hl.kws.push(kwIndex);
+          if (!selected.includes(ci)) {
+            const g = fileGain.get(ci) ?? { score: 0, via: new Set<string>() };
+            if (!g.via.has(name)) g.score += x.p * (h.kind === "def" ? 1.5 : 1);
+            g.via.add(name);
+            fileGain.set(ci, g);
+          }
+        }
+      }
+      if (generic.length)
+        cuts.push(
+          `symbols round ${round_}: used in too many files to follow every usage (definitions only): ${generic.join(", ")}`,
+        );
+      // triage the files the identifiers lead to (new files, and candidates that gained symbol hits)
+      const gains = [...fileGain.entries()]
+        .filter(([ci]) => !cands[ci]!.isTest || allowTests)
+        .sort((a, b) => b[1].score - a[1].score || (cands[a[0]]!.path < cands[b[0]]!.path ? -1 : 1));
+      const toTriage = gains.slice(0, cfg.symbols.maxNewFilesTriaged);
+      if (gains.length > toTriage.length) {
+        cuts.push(
+          `symbols round ${round_}: triaged ${toTriage.length} of ${gains.length} files that use the followed identifiers; not triaged: ${gains
+            .slice(toTriage.length, toTriage.length + 12)
+            .map(([ci]) => cands[ci]!.path)
+            .join(", ")}${gains.length - toTriage.length > 12 ? ", ..." : ""}`,
+        );
+      }
+      for (const [ci, g] of toTriage) cands[ci]!.lexScore += g.score;
+      const newScores = await judge.scoreFiles(
+        toTriage.map(([ci]) => fileItem(ci)),
+        ctx,
+      );
+      for (const [id, p] of newScores) fileScores.set(id, p);
+      const passed = toTriage
+        .map(([ci, g]) => ({ ci, g, p: pOf(ci) }))
+        .filter((x) => x.p >= thr.T1)
+        .sort((a, b) => b.p - a.p || b.g.score - a.g.score);
+      const take = passed.slice(0, cfg.symbols.maxNewFilesSelected);
+      if (passed.length > take.length) {
+        cuts.push(
+          `symbols round ${round_}: selected ${take.length} of ${passed.length} relevant files the identifiers lead to; not selected: ${passed
+            .slice(take.length)
+            .map((x) => `${cands[x.ci]!.path} (${r2(x.p)})`)
+            .join(", ")}`,
+        );
+      }
+      for (const x of take) {
+        selected.push(x.ci);
+        symbolAdded.push({ path: cands[x.ci]!.path, p: round(x.p), via: [...x.g.via] });
+      }
+      roundTrace.triaged = toTriage.map(([ci, g]) => ({
+        path: cands[ci]!.path,
+        p: round(pOf(ci)),
+        via: [...g.via],
+      }));
+      roundTrace.added = take.map((x) => cands[x.ci]!.path);
+      await loadLines(take.map((x) => cands[x.ci]!.path));
+      sources = take.map((x) => x.ci).filter(codeFile);
+    }
+    // ranked (for "more candidates") includes the newly triaged files by score
+    for (let i = 0; i < cands.length; i++) if (!ranked.includes(i) && fileScores.has(fileIds[i]!)) ranked.push(i);
+    ranked.sort((a, b) => pOf(b) - pOf(a) || cands[b]!.lexScore - cands[a]!.lexScore || a - b);
+  }
+  mark("symbols", ts);
+  emit("symbols", {
+    rounds: symbolRounds,
+    added: symbolAdded,
+    selected: selected.map((i) => cands[i]!.path),
+  });
+
+  // ---- 3. wave 2: windows + verification
+  ts = performance.now();
+  const kwNeedles = () =>
+    kws
+      .filter((k) => k.idf > 0)
+      .map((k) => keywordRegex(k))
+      .filter((re): re is RegExp => re !== null);
+  const needlesNow = kwNeedles();
+  const renderFor = (path: string, needles: RegExp[] = needlesNow): RenderOpts => ({
     maxLineChars: isDocPath(path) ? cfg.wave2.maxProseLineChars : cfg.wave2.maxLineChars,
     needles,
   });
+  // the top relevant small files are tiled whole: every declaration is judged, not only keyword windows
+  const tiled = new Set(
+    selected
+      .filter((i) => pOf(i) >= thr.T1 && readLines(cands[i]!.path).length <= cfg.wave2.tileMaxLines)
+      .sort((a, b) => pOf(b) - pOf(a))
+      .slice(0, cfg.wave2.tileMaxFiles),
+  );
+  const windowCuts: string[] = [];
   const perFileWindows: Window[][] = selected.map((i) => {
-    const c = rec.candidates[i]!;
+    const c = cands[i]!;
     const lines = readLines(c.path);
     const hits = [...c.hitLines.values()];
-    return buildFileWindows(lines, hits, kws, langOf(c.path), cfg, renderFor(c.path));
+    if (tiled.has(i)) {
+      const tiles = tileFile(lines, hits.map((h) => h.line), langOf(c.path), cfg, renderFor(c.path));
+      for (const t of tiles) t.score = scoreWindow(lines, t, kws, cfg.recall.hitCountWeight);
+      const keep = [...tiles]
+        .sort((a, b) => b.score - a.score || a.start - b.start)
+        .slice(0, cfg.wave2.tileMaxWindows);
+      if (keep.length < tiles.length)
+        windowCuts.push(
+          `${c.path}: ${fmtRanges(tiles.filter((t) => !keep.includes(t)).map((t) => [t.start, t.end]))}`,
+        );
+      return keep;
+    }
+    const all = rankFileWindows(lines, hits, kws, langOf(c.path), cfg, renderFor(c.path));
+    const keep = all.slice(
+      0,
+      pOf(i) >= thr.T1 ? cfg.wave2.windowsPerRelevantFile : cfg.wave2.windowsPerFile,
+    );
+    if (keep.length < all.length)
+      windowCuts.push(
+        `${c.path}: ${fmtRanges(mergeRanges(all.slice(keep.length).map((w) => [w.start, w.end])))}`,
+      );
+    return keep;
   });
+  if (windowCuts.length)
+    cuts.push(
+      `regions per file (limit ${cfg.wave2.windowsPerFile}, ${cfg.wave2.windowsPerRelevantFile} in relevant files, ${cfg.wave2.tileMaxWindows} in small relevant files read whole): not checked ${windowCuts.join("; ")}`,
+    );
   const capped = capPassages(perFileWindows, cfg.wave2.maxPassages);
+  const passageCut = perFileWindows.flatMap((ws, f) =>
+    ws.filter((w) => !capped[f]!.includes(w)).map((w) => `${cands[selected[f]!]!.path}:${w.start}-${w.end}`),
+  );
+  if (passageCut.length)
+    cuts.push(`passages checked (limit ${cfg.wave2.maxPassages}): not checked ${passageCut.join(", ")}`);
   const qTerms = contentTerms(ctx.question);
   const subTerms = subQuestions.map((s) => contentTerms(s));
   const evidence: EvidencePassage[] = [];
   const passageItems: PassageItem[] = [];
   let pid = 0;
-  const makePassage = (path: string, w: Window, fileNorm: number, lead?: string) => {
+  const makePassage = (
+    path: string,
+    w: Window,
+    fileNorm: number,
+    extra: { lead?: string; caller?: string } = {},
+  ) => {
     const lines = readLines(path);
-    const render = renderFor(path, lead ? [new RegExp(`\\b${escapeRegex(lead)}\\b`)] : kwNeedles);
+    const focus = extra.lead ?? extra.caller;
+    const render = renderFor(path, focus ? [new RegExp(`\\b${escapeRegex(focus)}\\b`)] : needlesNow);
     const text = renderLines(lines, w.start, w.end, render);
-    const raw = lines.slice(w.start - 1, w.end).join("\n");
-    const present = keywordsInRange(lines, w.start, w.end, kws);
+    const rawLines = lines.slice(w.start - 1, w.end);
+    const raw = rawLines.join("\n");
+    const present = keywordsInRange(lines, w.start, w.end, kws.slice(0, userKeywords));
     const rawTerms = new Set(contentTerms(raw));
     const id = `p${String(pid++).padStart(3, "0")}`;
-    const lex = lexicalPassageScore(raw, present, kws, qTerms, fileNorm);
+    const lex = lexicalPassageScore(raw, present, kws.slice(0, userKeywords), qTerms, fileNorm);
     const lexCov = subTerms.map((t) => overlap(t, rawTerms));
     const label =
       w.label && w.label.line < w.start ? `L${w.label.line}: ${w.label.text}` : undefined;
@@ -422,26 +728,31 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       rel: lex,
       cov: lexCov,
       lex,
-      lead,
+      lead: extra.lead,
+      caller: extra.caller,
       render,
+      importOnly: isImportOnly(rawLines),
     });
   };
   selected.forEach((ci, f) => {
-    const c = rec.candidates[ci]!;
+    const c = cands[ci]!;
     for (const w of [...capped[f]!].sort((a, b) => a.start - b.start))
-      makePassage(c.path, w, c.lexScore / maxLex);
+      makePassage(c.path, w, Math.min(1, c.lexScore / maxLex));
   });
-  const wave2Scores = await judge.scorePassages(passageItems, ctx, "wave2");
-  for (const e of evidence) {
-    const s = wave2Scores.get(e.id);
-    if (s) {
-      e.rel = s.rel;
-      e.cov = s.cov;
+  const applyScores = (scores: Map<string, { rel: number; cov: number[] }>) => {
+    for (const e of evidence) {
+      const s = scores.get(e.id);
+      if (s) {
+        e.rel = s.rel;
+        e.cov = s.cov;
+      }
     }
-  }
+  };
+  applyScores(await judge.scorePassages(passageItems, ctx, "wave2"));
   mark("wave2", ts);
   emit("wave2", {
     T2: thr.T2,
+    tiled: [...tiled].map((i) => cands[i]!.path),
     passages: evidence.map((e) => ({
       id: e.id,
       path: e.path,
@@ -452,75 +763,137 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       rel: round(e.rel),
       cov: e.cov.map(round),
       lex: round(e.lex ?? Number.NaN),
+      importOnly: e.importOnly || undefined,
     })),
   });
 
-  // ---- 4. wave 3: leads (exactly one round)
+  // ---- 4. wave 3: leads (definitions and call sites)
   ts = performance.now();
   let leadCands: LeadCandidate[] = [];
   let leadScores = new Map<string, number>();
   const chosenNames = new Set<string>();
-  if (cfg.wave3.enabled) {
-    const leadsFollowed: Array<{ name: string; score: number; def: string | null }> = [];
-    const seeds = evidence
-      .filter((e) => e.rel >= thr.T2)
-      .sort((a, b) => b.rel - a.rel)
-      .slice(0, cfg.wave3.seedPassages)
-      .map((e) => ({
-        path: e.path,
-        start: e.start,
-        lines: e.fileLines.slice(e.start - 1, e.end),
-        rel: e.rel,
-      }));
-    const searched = new Set<string>();
-    for (const k of kws) {
-      for (const v of [...k.variants, ...k.fragments.flatMap((f) => keywordVariants(f))]) {
-        searched.add(v.toLowerCase());
-        searched.add(splitWords(v).join(" "));
+  const leadIdByName = new Map<string, string>();
+  const leadsFollowed: Array<{ name: string; score: number; def: string | null }> = [];
+  const inEvidence = (path: string, line: number) =>
+    evidence.some((e) => e.path === path && line >= e.start && line <= e.end);
+  const overlapsEvidence = (path: string, w: { start: number; end: number }) =>
+    evidence.some((e) => e.path === path && !(w.end < e.start || w.start > e.end));
+  /** Windows the definitions and call sites of the named leads; returns the passages added. */
+  const followLeads = async (
+    chosen: Array<{ name: string; p: number }>,
+    defs: Map<string, DefinitionHit[]>,
+  ): Promise<number> => {
+    const before = passageItems.length;
+    for (const x of chosen) chosenNames.add(x.name);
+    await loadLines(chosen.flatMap((x) => (defs.get(x.name) ?? []).map((d) => d.path)));
+    for (const x of chosen) {
+      for (const d of defs.get(x.name) ?? []) {
+        const lines = readLines(d.path);
+        // the file could not be read as text (missing, binary, UTF-16) or changed after ripgrep saw it
+        if (d.line > lines.length) {
+          leadsFollowed.push({ name: x.name, score: x.p, def: `${d.path}:${d.line} (not in the file as read)` });
+          continue;
+        }
+        const w = definitionWindow(
+          lines,
+          d.line,
+          langOf(d.path),
+          cfg,
+          renderFor(d.path, [new RegExp(`\\b${escapeRegex(x.name)}\\b`)]),
+        );
+        const ov = overlapsEvidence(d.path, w);
+        leadsFollowed.push({ name: x.name, score: x.p, def: `${d.path}:${d.line}${ov ? " (overlaps evidence)" : ""}` });
+        if (!ov) makePassage(d.path, w, 0, { lead: x.name });
       }
     }
-    const qWords = new Set(
-      [
-        ...splitWords(ctx.question + " " + subQuestions.join(" ")),
-        ...kws.flatMap((k) => splitWords(k.raw)),
-      ].filter((w) => w.length >= 3 && !STOPWORDS.has(w)),
-    );
-    // extract generously, keep only leads whose definition exists and is not already in the evidence
-    const extracted = extractLeads(
-      seeds,
-      searched,
-      qWords,
-      Math.ceil(cfg.wave3.maxLeadCandidates * 1.5),
-    );
-    const selectedPaths = new Set(selected.map((i) => rec.candidates[i]!.path));
-    const allowTests = questionMentionsTests(ctx.question);
+    // call sites: other places that use the lead (sibling code paths that must change together)
+    const callerLeads = chosen.filter((x) => specificName(x.name));
+    if (cfg.wave3.callersPerLead > 0 && callerLeads.length) {
+      const usage = await locateUsages(session, callerLeads.map((x) => x.name), cfg, exArgs, allowTests, 12);
+      const refs = usage.hits.filter((h) => h.kind === "ref" && !inEvidence(h.path, h.line));
+      const picks: typeof refs = [];
+      for (const x of callerLeads) {
+        if ((usage.files.get(x.name)?.size ?? 0) > cfg.symbols.maxRefFiles) {
+          cuts.push(`call sites of ${x.name}: used in ${usage.files.get(x.name)!.size} files, too many to check (definition only).`);
+          continue;
+        }
+        const mine = refs
+          .filter((h) => h.name === x.name && (!isTestPath(h.path) || allowTests))
+          .sort(
+            (a, b) =>
+              Number(evidence.some((e) => e.path === b.path)) - Number(evidence.some((e) => e.path === a.path)) ||
+              (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line),
+          );
+        const perFile = new Set<string>();
+        for (const h of mine) {
+          if (picks.filter((p) => p.name === x.name).length >= cfg.wave3.callersPerLead) break;
+          if (perFile.has(h.path)) continue;
+          perFile.add(h.path);
+          picks.push(h);
+        }
+        const total = new Set(mine.map((h) => h.path)).size;
+        if (total > perFile.size)
+          cuts.push(
+            `call sites of ${x.name}: checked ${perFile.size} of ${total} files; not checked: ${[...new Set(mine.map((h) => h.path))]
+              .filter((p) => !perFile.has(p))
+              .slice(0, 10)
+              .join(", ")}${total - perFile.size > 10 ? ", ..." : ""}`,
+          );
+      }
+      await loadLines(picks.map((h) => h.path));
+      for (const h of picks) {
+        const lines = readLines(h.path);
+        if (h.line > lines.length || inEvidence(h.path, h.line)) continue;
+        const w = enclosingWindow(lines, h.line, langOf(h.path), cfg);
+        if (overlapsEvidence(h.path, w)) continue;
+        makePassage(h.path, w, 0, { caller: h.name });
+      }
+    }
+    const added = passageItems.slice(before);
+    if (added.length) applyScores(await judge.scorePassages(added, ctx, "lead_defs"));
+    return added.length;
+  };
+  let defsForLeads = new Map<string, DefinitionHit[]>();
+  if (cfg.wave3.enabled) {
+    const strong = evidence
+      .filter((e) => inclusionRel(e, cfg) >= thr.T2)
+      .sort((a, b) => b.rel - a.rel)
+      .slice(0, cfg.wave3.seedPassages);
+    // few passages passed: the best ones below the bar still name the code to follow
+    const weak =
+      strong.length < cfg.wave3.seedPassages
+        ? evidence
+            .filter((e) => !strong.includes(e) && !e.importOnly && e.rel >= cfg.wave3.seedFloor)
+            .sort((a, b) => b.rel - a.rel)
+            .slice(0, cfg.wave3.seedPassages - strong.length)
+        : [];
+    const seeds = [...strong, ...weak].map((e) => ({
+      path: e.path,
+      start: e.start,
+      lines: e.fileLines.slice(e.start - 1, e.end),
+      rel: e.rel,
+    }));
+    const leadSearched = new Set([...searched, ...followedSymbols.map((n) => n.toLowerCase())]);
+    const extracted = extractLeads(seeds, leadSearched, qWords, Math.ceil(cfg.wave3.maxLeadCandidates * 1.5));
+    const selectedPaths = new Set(selected.map((i) => cands[i]!.path));
     const defSearch = await locateDefinitions(
       session,
       extracted.map((l) => l.name),
       cfg,
-      excludeArgs(cfg),
+      exArgs,
       12,
       allowTests,
     );
     const seenAt = new Map(extracted.map((l) => [l.name, l.seenAt.path]));
-    const defs = chooseDefinitions(
-      defSearch.hits,
-      selectedPaths,
-      cfg.wave3.defsPerLead,
-      allowTests,
-      seenAt,
-    );
-    const inEvidence = (path: string, line: number) =>
-      evidence.some((e) => e.path === path && line >= e.start && line <= e.end);
+    defsForLeads = chooseDefinitions(defSearch.hits, selectedPaths, cfg.wave3.defsPerLead, allowTests, seenAt);
     const leadDrops: Record<string, string> = {};
     // genericity penalty: a name defined/used as a key in many files (sessionId, workspaceId, isRecord) is rarely
     // what the answer hinges on
-    const nFiles = Math.max(rec.totalFiles, 1);
     const genericity = (name: string) =>
       idfOf(defSearch.fileCounts.get(name) ?? 0, nFiles) / idfOf(0, nFiles);
     leadCands = extracted
       .filter((l) => {
-        const ds = defs.get(l.name) ?? [];
+        const ds = defsForLeads.get(l.name) ?? [];
         if (!ds.length) leadDrops[l.name] = "no definition found";
         else if (ds.every((d) => inEvidence(d.path, d.line)))
           leadDrops[l.name] = "definition already in evidence";
@@ -537,57 +910,14 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       context: l.context,
       lex: l.weight / maxW,
     }));
+    leadItems.forEach((l) => leadIdByName.set(l.name, l.id));
     leadScores = await judge.scoreLeads(leadItems, ctx);
     const chosen = leadItems
-      .map((l) => ({ l, p: leadScores.get(l.id) ?? 0 }))
+      .map((l) => ({ name: l.name, id: l.id, p: leadScores.get(l.id) ?? 0 }))
       .filter((x) => x.p >= thr.T3)
-      .sort((a, b) => b.p - a.p || (a.l.id < b.l.id ? -1 : 1))
+      .sort((a, b) => b.p - a.p || (a.id < b.id ? -1 : 1))
       .slice(0, cfg.wave3.maxLeadsFollowed);
-    for (const x of chosen) chosenNames.add(x.l.name);
-    await loadLines(chosen.flatMap((x) => (defs.get(x.l.name) ?? []).map((d) => d.path)));
-    const defItemsStart = passageItems.length;
-    for (const x of chosen) {
-      for (const d of defs.get(x.l.name) ?? []) {
-        const lines = readLines(d.path);
-        // the file could not be read as text (missing, binary, UTF-16) or changed after ripgrep saw it
-        if (d.line > lines.length) {
-          leadsFollowed.push({
-            name: x.l.name,
-            score: x.p,
-            def: `${d.path}:${d.line} (not in the file as read)`,
-          });
-          continue;
-        }
-        const w = definitionWindow(
-          lines,
-          d.line,
-          langOf(d.path),
-          cfg,
-          renderFor(d.path, [new RegExp(`\\b${escapeRegex(x.l.name)}\\b`)]),
-        );
-        const overlapsExisting = evidence.some(
-          (e) => e.path === d.path && !(w.end < e.start || w.start > e.end),
-        );
-        leadsFollowed.push({
-          name: x.l.name,
-          score: x.p,
-          def: `${d.path}:${d.line}${overlapsExisting ? " (overlaps evidence)" : ""}`,
-        });
-        if (overlapsExisting) continue;
-        makePassage(d.path, w, 0, x.l.name);
-      }
-    }
-    const defItems = passageItems.slice(defItemsStart);
-    if (defItems.length) {
-      const defScores = await judge.scorePassages(defItems, ctx, "lead_defs");
-      for (const e of evidence) {
-        const s = defScores.get(e.id);
-        if (s) {
-          e.rel = s.rel;
-          e.cov = s.cov;
-        }
-      }
-    }
+    await followLeads(chosen, defsForLeads);
     emit("leads", {
       T3: thr.T3,
       seeds: seeds.map((s) => `${s.path}:${s.start}`),
@@ -604,40 +934,132 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       extracted: extracted.length,
       dropped: leadDrops,
       defPassages: evidence
-        .filter((e) => e.kind === "def")
+        .filter((e) => e.kind === "def" || e.caller)
         .map((e) => ({
           id: e.id,
           path: e.path,
           start: e.start,
           end: e.end,
-          lead: e.lead,
+          lead: e.lead ?? e.caller,
+          caller: Boolean(e.caller),
           rel: round(e.rel),
         })),
     });
   }
   mark("wave3", ts);
 
-  // ---- 5. pack + status
+  // ---- 5. pack + status (adaptive: a low rating follows more leads once and refills the budget)
   ts = performance.now();
   const cpt = cfg.pack.charsPerToken;
   const totalChars = Math.floor(budgetTokens * cpt);
-  const headerReserve = 420 + subQuestions.reduce((s, q) => s + q.length + 8, 0);
-  const footerReserve = Math.min(1800, Math.floor(totalChars * 0.12));
-  const body = packBody(evidence, {
+  const headerReserve = 520 + subQuestions.reduce((s, q) => s + q.length + 8, 0);
+  const footerReserve = Math.floor(totalChars * cfg.pack.footerShare);
+  const packOpts = (fillMin?: number) => ({
     subQuestions,
     T2: thr.T2,
     bodyChars: Math.max(0, totalChars - headerReserve - footerReserve),
     cfg,
     downweightChangelogs: !questionMentionsHistory(ctx.question + " " + subQuestions.join(" ")),
     downweightTests: !questionMentionsTests(ctx.question),
+    ...(fillMin !== undefined ? { fillMin } : {}),
   });
+  let status: CodeSearchStatus = { label: "unknown", overall: null, subs: [] };
+  let statusCheckError: JevUnavailableError | JevRequestError | undefined;
+  let statusEvidenceChars = 0;
+  const check = async (b: PackBody): Promise<void> => {
+    if (!cfg.status.enabled || !b.included.length) {
+      status = b.included.length ? status : { label: "insufficient", overall: null, subs: [] };
+      return;
+    }
+    const ev = statusEvidence(b.included, cfg.status.maxEvidenceChars);
+    statusEvidenceChars = ev.length;
+    const tStatus = performance.now();
+    try {
+      status = statusLabel(await judge.status(ev, ctx), cfg);
+      mark("status", tStatus);
+    } catch (error) {
+      mark("status", tStatus);
+      if (signal.aborted || !(error instanceof JevUnavailableError || error instanceof JevRequestError))
+        throw error;
+      statusCheckError = error;
+      status = { label: "unknown", overall: null, subs: [], error: error.message.slice(0, 200) };
+    }
+  };
+  let body = packBody(evidence, packOpts());
+  await check(body);
+  const adaptive: string[] = [];
+  const ratingOf = () => (status.overall === null ? null : status.overall);
+  const firstRating = ratingOf();
+  if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.followBelowRating && cfg.wave3.enabled) {
+    // follow the next leads (a lower bar) and the next triaged files once
+    const nextLeads = leadCands
+      .filter((l) => !chosenNames.has(l.name))
+      .map((l) => ({ name: l.name, p: leadScores.get(leadIdByName.get(l.name)!) ?? 0 }))
+      .filter((x) => x.p >= Math.min(thr.T3, 0.35))
+      .sort((a, b) => b.p - a.p)
+      .slice(0, cfg.wave3.maxLeadsFollowed);
+    const added = await followLeads(nextLeads, defsForLeads);
+    adaptive.push(`rating ${r2(firstRating)}: followed ${nextLeads.length} more leads (${added} passages)`);
+    body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
+    await check(body);
+  } else if (!statusCheckError && firstRating !== null && firstRating < cfg.pack.fillBelowRating) {
+    const before = body.included.length;
+    body = packBody(evidence, packOpts(cfg.pack.fillMinRelevance));
+    if (body.included.length !== before) {
+      adaptive.push(`rating ${r2(firstRating)}: filled the budget with passages rel >= ${cfg.pack.fillMinRelevance}`);
+      await check(body);
+    }
+  }
+  mark("pack", ts);
+
+  // ---- footer: coverage of relevant files, caps, leads, keywords
   const includedFiles = new Set(body.included.map((p) => p.path));
   const windowedFiles = new Set(evidence.map((e) => e.path));
+  const relevantFiles = new Set<string>([
+    ...includedFiles,
+    ...selected.filter((i) => pOf(i) >= thr.T1).map((i) => cands[i]!.path),
+    ...evidence.filter((e) => inclusionRel(e, cfg) >= thr.T2).map((e) => e.path),
+  ]);
+  const shownBy = new Map<string, Array<[number, number]>>();
+  for (const p of body.included) {
+    const arr = shownBy.get(p.path) ?? [];
+    arr.push([p.start, p.end]);
+    shownBy.set(p.path, arr);
+  }
+  const pByPath = new Map(cands.map((c, i) => [c.path, fileScores.get(fileIds[i]!)]));
+  const fileRank = (path: string) => {
+    const order = body.included.findIndex((p) => p.path === path);
+    return order >= 0 ? order : 1000 - (pByPath.get(path) ?? 0);
+  };
+  const coverage: CoverageFile[] = [...relevantFiles]
+    .sort((a, b) => fileRank(a) - fileRank(b) || (a < b ? -1 : 1))
+    .map((path) => {
+      const shown = shownBy.get(path) ?? [];
+      const checked = body.excluded
+        .filter((x) => x.path === path && !shown.some(([s, e]) => x.start >= s && x.end <= e))
+        .map((x) => ({ start: x.start, end: x.end, rel: x.rel }));
+      const p = pByPath.get(path);
+      const lines = fileLines.get(path) ?? [];
+      const hidden = complementRanges(lines.length, shown);
+      return {
+        path,
+        lines: lines.length,
+        shown,
+        checked,
+        outline: outlineRanges(lines, langOf(path), hidden, cfg.pack.outlineNames),
+        ...(!shown.length && p !== undefined ? { note: `file triage ${r2(p)}` } : {}),
+      };
+    });
+  if (body.budgetCut.length)
+    cuts.push(
+      `token budget (${fmtK(budgetTokens)}): passages that passed but did not fit: ${body.budgetCut
+        .map((x) => `${x.path}:${x.start}-${x.end} (${r2(x.rel)})`)
+        .join(", ")}`,
+    );
   const otherFiles = ranked
-    .filter((i) => !windowedFiles.has(rec.candidates[i]!.path))
-    .map((i) => ({ path: rec.candidates[i]!.path, score: fileScores.get(fileIds[i]!) ?? 0 }))
+    .filter((i) => !windowedFiles.has(cands[i]!.path))
+    .map((i) => ({ path: cands[i]!.path, score: pOf(i) }))
     .filter((x) => x.score > 0);
-  const leadIdByName = new Map(leadCands.map((l, i) => [l.name, `l${String(i).padStart(3, "0")}`]));
   const notFollowed = leadCands
     .filter((l) => !chosenNames.has(l.name))
     .map((l) => ({
@@ -646,58 +1068,48 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       seenAt: `${l.seenAt.path}:${l.seenAt.line}`,
     }))
     .sort((a, b) => b.score - a.score);
-  const zero = kws.filter((k) => k.df === 0 && k.pathDf === 0);
-  const fragmentOnly = kws.filter((k) => k.fragments.length > 0 && (k.df > 0 || k.pathDf > 0));
-  const zeroHitKeywords = [
-    ...zero.map((k) => ({ raw: k.raw, fragments: [] as string[] })),
-    ...fragmentOnly.map((k) => ({ raw: k.raw, fragments: k.fragments })),
-  ];
+  ts = performance.now();
+  const keywords = await keywordNotes({
+    session,
+    keywords: rec.keywords,
+    candidates: cands,
+    relevantFiles,
+    suggestFrom: [
+      ...new Set([
+        ...selected.map((i) => cands[i]!.path),
+        ...ranked.slice(0, 60).map((i) => cands[i]!.path),
+      ]),
+    ],
+    cfg,
+    excludeArgs: exArgs,
+  });
+  mark("vocab", ts);
   const widenedNote = prefixNote(rec);
   const footer = renderFooter({
+    coverage,
+    cuts,
     excluded: body.excluded,
     otherFiles,
     leadsNotFollowed: notFollowed,
-    zeroHitKeywords,
+    keywords,
     ...(widenedNote ? { widenedNote } : {}),
     cfg,
     maxChars: footerReserve,
   });
-  mark("pack", ts);
-
-  // A failure of the status request alone (after the pack) keeps the Jev pack with status unknown.
-  ts = performance.now();
-  let status: CodeSearchStatus = { label: "unknown", overall: null, subs: [] };
-  let statusCheckError: JevUnavailableError | JevRequestError | undefined;
-  let statusEvidenceChars = 0;
-  if (cfg.status.enabled && body.included.length) {
-    const ev = statusEvidence(body.included, cfg.status.maxEvidenceChars);
-    statusEvidenceChars = ev.length;
-    try {
-      status = statusLabel(await judge.status(ev, ctx), cfg);
-    } catch (error) {
-      if (
-        signal.aborted ||
-        !(error instanceof JevUnavailableError || error instanceof JevRequestError)
-      )
-        throw error;
-      statusCheckError = error;
-      status = { label: "unknown", overall: null, subs: [], error: error.message.slice(0, 200) };
-    }
-  } else if (!body.included.length) {
-    status = { label: "insufficient", overall: null, subs: [] };
-  }
-  mark("status", ts);
   emit("pack", {
     T2: thr.T2,
     budgetTokens,
     totalChars,
     priority: body.priority,
+    adaptive,
+    firstRating,
     included: body.included.map((p) => ({
       id: p.id,
       path: p.path,
       start: p.start,
       end: p.end,
       trimmed: p.trimmed,
+      whole: p.whole || undefined,
       rel: round(p.rel),
       cov: p.cov.map(round),
       chars: p.block.length,
@@ -709,6 +1121,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       end: e.end,
       rel: round(e.rel),
     })),
+    coverage: coverage.map((c) => ({ path: c.path, lines: c.lines, shown: c.shown })),
+    cuts,
+    keywords,
     status,
     statusEvidenceChars,
   });
@@ -742,7 +1157,7 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     if (subQuestions.length) head.push(subQuestions.map((s, j) => `s${j + 1}: ${s}`).join("\n"));
     head.push(
       body.included.length
-        ? "Passages are verbatim with original line numbers (N| text), grouped by file, best first; rel = relevance, [sN] = covers sub-question N. The rating covers only these passages; it cannot see other entry points, defaults, flags or exceptions the search did not return."
+        ? "Passages are verbatim with original line numbers (N| text), grouped by file, best first; rel = relevance, [sN] = covers sub-question N. The rating covers only these passages; it cannot see other entry points, defaults, flags or exceptions the search did not return. This shows where to look: before changing code, read the relevant regions in full, including the not-shown ranges listed at the end."
         : "No passage passed verification. Try other keywords (exact identifiers, config keys, error strings) or read the candidates below.",
     );
     return [head.join("\n"), body.body, footer].filter(Boolean).join("\n\n") + "\n";

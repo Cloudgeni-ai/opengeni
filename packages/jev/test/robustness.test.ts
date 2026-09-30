@@ -172,6 +172,8 @@ describeWithRipgrep("lines past the end of the file as read", () => {
       keywords: ["computeLimit"],
       workspace: new LocalCodeSearchWorkspace(root),
       jev: fakeJevClient({ good: ["computeLimit", "helper_threshold_value"] }),
+      // lead mechanics only: symbol discovery would follow the same name first
+      config: codeSearchConfig({ symbols: { enabled: false } }),
       onStage: (stage, data) => events.push([stage, data]),
     });
     // ripgrep transcodes UTF-16 and finds the definition; readText sees NUL bytes and returns null
@@ -198,6 +200,7 @@ describeWithRipgrep("lines past the end of the file as read", () => {
         "src/other.ts": 1,
       }),
       jev: fakeJevClient({ good: ["computeLimit", "helperThresholdValue"] }),
+      config: codeSearchConfig({ symbols: { enabled: false } }),
       onStage: (stage, data) => events.push([stage, data]),
     });
     const leads = events.find(([stage]) => stage === "leads")![1];

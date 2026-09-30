@@ -1,6 +1,8 @@
 /**
- * Every code_search threshold, budget and cap in one place. The defaults are scout-0.3.1's Jev
- * configuration, tuned on the E1 DEV split (2026-09-24); change them only with a new evaluation.
+ * Every code_search threshold, budget and cap in one place. The recall/triage/verification defaults are
+ * scout-0.3.1's Jev configuration, tuned on the E1 DEV split (2026-09-24); symbols, tiling, callers and the
+ * adaptive pack (scout-0.4) were added against the code_search eval set (2026-09-30). Change them only with
+ * a new evaluation. Every cap that cuts something is reported in the pack.
  */
 
 export interface CodeSearchConfig {
@@ -47,6 +49,8 @@ export interface CodeSearchConfig {
   };
   wave2: {
     windowsPerFile: number;
+    /** Same for files triage judged relevant (p >= T1) that are too large to tile. */
+    windowsPerRelevantFile: number;
     /** How many of a file's strongest hit lines seed windows (before merging/splitting). */
     seedHitsPerFile: number;
     /** Max lines to walk up from a hit looking for the enclosing declaration. */
@@ -75,6 +79,32 @@ export interface CodeSearchConfig {
     maxWindowChars: number;
     /** Same for markdown (sections are long, paragraphs independent). */
     maxProseWindowChars: number;
+    /** Files up to this many lines that triage selected with p >= T1 are tiled whole (every declaration judged). */
+    tileMaxLines: number;
+    /** Max windows per tiled file. */
+    tileMaxWindows: number;
+    /** Max files tiled (the most relevant by triage). */
+    tileMaxFiles: number;
+    /** Target lines per tile (a tile ends at the next declaration after this many lines). */
+    tileTargetLines: number;
+  };
+  symbols: {
+    /** Symbol discovery between triage and passage verification (declared/imported/called identifiers of the selected files). */
+    enabled: boolean;
+    /** Discovery rounds; each round judges identifiers of the files the previous round added. */
+    maxRounds: number;
+    /** Identifiers judged per round (best by weight); the rest are reported as not judged. */
+    maxJudged: number;
+    /** Identifiers searched per round (p >= threshold, best first). */
+    maxFollowed: number;
+    /** Jev floor for following an identifier. */
+    threshold: number;
+    /** Files an identifier may occur in before it counts as generic (its definition is still followed). */
+    maxRefFiles: number;
+    /** New files triaged per round (best by symbol hits); the rest are reported. */
+    maxNewFilesTriaged: number;
+    /** New files selected per round (p >= T1, best first). */
+    maxNewFilesSelected: number;
   };
   wave3: {
     enabled: boolean;
@@ -83,6 +113,10 @@ export interface CodeSearchConfig {
     /** Leads are extracted from at most this many of the most relevant passages (all >= T2). */
     seedPassages: number;
     defsPerLead: number;
+    /** Call sites windowed per followed lead (callers outside the evidence, non-test first). */
+    callersPerLead: number;
+    /** Seed floor when fewer than seedPassages passages reach T2 (best below T2 still seed leads). */
+    seedFloor: number;
   };
   status: {
     enabled: boolean;
@@ -116,6 +150,26 @@ export interface CodeSearchConfig {
     testPrior: number;
     /** Pack ordering score = (rel + lexWeight x lexical passage score) x prior. */
     lexWeight: number;
+    /** Multiplier on rel for passages that are mostly import/require lines. */
+    importPrior: number;
+    /** Evidence rating below this refills the budget with passages >= fillMinRelevance. */
+    fillBelowRating: number;
+    fillMinRelevance: number;
+    /** Evidence rating below this follows the next leads and callers before refilling (one extra round). */
+    followBelowRating: number;
+    /** A relevant file whose whole rendering fits in this many chars is shown whole. */
+    wholeFileMaxChars: number;
+    /** Two passages of one file separated by at most this many lines are joined. */
+    stitchGap: number;
+    /** Max files listed in the coverage map (relevant files: shown / not-shown ranges). */
+    coverageFiles: number;
+    /** Share of the budget reserved for the footer (coverage map, limits, leads, keywords). */
+    footerShare: number;
+    /** A sub-question with no passage at T2 still gets its best subFallback passages with coverage >= subFloor. */
+    subFloor: number;
+    subFallback: number;
+    /** Declarations named per file in the coverage map's not-shown ranges. */
+    outlineNames: number;
   };
   jev: {
     /** Inline the question text in every Jev question when it is at most this long; else reference `question`. */
@@ -166,6 +220,7 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
   },
   wave2: {
     windowsPerFile: 5,
+    windowsPerRelevantFile: 12,
     seedHitsPerFile: 24,
     maxUp: 40,
     maxDown: 120,
@@ -176,11 +231,25 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     minWindowLines: 12,
     passagesPerRequest: 4,
     maxRequestChars: 24_000,
-    maxPassages: 80,
+    maxPassages: 200,
     maxLineChars: 400,
     maxProseLineChars: 1600,
     maxWindowChars: 8000,
     maxProseWindowChars: 4000,
+    tileMaxLines: 900,
+    tileMaxWindows: 24,
+    tileMaxFiles: 6,
+    tileTargetLines: 20,
+  },
+  symbols: {
+    enabled: true,
+    maxRounds: 2,
+    maxJudged: 160,
+    maxFollowed: 10,
+    threshold: 0.5,
+    maxRefFiles: 40,
+    maxNewFilesTriaged: 40,
+    maxNewFilesSelected: 6,
   },
   wave3: {
     enabled: true,
@@ -188,6 +257,8 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     maxLeadsFollowed: 6,
     seedPassages: 12,
     defsPerLead: 1,
+    callersPerLead: 3,
+    seedFloor: 0.3,
   },
   status: { enabled: true, maxEvidenceChars: 60_000, hi: 0.7, lo: 0.4 },
   pack: {
@@ -204,6 +275,17 @@ export const DEFAULT_CODE_SEARCH_CONFIG: Readonly<CodeSearchConfig> = deepFreeze
     docPrior: 0.85,
     testPrior: 1,
     lexWeight: 0,
+    importPrior: 0.5,
+    fillBelowRating: 0.7,
+    fillMinRelevance: 0.3,
+    followBelowRating: 0.4,
+    wholeFileMaxChars: 5000,
+    stitchGap: 12,
+    coverageFiles: 16,
+    footerShare: 0.22,
+    subFloor: 0.3,
+    subFallback: 2,
+    outlineNames: 16,
   },
   jev: {
     inlineQuestionMaxChars: 600,
@@ -254,6 +336,11 @@ export function validateCodeSearchConfig(c: CodeSearchConfig): void {
     probs.push("wave2.maxProseWindowChars must be >= 2 x wave2.maxProseLineChars + 200");
   }
   if (c.wave3.maxLeadCandidates > 250) probs.push("wave3.maxLeadCandidates must be <= 250");
+  if (c.symbols.maxJudged > 250) probs.push("symbols.maxJudged must be <= 250");
+  if (!(c.symbols.threshold >= 0 && c.symbols.threshold <= 1)) probs.push("symbols.threshold must be in [0,1]");
+  if (c.wave2.tileTargetLines < 5) probs.push("wave2.tileTargetLines must be >= 5");
+  if (!(c.pack.importPrior > 0 && c.pack.importPrior <= 1)) probs.push("pack.importPrior must be in (0,1]");
+  if (!(c.pack.footerShare > 0 && c.pack.footerShare < 0.5)) probs.push("pack.footerShare must be in (0,0.5)");
   if (!(c.status.lo <= c.status.hi)) probs.push("status.lo must be <= status.hi");
   if (c.pack.charsPerToken <= 0) probs.push("pack.charsPerToken must be > 0");
   if (c.pack.filePenalty < 0) probs.push("pack.filePenalty must be >= 0");

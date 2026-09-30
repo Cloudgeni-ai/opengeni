@@ -242,6 +242,8 @@ describeWithRipgrep("runCodeSearch end to end with a fake Jev", () => {
       "pack",
       "recall",
       "status",
+      "symbols",
+      "vocab",
       "wave1",
       "wave2",
       "wave3",

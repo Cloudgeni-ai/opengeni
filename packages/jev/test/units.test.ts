@@ -539,10 +539,12 @@ describe("pack", () => {
       ev(`p${i}`, i * 10 + 1, i * 10 + 5, 0.4, [], `src/very/long/path/number/${i}/file.ts`),
     );
     const out = renderFooter({
+      coverage: [],
+      cuts: [],
       excluded,
       otherFiles: [],
       leadsNotFollowed: [],
-      zeroHitKeywords: [{ raw: "nope", fragments: [] }],
+      keywords: [{ raw: "nope", fragments: [], suggestions: [], status: "zero" }],
       cfg,
       maxChars: 300,
     });

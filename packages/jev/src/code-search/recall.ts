@@ -104,6 +104,8 @@ export interface KeywordInfo {
   idf: number;
   /** Fragments used because the full keyword had zero hits. */
   fragments: string[];
+  /** An identifier added by symbol discovery (not one of the caller's keywords). */
+  symbol?: boolean | undefined;
 }
 
 export interface HitLine {
