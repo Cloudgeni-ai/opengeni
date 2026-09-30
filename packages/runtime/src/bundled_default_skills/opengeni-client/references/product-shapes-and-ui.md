@@ -31,9 +31,22 @@ console routes and 404 on the product origin. Never pass them to a raw `<a>`.
   proxy `sandboxFiles: true` (default off) plus `files:read`; they are confined
   to the selected working directory, including on Connected Machines, and
   refuse symlinked paths. Disabled sandbox links render unavailable.
-- Route editable artifacts and Sites to the product's own UI with
-  `resolveLink={(target) => ... ({ href } | { open } | null)}` on
-  `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
+- Artifacts and Sites: reuse the OpenGeni surfaces, do not rebuild them.
+  `opengeni-site` fences render the inline Site preview automatically. Mount
+  `SessionArtifactViewer` (`@opengeni/react/artifacts`) in a host container
+  (for example the main area beside an assistant panel, a full-screen sheet on
+  phones) and pass `onOpenArtifact` to `SessionConversation` (or
+  `viewerLinkResolver` to `MessageTimeline`). Enable the proxy's
+  `artifacts: true`; editors also need the document, spreadsheet, and
+  presentation runtimes (`@opengeni/artifact-kernel-wasm-document`,
+  `@opengeni/artifact-kernel-wasm-spreadsheet`,
+  `@opengeni/artifact-kernel-wasm-presentation`) plus the SDK Worker URL
+  (`editableRuntimes`). A custom host proxy reports the viewer capability with
+  `artifactViewerCapability` from `@opengeni/sdk`. Close the viewer when the session changes.
+  Translate its copy with `labels` (partial `ArtifactLabels`) or
+  `ArtifactLabelsProvider`.
+- Other routing: `resolveLink={(target) => ... ({ href } | { open } | null)}`
+  on `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
   subtree; it also covers `Markdown` inside a custom `renderMessageText`.
   Unresolved targets render as unavailable text, not broken links.
 - `MessageTimeline` alone has no defaults; add

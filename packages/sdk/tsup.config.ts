@@ -15,6 +15,7 @@ export default defineConfig({
   entry: [
     "src/allowance-refusal.ts",
     "src/chat/index.ts",
+    "src/session-proxy.ts",
     "src/adapters/next.ts",
     "src/adapters/express.ts",
     "src/adapters/hono.ts",

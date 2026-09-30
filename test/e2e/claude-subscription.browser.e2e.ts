@@ -75,6 +75,7 @@ for (const theme of ["dark", "light"] as const) {
         try {
           await page.goto(`${baseUrl}/test/claude-subscription.html?scope=${scope}`);
           await page.getByRole("heading", { name: "Connect Claude subscription" }).waitFor();
+          await page.getByRole("button", { name: "Use a setup token", exact: false }).click();
           expect(await page.locator('input[type="file"]').count()).toBe(0);
           expect(await page.getByLabel("Claude account UUID").count()).toBe(0);
           expect(await page.getByLabel("Claude device ID").count()).toBe(0);
@@ -106,13 +107,39 @@ for (const theme of ["dark", "light"] as const) {
           await page
             .locator('button[aria-label="Check usage now"][aria-disabled="true"]')
             .waitFor();
+          await page
+            .getByText(
+              "This setup token allows model calls. Usage readings update after Claude is used. Sign in again to check current usage and reset times.",
+              { exact: true },
+            )
+            .waitFor();
+          expect(JSON.parse((await page.getByTestId("quota-request").textContent())!)).toEqual({
+            path: `/v1/${scope === "workspace" ? "workspaces" : "organizations"}/22222222-2222-4222-8222-222222222222/model-providers/claude_subscription/usage/refresh`,
+            contentType: "application/json",
+            body: {},
+          });
+          await page
+            .getByText(
+              "This setup token allows model calls. Usage readings update after Claude is used. Sign in again to check current usage and reset times.",
+              { exact: true },
+            )
+            .waitFor();
+          expect(
+            await page.getByText("Couldn't check usage. Try again.", { exact: true }).count(),
+          ).toBe(0);
           await page.keyboard.press("Escape");
           await accessible(page);
           await page.screenshot({
             path: `${evidence}/${scope}-${width}-${theme}-usage.png`,
             fullPage: true,
           });
-          await page.getByRole("button", { name: "Replace token", exact: true }).click();
+          await page
+            .getByRole("button", {
+              name: "More actions for Claude subscription",
+              exact: true,
+            })
+            .click();
+          await page.getByRole("menuitem", { name: "Replace setup token", exact: true }).click();
           const dialog = page.getByRole("dialog");
           await dialog
             .getByLabel("Claude subscription setup token")
@@ -133,3 +160,140 @@ for (const theme of ["dark", "light"] as const) {
     }
   }
 }
+
+for (const theme of ["dark", "light"] as const) {
+  for (const scope of ["workspace", "organization"] as const) {
+    for (const width of [1280, 390]) {
+      test(`${scope} full sign-in, browser isolation, recovery and direct usage at ${width}px (${theme})`, async () => {
+        const context = await browser.newContext({
+          viewport: { width, height: 950 },
+          colorScheme: theme,
+        });
+        // No provider traffic or model calls: only the official popup destination is represented.
+        await context.route("https://claude.com/**", (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: "<!doctype html><title>Claude sign-in fixture</title><p>Approve access in Claude</p>",
+          }),
+        );
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        try {
+          await page.goto(`${baseUrl}/test/claude-subscription.html?scope=${scope}`);
+          await page
+            .getByRole("heading", {
+              name: "Connect Claude subscription",
+              exact: true,
+            })
+            .waitFor();
+          const start = page.getByRole("button", {
+            name: "Sign in to Claude",
+            exact: true,
+          });
+          expect(await start.isEnabled()).toBe(true);
+          expect(await page.getByLabel("Claude subscription setup token").isVisible()).toBe(false);
+          await accessible(page);
+          const popupPromise = context.waitForEvent("page");
+          await start.click();
+          const popup = await popupPromise;
+          await popup.waitForURL("https://claude.com/**");
+          expect(new URL(popup.url()).origin).toBe("https://claude.com");
+          expect(await popup.evaluate(() => window.opener === null)).toBe(true);
+          await page.getByLabel("Claude authorization code").waitFor();
+          expect(
+            await page.getByRole("button", { name: "Complete sign-in", exact: true }).isDisabled(),
+          ).toBe(true);
+          // Navigating away and returning keeps only scoped, expiring attempt metadata.
+          await page.reload();
+          await page.getByLabel("Claude authorization code").waitFor();
+          expect(
+            await page.evaluate(() => document.activeElement?.getAttribute("aria-label")),
+          ).toBe("Claude authorization code");
+          await page.getByLabel("Claude authorization code").fill("wrong-code");
+          await page.getByRole("button", { name: "Complete sign-in", exact: true }).click();
+          await page.getByRole("alert").waitFor();
+          expect(await page.getByLabel("Claude authorization code").isVisible()).toBe(true);
+          await page.getByLabel("Claude authorization code").fill("fixture-code#fixture-state");
+          await accessible(page);
+          await page.screenshot({
+            path: `${evidence}/${scope}-${width}-${theme}-signin.png`,
+            fullPage: true,
+          });
+          await page.getByRole("button", { name: "Complete sign-in", exact: true }).click();
+          await page.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+          await page.getByText("50% left", { exact: true }).waitFor();
+          expect(JSON.parse((await page.getByTestId("operation-receipt").textContent())!)).toEqual({
+            action: "oauth_connect",
+            scope,
+            fields: ["attemptId", "code"],
+          });
+          expect(await page.getByText(/Resets /).count()).toBeGreaterThanOrEqual(2);
+          await page.getByRole("button", { name: "Check usage now", exact: true }).click();
+          await page.waitForFunction(
+            () => document.querySelector('[data-testid="quota-request"]')?.textContent !== "null",
+          );
+          expect(JSON.parse((await page.getByTestId("quota-request").textContent())!)).toEqual({
+            path: `/v1/${scope === "workspace" ? "workspaces" : "organizations"}/${scopeIdForBrowser}/model-providers/claude_subscription/usage/refresh`,
+            contentType: "application/json",
+            body: {},
+          });
+          await page.waitForFunction(
+            () =>
+              document
+                .querySelector('button[aria-label="Check usage now"]')
+                ?.getAttribute("aria-disabled") !== "true",
+          );
+          expect(
+            await page
+              .getByText("This setup token allows model calls.", {
+                exact: false,
+              })
+              .isVisible(),
+          ).toBe(false);
+          expect(
+            await page.getByText("Couldn't check usage. Try again.", { exact: true }).count(),
+          ).toBe(0);
+          await accessible(page);
+          await page.screenshot({
+            path: `${evidence}/${scope}-${width}-${theme}-full-usage.png`,
+            fullPage: true,
+          });
+          expect(
+            await page.evaluate(
+              () =>
+                Object.keys(sessionStorage).filter((key) =>
+                  key.startsWith("opengeni.claude-signin:"),
+                ).length,
+            ),
+          ).toBe(0);
+          await page.getByRole("button", { name: "Sign in again", exact: true }).click();
+          await page
+            .getByRole("heading", {
+              name: "Reconnect Claude subscription",
+              exact: true,
+            })
+            .waitFor();
+          await page.getByRole("button", { name: "Sign in to Claude", exact: true }).click();
+          await page.getByLabel("Claude authorization code").waitFor();
+          await page.getByRole("button", { name: "Start again", exact: true }).click();
+          expect(
+            await page.getByRole("button", { name: "Sign in to Claude", exact: true }).isEnabled(),
+          ).toBe(true);
+          expect(
+            await page.evaluate(
+              () =>
+                Object.keys(sessionStorage).filter((key) =>
+                  key.startsWith("opengeni.claude-signin:"),
+                ).length,
+            ),
+          ).toBe(0);
+          expect(errors).toEqual([]);
+        } finally {
+          await context.close();
+        }
+      }, 60_000);
+    }
+  }
+}
+const scopeIdForBrowser = "22222222-2222-4222-8222-222222222222";

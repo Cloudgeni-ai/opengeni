@@ -4979,6 +4979,7 @@ export function sessionAuthorizationOperationForHttp(
     return verb === "POST" ? "session.files.read" : null;
   }
   if (suffix === "/artifacts/publish" && verb === "POST") return "session.files.write";
+  if (suffix.startsWith("/artifact-associations/") && verb === "GET") return "session.read";
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
     return verb === "POST" ? "session.files.write" : null;
   }

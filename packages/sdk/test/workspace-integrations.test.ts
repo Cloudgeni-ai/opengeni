@@ -4,6 +4,7 @@ import {
   signOpenGeniPayload,
   verifyCredentialProviderRequest,
   verifyWebhookEvent,
+  type CredentialProviderInitiatorContext,
 } from "../src/index";
 import {
   createOrganizationWebhook,
@@ -161,6 +162,11 @@ test("signature helpers retain routing and embedder identity additions", async (
     turnId: "turn",
     attemptId: "attempt",
     initiator: { kind: "subject", subjectId: initiatingHuman.subjectId },
+    initiatorContext: {
+      kind: "human",
+      initiator: { kind: "subject", subjectId: initiatingHuman.subjectId },
+      context: {},
+    } satisfies CredentialProviderInitiatorContext,
     initiatingHumanSubjectId: initiatingHuman.subjectId,
     initiatingHuman,
     sandboxBackend: "modal",
@@ -174,6 +180,27 @@ test("signature helpers retain routing and embedder identity additions", async (
       secret,
     }),
   ).toEqual(request);
+  // An older sender remains compatible; absence never implies human authority.
+  const { initiatorContext: _context, ...legacy } = request;
+  const legacyBody = JSON.stringify(legacy);
+  expect(
+    await verifyCredentialProviderRequest({
+      body: legacyBody,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, legacyBody) },
+      secret,
+    }),
+  ).toEqual(legacy);
+  const tampered = JSON.stringify({
+    ...request,
+    initiatorContext: { ...request.initiatorContext, kind: "service" },
+  });
+  await expect(
+    verifyCredentialProviderRequest({
+      body: tampered,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+      secret,
+    }),
+  ).rejects.toThrow("signature verification failed");
 });
 
 test("verified pre-upgrade session and usage deliveries default their missing lane", async () => {

@@ -117,6 +117,7 @@ export const handleOpenGeni = createSessionProxyHandler(og, {
 | `modelSelection`       | `false` removes per-message model choices from the browser                                                                        |
 | `files`                | `false` disables attachment routes                                                                                                |
 | `sandboxFiles`         | Explicit `true` enables bounded, no-symlink reads inside the session working directory; default off                               |
+| `artifacts`            | Explicit `true` enables the shared artifact viewer and Site previews with exact session authorization; default off                |
 | `maxBodyBytes`         | Request body limit; defaults to 1 MiB                                                                                             |
 | `sessionList`          | Chat list for `OpenGeniChat`: `"mine"` (default, chats the user created), `"visible"`, or `false`                                 |
 | `beforeForwardMessage` | Server-owned `modelContext` and MCP credential rotation for every forwarded message                                               |
@@ -132,6 +133,14 @@ unavailable unless the proxy explicitly enables `sandboxFiles: true`; enabled
 reads remain inside the session working directory and refuse symlink components.
 Use `resolveLink` on `SessionConversation` or an outer `OpenGeniLinkProvider`
 to route editable artifacts and Sites to your product's authenticated surfaces.
+Alternatively, use `onOpenArtifact` with `SessionArtifactViewer` from
+`@opengeni/react/artifacts` and enable proxy `artifacts: true`. The proxy resolves
+fresh effective user grants and checks the exact source-session association on
+every read. Live tickets retain that session's authority. Site HTML streams with
+backpressure and cancellation and a 25 MiB actual-byte ceiling
+(`site_html_too_large` on overflow); the console's direct delivery is unchanged.
+Server-only proxy read helpers live on `@opengeni/sdk/session-proxy`. The viewer
+offers Retry after temporary config failures.
 For non-React renderers, use `parseOpenGeniLink` plus `isReservedOpenGeniLink`;
 invalid reserved references must stay unavailable, not become host-origin links.
 

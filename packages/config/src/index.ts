@@ -2149,10 +2149,26 @@ export const ClaudeSubscriptionCredential = z
     version: z.literal(1),
     token: z.string().regex(/^sk-ant-oat[0-9]+-\S+$/),
     identity: ClaudeSubscriptionIdentity,
+    oauth: z
+      .object({
+        refreshToken: z.string().min(1).max(16384),
+        expiresAt: z.string().datetime(),
+        scopes: z.array(z.string().min(1).max(256)).min(1).max(32),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 const AnthropicProviderOptions = z.object({
   identity: ClaudeSubscriptionIdentity.optional(),
+  // Native connection provenance only; never included in Anthropic request bodies.
+  credentialBinding: z
+    .object({
+      connectionId: z.string().uuid(),
+      credentialVersion: z.number().int().positive(),
+    })
+    .strict()
+    .optional(),
   auth: z.enum(["api-key", "oauth"]).default("api-key"),
   cacheTtl: z.enum(["5m", "1h", "off"]).default("5m"),
   maxOutputTokens: z.number().int().positive().default(32000),
@@ -4506,7 +4522,10 @@ export function withWorkspaceOpenRouterCredential(
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
 export function withOrganizationGatewayCatalogProvider(
   settings: Settings,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (customModels.length === 0) return settings;
   const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
@@ -4522,7 +4541,10 @@ export function withOrganizationGatewayCatalogProvider(
 export function withOrganizationGatewayCredential(
   settings: Settings,
   apiKey: string,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (!apiKey.trim()) throw new Error("organization AI Gateway credential is empty");
   const catalog = withOrganizationGatewayCatalogProvider(settings, customModels);
@@ -4535,7 +4557,10 @@ export function withOrganizationGatewayCredential(
 /** Secret-free organization OpenRouter catalog overlay. */
 export function withOrganizationOpenRouterCatalogProvider(
   settings: Settings,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
     (provider) => provider.id !== ORGANIZATION_OPENROUTER_PROVIDER_ID,
@@ -4552,7 +4577,10 @@ export function withOrganizationOpenRouterCatalogProvider(
 export function withOrganizationOpenRouterCredential(
   settings: Settings,
   apiKey: string,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (!apiKey.trim()) throw new Error("organization OpenRouter credential is empty");
   const catalog = withOrganizationOpenRouterCatalogProvider(settings, customModels);
@@ -4871,7 +4899,10 @@ function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
   return {
     ...(provider.anthropic
-      ? { anthropic: (({ identity: _identity, ...options }) => options)(provider.anthropic) }
+      ? {
+          anthropic: (({ identity: _identity, credentialBinding: _binding, ...options }) =>
+            options)(provider.anthropic),
+        }
       : {}),
     headers: Object.entries(provider.defaultHeaders ?? {})
       .sort(([left], [right]) => left.localeCompare(right))
@@ -6917,7 +6948,11 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
   );
 }
 
-export type TrustedProxyCidr = { address: string; prefix: number; family: "ipv4" | "ipv6" };
+export type TrustedProxyCidr = {
+  address: string;
+  prefix: number;
+  family: "ipv4" | "ipv6";
+};
 
 /**
  * Parse `OPENGENI_API_TRUSTED_PROXY_CIDRS`: comma-separated IPv4/IPv6 CIDRs or
@@ -8128,6 +8163,7 @@ export function withClaudeConnectionCredential(
   kind: ClaudeConnectionKind,
   credential: string,
   scope: "workspace" | "organization" = "organization",
+  credentialBinding?: { connectionId: string; credentialVersion: number },
 ): Settings {
   if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled)
     throw new Error("Claude subscriptions are not enabled on this deployment");
@@ -8149,6 +8185,12 @@ export function withClaudeConnectionCredential(
                     anthropic: {
                       ...provider.anthropic,
                       identity: bundle?.identity,
+                      credentialBinding: credentialBinding
+                        ? {
+                            connectionId: credentialBinding.connectionId,
+                            credentialVersion: credentialBinding.credentialVersion,
+                          }
+                        : undefined,
                     },
                   }
                 : {}),
@@ -8159,3 +8201,4 @@ export function withClaudeConnectionCredential(
   };
 }
 export * from "./claude-subscription-usage";
+export * from "./claude-subscription-oauth";

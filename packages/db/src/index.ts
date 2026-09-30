@@ -491,6 +491,7 @@ import {
 import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
+  contextForCausalTurn,
   creatorColumns,
   frozenInitiatorForCommandActor,
   frozenScheduledOccurrenceInitiator,
@@ -706,6 +707,7 @@ export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 export {
   loadIntegrationOAuthPendingState,
   storeIntegrationOAuthPendingState,
+  consumeIntegrationOAuthPendingState,
 } from "./integration-oauth-pending-states";
 export * from "./workspace-integrations";
 export {
@@ -72412,6 +72414,12 @@ export async function claimSessionWorkForAttempt(
           } else {
             internalInitiator = internalUpdateInitiator();
           }
+          // Batch identity belongs to this accepted inference, not its sender's
+          // earlier batch. Preserve every other frozen service/agent context key.
+          internalInitiator.context = {
+            ...internalInitiator.context,
+            updateIds: delivered.updates.map((update) => update.id),
+          };
           if (delivered.event) {
             delivered.event.payload = {
               ...(delivered.event.payload as Record<string, unknown>),
@@ -72637,6 +72645,7 @@ export async function claimSessionWorkForAttempt(
                 initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
                 initiatorKind: schema.sessionTurns.initiatorKind,
                 initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                initiatorContext: schema.sessionTurns.initiatorContext,
               })
               .from(schema.sessionTurns)
               .where(
@@ -72647,6 +72656,20 @@ export async function claimSessionWorkForAttempt(
                 ),
               )
               .limit(1);
+            if (causalTurn) {
+              internalInitiator.context = contextForCausalTurn(
+                internalInitiator.context,
+                {
+                  initiator: initiatorFromStorage(
+                    causalTurn.initiatorKind,
+                    causalTurn.initiatorSubjectId,
+                    causalTurn.initiatorContext,
+                  ),
+                  context: causalTurn.initiatorContext,
+                },
+                { sessionId, turnId: causalHumanTurnId },
+              );
+            }
             const causalHumanSubjectId =
               causalTurn?.initiatingHumanSubjectId ??
               (causalTurn?.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null);
@@ -85914,6 +85937,7 @@ export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
 export * from "./claude-subscription-usage";
+export * from "./claude-subscription-tokens";
 
 export {
   setWorkspacePauseTimerInTransaction,

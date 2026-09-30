@@ -30,6 +30,7 @@ export type {
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   CredentialProviderRequest,
+  CredentialProviderInitiatorContext,
   CredentialProviderResponse,
   CredentialProviderMcpHeaders,
   CredentialProviderMcpMaterial,
@@ -145,7 +146,10 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   };
 }
 
-/** Verify and parse one request sent to an organization or workspace credential provider. */
+/**
+ * Verify the exact bytes and parse a provider request, including its frozen
+ * initiatorContext when sent by an upgraded worker. Provenance grants no access.
+ */
 export async function verifyCredentialProviderRequest(
   input: SignedRequest,
 ): Promise<CredentialProviderRequest> {

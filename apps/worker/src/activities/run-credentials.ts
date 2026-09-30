@@ -149,22 +149,25 @@ export async function bindRunCredentialResolver(
     workspaceId: input.workspaceId,
     sessionId: input.session.id,
   };
+  // A renewable resolver belongs to one admitted turn, even if its caller
+  // subsequently replaces or mutates an in-memory session/turn projection.
+  const frozenRequest = structuredClone(
+    buildRunCredentialsRequest({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      session: input.session,
+      turn: input.turn,
+      attemptId: input.attemptId,
+      effectiveSandboxBackend: input.effectiveSandboxBackend,
+      variableSet: input.variableSet,
+      rootSessionId,
+      purpose: "provision",
+      forceRefresh: false,
+    }),
+  );
   return {
     resolve: async ({ purpose, forceRefresh }) => {
-      const resolution = await resolver(
-        buildRunCredentialsRequest({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          session: input.session,
-          turn: input.turn,
-          attemptId: input.attemptId,
-          effectiveSandboxBackend: input.effectiveSandboxBackend,
-          variableSet: input.variableSet,
-          rootSessionId,
-          purpose,
-          forceRefresh,
-        }),
-      );
+      const resolution = await resolver({ ...frozenRequest, purpose, forceRefresh });
       return normalizeRunCredentialsResolution(resolution, scope);
     },
   };

@@ -10,10 +10,14 @@ export function DeferredChatMedia({
   children,
   height,
   label,
+  actionLabel,
 }: {
   children: ReactNode;
   height: number;
-  label: string;
+  /** What is loading, as in "Load {label}". */
+  label?: string | undefined;
+  /** The complete (translated) activation label; overrides `label`. */
+  actionLabel?: string | undefined;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(false);
@@ -54,7 +58,7 @@ export function DeferredChatMedia({
             className="rounded-md px-3 py-2 text-sm text-fg-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => setActive(true)}
           >
-            Load {label}
+            {actionLabel ?? `Load ${label ?? "media"}`}
           </button>
         </div>
       )}

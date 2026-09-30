@@ -126,6 +126,10 @@
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
     },
+    "./session-proxy": {
+      "types": "./src/session-proxy.ts",
+      "default": "./src/session-proxy.ts"
+    },
     "./next": {
       "types": "./src/adapters/next.ts",
       "default": "./src/adapters/next.ts"

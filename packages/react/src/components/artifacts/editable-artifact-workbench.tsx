@@ -6,6 +6,7 @@ import {
 } from "@opengeni/sdk/editable-artifacts";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useArtifactLabels } from "./artifact-chrome";
 import { EditableArtifactMessage } from "./editable-artifact-ui";
 import {
   EditableDocumentArtifactSurface,
@@ -133,6 +134,7 @@ export function EditableArtifactWorkbenchHost({
   }, [retryEpoch, sessionKey]);
 
   const retry = useCallback(() => setRetryEpoch((value) => value + 1), []);
+  const labels = useArtifactLabels();
   const currentError = state.key === sessionKey ? state.error : null;
   if (state.key === sessionKey && state.session) {
     return (
@@ -146,9 +148,10 @@ export function EditableArtifactWorkbenchHost({
   }
   return (
     <EditableArtifactMessage
-      title={currentError ? "Could not open this artifact" : "Opening artifact"}
-      detail={currentError?.message ?? "Starting the secure editing session…"}
+      title={currentError ? labels.editableErrors.transient.title : labels.opening}
+      detail={currentError?.message ?? labels.startingEditor}
       retry={currentError ? retry : undefined}
+      retryLabel={labels.retry}
     />
   );
 }

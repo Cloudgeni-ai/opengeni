@@ -20,6 +20,15 @@ import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-
 const repo = join(import.meta.dir, "..");
 const SESSION_ROUTES = "apps/api/src/routes/sessions.ts";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
+test("exact artifact association reads retain source session authorization", () => {
+  expect(
+    sessionAuthorizationOperationForHttp(
+      "GET",
+      `/v1/workspaces/${SESSION_ID}/sessions/${SESSION_ID}/artifact-associations/artifact`,
+      SESSION_ID,
+    ),
+  ).toBe("session.read");
+});
 test("proxy-confined workspace reads retain exact session authorization", () => {
   expect(
     sessionAuthorizationOperationForHttp(

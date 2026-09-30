@@ -2,7 +2,9 @@ import { parseClaudeUsageResponse, type Settings } from "@opengeni/config";
 import { emptyClaudeUsage } from "@opengeni/config";
 import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import {
-  loadClaudeSubscriptionUsageCredential,
+  resolveClaudeSubscriptionCredential,
+  ClaudeSubscriptionConnectionChanged,
+  ClaudeSubscriptionRefreshUnavailable,
   recordClaudeSubscriptionUsage,
   type ClaudeUsageScope,
   type Database,
@@ -17,8 +19,17 @@ export async function refreshClaudeSubscriptionUsage(
   scope: ClaudeUsageScope,
   fetchImpl: typeof fetch = globalThis.fetch,
 ) {
-  const credential = await loadClaudeSubscriptionUsageCredential(db, settings, scope);
+  const credential = await resolveClaudeSubscriptionCredential(db, settings, scope, {
+    fetchImpl,
+  }).catch((error) => {
+    if (error instanceof ClaudeSubscriptionConnectionChanged)
+      throw new HTTPException(409, { message: error.message });
+    if (error instanceof ClaudeSubscriptionRefreshUnavailable)
+      throw new HTTPException(503, { message: error.message });
+    throw error;
+  });
   if (!credential) return emptyClaudeUsage(null);
+  if ("reconnectRequired" in credential) return credential.usage;
   const current = credential.usage;
   if (
     current.refreshStatus === "scope_required" ||

@@ -23,12 +23,15 @@ import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  organizationApiKeyAccess,
   requireAccessContext,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
+
+export { organizationApiKeyAccess } from "@opengeni/core";
 
 /** Permissions minted onto a `full` organization API key. */
 export const organizationApiKeyPermissions: Permission[] = [
@@ -58,15 +61,6 @@ export function organizationApiKeyPermissionsForAccess(
   return access === "read"
     ? [...organizationReadApiKeyPermissions]
     : [...organizationApiKeyPermissions];
-}
-
-/**
- * The access tier is derived from stored permissions rather than a column: a
- * key that carries the `workspace:admin` wildcard administers the
- * organization, any other organization key is read-only.
- */
-export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
-  return permissions.includes("workspace:admin") ? "full" : "read";
 }
 
 function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {

@@ -170,3 +170,9 @@ export function openGeniConsolePath(
       return null;
   }
 }
+
+/**
+ * Request header naming the session an embedded artifact read belongs to.
+ * `createSessionProxyHandler` only serves artifacts OpenGeni lists for it.
+ */
+export const SESSION_SCOPE_HEADER = "x-opengeni-session-id";

@@ -149,6 +149,11 @@ OpenGeni POSTs:
   "accountId": "…", "workspaceId": "…", "sessionId": "…", "rootSessionId": "…",
   "parentSessionId": null, "turnId": "…", "attemptId": "…",
   "initiator": { "kind": "subject", "subjectId": "user:alice" },
+  "initiatorContext": {
+    "kind": "human",
+    "initiator": { "kind": "subject", "subjectId": "user:alice" },
+    "context": {}
+  },
   "initiatingHumanSubjectId": "user:alice",
   "initiatingHuman": { "subjectId": "user:alice", "externalIdentity": null },
   "sandboxBackend": "modal", "sandboxOs": "linux"
@@ -203,6 +208,53 @@ external identity record, never from the session creator. No known human means
 `externalIdentity: null`. Existing `initiator` and `initiatingHumanSubjectId`
 fields are unchanged. These fields are informational identity, never
 authorization: authorize users and tools with the authenticated connection.
+
+`initiatorContext` carries the **exact accepted turn's frozen provenance**, not
+the session creator, latest human, or mutable session metadata. Its `kind` is
+`human`, `service`, or `agent` (the newest frozen `via` hop is an agent
+delegation). `initiator` retains the full accepted causal identity, including a
+signed service's subject and label; `context` retains the accepted non-secret
+host context without rewriting its keys. Service assertions are bounded to
+4096 UTF-8 bytes at acceptance. The complete object is part of the raw body
+covered by `OpenGeni-Signature`; `verifyCredentialProviderRequest` returns its
+typed value unchanged. It is optional in SDK types only for older senders;
+upgraded workers always send it on provision and renewal.
+
+Agent-created children inherit their calling turn's service identity and
+`context.via` records the exact calling session, turn, attempt, and execution
+generation. Internal continuations and child lifecycle inputs keep their
+existing service principal: at claim, their `via` chain freezes the exact
+target causal turn's session/turn ids, identity, and context. Each hop's context
+excludes its own `via`, avoiding recursive chains. Chains retain the root and
+newest hops, up to 32, with `viaTruncated: true` when clipped. Coalesced internal
+turns carry their own batch's `context.updateIds`, never a sender's older batch.
+Retries and renewals retain the same accepted facts. No historical missing
+service provenance is reconstructed from current session state.
+
+These fields grant **nothing** and do not replace `initiatingHuman`, the delegated
+grant subject, permissions, or OpenGeni's existing authorization checks. A host
+can apply its own credential-issuance policy to a scheduled service turn without
+pretending it is a human turn. For example, after independently mapping the
+trusted workspace id to its tenant and verifying the scheduled occurrence:
+
+```ts
+const request = await verifyCredentialProviderRequest({ body: rawBody, headers, secret });
+const tenant = await tenants.byOpenGeniWorkspaceId(request.workspaceId);
+const origin = request.initiatorContext;
+if (!tenant || origin?.kind !== "service" ||
+    origin.initiator.subjectId !== "product:scheduled-drift" ||
+    typeof origin.context.occurrenceId !== "string" ||
+    !await scheduledPolicy.authorize(tenant.id, origin.context.occurrenceId)) {
+  return Response.json({ status: "not_applicable" });
+}
+// Return only the credentials this tenant's scheduled-check policy permits.
+return Response.json({ status: "ok", environment: await scheduledCredentials(tenant.id) });
+```
+
+For an inherited continuation, apply that same host policy to the original
+service identity/context retained in the causal `via` chain, and validate the
+causal chain required by your policy. Never treat `kind`, a service label, an
+occurrence id, or the mere presence of a human as an authorization by itself.
 
 ### Renewable MCP headers
 

@@ -3756,7 +3756,7 @@ export const integrationOauthPendingStates = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").notNull(),
+    workspaceId: uuid("workspace_id"),
     stateEncrypted: text("state_encrypted").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10284,9 +10284,9 @@ export const sandboxRetainedProcesses = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
     providerCommand: jsonb("provider_command").$type<SandboxProviderCommand>(),
-    supervisionRetentionXid: customType<{ data: string }>({ dataType: () => "xid8" })(
-      "supervision_retention_xid",
-    ).default(sql`pg_current_xact_id()`),
+    supervisionRetentionXid: customType<{ data: string }>({
+      dataType: () => "xid8",
+    })("supervision_retention_xid").default(sql`pg_current_xact_id()`),
     supervisionReceipt: jsonb("supervision_receipt").$type<CommandSupervisionReceipt>(),
     supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
     cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
