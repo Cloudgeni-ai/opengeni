@@ -1107,6 +1107,82 @@ describe("queue surface browser acceptance", () => {
     }
   }, 60_000);
 
+  test("queue action menus scroll within a short viewport and retain keyboard access at 200% text", async () => {
+    const viewport = { width: 320, height: 480 };
+    const context = await newBrowserContext({ viewport, hasTouch: true, isMobile: true });
+    try {
+      const page = await context.newPage();
+      const diagnostics = observePageFailures(page);
+      for (const theme of themes) {
+        await page.goto(`${baseUrl}/queue.html?count=3&theme=${theme}&visibility=short-zwj`, {
+          waitUntil: "networkidle",
+        });
+        await page.addStyleTag({ content: ":root { font-size: 32px !important; }" });
+        await page.evaluate(() => document.fonts.ready);
+        await page.getByRole("button", { name: "3 queued prompts", exact: true }).click();
+        const trigger = page.getByRole("button", {
+          name: "More actions for queued prompt 1",
+          exact: true,
+        });
+        await trigger.focus();
+        await page.keyboard.press("Enter");
+
+        const menu = page.getByTestId("queue-actions-menu-1");
+        const geometry = await measurePortalMenu(page, 1);
+        expect(geometry.itemCount).toBe(5);
+        expect(geometry.insideViewport).toBe(true);
+        expect(geometry.itemWidths.every((width) => width > 0 && width <= viewport.width)).toBe(
+          true,
+        );
+        expect(geometry.itemHeights.every((height) => height >= 43)).toBe(true);
+        expect(await menu.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
+          true,
+        );
+
+        // Roving focus must reveal the last enabled action, not leave it clipped
+        // behind a height cap; Home must bring the first action back into view.
+        for (const [key, label] of [
+          ["End", "Move to bottom"],
+          ["Home", "Edit in composer"],
+        ] as const) {
+          await page.keyboard.press(key);
+          await page.waitForFunction(
+            (name) =>
+              document.activeElement?.getAttribute("role") === "menuitem" &&
+              document.activeElement.textContent?.trim() === name,
+            label,
+          );
+          const item = menu.getByRole("menuitem", { name: label, exact: true });
+          const itemGeometry = await reflowGeometry(item);
+          expect(await item.evaluate((element) => document.activeElement === element)).toBe(true);
+          expect(itemGeometry.textInside).toBe(true);
+          expect(itemGeometry.insideViewport).toBe(true);
+          expect(
+            await item.evaluate((element) => {
+              const itemBounds = element.getBoundingClientRect();
+              const menuBounds = element.closest('[role="menu"]')!.getBoundingClientRect();
+              return itemBounds.top >= menuBounds.top && itemBounds.bottom <= menuBounds.bottom;
+            }),
+          ).toBe(true);
+        }
+        expect(await menu.evaluate((element) => element.scrollTop)).toBe(0);
+        const menuReport = await new AxeBuilder({ page })
+          .include('[data-testid="queue-actions-menu-1"]')
+          .withTags(["wcag2a", "wcag2aa"])
+          .analyze();
+        expect(menuReport.violations).toEqual([]);
+        await page.keyboard.press("Escape");
+        expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
+        expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+        const report = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+        expect(report.violations).toEqual([]);
+      }
+      expect(diagnostics).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("hostile queue errors stay lossless and bounded at 320px and 200% text", async () => {
     const viewport = { width: 320, height: 800 } as const;
     const sources = ["queue", "mutation"] as const satisfies readonly QueueErrorSource[];

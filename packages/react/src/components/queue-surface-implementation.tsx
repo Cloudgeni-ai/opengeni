@@ -1143,7 +1143,8 @@ function SortableQueueRow({
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
-                className={`${MENU_SURFACE_CLASS} og-root z-50 w-52 max-w-[calc(100vw-16px)]`}
+                collisionPadding={8}
+                className={`${MENU_SURFACE_CLASS} og-root z-50 max-h-(--radix-dropdown-menu-content-available-height) w-52 max-w-[calc(100vw-16px)] overflow-x-hidden overflow-y-auto`}
                 style={portalTokenStyle}
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
