@@ -1,6 +1,12 @@
 import { Component, type ReactNode } from "react";
 
-type Anchor = { element: HTMLElement; key: string | null; text: string | null; top: number };
+type Anchor = {
+  element: HTMLElement;
+  key: string | null;
+  text: string | null;
+  top: number;
+  focused?: boolean;
+};
 export type TimelineAnchor = Anchor[];
 
 /** Read the old DOM immediately before React changes it, not when a fetch starts. */
@@ -26,17 +32,24 @@ export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | n
     .map((element) => ({ element, rect: element.getBoundingClientRect() }))
     .filter(({ rect }) => rect.height > 0);
   const anchors: TimelineAnchor = [];
+  let stickyFocus: Anchor | undefined;
   // A disclosure is the reader's explicit point of interaction. In particular,
   // anchoring a paragraph below an expanding disclosure would move its button.
   const focused = scroller.ownerDocument.activeElement;
-  if (
-    focused instanceof HTMLElement &&
-    scroller.contains(focused) &&
-    focused.matches("button[aria-expanded]")
-  ) {
+  if (focused instanceof HTMLElement && scroller.contains(focused) && focused !== scroller) {
     const box = focused.getBoundingClientRect();
     if (box.bottom > viewport.top && box.top < viewport.bottom) {
-      anchors.push({ element: focused, key: null, text: null, top: box.top });
+      const anchor = { element: focused, key: null, text: null, top: box.top, focused: true };
+      const section = focused.closest("[data-og-work-section]");
+      // A stuck header stays put even when its section moves. Anchor the work
+      // being read beneath it instead, while still retaining its focus identity.
+      if (
+        focused.matches('[data-og-work-header="outer"]') &&
+        section &&
+        section.getBoundingClientRect().top < box.top - 1
+      )
+        stickyFocus = anchor;
+      else anchors.push(anchor);
     }
   }
   // A paragraph survives even when earlier deltas reconstruct its containing message.
@@ -60,6 +73,7 @@ export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | n
   }));
   anchors.push(...rows.filter((row) => row.top >= viewport.top));
   anchors.push(...rows.filter((row) => row.top < viewport.top).reverse());
+  if (stickyFocus) anchors.push(stickyFocus);
   return anchors;
 }
 
