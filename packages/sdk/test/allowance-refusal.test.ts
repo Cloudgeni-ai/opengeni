@@ -18,6 +18,14 @@ test("SDK allowance subpath preserves canonical safe presentation", () => {
   expect(text).not.toContain("Private wrapper");
 });
 
+test("published SDK allowance leaf is self-contained without a schema runtime", async () => {
+  if (process.env.OPENGENI_VERIFY_BUILT_EMBEDDING_PACKAGES !== "1") return;
+  const emitted = await Bun.file(`${import.meta.dir}/../dist/allowance-refusal.js`).text();
+  expect(emitted).toContain("usage allowance is exhausted");
+  expect(emitted).not.toContain("@opengeni/contracts");
+  expect(emitted).not.toMatch(/\bzod\b|\$ZodType|ZodError/u);
+});
+
 test("React allowance projection's browser closure stays client-only", async () => {
   const loaded = new Set<string>();
   const result = await Bun.build({
@@ -48,6 +56,7 @@ test("React allowance projection's browser closure stays client-only", async () 
       /\/packages\/(?:core|db|runtime|config|events|storage|network)\//u.test(path),
     ),
   ).toEqual([]);
+  expect([...loaded].filter((path) => /\/node_modules\/.*\/zod\//u.test(path))).toEqual([]);
   const text = await result.outputs[0]!.text();
   expect(text).toContain("usage allowance is exhausted");
   expect(text).not.toMatch(/require\(["'](?:node:)?(?:fs|child_process|net)["']\)/u);

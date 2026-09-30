@@ -50,6 +50,7 @@ export default defineConfig({
   clean: true,
   external: [/^@opengeni\//],
   noExternal: [
+    "@opengeni/contracts/allowance-refusal",
     "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",

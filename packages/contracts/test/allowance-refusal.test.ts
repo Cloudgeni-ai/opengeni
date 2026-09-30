@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { AllowanceExhaustedRefusal } from "../src/usage-allowances";
 import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
@@ -13,6 +14,43 @@ const refusal = {
 };
 
 describe("bounded allowance refusal presentation", () => {
+  test("pure presentation parser matches the canonical bounded timestamp and member contract", () => {
+    for (const resetsAt of [
+      null,
+      "2026-10-01T00:00Z",
+      "2026-10-01T00:00:00.123456Z",
+      "2026-10-01T02:30:00+02:30",
+      "2026-10-01T02:30-02:30",
+      "2000-02-29T00:00Z",
+      "1900-02-29T00:00Z",
+      "2024-02-29T00:00Z",
+      "2026-02-29T00:00Z",
+      "2026-04-31T00:00Z",
+      "2026-12-31T23:59:59Z",
+      "2026-10-01T24:00:00Z",
+      "2026-10-01T00:60:00Z",
+      "2026-10-01T00:00:60Z",
+      "2026-10-01T00:00:00+24:00",
+      "2026-10-01T00:00:00+01:60",
+      "2026-10-01T00:00:00+0200",
+      "2026-10-01T00:00:00",
+      "2026-10-01",
+    ]) {
+      for (const subjectId of [
+        undefined,
+        "member",
+        "",
+        "\0",
+        "x".repeat(1_024),
+        "x".repeat(1_025),
+      ]) {
+        const input = { ...refusal, resetsAt, subjectId };
+        expect(parseAllowanceExhaustedRefusal(input) !== null).toBe(
+          AllowanceExhaustedRefusal.safeParse(input).success,
+        );
+      }
+    }
+  });
   test("accepts LimitDecision and API details without publishing wrappers or diagnostics", () => {
     const parsed = parseAllowanceExhaustedRefusal({
       ...refusal,
