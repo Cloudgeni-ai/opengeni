@@ -395,7 +395,12 @@ means a verified self-update is draining accepted work; `queue_breaker` and
 detail remains an unspecified admission refusal. The same distinction survives
 retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
 `update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Request an update
+long-lived servers, cancel accepted work, or restart the host. Open browser and
+computer controllers also keep the host busy, including pending creation and
+shutdown. The agent checks every owned browserd scope through its private
+admin-only idle proof after fencing new routed work; unavailable, crashed, or
+older incompatible controllers return retryable `update_state_unavailable`.
+An empty controller may remain running without blocking an update. Request an update
 again at a safe idle point. Older runners can remain draining indefinitely;
 inspect their accepted operations and coordinate a safe stop/restart with their
 owners instead of killing useful work or increasing concurrency limits.
