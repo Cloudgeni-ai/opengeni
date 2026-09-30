@@ -63,8 +63,11 @@ export type ComposerSettingPanel = {
   /** The current value, right-aligned on the row. */
   summary: string;
   disabled?: boolean;
-  /** Panel element; receives `leading` (back control) via clone. */
-  panel: ReactElement<{ leading?: ReactNode }>;
+  /**
+   * Panel element; receives `leading` (back control) and `presentation`
+   * (inside the dropdown, or in a dialog) via clone.
+   */
+  panel: ReactElement<{ leading?: ReactNode; presentation?: "menu" | "dialog" }>;
 };
 
 /**
@@ -318,9 +321,15 @@ export function ComposerMobilePlusPanel(
           },
         })
       ) : panel === "runs-on" && props.runsOn ? (
-        withLeading(props.runsOn.panel, backButton)
+        cloneElement(props.runsOn.panel, {
+          leading: backButton,
+          presentation: dialogOpen ? "dialog" : "menu",
+        })
       ) : panel === "visibility" && props.visibility ? (
-        withLeading(props.visibility.panel, backButton)
+        cloneElement(props.visibility.panel, {
+          leading: backButton,
+          presentation: dialogOpen ? "dialog" : "menu",
+        })
       ) : panel === "voice" && voiceModel ? (
         withLeading(voiceModel.panel, backButton)
       ) : panel === "settings" ? (
@@ -357,6 +366,18 @@ export function ComposerMobilePlusPanel(
   );
 }
 
+/** The dialog's accessible name for each drill-in (the root is never a dialog). */
+export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
+  root: "Composer actions",
+  tools: "Connectors",
+  repos: "Repositories",
+  voice: "Voice model",
+  variables: "Variable sets",
+  settings: "Chat settings",
+  "runs-on": "Runs on",
+  visibility: "Who can see this chat",
+};
+
 function ComposerPanelContent(props: {
   dialog: boolean;
   side: "top" | "bottom";
@@ -383,15 +404,7 @@ function ComposerPanelContent(props: {
           props.triggerRef.current?.focus();
         }}
       >
-        <DialogTitle className="sr-only">
-          {props.panel === "repos"
-            ? "Repositories"
-            : props.panel === "tools"
-              ? "Connectors"
-              : props.panel === "variables"
-                ? "Variable sets"
-                : "Voice model"}
-        </DialogTitle>
+        <DialogTitle className="sr-only">{PANEL_DIALOG_TITLE[props.panel]}</DialogTitle>
         {props.children}
       </DialogContent>
     );

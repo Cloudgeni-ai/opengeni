@@ -69,8 +69,10 @@ import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-n
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import {
   RunsOnMenuBody,
+  RunsOnNotice,
   VisibilityMenuBody,
   hasRunsOnChoices,
+  runsOnAttention,
   hasVisibilityChoice,
   runsOnSummary,
   visibilitySummary,
@@ -2457,11 +2459,42 @@ function ComputeTargetControl(props: {
     props.selectionHistory,
   ]);
 
+  // A 404 means Connected Machines are off here, not a failure.
+  const fleetLoadFailed =
+    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
+  const attention = runsOnAttention({
+    draft,
+    machines,
+    fleetLoadFailed,
+    fleetLoading: fleet.loading,
+  });
+
   // Where it runs is chosen under "+" > Runs on. Only what needs attention
-  // shows under the composer: a catalog that couldn't be verified, and the
+  // shows under the composer: why Send waits on where it runs (with a retry
+  // for a failed machine load), a catalog that couldn't be verified, and the
   // personal resources this chat will use.
   return (
     <>
+      {attention ? (
+        <div className="mt-3">
+          <RunsOnNotice
+            attention={attention}
+            machines={machines}
+            disabled={props.disabled}
+            onRetryMachines={() => void fleet.refresh()}
+            connectAction={
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  to="/workspaces/$workspaceId/machines"
+                  params={{ workspaceId: props.workspaceId }}
+                >
+                  Connect a machine
+                </Link>
+              </Button>
+            }
+          />
+        </div>
+      ) : null}
       {props.catalogRecovery.error ? (
         <div role="alert" className="mt-3">
           <Notice
