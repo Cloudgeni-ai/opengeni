@@ -19,7 +19,20 @@ export const ORGANIZATION_WEBHOOK_LIMIT_PER_ORGANIZATION = 10;
 
 /** Exact external-source match; absent/null means every workspace in the organization. */
 export const IntegrationWorkspaceFilter = z
-  .object({ externalSource: z.string().min(1).max(256).optional() })
+  .object({
+    externalSource: z
+      .string()
+      .min(1)
+      .max(200)
+      .refine(
+        (value) =>
+          !value.includes("\0") &&
+          !/[\uD800-\uDFFF]/u.test(value) &&
+          new TextEncoder().encode(value).byteLength <= 200,
+        "External source must be valid PostgreSQL text of at most 200 UTF-8 bytes",
+      )
+      .optional(),
+  })
   .strict();
 export type IntegrationWorkspaceFilter = z.infer<typeof IntegrationWorkspaceFilter>;
 
@@ -323,7 +336,8 @@ export const CredentialProviderMcpHeaders = z
       const lower = name.toLowerCase();
       if (
         name.length > 128 ||
-        !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) ||
+        name.length === 0 ||
+        /[^!#$%&'*+.^_`|~0-9A-Za-z-]/.test(name) ||
         FORBIDDEN_MCP_HEADERS.has(lower) ||
         seen.has(lower)
       ) {
@@ -332,7 +346,7 @@ export const CredentialProviderMcpHeaders = z
       seen.add(lower);
       const valueBytes = new TextEncoder().encode(value).byteLength;
       bytes += name.length + valueBytes;
-      if (valueBytes > 16384 || /[\u0000-\u0008\u000a-\u001f\u007f]/.test(value)) {
+      if (valueBytes > 16384 || /[^\t\u0020-\u007e\u0080-\u00ff]/.test(value)) {
         context.addIssue({ code: "custom", message: "Invalid or oversized MCP header value" });
       }
     }

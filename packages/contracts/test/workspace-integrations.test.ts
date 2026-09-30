@@ -87,7 +87,10 @@ describe("workspace integration contracts", () => {
     for (const workspaceFilter of [
       { externalSource: "" },
       { externalId: "tenant" },
-      { externalSource: "x".repeat(257) },
+      { externalSource: "x".repeat(201) },
+      { externalSource: "é".repeat(101) },
+      { externalSource: "nul\0" },
+      { externalSource: "\uD800" },
     ]) {
       expect(
         PutOrganizationCredentialProviderRequest.safeParse({ ...request, workspaceFilter }).success,
@@ -123,9 +126,11 @@ describe("workspace integration contracts", () => {
       { "Proxy-Authorization": "test-only" },
       { "content-length": "1" },
       { "bad name": "value" },
+      { "Authorization\n": "value" },
       { Authorization: "one", authorization: "two" },
       { Authorization: "value\r\nHost: example.com" },
       { Authorization: "\0" },
+      { Authorization: "unsupported-😀" },
       { Authorization: "x".repeat(16385) },
       Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`x-${i}`, "v"])),
       Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`x-${i}`, "v".repeat(16384)])),
