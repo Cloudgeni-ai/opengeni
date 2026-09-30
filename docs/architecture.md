@@ -78,11 +78,7 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
-Task-tree authority locks root and addressed sessions in UUID order with
-`FOR NO KEY UPDATE`: sibling mutations still serialize, but foreign-key
-`KEY SHARE` checks can proceed while child activity finalization holds the
-workspace activity counter. Exact turn/attempt and visibility fences remain
-unchanged (`0542_task_note_root_lock_mode.sql`).
+Task-tree [locking invariants](run-lifecycle.md).
 
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.

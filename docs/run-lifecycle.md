@@ -2405,6 +2405,12 @@ operation UUID. Notes remain an explicit retrieval surface and are never
 composed into recovery history or ordinary prompts. See
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
+Task-tree authority locks root and addressed sessions in UUID order with
+`FOR NO KEY UPDATE`: sibling mutations still serialize, but foreign-key
+`KEY SHARE` checks can proceed while child activity finalization holds the
+workspace activity counter. Exact turn/attempt and visibility fences remain
+unchanged (`0542_task_note_root_lock_mode.sql`).
+
 Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at
 `OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE`; reaching that target is ordinary
