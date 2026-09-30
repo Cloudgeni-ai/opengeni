@@ -4,9 +4,9 @@
 
 ## Navigation
 
-1. Read §2–4; skim §6.
-2. **Subsystem changes:** §13 links canonical sources.
-3. **Behavior:** follow source links.
+1. Read §2–4, §6.
+2. **Subsystems:** §13 sources.
+3. **Behavior:** source links.
 4. **Stale boundaries:** update per §14.
 
 ---
@@ -19,25 +19,23 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is self-hostable: Postgres persists state, Temporal coordinates execution,
-and NATS transports reconstructible events. The API authorizes clients; workers
-use sandboxes or Connected Machines.
+Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
+NATS transports reconstructible events. The API authorizes; workers execute.
 
-External users require live membership. `asUser()` supplies canonical
-identity; an end-user label does not. Private/shared visibility differs from
-cross-tree `agentAccess`. Personal Knowledge follows the verified active-turn
-user; task notes cover temporary tree coordination. Linking never merges users.
-See [product integration](product-integration.md),
+External users require live membership. `asUser()` supplies identity; labels do
+not. Visibility differs from `agentAccess`. Personal Knowledge follows the
+verified active-turn user; task notes coordinate temporarily. Linking never
+merges users. See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal physically deletes the scoped registry head and revisions,
-requiring exact approval and Learning enforcement through the Skill lifecycle.
+Skill removal deletes the scoped registry head and revisions through exact
+approval and Learning enforcement.
 Accepted conversation context remains unchanged.
 
-Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
-inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
+Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
+retain catalog floors but grant no capabilities or credentials.
 
-Account isolation/rebinding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
+Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
 ---
@@ -1586,6 +1584,8 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
 - **Human, service, API-key, and agent identities are distinct.** Provenance is
   not authority. Personal-resource execution requires the exact permitted
   human snapshot; worker identity never substitutes for it.
+- Workspace providers override organization defaults; webhooks fan out.
+  MCP headers stay in memory; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
   Conversation, source, tool, and error text is not centrally regex-redacted.
@@ -1722,6 +1722,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
+| Organization/workspace callbacks | `packages/db/src/workspace-integrations.ts`, `apps/api/src/routes/workspace-integrations.ts`, `apps/api/src/routes/organization-integrations.ts`, `apps/api/src/workspace-webhook-dispatch.ts`, `apps/worker/src/activities/workspace-credential-provider.ts` | [`workspace-integrations.md`](workspace-integrations.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

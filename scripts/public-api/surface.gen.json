@@ -307,6 +307,39 @@
       ]
     },
     {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/credential-provider",
+      "sdk": [
+        "OpenGeniClient.deleteOrganizationCredentialProvider"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/credential-provider",
+      "sdk": [
+        "OpenGeniClient.getOrganizationCredentialProvider"
+      ],
+      "request": [],
+      "response": [
+        "GetOrganizationCredentialProviderResponse"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/organizations/:organizationId/credential-provider",
+      "sdk": [
+        "OpenGeniClient.putOrganizationCredentialProvider"
+      ],
+      "request": [
+        "PutOrganizationCredentialProviderRequest"
+      ],
+      "response": [
+        "PutOrganizationCredentialProviderResponse"
+      ]
+    },
+    {
       "method": "POST",
       "path": "/v1/organizations/:organizationId/external-identities/lookup",
       "sdk": [
@@ -743,6 +776,85 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/webhooks",
+      "sdk": [
+        "OpenGeniClient.listOrganizationWebhooks"
+      ],
+      "request": [],
+      "response": [
+        "ListOrganizationWebhooksResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/webhooks",
+      "sdk": [
+        "OpenGeniClient.createOrganizationWebhook"
+      ],
+      "request": [
+        "CreateOrganizationWebhookRequest"
+      ],
+      "response": [
+        "CreateOrganizationWebhookResponse"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
+      "sdk": [
+        "OpenGeniClient.deleteOrganizationWebhook"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
+      "sdk": [
+        "OpenGeniClient.getOrganizationWebhook"
+      ],
+      "request": [],
+      "response": [
+        "OrganizationWebhook"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
+      "sdk": [
+        "OpenGeniClient.updateOrganizationWebhook"
+      ],
+      "request": [
+        "UpdateOrganizationWebhookRequest"
+      ],
+      "response": [
+        "OrganizationWebhook"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/webhooks/:webhookId/deliveries",
+      "sdk": [
+        "OpenGeniClient.listOrganizationWebhookDeliveries"
+      ],
+      "request": [],
+      "response": [
+        "ListOrganizationWebhookDeliveriesResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/organizations/:organizationId/webhooks/:webhookId/deliveries/:deliveryId/redeliver",
+      "sdk": [
+        "OpenGeniClient.redeliverOrganizationWebhookDelivery"
+      ],
+      "request": [],
+      "response": [
+        "OrganizationWebhookDelivery"
+      ]
     },
     {
       "method": "POST",
@@ -6691,6 +6803,17 @@
       "response": []
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
+      "sdk": [
+        "OpenGeniClient.getWorkspaceWebhook"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceWebhook"
+      ]
+    },
+    {
       "method": "PATCH",
       "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId",
       "sdk": [
@@ -10563,6 +10686,30 @@
         "$.workspaceId": "string!"
       }
     },
+    "CreateOrganizationWebhookRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.description": "string? null",
+        "$.enabled": "boolean?",
+        "$.eventTypes": "array!",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.url": "string!",
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)? null"
+      }
+    },
+    "CreateOrganizationWebhookResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.secret": "string!",
+        "$.webhook": "ref(OrganizationWebhook)!"
+      }
+    },
     "CreateOrganizationWorkspaceRequest": {
       "io": [
         "input"
@@ -12104,6 +12251,15 @@
         "$.video": "ref(GeneratedVideoFacts)!"
       }
     },
+    "GetOrganizationCredentialProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.provider": "ref(OrganizationCredentialProvider)! null"
+      }
+    },
     "GetWorkspaceCaptureFileResponse": {
       "io": [
         "output"
@@ -13543,6 +13699,16 @@
         "$|kind=auto.url": "string!"
       }
     },
+    "IntegrationWorkspaceFilter": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.externalSource": "string?"
+      }
+    },
     "InteractionAssociation": {
       "io": [
         "output"
@@ -14343,6 +14509,26 @@
         "$.invitations": "array!",
         "$.invitations[]": "ref(OrganizationInvitation)",
         "$.nextCursor": "string! null"
+      }
+    },
+    "ListOrganizationWebhookDeliveriesResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deliveries": "array!",
+        "$.deliveries[]": "ref(WorkspaceWebhookDelivery)"
+      }
+    },
+    "ListOrganizationWebhooksResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.webhooks": "array!",
+        "$.webhooks[]": "ref(OrganizationWebhook)"
       }
     },
     "ListPersonalGitHubRepositoriesResponse": {
@@ -15427,6 +15613,21 @@
         "$": "enum=[\"\\\"full\\\"\",\"\\\"read\\\"\"]"
       }
     },
+    "OrganizationCredentialProvider": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.enabled": "boolean!",
+        "$.organizationId": "string!",
+        "$.timeoutMs": "integer!",
+        "$.updatedAt": "string!",
+        "$.url": "string!",
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
+      }
+    },
     "OrganizationDocumentAuthorityReclassification": {
       "io": [
         "output"
@@ -15865,6 +16066,44 @@
         "$.role": "ref(AssignableWorkspaceMemberRole)!",
         "$.workspaceId": "string!",
         "$.workspaceName": "string!"
+      }
+    },
+    "OrganizationWebhook": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.description": "string! null",
+        "$.enabled": "boolean!",
+        "$.eventTypes": "array!",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.id": "string!",
+        "$.organizationId": "string!",
+        "$.updatedAt": "string!",
+        "$.url": "string!",
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)! null"
+      }
+    },
+    "OrganizationWebhookDelivery": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.attempts": "integer!",
+        "$.createdAt": "string!",
+        "$.deliveredAt": "string! null",
+        "$.eventId": "string!",
+        "$.eventType": "string!",
+        "$.failedAt": "string! null",
+        "$.id": "string!",
+        "$.lastError": "string! null",
+        "$.lastStatus": "integer! null",
+        "$.nextAttemptAt": "string! null",
+        "$.status": "ref(WorkspaceWebhookDeliveryStatus)!",
+        "$.webhookId": "string!"
       }
     },
     "OrganizationWorkspaceAccess": {
@@ -16807,6 +17046,28 @@
         "$.source": "ref(WorkspaceArtifactSourceBundle)?",
         "$.title": "string?",
         "$.uploadId": "string?"
+      }
+    },
+    "PutOrganizationCredentialProviderRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.enabled": "boolean?",
+        "$.timeoutMs": "integer?",
+        "$.url": "string!",
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)? null"
+      }
+    },
+    "PutOrganizationCredentialProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.provider": "ref(OrganizationCredentialProvider)!",
+        "$.secret": "string?"
       }
     },
     "PutOrganizationWorkspaceMemberRequest": {
@@ -20521,6 +20782,20 @@
         "$.retentionDays": "integer! null"
       }
     },
+    "UpdateOrganizationWebhookRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.description": "string? null",
+        "$.enabled": "boolean?",
+        "$.eventTypes": "array?",
+        "$.eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.url": "string?",
+        "$.workspaceFilter": "ref(IntegrationWorkspaceFilter)? null"
+      }
+    },
     "UpdateOrganizationWorkspaceRequest": {
       "io": [
         "input"
@@ -23014,6 +23289,8 @@
       "createOpenGeniSiteClient": "value",
       "CreateOrganizationApiKeyRequest": "type",
       "CreateOrganizationProviderCustomModelRequest": "type",
+      "CreateOrganizationWebhookRequest": "type",
+      "CreateOrganizationWebhookResponse": "type",
       "CreateOrganizationWorkspaceRequest": "type",
       "CreatePreferenceRegistryProposalRequest": "type",
       "CreatePrReviewAppRegistrationRequest": "type",
@@ -23038,6 +23315,8 @@
       "CreateWorkspaceWebhookRequest": "type",
       "CreateWorkspaceWebhookResponse": "type",
       "createXaiSubscriptionRealtimeTransportStarter": "value",
+      "CredentialProviderMcpHeaders": "type",
+      "CredentialProviderMcpMaterial": "type",
       "CredentialProviderRequest": "type",
       "CredentialProviderResponse": "type",
       "CurrentOrOpenBrowserOptions": "type",
@@ -23158,6 +23437,7 @@
       "generatedImageSandboxPathMatches": "value",
       "GeneratedVideoFacts": "type",
       "GeneratedVideoReceipt": "type",
+      "GetOrganizationCredentialProviderResponse": "type",
       "GetSessionOptions": "type",
       "GetWorkspaceCaptureFileResponse": "type",
       "GetWorkspaceCaptureResponse": "type",
@@ -23228,6 +23508,7 @@
       "HumanInputQuestionKind": "type",
       "HumanInputResponse": "type",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
+      "InitiatingHuman": "type",
       "InsightsBillingPath": "type",
       "InsightsDepthBucket": "type",
       "InsightsFloorSession": "type",
@@ -23261,6 +23542,7 @@
       "IntegrationFacetStatus": "type",
       "IntegrationInstanceFacetsResponse": "type",
       "IntegrationSource": "type",
+      "IntegrationWorkspaceFilter": "type",
       "INTERACTION_PROTOCOL_VERSION": "value",
       "InteractionAssociation": "type",
       "InteractionControlFailure": "type",
@@ -23343,6 +23625,8 @@
       "ListIntegrationDefinitionsResponse": "type",
       "ListManagedOrganizationMembershipsResponse": "type",
       "ListOrganizationSessionsOptions": "type",
+      "ListOrganizationWebhookDeliveriesResponse": "type",
+      "ListOrganizationWebhooksResponse": "type",
       "ListPersonalGitHubRepositoriesOptions": "type",
       "ListPersonalGitHubRepositoriesResponse": "type",
       "ListPrReviewConfigurationResponse": "type",
@@ -23484,6 +23768,7 @@
       "OrganizationAdministrationOverview": "type",
       "OrganizationApiKeyAccess": "type",
       "OrganizationCodexAccountsResponse": "type",
+      "OrganizationCredentialProvider": "type",
       "OrganizationInvitation": "type",
       "OrganizationMember": "type",
       "OrganizationMembershipRole": "type",
@@ -23506,6 +23791,8 @@
       "OrganizationRecoveryUnavailableReason": "type",
       "OrganizationSessionListResponse": "type",
       "OrganizationSummary": "type",
+      "OrganizationWebhook": "type",
+      "OrganizationWebhookDelivery": "type",
       "OrganizationWorkspaceAccess": "type",
       "OrganizationWorkspaceAccessMember": "type",
       "OrganizationWorkspaceRoleDefinition": "type",
@@ -23601,6 +23888,8 @@
       "PublishBrowserRevisionResponse": "type",
       "PublishSandboxFileArtifactRequest": "type",
       "PublishWorkspaceArtifactVersionRequest": "type",
+      "PutOrganizationCredentialProviderRequest": "type",
+      "PutOrganizationCredentialProviderResponse": "type",
       "PutOrganizationWorkspaceMemberRequest": "type",
       "PutWorkspaceCredentialProviderRequest": "type",
       "PutWorkspaceCredentialProviderResponse": "type",
@@ -23937,6 +24226,7 @@
       "UpdateNetworkRouteRequest": "type",
       "UpdateOrganizationNameRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
+      "UpdateOrganizationWebhookRequest": "type",
       "UpdateOrganizationWorkspaceRequest": "type",
       "UpdatePrReviewAppRegistrationRequest": "type",
       "UpdatePrReviewRepositoryBindingRequest": "type",
@@ -26586,6 +26876,7 @@
       "createOrganizationApiKey",
       "createOrganizationInvitation",
       "createOrganizationProviderCustomModel",
+      "createOrganizationWebhook",
       "createOrganizationWorkspace",
       "createPreferenceRegistryProposal",
       "createRetainedArtifactDownloadUrl",
@@ -26612,7 +26903,9 @@
       "deleteEnvironmentVariable",
       "deleteGoal",
       "deleteOrganizationApiKey",
+      "deleteOrganizationCredentialProvider",
       "deleteOrganizationProviderCustomModel",
+      "deleteOrganizationWebhook",
       "deleteOrganizationWorkspace",
       "deleteQueueItem",
       "deleteRig",
@@ -26702,11 +26995,13 @@
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationCredentialProvider",
       "getOrganizationModelProviderConnection",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationUsageSummary",
       "getOrganizationUsageWorkspacePage",
+      "getOrganizationWebhook",
       "getPreferenceRegistry",
       "getPreferenceRegistryFullContent",
       "getPreferenceRegistrySummary",
@@ -26746,6 +27041,7 @@
       "getWorkspaceModelCatalog",
       "getWorkspaceRealtimeModelCatalog",
       "getWorkspaceState",
+      "getWorkspaceWebhook",
       "gitDiff",
       "gitLog",
       "gitReadBatch",
@@ -26817,6 +27113,8 @@
       "listOrganizationProviderCustomModels",
       "listOrganizationSessions",
       "listOrganizationSuperGrokAccounts",
+      "listOrganizationWebhookDeliveries",
+      "listOrganizationWebhooks",
       "listOwnConnectionAccounts",
       "listOwnFeedback",
       "listPersonalGitHubRepositories",
@@ -26895,6 +27193,7 @@
       "publishBrowserRevision",
       "publishSandboxFileArtifact",
       "publishWorkspaceArtifactVersion",
+      "putOrganizationCredentialProvider",
       "putOrganizationWorkspaceMember",
       "putWorkspaceCredentialProvider",
       "readBrowserClipboard",
@@ -26903,6 +27202,7 @@
       "readWorkspaceSkill",
       "reconnectPersonalGitHub",
       "recoverSandbox",
+      "redeliverOrganizationWebhookDelivery",
       "redeliverWorkspaceWebhookDelivery",
       "refreshCodexUsage",
       "refreshScheduledTaskAccess",
@@ -27025,6 +27325,7 @@
       "updateOrganizationMember",
       "updateOrganizationName",
       "updateOrganizationRetentionPolicy",
+      "updateOrganizationWebhook",
       "updateOrganizationWorkspace",
       "updateOrganizationWorkspaceSettings",
       "updateRig",
