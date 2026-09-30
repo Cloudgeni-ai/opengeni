@@ -159,7 +159,18 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         data-testid="model-picker-models"
       >
         {props.loading ? (
-          <p className={MENU_NOTE_CLASS}>{messages.loading}</p>
+          // Rows at the menu's row height, never a sentence, so nothing jumps.
+          <div role="status" aria-label={messages.loading}>
+            {[58, 44, 66, 50].map((width) => (
+              <div key={width} aria-hidden="true" className="flex h-8 items-center gap-3 px-2.5">
+                <span className="size-4 shrink-0 animate-pulse rounded bg-og-surface-2" />
+                <span
+                  className="h-2.5 animate-pulse rounded bg-og-surface-2"
+                  style={{ width: `${width}%` }}
+                />
+              </div>
+            ))}
+          </div>
         ) : rows.some((row) => row.selectable) ? (
           <>
             {groups.map((group) => (

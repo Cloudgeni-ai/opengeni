@@ -12,6 +12,7 @@ import {
   ComposerMenuSwitch,
   ComposerMenuSwitchIndicator,
   MenuBackButton,
+  ComposerMenuRowsSkeleton,
 } from "@/components/ui/composer-menu";
 import { MENU_CHECK_CLASS, MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 import type { SessionToolSelection } from "@/components/pickers";
@@ -63,10 +64,9 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         />
         <div className="min-h-0 overflow-y-auto overscroll-contain">
           <p className={MENU_LABEL_CLASS}>Connected accounts</p>
-          {accounts.loading ? (
-            <p role="status" className={MENU_NOTE_CLASS}>
-              Loading accounts…
-            </p>
+          {accounts.loading &&
+          !accounts.groups.some((group) => group.serverId === settingsServer.id) ? (
+            <ComposerMenuRowsSkeleton rows={2} label="Loading accounts" />
           ) : null}
           <ConnectionAccountPicker
             {...accounts}
@@ -122,20 +122,13 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         }
       />
       <div className="min-h-0 shrink overflow-y-auto overscroll-contain">
-        {accounts?.loading ? (
-          <p role="status" className={MENU_NOTE_CLASS}>
-            Loading accounts…
-          </p>
-        ) : null}
         {accounts?.error ? (
           <p role="alert" className={cn(MENU_NOTE_CLASS, "text-status-failed")}>
             {accounts.error}
           </p>
         ) : null}
         {props.loading && !connectors.length ? (
-          <p className={MENU_NOTE_CLASS} role="status">
-            Loading connectors…
-          </p>
+          <ComposerMenuRowsSkeleton rows={4} size="tile" label="Loading connectors" />
         ) : null}
         {!props.loading && !connectors.length ? (
           <p className={MENU_NOTE_CLASS}>Connect an app to use it in your conversations.</p>

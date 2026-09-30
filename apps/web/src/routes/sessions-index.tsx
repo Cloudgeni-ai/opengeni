@@ -1712,12 +1712,12 @@ function SessionsIndexRouteContent({
 
           {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
-          {connectionAccounts.loading ||
-          connectionAccounts.error ||
-          connectionAccounts.accountChoiceMessage ? (
-            <div role={connectionAccounts.loading ? "status" : "alert"} className="mt-3">
+          {/* Accounts load quietly with the composer: only a problem shows here,
+              never a loading line behind an open menu. */}
+          {connectionAccounts.error || connectionAccounts.accountChoiceMessage ? (
+            <div role="alert" className="mt-3">
               <Notice
-                tone={connectionAccounts.loading ? "muted" : "waiting"}
+                tone="waiting"
                 action={
                   connectionAccounts.error && !connectionAccounts.accessDenied ? (
                     <Button
@@ -1730,13 +1730,11 @@ function SessionsIndexRouteContent({
                   ) : undefined
                 }
               >
-                {connectionAccounts.loading
-                  ? "Checking connected accounts…"
-                  : connectionAccounts.error
-                    ? connectionAccounts.accessDenied
-                      ? connectionAccounts.error
-                      : "Couldn't check connected accounts. Retry to send your message."
-                    : connectionAccounts.accountChoiceMessage}
+                {connectionAccounts.error
+                  ? connectionAccounts.accessDenied
+                    ? connectionAccounts.error
+                    : "Couldn't check connected accounts. Retry to send your message."
+                  : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
           ) : null}

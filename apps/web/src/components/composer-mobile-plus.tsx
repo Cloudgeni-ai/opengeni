@@ -1,11 +1,27 @@
 import { PlusIcon } from "lucide-react";
-import { lazy, Suspense, useRef, useState } from "react";
+import {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ComponentType,
+} from "react";
 
-import type { ComposerPlusProps, Panel } from "./composer-mobile-plus-panel";
+import type {
+  ComposerMobilePlusPanel as ComposerMobilePlusPanelType,
+  ComposerPlusProps,
+  Panel,
+} from "./composer-mobile-plus-panel";
 import { Button } from "@/components/ui/button";
 import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
 import { Dialog } from "@/components/ui/dialog";
 import { MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
+import {
+  ComposerMenuRowsSkeleton,
+  lazyComposerPanel,
+  preloadComposerMenuPanels,
+} from "@/components/ui/composer-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,11 +30,19 @@ import {
 
 export type { ComposerPlusProps } from "./composer-mobile-plus-panel";
 
-const LazyComposerPanel = lazy(() =>
+type PanelProps = ComponentProps<typeof ComposerMobilePlusPanelType>;
+
+/** The "+" menu itself: rendered at once when "+" opens after the preload. */
+const LazyComposerPanel = lazyComposerPanel<PanelProps>(() =>
   import("./composer-mobile-plus-panel")
-    .then((module) => ({ default: module.ComposerMobilePlusPanel }))
-    .catch(() => ({ default: ComposerPanelLoadFailed })),
+    .then((module) => module.ComposerMobilePlusPanel)
+    .catch(() => ComposerPanelLoadFailed as ComponentType<PanelProps>),
 );
+
+/** The "+" menu and every drill-in body, loaded before the first open. */
+function preloadComposerMenus() {
+  preloadComposerMenuPanels();
+}
 
 function ComposerPanelNotice(props: ComposerPlusProps & { failed?: boolean }) {
   return (
@@ -29,9 +53,13 @@ function ComposerPanelNotice(props: ComposerPlusProps & { failed?: boolean }) {
       collisionPadding={12}
       className={COMPOSER_MENU_PANEL_CLASS}
     >
-      <p role={props.failed ? "alert" : "status"} className={MENU_NOTE_CLASS}>
-        {props.failed ? "Composer actions could not be loaded." : "Loading actions…"}
-      </p>
+      {props.failed ? (
+        <p role="alert" className={MENU_NOTE_CLASS}>
+          Composer actions could not be loaded.
+        </p>
+      ) : (
+        <ComposerMenuRowsSkeleton rows={4} label="Loading composer actions" />
+      )}
       {props.failed ? (
         <Button type="button" size="sm" onClick={() => window.location.reload()}>
           Reload
@@ -50,6 +78,19 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
+  // Warm the menus once the composer is idle, so "+" never opens onto a load.
+  useEffect(() => {
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (run: () => void) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback && idleWindow.cancelIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(preloadComposerMenus);
+      return () => idleWindow.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(preloadComposerMenus, 1500);
+    return () => window.clearTimeout(handle);
+  }, []);
   const dialogOpen =
     open &&
     panel !== "root" &&
@@ -83,6 +124,8 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
             size="icon-xs"
             disabled={props.disabled}
             aria-label="More composer actions"
+            onPointerEnter={preloadComposerMenus}
+            onFocus={preloadComposerMenus}
             className="size-8 pointer-coarse:size-11 shrink-0 rounded-full text-fg-muted hover:text-fg"
           >
             <PlusIcon className="size-4" />

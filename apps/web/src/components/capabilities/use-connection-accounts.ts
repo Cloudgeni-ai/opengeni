@@ -20,10 +20,12 @@ export function useConnectionAccounts(
   const identity = `${session.workspaceId}:${session.id}`;
   const selectedIds = session.selectedIds;
   const scope = useRef({ client, identity, catalog, session, canReadConnections, epoch: 0 });
+  // A new caller, chat or grant fences old inventory. A refreshed catalog does
+  // not: the last inventory stays on screen while the new one loads, so menus
+  // and the page never flash back to a loading state.
   if (
     scope.current.client !== client ||
     scope.current.identity !== identity ||
-    scope.current.catalog !== catalog ||
     scope.current.canReadConnections !== canReadConnections
   ) {
     scope.current.epoch++;
@@ -58,12 +60,10 @@ export function useConnectionAccounts(
     const invocation = scope.current;
     if (invocation.canReadConnections !== true) return;
     const revision = ++request.current;
-    setResult(null);
     const current = () =>
       request.current === revision &&
       scope.current.client === invocation.client &&
       scope.current.identity === invocation.identity &&
-      scope.current.catalog === invocation.catalog &&
       scope.current.epoch === invocation.epoch &&
       scope.current.canReadConnections === true;
     try {
@@ -102,7 +102,6 @@ export function useConnectionAccounts(
     canReadConnections === true &&
     result?.client === client &&
     result.identity === identity &&
-    result.catalog === catalog &&
     result.epoch === epoch;
   const hasNative = catalog.some(
     (item) =>

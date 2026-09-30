@@ -13,7 +13,11 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
-import { ComposerMenuHeader, ComposerMenuSwitch } from "@/components/ui/composer-menu";
+import {
+  ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
+  ComposerMenuSwitch,
+} from "@/components/ui/composer-menu";
 import { MENU_BUTTON_CLASS, MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
 
 import {
@@ -591,11 +595,10 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 </div>
               ) : null}
             </div>
-          ) : props.repoBusy ? (
-            <div className={cn(MENU_NOTE_CLASS, "flex items-center gap-2")}>
-              <Loader2Icon className="size-4 animate-spin" />
-              Loading repositories…
-            </div>
+          ) : props.repoBusy && !hasRepos ? (
+            // First load only: rows that hold the menu's size. A refresh with
+            // repositories already listed updates them in place.
+            <ComposerMenuRowsSkeleton rows={4} label="Loading repositories" />
           ) : !hasRepos ? (
             <div>
               {emptyNote}

@@ -100,6 +100,40 @@ export function AgentLearningSettingsEditor(props: AgentLearningSettingsEditorPr
   ]);
   return <AgentLearningSettingsFields key={identity} {...props} />;
 }
+/**
+ * The last settings read per caller and scope. Chat settings in the composer
+ * opens straight onto them and refreshes in place, instead of loading.
+ */
+const settingsCache = new WeakMap<
+  object,
+  Map<string, { record: AgentLearningSettingsRecord; defaults: AgentLearningSettingsRecord }>
+>();
+function settingsCacheKey(props: AgentLearningSettingsEditorProps) {
+  return `${props.workspaceId}|${props.scope}|${props.source?.kind ?? ""}:${props.source?.id ?? ""}`;
+}
+
+/** Reads a chat's settings into the cache before its menu opens. Never throws. */
+export function prefetchAgentLearningSettings(
+  client: ReturnType<typeof useAppContext>["client"],
+  props: AgentLearningSettingsEditorProps,
+): void {
+  const key = settingsCacheKey(props);
+  if (settingsCache.get(client)?.has(key)) return;
+  void Promise.all([
+    client.getAgentLearningSettings(props.workspaceId, props.scope, props.source),
+    client.getAgentLearningSettings(props.workspaceId, props.scope),
+  ])
+    .then(([record, defaults]) => {
+      let byKey = settingsCache.get(client);
+      if (!byKey) {
+        byKey = new Map();
+        settingsCache.set(client, byKey);
+      }
+      if (!byKey.has(key)) byKey.set(key, { record, defaults });
+    })
+    .catch(() => undefined);
+}
+
 function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   const active = useRef(true);
   useEffect(() => {
@@ -110,8 +144,14 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   }, []);
   const context = useAppContext();
   const fieldId = useId();
-  const [record, setRecord] = useState<AgentLearningSettingsRecord | null>(null);
-  const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(null);
+  const cacheKey = settingsCacheKey(props);
+  const cached = settingsCache.get(context.client)?.get(cacheKey) ?? null;
+  const [record, setRecord] = useState<AgentLearningSettingsRecord | null>(
+    () => cached?.record ?? null,
+  );
+  const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(
+    () => cached?.defaults ?? null,
+  );
   const [error, setError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -120,7 +160,8 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   const sourceId = props.source?.id;
   useEffect(() => {
     let current = true;
-    setRecord(null);
+    // Cached rows stay on screen while this read refreshes them.
+    if (!settingsCache.get(context.client)?.has(cacheKey)) setRecord(null);
     setError(null);
     setSaved(false);
     const source = sourceKind && sourceId ? { kind: sourceKind, id: sourceId } : undefined;
@@ -129,6 +170,12 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       context.client.getAgentLearningSettings(props.workspaceId, props.scope),
     ])
       .then(([value, base]) => {
+        let byKey = settingsCache.get(context.client);
+        if (!byKey) {
+          byKey = new Map();
+          settingsCache.set(context.client, byKey);
+        }
+        byKey.set(cacheKey, { record: value, defaults: base });
         if (current) {
           setRecord(value);
           setDefaults(base);
@@ -140,6 +187,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
     return () => {
       current = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- cacheKey is derived from these
   }, [context.client, props.workspaceId, props.scope, sourceKind, sourceId, reload]);
 
   async function save(category: AgentLearningCategory, mode: AgentLearningMode | "inherit") {
@@ -157,6 +205,8 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
         expectedVersion: record.version,
         settings: props.source ? { [category]: mode } : { ...record.settings, [category]: mode },
       });
+      const entry = settingsCache.get(context.client)?.get(cacheKey);
+      if (entry) entry.record = next;
       if (active.current && context.ownsWorkspaceInvocation(props.workspaceId, invocation)) {
         setRecord(next);
         setSaved(true);
@@ -193,9 +243,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
         </ErrorMessage>
       )
     ) : (
-      <p role="status" className="text-sm text-fg-muted">
-        Loading Agent learning…
-      </p>
+      <AgentLearningSkeleton compact={props.compact} />
     );
 
   return (
@@ -254,6 +302,26 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       <p role="status" className={saving || saved ? "text-xs text-fg-muted" : "sr-only"}>
         {saving ? "Saving…" : saved ? "Saved. Applies from the next agent run." : ""}
       </p>
+    </div>
+  );
+}
+
+/**
+ * The editor's rows while its settings load: the same rows and heights, so a
+ * menu or page that opens onto it never jumps when they arrive.
+ */
+export function AgentLearningSkeleton({ compact }: { compact?: boolean }) {
+  return (
+    <div role="status" aria-label="Loading Agent learning" className="grid gap-3">
+      <div aria-hidden="true" className="divide-y divide-border">
+        {CATEGORIES.map(({ key }) => (
+          <div key={key} className="flex items-center justify-between gap-3 py-3">
+            <span className="h-3 w-24 animate-pulse rounded bg-surface-2" />
+            <span className="h-8 w-36 animate-pulse rounded-md bg-surface-2" />
+          </div>
+        ))}
+      </div>
+      {compact ? <span aria-hidden="true" className="h-4" /> : null}
     </div>
   );
 }

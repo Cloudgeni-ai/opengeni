@@ -3,6 +3,7 @@ import { ChevronDownIcon, ChevronUpIcon, PlusIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
   ComposerMenuSwitch,
   MenuBackButton,
 } from "@/components/ui/composer-menu";
@@ -150,13 +151,13 @@ export function VariableSetShortlistEditor(props: {
               );
             })}
         {(adding ? catalog : props.rows).length === 0 ? (
-          <p className={MENU_NOTE_CLASS}>
-            {adding && props.loading
-              ? "Loading variable sets…"
-              : adding
-                ? "No matching variable sets."
-                : "No variable sets in this list."}
-          </p>
+          adding && props.loading ? (
+            <ComposerMenuRowsSkeleton rows={3} label="Loading variable sets" />
+          ) : (
+            <p className={MENU_NOTE_CLASS}>
+              {adding ? "No matching variable sets." : "No variable sets in this list."}
+            </p>
+          )
         ) : null}
       </div>
       {!adding && props.canAdd ? (

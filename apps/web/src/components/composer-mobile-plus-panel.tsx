@@ -9,7 +9,7 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import {
-  lazy,
+  useEffect,
   Suspense,
   cloneElement,
   isValidElement,
@@ -22,20 +22,20 @@ import { SessionToolsMenuBody, type SessionToolSelection } from "@/components/pi
 import {
   COMPOSER_MENU_PANEL_CLASS,
   ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
   MenuBackButton,
+  lazyComposerPanel,
 } from "@/components/ui/composer-menu";
-import { MENU_CHEVRON_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
-const AgentLearningSettingsEditor = lazy(() =>
-  import("@/components/knowledge/agent-learning-settings").then((module) => ({
-    default: module.AgentLearningSettingsEditor,
-  })),
+import { MENU_CHEVRON_CLASS } from "@/components/ui/menu-styles";
+const loadAgentLearning = () => import("@/components/knowledge/agent-learning-settings");
+const AgentLearningSettingsEditor = lazyComposerPanel(() =>
+  loadAgentLearning().then((module) => module.AgentLearningSettingsEditor),
 );
-const AgentLearningDraftEditor = lazy(() =>
-  import("@/components/knowledge/agent-learning-settings").then((module) => ({
-    default: module.AgentLearningDraftEditor,
-  })),
+const AgentLearningDraftEditor = lazyComposerPanel(() =>
+  loadAgentLearning().then((module) => module.AgentLearningDraftEditor),
 );
 import { DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useAppContext } from "@/context";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -112,6 +112,25 @@ export function ComposerMobilePlusPanel(
   },
 ) {
   const { triggerRef, panel, setPanel, setOpen, dialogOpen } = props;
+  // Chat settings opens without a load: fetch its editor while the menu is open.
+  const { client } = useAppContext();
+  const chatSettings = props.chatSettings;
+  const draftChatSettings = Boolean(props.draftChatSettings);
+  useEffect(() => {
+    if (!chatSettings && !draftChatSettings) return;
+    void loadAgentLearning()
+      .then((module) => {
+        if (chatSettings) {
+          module.prefetchAgentLearningSettings(client, {
+            workspaceId: chatSettings.workspaceId,
+            scope: chatSettings.scope,
+            source: { kind: "chat", id: chatSettings.sessionId },
+            canEdit: chatSettings.canEdit,
+          });
+        }
+      })
+      .catch(() => undefined);
+  }, [client, chatSettings, draftChatSettings]);
   const connectors = props.servers.filter(isComposerConnector);
   const toolsSelected = connectors.filter((server) =>
     props.selection.mcpServerIds.has(server.id),
@@ -264,11 +283,7 @@ export function ComposerMobilePlusPanel(
               Choose what agents can add or update in this chat.
             </p>
             <Suspense
-              fallback={
-                <p role="status" className={MENU_NOTE_CLASS}>
-                  Loading settings…
-                </p>
-              }
+              fallback={<ComposerMenuRowsSkeleton rows={3} size="tile" label="Loading settings" />}
             >
               {props.chatSettings ? (
                 <AgentLearningSettingsEditor
