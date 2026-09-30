@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { resolveModelProviderForTurn } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import {
   applyCreditDebitAfterUse,
@@ -7,6 +8,10 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createWorkspaceProviderCustomModel,
+  deleteWorkspaceProviderCustomModel,
+  getWorkspaceProviderCustomModelForExecution,
+  listWorkspaceProviderCustomModels,
   setMemberAllowance,
   setWorkspaceAllowance,
   submitHumanPromptInTransaction,
@@ -38,7 +43,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+async function fixture(targetModel = "scripted-model") {
   const human = `user:agent-allowance:${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "agent-allowance",
@@ -56,12 +61,12 @@ async function fixture() {
   await shared.admin`insert into organization_memberships
     (account_id,subject_id,role,status,personal_workspace_id)
     values(${grant.accountId},${human},'owner','active',${personalId})`;
-  const makeSession = async () =>
+  const makeSession = async (model = "scripted-model") =>
     await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       initialMessage: "Session creator is not the command initiator",
-      model: "scripted-model",
+      model,
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
@@ -75,6 +80,7 @@ async function fixture() {
       type: "human",
       subjectId: human,
     },
+    model = "scripted-model",
   ) => {
     await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId, human, (tx) =>
       submitHumanPromptInTransaction(tx, {
@@ -87,7 +93,7 @@ async function fixture() {
         delivery: "send",
         text: "Start exact caller turn",
         resources: [],
-        model: "scripted-model",
+        model,
         reasoningEffort: "medium",
         reasoningEffortFallback: "medium",
         source: "user",
@@ -107,8 +113,8 @@ async function fixture() {
   };
   const caller = await makeSession();
   const claimed = await start(caller.id);
-  const target = await makeSession();
-  const activeTarget = await start(target.id);
+  const target = await makeSession(targetModel);
+  const activeTarget = await start(target.id, undefined, targetModel);
   const context: AgentSessionCommandContext = {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -222,6 +228,30 @@ function command(scope: Fixture, kind: "send" | "steer", key = crypto.randomUUID
 describe("fresh delegated Agent Send and Steer allowance admission", () => {
   for (const action of ["send", "steer"] as const) {
     test.each(["workspace", "member"] as const)(
+      `${action} refuses a retained credits-funded target under %s exhaustion without writes`,
+      async (kind) => {
+        const scope = await fixture("gpt-5.6-luna");
+        scope.deps.settings = testSettings({
+          billingMode: "disabled",
+          usageLimitsMode: "none",
+          sandboxBackend: "none",
+          modelCostPolicyJson: '{"gpt-5.6-luna":"credits"}',
+        });
+        expect(
+          resolveModelProviderForTurn(scope.deps.settings, scope.target.model)?.model.cost,
+        ).toBe("credits");
+        const refusal = await exhaust(scope, kind);
+        const before = await snapshot(scope);
+        await expect(command(scope, action)).rejects.toMatchObject({
+          status: 402,
+          cause: { allowed: false, ...refusal },
+        });
+        expect(await snapshot(scope)).toEqual(before);
+        expect(scope.tasks).toHaveLength(0);
+      },
+      60_000,
+    );
+    test.each(["workspace", "member"] as const)(
       `${action} refuses %s exhaustion before accepted work or interruption`,
       async (kind) => {
         const scope = await fixture();
@@ -288,5 +318,55 @@ describe("fresh delegated Agent Send and Steer allowance admission", () => {
       });
       expect((await command(scope, action)).replay).toBe(false);
     }, 60_000);
+    for (const providerKind of ["vercel_gateway", "openrouter"] as const) {
+      test.each(["workspace", "member"] as const)(
+        `${action} retains retired BYOK ${providerKind} funding under %s exhaustion`,
+        async (kind) => {
+          const upstreamModelId = "anthropic/claude-sonnet-4.6";
+          const providerId = providerKind === "vercel_gateway" ? "gateway" : "openrouter";
+          const scope = await fixture(`workspace-${providerId}/${upstreamModelId}`);
+          const modelScope = {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            providerKind,
+          };
+          const created = await createWorkspaceProviderCustomModel(client.db, {
+            ...modelScope,
+            upstreamModelId,
+            operationId: crypto.randomUUID(),
+            requestHash: "1".repeat(64),
+            createdBySubjectId: scope.human,
+          });
+          if (!created) throw new Error("BYOK custom model creation conflicted");
+          expect(
+            await deleteWorkspaceProviderCustomModel(client.db, {
+              ...modelScope,
+              customModelId: created.id,
+              expectedVersion: created.version,
+              operationId: crypto.randomUUID(),
+              requestHash: "2".repeat(64),
+            }),
+          ).toMatchObject({ outcome: "success" });
+          expect(await listWorkspaceProviderCustomModels(client.db, modelScope)).toEqual([]);
+          expect(
+            await getWorkspaceProviderCustomModelForExecution(client.db, {
+              ...modelScope,
+              upstreamModelId,
+            }),
+          ).toMatchObject({ id: created.id, retiredAt: expect.any(Date) });
+          const refusal = await exhaust(scope, kind);
+          const applied = await command(scope, action);
+          expect(applied.replay).toBe(false);
+          expect(
+            await checkWorkspaceAllowance(client.db, {
+              accountId: scope.accountId,
+              workspaceId: scope.workspaceId,
+              subjectId: scope.human,
+            }),
+          ).toEqual(refusal);
+        },
+        60_000,
+      );
+    }
   }
 });

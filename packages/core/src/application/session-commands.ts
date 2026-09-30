@@ -60,6 +60,7 @@ import { normalizeResources } from "../domain/resources";
 import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
 import { initiatingHumanForAllowance } from "../domain/sessions";
 import { modelFundingForAdmission } from "../billing/limits";
+import { resolveWorkspaceCatalogSettings } from "../model-catalog";
 import {
   requireSessionAuthorization,
   type ResolvedSessionAuthorization,
@@ -171,13 +172,18 @@ async function assertFreshAgentCommandAllowance(
     throw new HTTPException(404, { message: "Target session not found" });
   }
   if (deps.settings) {
+    const { settings } = await resolveWorkspaceCatalogSettings(tx, deps.settings, {
+      accountId: target.accountId,
+      workspaceId: context.workspaceId,
+      retainedProductModelId: target.model,
+    });
     const codexBilled = await isCodexBilledTurn({
       db: tx,
-      settings: deps.settings,
+      settings,
       workspaceId: context.workspaceId,
       model: target.model,
     });
-    if (modelFundingForAdmission(deps.settings, target.model, codexBilled).fundedWithoutCredits) {
+    if (modelFundingForAdmission(settings, target.model, codexBilled).fundedWithoutCredits) {
       return;
     }
   }

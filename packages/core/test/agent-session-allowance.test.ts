@@ -52,6 +52,16 @@ function fixture(action: "send" | "steer", replay = false) {
   );
   const allowance = track(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
   const codex = track(spyOn(db, "isCodexBilledTurn").mockResolvedValue(false));
+  const gatewayModels = track(spyOn(db, "listWorkspaceGatewayCustomModels").mockResolvedValue([]));
+  const openRouterModels = track(
+    spyOn(db, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
+  );
+  const retainedGateway = track(
+    spyOn(db, "getWorkspaceGatewayCustomModelForExecution").mockResolvedValue(null),
+  );
+  const retainedOpenRouter = track(
+    spyOn(db, "getWorkspaceOpenRouterCustomModelForExecution").mockResolvedValue(null),
+  );
   const result = {
     replay,
     eventIds: [],
@@ -87,7 +97,20 @@ function fixture(action: "send" | "steer", replay = false) {
           instruction: "Steer",
           idempotencyKey: "operation",
         });
-  return { tx, target, frozen, allowance, codex, command, deps, run };
+  return {
+    tx,
+    target,
+    frozen,
+    allowance,
+    codex,
+    gatewayModels,
+    openRouterModels,
+    retainedGateway,
+    retainedOpenRouter,
+    command,
+    deps,
+    run,
+  };
 }
 
 describe("agent command fresh allowance callbacks", () => {
@@ -143,6 +166,10 @@ describe("agent command fresh allowance callbacks", () => {
       expect(f.frozen).not.toHaveBeenCalled();
       expect(f.codex).not.toHaveBeenCalled();
       expect(f.allowance).not.toHaveBeenCalled();
+      expect(f.gatewayModels).not.toHaveBeenCalled();
+      expect(f.openRouterModels).not.toHaveBeenCalled();
+      expect(f.retainedGateway).not.toHaveBeenCalled();
+      expect(f.retainedOpenRouter).not.toHaveBeenCalled();
     });
     test(`${action} externally billed Codex target bypasses allowance checks`, async () => {
       const f = fixture(action);
@@ -150,5 +177,66 @@ describe("agent command fresh allowance callbacks", () => {
       await f.run();
       expect(f.allowance).not.toHaveBeenCalled();
     });
+    for (const provider of ["gateway", "openrouter"] as const) {
+      test(`${action} retains retired workspace ${provider} funding under exhaustion`, async () => {
+        const f = fixture(action);
+        const upstreamModelId = "anthropic/claude-sonnet-4.6";
+        const model = `workspace-${provider}/${upstreamModelId}`;
+        f.target.mockResolvedValue({
+          id: targetSessionId,
+          accountId: context.accountId,
+          model,
+        } as never);
+        const retained = provider === "gateway" ? f.retainedGateway : f.retainedOpenRouter;
+        retained.mockResolvedValue({
+          id: "77777777-7777-4777-8777-777777777777",
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          providerKind: provider === "gateway" ? "vercel_gateway" : "openrouter",
+          upstreamModelId,
+          label: null,
+          version: 2,
+          createdBySubjectId: "user:target-creator",
+          retiredAt: new Date("2026-09-29T00:00:00.000Z"),
+          createdAt: new Date("2026-09-28T00:00:00.000Z"),
+          updatedAt: new Date("2026-09-29T00:00:00.000Z"),
+        } as never);
+        f.allowance.mockResolvedValue({
+          code: "allowance_exhausted",
+          scope: "workspace",
+          subjectId: null,
+          resetsAt: null,
+          message: "Workspace usage exhausted",
+        });
+        expect((await f.run()).replay).toBe(false);
+        expect(retained).toHaveBeenCalledWith(f.tx, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          upstreamModelId,
+        });
+        expect(f.allowance).not.toHaveBeenCalled();
+        expect(f.frozen).not.toHaveBeenCalled();
+      });
+      test(`${action} cannot bypass exhaustion with an unstored workspace ${provider} ID`, async () => {
+        const f = fixture(action);
+        f.target.mockResolvedValue({
+          id: targetSessionId,
+          accountId: context.accountId,
+          model: `workspace-${provider}/unstored/model`,
+        } as never);
+        f.allowance.mockResolvedValue({
+          code: "allowance_exhausted",
+          scope: "workspace",
+          subjectId: null,
+          resetsAt: null,
+          message: "Workspace usage exhausted",
+        });
+        await expect(f.run()).rejects.toMatchObject({
+          status: 402,
+          cause: { code: "allowance_exhausted" },
+        });
+        expect(f.allowance).toHaveBeenCalledTimes(1);
+      });
+    }
   }
 });
