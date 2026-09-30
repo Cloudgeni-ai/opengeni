@@ -16,6 +16,7 @@ import {
   sandboxOperationMetricObserver,
   turnExecutionTelemetryKey,
   withTraceContext,
+  withMcpTelemetry,
 } from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -1813,14 +1814,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       { parent: null },
     );
     try {
-      return await withTraceContext(span, () => {
-        try {
-          resolvedServices.observability.info("worker execution started", { correlationId });
-        } catch {
-          // Correlation diagnostics never affect execution or admission.
-        }
-        return runAgentTurn(input, resolvedServices, span);
-      });
+      return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
+        withTraceContext(span, () => {
+          try {
+            resolvedServices.observability.info("worker execution started", { correlationId });
+          } catch {
+            // Correlation diagnostics never affect execution or admission.
+          }
+          return runAgentTurn(input, resolvedServices, span);
+        }),
+      );
     } catch (error) {
       span.end({ error });
       throw error;

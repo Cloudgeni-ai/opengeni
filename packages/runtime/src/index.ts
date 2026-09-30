@@ -1,3 +1,4 @@
+import { measureMcpPhase } from "@opengeni/observability";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -5562,7 +5563,11 @@ async function authorizeResolvedProviderRequest(
   result: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
 ): Promise<boolean> {
   try {
-    return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+    return await measureMcpPhase(
+      "provider_authorization",
+      () => (result.authorizeProviderRequest ? result.authorizeProviderRequest() : true),
+      (allowed) => (allowed ? "completed" : "rejected"),
+    );
   } catch {
     return false;
   }
@@ -5655,7 +5660,11 @@ async function resolveConnectionForRequest(
     ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
-    return await options.resolveCredential(request);
+    return await measureMcpPhase(
+      "credential_resolution",
+      () => options.resolveCredential!(request),
+      (result) => (result.status === "ok" ? "completed" : "rejected"),
+    );
   } catch {
     return {
       status: "auth_needed",
@@ -7226,7 +7235,7 @@ export class PrefixedMcpServer implements MCPServer {
       if (this.inner instanceof PrefixedMcpServer) {
         await this.inner.connectWithLifecycleMetric(false);
       } else {
-        await this.inner.connect();
+        await measureMcpPhase("client_setup", () => this.inner.connect());
       }
       delete this.lifecycleFailures.connect;
     } catch (error) {
