@@ -66,6 +66,7 @@ import type {
   SkillSummary,
   SkillWriteReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 import {
@@ -7610,6 +7611,19 @@ export class OpenGeniClient {
     request: SaveWorkspaceSkillRequest,
   ): Promise<SkillWriteReceipt> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  /** Permanently remove a personal/workspace Skill and all its saved revisions. */
+  async removeWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: RemoveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/remove`,
+      request,
+    );
   }
 
   async approveWorkspaceSkill(

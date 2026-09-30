@@ -435,6 +435,7 @@ export type {
   SkillPublicationReceipt,
   SkillSourceReleaseReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 export type {
