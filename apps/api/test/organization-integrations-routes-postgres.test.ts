@@ -31,6 +31,7 @@ let token: string;
 const subjectId = `user:org-integration-admin:${crypto.randomUUID()}`;
 const delegationSecret = "organization-integration-test-secret";
 const settings = testSettings({
+  productAccessMode: "managed",
   delegationSecret,
   environmentsEncryptionKey: randomBytes(32).toString("base64"),
 });
