@@ -256,6 +256,7 @@ import {
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
+  setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
@@ -5706,6 +5707,45 @@ function registerWorkspaceOrchestrationTools(
           updated: result.updated,
           title: result.title ?? title,
         });
+      },
+    );
+
+    server.registerTool(
+      "session_set_model",
+      {
+        description:
+          "Set an existing session's model and reasoning defaults for future turns. Use a model from list_models and specify the intended reasoning effort. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults. Requires sessions:control and ordinary target-session authorization.",
+        inputSchema: {
+          sessionId: z4.string().uuid(),
+          model: z4.string().min(1).max(512),
+          reasoningEffort: z4.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+          idempotencyKey: z4.string().uuid(),
+        },
+      },
+      async ({ sessionId, ...request }) => {
+        const result = await setSessionModel(deps, grant, sessionId, request, "first_party_mcp");
+        return json(
+          mcpMutationReceipt({
+            operation: "session_set_model",
+            committed: true,
+            outcome: result.replay ? "replayed" : "updated",
+            changed: !result.replay,
+            resource: { type: "session", id: sessionId },
+            relatedResources: [
+              { type: "session_command_receipt", id: result.receiptId },
+              { type: "session_event", id: result.eventId },
+            ],
+            timestamp: result.timestamp,
+            idempotency: { status: result.replay ? "replayed" : "applied" },
+            facts: {
+              model: result.model,
+              reasoningEffort: result.reasoningEffort,
+              latencyMode: result.latencyMode,
+              effectiveFrom: result.effectiveFrom,
+            },
+            nextAction: { tool: "session_get", arguments: { sessionId, detail: "full" } },
+          }),
+        );
       },
     );
   }
