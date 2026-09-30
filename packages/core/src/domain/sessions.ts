@@ -3339,19 +3339,20 @@ async function createSessionForRequestInFileScope(
     const frozenCreationInitiator = await withWorkspaceSessionActivityRls(
       db,
       workspaceId,
-      (scopedDb) => frozenInitiatorForCommandActor(
-        scopedDb,
-        workspaceId,
-        creationInitiator.actor ??
-          (creationInitiator.initiator?.kind === "service"
-            ? {
-                type: "service",
-                subjectId: creationInitiator.initiator.subjectId,
-                ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
-              }
-            : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
-        grant.subjectLabel,
-      ),
+      (scopedDb) =>
+        frozenInitiatorForCommandActor(
+          scopedDb,
+          workspaceId,
+          creationInitiator.actor ??
+            (creationInitiator.initiator?.kind === "service"
+              ? {
+                  type: "service",
+                  subjectId: creationInitiator.initiator.subjectId,
+                  ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
+                }
+              : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
+          grant.subjectLabel,
+        ),
     );
     await requireLimit(deps, {
       accountId: grant.accountId,
@@ -3861,12 +3862,8 @@ async function acceptSessionUserMessageInFileScope(
     let frozenAdmissionInitiator = await withWorkspaceSessionActivityRls(
       db,
       workspaceId,
-      (scopedDb) => frozenInitiatorForCommandActor(
-        scopedDb,
-        workspaceId,
-        admissionActor,
-        grant.subjectLabel,
-      ),
+      (scopedDb) =>
+        frozenInitiatorForCommandActor(scopedDb, workspaceId, admissionActor, grant.subjectLabel),
     );
     // Re-submitting a checked-out queue edit retains the original turn's
     // causal human, just as the locked prompt transaction does.
