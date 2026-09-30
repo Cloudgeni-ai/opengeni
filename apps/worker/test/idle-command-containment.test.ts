@@ -15,6 +15,7 @@ import {
   enrollRetainedCommandContainment,
   getRetainedProcess,
   initializeSessionStartAtomically,
+  markWarmLeaseInstanceLost,
   readLease,
   reapStaleLeaseHoldersGlobal,
   releaseLeaseHolder,
@@ -182,6 +183,22 @@ async function insertTurnHolder(
     where id = ${fixture.leaseId}`;
 }
 
+/** Ordinary turn settlement as the durable rows record it: attempt closed,
+ * turn finished, session back to idle. */
+async function finishTurn(
+  attempt: { attemptId: string; turnId: string; sessionId: string },
+  outcome: "completed" | "cancelled" = "completed",
+) {
+  await admin`update session_turn_attempts set state = 'closed', outcome = ${outcome},
+    closed_at = now(),
+    quiesced_at = case when ${outcome} = 'completed' then now() else null end
+    where id = ${attempt.attemptId}`;
+  await admin`update session_turns set status = ${outcome}, finished_at = now(),
+    active_attempt_id = null where id = ${attempt.turnId}`;
+  await admin`update sessions set status = 'idle', active_turn_id = null
+    where id = ${attempt.sessionId} and active_turn_id = ${attempt.turnId}`;
+}
+
 /** One singleton sandbox group whose completed turn left a legacy background
  * command running (e.g. a dev server) under a non-expiring process holder. */
 async function idleFixture(options: { outcome?: string; reconcileAttempts?: number } = {}) {
@@ -263,14 +280,15 @@ async function idleFixture(options: { outcome?: string; reconcileAttempts?: numb
     idleGraceMs: SETTINGS.sandboxIdleGraceMs,
     workspaceWritersQuiesced: true,
   });
-  await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-    closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
+  await finishTurn(attempt);
   return { ...fixture, admission };
 }
 
 /** Move every durable idleness fact of the fixture's group back in time. */
 async function idleFor(fixture: Fixture, minutes: number) {
   const ago = `${minutes} minutes`;
+  await admin`update session_turns set finished_at = now() - ${ago}::interval
+    where workspace_id = ${fixture.workspaceId} and finished_at is not null`;
   await admin`update session_turn_attempts set closed_at = now() - ${ago}::interval,
     updated_at = now() - ${ago}::interval,
     quiesced_at = case when quiesced_at is null then null else now() - ${ago}::interval end
@@ -430,8 +448,8 @@ describe("idle command containment", () => {
       expect(record.updates[0]).toMatchObject({
         classification: "failure",
         summary:
-          "`bun run dev --port 3000` was stopped because the sandbox was idle for 30 minutes; " +
-          "the workspace was saved. Restart it if you still need it.",
+          "`bun run dev --port 3000` was stopped because nobody used this session for 30 minutes " +
+          "and nothing was waiting on it; the workspace was saved. Restart it if you still need it.",
         payload: { commandId: fixture.processId, state: "lost", reason: "idle_containment" },
       });
       expect(record.pending.map((event) => event.payload.kind)).toContain(
@@ -456,8 +474,7 @@ describe("idle command containment", () => {
       await idleFor(fixture, 31);
       const sibling = await startAttempt(fixture, fixture.sandboxGroupId);
       expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
-      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-        closed_at = now(), quiesced_at = now() where id = ${sibling.attemptId}`;
+      await finishTurn(sibling);
       // Its close is fresh activity: the whole group must be idle again.
       expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
       await idleFor(fixture, 31);
@@ -514,8 +531,7 @@ describe("idle command containment", () => {
         and holder_id = ${child.holderId}`;
       await admin`update sandbox_leases set refcount = 1, turn_holders = 0
         where id = ${fixture.leaseId}`;
-      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-        closed_at = now(), quiesced_at = now() where id = ${child.attemptId}`;
+      await finishTurn(child);
       await idleFor(fixture, 31);
       expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
       await admin`update sandbox_workspace_mutation_admissions set provider_outcome = 'resolved',
@@ -580,12 +596,12 @@ describe("idle command containment", () => {
         and kind = 'turn'`;
       await admin`update sandbox_leases set refcount = 2, turn_holders = 0
         where id = ${fixture.leaseId}`;
-      await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
-        closed_at = now(), quiesced_at = now() where id = ${holder.attemptId}`;
+      await finishTurn(holder);
       await idleFor(fixture, 31);
       expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
       const candidates = await admin<{ sandbox_group_id: string }[]>`
-        select sandbox_group_id from opengeni_private.list_unobservable_command_drain_candidates(100)`;
+        select sandbox_group_id
+        from opengeni_private.list_command_containment_candidates(100, ${WINDOW_MS}::bigint)`;
       expect(candidates.map((row) => row.sandbox_group_id)).not.toContain(fixture.sandboxGroupId);
     }
   }, 180_000);
@@ -769,6 +785,128 @@ describe("idle command containment", () => {
     );
   }, 180_000);
 
+  test("a held input wait or a pending human request keeps the command running", async () => {
+    // The agent registered wait_for_input for its background build and ended
+    // its turn: the command is awaited, not abandoned.
+    {
+      const fixture = await idleFixture();
+      await admin`update sessions set input_wait_turn_id = ${fixture.attempt.turnId},
+        input_wait_until = now() + interval '3 hours', input_wait_reason = 'waiting for the build',
+        input_wait_set_at = now() - interval '31 minutes' where id = ${fixture.attempt.sessionId}`;
+      await idleFor(fixture, 45);
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      expect(
+        (
+          await reapStaleLeaseHoldersGlobal(db, {
+            viewerHolderTtlMs: 90_000,
+            idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+            idleCommandContainmentMs: WINDOW_MS,
+          })
+        ).some((row) => row.sandboxGroupId === fixture.sandboxGroupId),
+      ).toBe(false);
+      expect((await readLease(db, fixture.workspaceId, fixture.sandboxGroupId))?.liveness).toBe(
+        "warm",
+      );
+      // Once the wait has expired nothing is waiting on the command any more.
+      await admin`update sessions set input_wait_until = now() - interval '1 second'
+        where id = ${fixture.attempt.sessionId}`;
+      expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    }
+    // A pending approval or structured human input in any group session.
+    {
+      const fixture = await idleFixture();
+      const asking = await startAttempt(fixture, fixture.sandboxGroupId);
+      await admin`update session_turn_attempts set state = 'closed', outcome = 'requires_action',
+        closed_at = now() where id = ${asking.attemptId}`;
+      await admin`update session_turns set status = 'requires_action', active_attempt_id = null
+        where id = ${asking.turnId}`;
+      await admin`update sessions set status = 'requires_action' where id = ${asking.sessionId}`;
+      await idleFor(fixture, 45);
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      // The person answered and that turn finished; the group then went unused.
+      await admin`update session_turns set status = 'completed', finished_at = now()
+        where id = ${asking.turnId}`;
+      await admin`update sessions set status = 'idle', active_turn_id = null
+        where id = ${asking.sessionId}`;
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+      await idleFor(fixture, 31);
+      expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+    }
+  }, 180_000);
+
+  test("the deadline backstop captures behind a cancelled owner without a quiescence receipt", async () => {
+    const fixture = await idleFixture();
+    // The owner turn was cancelled: closed, no quiesced_at receipt, no pending
+    // writer. Another turn in the group ran ten minutes ago.
+    await admin`update session_turn_attempts set outcome = 'cancelled', quiesced_at = null,
+      closed_at = now() - interval '50 minutes' where id = ${fixture.attempt.attemptId}`;
+    await admin`update session_turns set status = 'cancelled' where id = ${fixture.attempt.turnId}`;
+    const recent = await startAttempt(fixture, fixture.sandboxGroupId);
+    await insertTurnHolder(fixture, recent);
+    await releaseLeaseHolder(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sandboxGroupId: fixture.sandboxGroupId,
+      kind: "turn",
+      holderId: recent.holderId,
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+      workspaceWritersQuiesced: true,
+    });
+    await finishTurn(recent);
+    await admin`update session_turn_attempts set closed_at = now() - interval '10 minutes',
+      quiesced_at = now() - interval '10 minutes' where id = ${recent.attemptId}`;
+    await admin`update sandbox_leases set rotation_requested_at = now() - interval '61 minutes',
+      rotation_reason = 'provider_deadline', provider_created_at = now() - interval '23 hours',
+      provider_deadline_at = now() - interval '1 minute' + interval '1 hour'
+      where id = ${fixture.leaseId}`;
+    await admin`update sandbox_retained_processes set reconcile_attempts = 260,
+      started_at = now() - interval '2 hours',
+      cancellation_requested_at = now() - interval '60 minutes', cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now() - interval '60 minutes'
+      where id = ${fixture.processId}`;
+    // The group is far from idle for the window, but the backstop must act.
+    expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("deadline");
+    const { result, persisted } = await drain(fixture);
+    expect(result.status).toBe("terminated");
+    expect(persisted).toEqual([true]);
+    const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(lease?.liveness).toBe("cold");
+    expect(lease?.archiveGeneration).toBe(lease?.workspaceGeneration);
+    expect((await commandTerminalRecord(fixture)).command?.settlement_reason).toBe(
+      "provider_deadline_containment",
+    );
+  }, 180_000);
+
+  test("provider loss seen by routing settles linked commands with their notice", async () => {
+    const fixture = await idleFixture();
+    const marked = await markWarmLeaseInstanceLost(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sandboxGroupId: fixture.sandboxGroupId,
+      expectedEpoch: EPOCH,
+      expectedInstanceId: fixture.instanceId,
+      expectedBackend: "modal",
+      diagnostic: "provider_not_found_during_routed_operation",
+    });
+    expect(marked.status).toBe("marked");
+    if (marked.status !== "marked") throw new Error("loss was not marked");
+    expect(marked.settlement.processesLost).toBe(1);
+    expect(marked.backgroundCommandEvents?.map((event) => event.type)).toEqual([
+      "session.command.finished",
+      "system.update.pending",
+    ]);
+    const record = await commandTerminalRecord(fixture);
+    expect(record.command).toEqual({
+      state: "lost",
+      exit_code: null,
+      settlement_reason: "provider_instance_lost",
+    });
+    expect(record.finished).toHaveLength(1);
+    expect(record.updates[0]?.summary).toBe(
+      "bun run dev --port 3000: result unavailable. Its exit status could not be confirmed.",
+    );
+  }, 180_000);
+
   test("the reaper sweep reports each inspection outcome", async () => {
     const fixture = await idleFixture();
     const outcomes: CommandContainmentInspection[] = [];
@@ -779,10 +917,25 @@ describe("idle command containment", () => {
         idleCommandContainmentMs: WINDOW_MS,
         onCommandContainment: (outcome) => outcomes.push(outcome),
       });
+    const inventory = async () =>
+      (
+        await admin<{ sandbox_group_id: string }[]>`select sandbox_group_id
+          from opengeni_private.list_command_containment_candidates(100, ${WINDOW_MS}::bigint)`
+      ).map((row) => row.sandbox_group_id);
+    // A group used five minutes ago is not even an inventory candidate, so it
+    // never costs the exclusive workspace-control fence.
     await idleFor(fixture, 5);
+    expect(await inventory()).not.toContain(fixture.sandboxGroupId);
+    // A held input wait passes the coarse inventory but not exact enrollment.
+    await admin`update sessions set input_wait_turn_id = ${fixture.attempt.turnId},
+      input_wait_until = now() + interval '3 hours', input_wait_reason = 'waiting for tests',
+      input_wait_set_at = now() - interval '31 minutes' where id = ${fixture.attempt.sessionId}`;
+    await idleFor(fixture, 31);
+    expect(await inventory()).toContain(fixture.sandboxGroupId);
     await sweep();
     expect(outcomes).toContain("not_eligible");
-    await idleFor(fixture, 31);
+    await admin`update sessions set input_wait_until = now() - interval '1 second'
+      where id = ${fixture.attempt.sessionId}`;
     outcomes.length = 0;
     expect((await sweep()).some((row) => row.sandboxGroupId === fixture.sandboxGroupId)).toBe(true);
     expect(outcomes).toContain("idle_enrolled");

@@ -3940,6 +3940,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       ).toBeNull();
       await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
+      // Both turns settled: an open turn in any group session would still block.
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
+      await admin`update session_turns set status = 'completed', active_attempt_id = null,
+        finished_at = now() - interval '2 minutes'
+        where id in (${sibling.turnId}, ${attempt.turnId})`;
+      await admin`update sessions set status = 'idle', active_turn_id = null
+        where id in (${sibling.sessionId}, ${attempt.sessionId})`;
       await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
         expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       });
@@ -4235,13 +4242,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${secondProcessId}`;
     await admin`update sandbox_retained_processes
       set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
-    // A closed failure has no physical-quiescence receipt: unlike an ordinary
-    // completed attempt, it cannot license a potentially lossy capture.
-    await admin`update session_turn_attempts set outcome = 'failed'
-      where id = ${attempt.attemptId}`;
-    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
-    await admin`update session_turn_attempts set outcome = 'completed'
-      where id = ${attempt.attemptId}`;
+    // A closed owner with pending quiescence (an unsettled interruption or
+    // writer) cannot license the capture, whatever its outcome.
+    await verifyPendingQuiescenceBlocks(ids, attempt, async () => {
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
+    });
     const strandedProcess = await getRetainedProcess(db, {
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
@@ -4417,7 +4422,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toBe("terminated");
   }, 180_000);
 
-  test("command containment inventory function replays without widening public authority", async () => {
+  test("deadline-command inventory function replays without widening public authority", async () => {
     if (!available) throw new Error("Real PostgreSQL required for containment migration");
     const definition = async () => {
       const [row] = await admin`select pg_get_functiondef(
@@ -4426,16 +4431,17 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return String(row!.definition);
     };
     const before = await definition();
-    // One health-independent inventory: no reconcile outcome, attempt count or
-    // stop-intent predicate survives; exact enrollment owns the idle decision.
-    expect(before).not.toContain("last_reconcile_outcome");
-    expect(before).not.toContain("reconcile_attempts");
-    expect(before).not.toContain("cancel_requested_at");
-    expect(before).toContain("holder.kind <> 'process'");
-    expect(before).toContain("? 'supervision'");
+    expect(before).toContain("process.reconcile_attempts >= 5");
+    expect(before).toContain("command.cancel_requested_at IS NOT NULL");
+    expect(before).toContain(
+      "process.deadline_cancellation_requested_at < now() - interval '2 minutes'",
+    );
     expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
     const migration = await Bun.file(
-      new URL("../../../packages/db/drizzle/0541_idle_command_containment.sql", import.meta.url),
+      new URL(
+        "../../../packages/db/drizzle/0508_deadline_command_workspace_capture.sql",
+        import.meta.url,
+      ),
     ).text();
     await admin.begin(async (tx) => {
       await tx.unsafe(migration.slice(migration.indexOf("DO $install$")));
@@ -4962,6 +4968,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       admittedWorkspaceGeneration: admission.workspaceGeneration,
       operation: "preFixRetainedProcess",
       providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: processId, command: "pre-fix server" },
       owner: {
         kind: "turn",
         turnId: attempt.turnId,
@@ -5585,6 +5592,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(rows).toEqual([
       { id: admission.id, outcome: "rejected", state: "lost" },
       { id: orphan.id, outcome: "rejected", state: null },
+    ]);
+    // The operator settlement tells the owning session, like automatic loss.
+    const finished = await admin<{ payload: { state: string; reason: string } }[]>`
+      select payload from session_events where session_id = ${attempt.sessionId}
+        and type = 'session.command.finished'`;
+    expect(finished.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ state: "lost", reason: "provider_instance_lost" }),
     ]);
 
     const duplicate = await reconcileColdLostLeaseInstanceBlockers(db, {

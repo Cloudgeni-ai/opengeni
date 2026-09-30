@@ -1937,7 +1937,11 @@ recovery. Each ambiguous operation is invoked at most once and is never replayed
 on a replacement backend. In the winning loss transaction, every active
 retained process on that exact lease epoch/provider is marked lost, all matching
 open admissions are rejected, matching PTYs are closed, and only those process
-holders are removed before the epoch advances. Terminal processes and every
+holders are removed before the epoch advances. Each linked background command
+gets its `session.command.finished` event and typed result input in that same
+transaction; the transaction takes the session-event prefix (workspace control,
+workspace, session) before any blocker or lease row, and only when such a
+command exists. Terminal processes and every
 other epoch/provider remain untouched. During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
@@ -1952,7 +1956,7 @@ observation, and every process/admission/PTY/holder/interruption identity into a
 `clrp1:` receipt. Unknown, incomplete, possible-writer, or mismatched truth
 blocks. Apply accepts only that exact reviewed receipt, re-previews before and
 under row locks, and settles the same narrow rows as the automatic loss
-transaction. It never calls a provider, changes epoch/archive/recovery truth,
+transaction, including linked command events and inputs. It never calls a provider, changes epoch/archive/recovery truth,
 writes `/workspace`, or replays an ambiguous operation. The exact runbook is in
 [`deployment.md`](deployment.md#cold-lost-provider-blocker-reconciliation).
 
@@ -2149,29 +2153,40 @@ including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
 
-**Idle command containment.** A legacy retained command keeps its Modal box warm through a non-expiring process
-holder, so the zero-holder idle drain never runs for it and the box would stay up
-until the provider deadline kills it uncaptured. One rule contains such commands,
-independent of command health: running, still draining output, stopping,
-unobservable, or repeatedly failing observation all qualify. The reaper
-inventories warm or draining Modal leases whose only holders are process holders
-of active non-supervised processes, with no capture or reaper hold. Exact
-enrollment then re-checks, under the workspace control fence and the
-process -> admission -> lease row locks:
+**Idle command containment.** A legacy retained command keeps its Modal box
+warm through a non-expiring process holder, so the zero-holder idle drain never
+runs for it and the box would stay up until the provider deadline kills it
+uncaptured. One rule contains such commands, independent of command health:
+running, still draining output, stopping, unobservable, or repeatedly failing
+observation all qualify. The reaper reads a new inventory,
+`list_command_containment_candidates(limit, idle window)` from migration 0541,
+which lists enrolled drains, rotating leases, and warm or draining Modal leases
+whose only holders are process holders of active non-supervised processes, with
+no capture or reaper hold and no open turn, turn finish, attempt close,
+holder-set change or admission in the group within the window. Exact
+enrollment then re-checks, with an unlocked screen first and then under the
+workspace control fence and the process -> admission -> lease row locks:
 
 - every active process is on the lease's current epoch, provider and home route,
   and none is supervised;
 - no holder other than those process holders, and no unsettled admission other
   than their parent admissions;
-- no non-closed turn attempt and no pending quiescence (unsettled interruption,
-  undrained attempt writer) in any session of the sandbox group or owning a
-  process on the lease;
-- durable idleness for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default
-  30 minutes; it must exceed the idle grace and, when explicit, stay below the
-  rotation lead). The newest attempt close, lease holder-set change and
-  admission or settlement on the lease epoch must all be older than the window.
-  Migration 0541 stamps `sandbox_leases.holders_changed_at` in a trigger
-  whenever any writer changes the holder counters. Process age is never a fact.
+- in every session of the sandbox group and every session owning a process on
+  the lease: no open turn (`queued`, `running`, `requires_action`, `recovering`,
+  `waiting_capacity`, which includes a pending approval or human-input request),
+  no non-closed attempt, no pending quiescence (unsettled interruption or
+  undrained attempt writer), and no held `wait_for_input`. The agent registers
+  that wait for background work it is deliberately waiting on, so such a command
+  is not abandoned; it keeps running, and only the provider-deadline backstop can
+  stop it. An expired wait no longer holds;
+- the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
+  (default 30 minutes; it must exceed the idle grace and, when explicit, stay
+  below the rotation lead, and it must leave the reaper period plus the drain
+  capture budget before an explicit `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS`). The
+  newest attempt close, turn finish, lease holder-set change, and admission or
+  settlement on the lease epoch must all be older than the window. Migration
+  0541 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
+  writer changes the holder counters. Process age is never a fact.
 
 A holder or writer that committed first is seen and refuses enrollment; a later
 one observes the requested rotation and is fenced until the successor box.
@@ -2183,15 +2198,18 @@ archive is the final state. The cold commit settles each still-active enrolled
 command `lost` with reason `idle_containment` (`provider_deadline_containment`
 on a deadline rotation), never an exit code. In the same transaction it appends
 `session.command.finished`, the typed `background_command_result` input and
-`system.update.pending`, exactly as ordinary exit/loss proof does; the notice
-names the command, says the sandbox was idle for N minutes and the workspace was
-saved, and asks the agent to restart it if still needed. A provider that
-disappeared before capture settles `provider_instance_lost` without a
-saved-workspace claim. A real exit arriving during the drain keeps its exit code.
-Failed checkpoints retain the provider and command holders for retry. Filesystem
-snapshots preserve neither running processes nor application transaction state.
+`system.update.pending`, exactly as ordinary exit/loss proof does. The notice
+names the command, says nobody used the session for N minutes and nothing was
+waiting on it, says the workspace was saved, and asks the agent to restart it
+if still needed. A provider that disappeared before capture settles
+`provider_instance_lost` without a saved-workspace claim. A real exit arriving
+during the drain keeps its exit code. Failed checkpoints retain the provider and
+command holders for retry. Filesystem snapshots preserve neither running
+processes nor application transaction state.
 `opengeni_sandbox_command_containment_total{outcome}` counts inspections and
-enrolled cold commits.
+enrolled cold commits. Pre-0541 workers keep calling the untouched legacy
+`list_unobservable_command_drain_candidates(integer)` with their narrower
+predicates during a rolling deploy; a later contract migration can drop it.
 
 Supervised commands stay excluded. Native supervision is default-off, its
 durable cancellation intent accepts only `provider_deadline` or `explicit_stop`,
@@ -2203,9 +2221,11 @@ For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner has a quiescence receipt or is normally completed and
-closed (or its direct request returned),
-and no unrelated holder or mutation admission remains. An outstanding
+exit proof when every owner attempt is closed with no pending quiescence,
+whatever its outcome (completed, cancelled, failed, superseded or awaiting
+action), or its direct request returned, and no unrelated holder or mutation
+admission remains. This backstop ignores the idle window, input waits and
+pending human requests: the box would die at the deadline anyway. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
 is captured; remaining commands settle `provider_deadline_containment` with the

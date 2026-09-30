@@ -1211,15 +1211,18 @@ const SettingsSchema = z.object({
   // provider no longer answers for) keeps its box warm through a non-expiring
   // process holder, so the zero-holder drain never runs and the box would stay
   // up until the provider deadline kills it uncaptured. Once every session of
-  // the sandbox group has been idle this long - no open turn, no other holder
-  // or writer, measured from durable turn-close/holder/admission facts - the
-  // reaper checkpoints the workspace, stops the box and settles those commands
-  // `lost` with reason `idle_containment`. Default 30min: twice the default
+  // the sandbox group has been unused this long - no open turn or pending
+  // request, no held wait_for_input, no other holder or writer, measured from
+  // durable turn/holder/admission facts - the reaper checkpoints the workspace,
+  // stops the box and settles those commands `lost` with reason
+  // `idle_containment`. Default 30min: twice the default
   // idle grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
   // the deadline path has to act. Must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
-  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS.
+  // an explicit value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
+  // and with an explicit OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS the reaper period
+  // plus this window plus the drain capture budget must fit before it.
   // getSettings derives the unset default between those two for short-lived
   // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
   sandboxIdleCommandContainmentMs: z.coerce.number().int().positive().default(1_800_000),
@@ -3646,12 +3649,23 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
   };
   if (raw.sandboxIdleCommandContainmentMs === undefined) {
     // Strictly between the idle grace and the rotation lead whenever that
-    // interval exists (short test/canary lifetimes), never above 30 minutes.
+    // interval exists (short test/canary lifetimes), never above 30 minutes,
+    // and early enough that an explicit Modal idle timeout cannot fire first.
+    const modalIdleCeilingMs =
+      settings.sandboxBackend === "modal" && settings.modalIdleTimeoutSeconds !== undefined
+        ? settings.modalIdleTimeoutSeconds * 1000 -
+          settings.sandboxLeaseReaperPeriodMs -
+          sandboxArchiveCaptureTimeoutMs({
+            sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+          }) -
+          1
+        : Number.POSITIVE_INFINITY;
     settings.sandboxIdleCommandContainmentMs = Math.max(
       settings.sandboxIdleGraceMs + 1,
       Math.min(
         1_800_000,
         Math.floor((settings.sandboxIdleGraceMs + settings.sandboxRotationLeadMs) / 2),
+        modalIdleCeilingMs,
       ),
     );
   }
@@ -7561,6 +7575,18 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
             `elapses — Modal's idle-reap must NOT fire first (or /workspace is lost). Raise ` +
             `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS (defaults to OPENGENI_MODAL_TIMEOUT_SECONDS) or lower ` +
             `OPENGENI_SANDBOX_IDLE_GRACE_MS.`,
+        );
+      }
+      if (
+        settings.modalIdleTimeoutSeconds !== undefined &&
+        !(reaperPeriod + containmentMs + drainCaptureTimeoutMs < idleTimeoutMs)
+      ) {
+        throw new Error(
+          `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS + ` +
+            `drain capture timeout (${reaperPeriod} + ${containmentMs} + ${drainCaptureTimeoutMs}) ` +
+            `must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}): ` +
+            `idle command containment must checkpoint a box before Modal's own idle reaper stops it. ` +
+            `Lower OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS or raise the Modal idle timeout.`,
         );
       }
     }

@@ -1509,9 +1509,9 @@ Router credentials remain in memory. Legacy batch readers only drain existing
 commands; their locators are never reinterpreted as offsets.
 
 Legacy retained Modal commands, whatever their health, use the existing drain once
-the whole group is idle for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`; after a
-verified checkpoint they settle lost with a notice. Command backoff never suppresses
-rotation's provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+the group is unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` with no input
+wait or pending request; they settle lost with a notice. Command backoff never
+suppresses rotation's provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
 `apps/worker/src/retained-process-retry.ts` caps retained observation backoff at
 the exact Modal lease's rotation lead boundary, then reaper cadence; cancellation,

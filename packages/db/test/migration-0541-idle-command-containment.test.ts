@@ -12,7 +12,9 @@ import {
 } from "../src/index";
 
 const MIGRATION = "0541_idle_command_containment.sql";
-const FUNCTION = "opengeni_private.list_unobservable_command_drain_candidates(integer)";
+const FUNCTION = "opengeni_private.list_command_containment_candidates(integer,bigint)";
+const LEGACY_FUNCTION = "opengeni_private.list_unobservable_command_drain_candidates(integer)";
+const WINDOW_MS = 30 * 60_000;
 const MODAL_PROVIDER_BINDING = {
   key: '{"version":1,"serverUrl":"https://modal.test","workspaceName":"opengeni-test","environment":"test"}',
   binding: {
@@ -45,10 +47,37 @@ async function migrationSource(): Promise<string> {
   return await Bun.file(new URL(`../drizzle/${MIGRATION}`, import.meta.url)).text();
 }
 
-async function candidateGroups(): Promise<string[]> {
+async function candidateGroups(idleMs: number | null = WINDOW_MS): Promise<string[]> {
+  const rows = await admin<{ sandbox_group_id: string }[]>`
+    select sandbox_group_id
+    from opengeni_private.list_command_containment_candidates(100, ${idleMs}::bigint)`;
+  return rows.map((row) => row.sandbox_group_id);
+}
+
+async function legacyCandidateGroups(): Promise<string[]> {
   const rows = await admin<{ sandbox_group_id: string }[]>`
     select sandbox_group_id from opengeni_private.list_unobservable_command_drain_candidates(100)`;
   return rows.map((row) => row.sandbox_group_id);
+}
+
+async function definition(signature: string): Promise<string> {
+  const [row] = await admin<{ definition: string }[]>`
+    select pg_get_functiondef(${signature}::regprocedure) as definition`;
+  return row!.definition;
+}
+
+/** Move the group's durable activity facts back in time. */
+async function unusedFor(fixture: { workspaceId: string; leaseId: string }, minutes: number) {
+  const ago = `${minutes} minutes`;
+  await admin`update session_turn_attempts set closed_at = now() - ${ago}::interval,
+    updated_at = now() - ${ago}::interval, quiesced_at = now() - ${ago}::interval
+    where workspace_id = ${fixture.workspaceId}`;
+  await admin`update session_turns set finished_at = now() - ${ago}::interval
+    where workspace_id = ${fixture.workspaceId}`;
+  await admin`update sandbox_workspace_mutation_admissions set admitted_at = now() - ${ago}::interval
+    where lease_id = ${fixture.leaseId}`;
+  await admin`update sandbox_leases set holders_changed_at = now() - ${ago}::interval
+    where id = ${fixture.leaseId}`;
 }
 
 /** A warm Modal lease whose only holder is one healthy legacy retained command. */
@@ -130,6 +159,11 @@ async function leaseWithRetainedCommand() {
   });
   await admin`update sandbox_retained_processes set last_reconcile_outcome = 'provider_running'
     where id = ${processId}`;
+  await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
+    closed_at = now(), quiesced_at = now() where id = ${attemptId}`;
+  await admin`update session_turns set status = 'completed', finished_at = now(),
+    active_attempt_id = null where id = ${claim.turn.id}`;
+  await admin`update sessions set status = 'idle', active_turn_id = null where id = ${session.id}`;
   await admin`delete from sandbox_lease_holders where lease_id = ${lease!.id} and kind = 'turn'`;
   await admin`update sandbox_leases set refcount = 1, turn_holders = 0 where id = ${lease!.id}`;
   return {
@@ -141,10 +175,14 @@ async function leaseWithRetainedCommand() {
 }
 
 describe("0541 idle command containment", () => {
-  test("is a rolling, additive migration", async () => {
+  test("is a rolling, expand-only migration", async () => {
     const source = await migrationSource();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\bDROP\s+(TABLE|COLUMN|FUNCTION|TRIGGER)\b/i);
+    // Pre-0541 workers keep calling the untouched legacy inventory.
+    expect(source).not.toMatch(
+      /CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+opengeni_private\.list_unobservable_command_drain_candidates/i,
+    );
     // An RLS-immune stable default, never a row backfill over a FORCE-RLS table.
     expect(source).toContain("ADD COLUMN holders_changed_at timestamptz NOT NULL DEFAULT now()");
     expect(source).not.toMatch(/\bUPDATE\s+sandbox_leases\b/i);
@@ -179,48 +217,62 @@ describe("0541 idle command containment", () => {
     }
   });
 
-  test("the inventory is independent of command health and excludes live blockers", async () => {
+  test("the new inventory screens for unused groups independent of command health", async () => {
     const fixture = await leaseWithRetainedCommand();
-    // A healthy running command with no other holder is a candidate: exact
-    // enrollment, not the inventory, decides whether the group is idle.
+    // A healthy running command whose group was just used is not a candidate,
+    // so a busy group never costs the exclusive workspace-control fence.
+    expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
+    await unusedFor(fixture, 31);
     expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
+    // A NULL window lists only enrolled or rotating leases.
+    expect(await candidateGroups(null)).not.toContain(fixture.sandboxGroupId);
 
+    // Every live blocker keeps it out.
     await admin`insert into sandbox_lease_holders (account_id, lease_id, workspace_id, kind,
       holder_id, subject_id) values (${fixture.accountId}, ${fixture.leaseId},
       ${fixture.workspaceId}, 'viewer', 'viewer-0541', ${fixture.sessionId})`;
     expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
     await admin`delete from sandbox_lease_holders where lease_id = ${fixture.leaseId}
       and kind = 'viewer'`;
-
     await admin`update sandbox_leases set reaper_hold_id = gen_random_uuid(),
       reaper_hold_until = now() + interval '1 hour', reaper_hold_reason = 'operator'
       where id = ${fixture.leaseId}`;
     expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
     await admin`update sandbox_leases set reaper_hold_id = null, reaper_hold_until = null,
       reaper_hold_reason = null where id = ${fixture.leaseId}`;
+    await admin`update session_turns set status = 'requires_action'
+      where session_id = ${fixture.sessionId}`;
+    expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
+    await admin`update session_turns set status = 'completed' where session_id = ${fixture.sessionId}`;
+    await unusedFor(fixture, 31);
+    expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
+    // A rotating lease is listed regardless of the window; exact enrollment
+    // applies the deadline grace.
+    await admin`update sandbox_leases set holders_changed_at = now(),
+      rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${fixture.leaseId}`;
+    expect(await candidateGroups(null)).toContain(fixture.sandboxGroupId);
+  });
+
+  test("pre-0541 workers keep their exact legacy inventory", async () => {
+    const fixture = await leaseWithRetainedCommand();
+    await unusedFor(fixture, 31);
+    // The old function is untouched: a healthy command never becomes one of
+    // its candidates, so an old worker takes no new workspace-control locks.
+    expect(await definition(LEGACY_FUNCTION)).toContain("process.reconcile_attempts >= 5");
+    expect(await legacyCandidateGroups()).not.toContain(fixture.sandboxGroupId);
     expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
   });
 
-  test("replays idempotently without widening public authority", async () => {
-    const definition = async () => {
-      const [row] = await admin<{ definition: string }[]>`
-        select pg_get_functiondef(${FUNCTION}::regprocedure) as definition`;
-      return row!.definition;
-    };
-    const before = await definition();
-    expect(before).not.toContain("last_reconcile_outcome");
-    expect(before).not.toContain("reconcile_attempts");
-    expect(before).not.toContain("cancel_requested_at");
-    const source = await migrationSource();
-    await admin.begin(async (tx) => {
-      await tx.unsafe(source.slice(source.indexOf("DO $install$"), source.lastIndexOf("RESET")));
-    });
-    expect(await definition()).toBe(before);
-    const [permission] = await admin<{ public_execute: boolean }[]>`
-      select coalesce(bool_or(acl.grantee = 0 and acl.privilege_type = 'EXECUTE'), false)
-        as public_execute
-      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-      where p.oid = ${FUNCTION}::regprocedure`;
-    expect(permission!.public_execute).toBe(false);
+  test("the new inventory is private to the reaper's role", async () => {
+    expect(await definition(FUNCTION)).not.toContain("last_reconcile_outcome");
+    const [permission] = await admin<{ public_execute: boolean; app_execute: boolean }[]>`
+      select
+        coalesce((select bool_or(acl.grantee = 0 and acl.privilege_type = 'EXECUTE')
+          from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl), false)
+          as public_execute,
+        has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as app_execute
+      from pg_proc p where p.oid = ${FUNCTION}::regprocedure`;
+    expect(permission).toEqual({ public_execute: false, app_execute: true });
   });
 });

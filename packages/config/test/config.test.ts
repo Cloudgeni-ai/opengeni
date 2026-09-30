@@ -2624,6 +2624,37 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/IDLE_COMMAND_CONTAINMENT_MS \(3600000\) must be strictly less than/);
   });
 
+  test("idle command containment must fire before an explicit Modal idle timeout", () => {
+    const modal = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1500",
+    };
+    // Default window derives below 1500s - reaper period - drain capture budget.
+    const derived = withEnv(modal, () => getSettings());
+    expect(derived.sandboxIdleCommandContainmentMs).toBeGreaterThan(derived.sandboxIdleGraceMs);
+    expect(
+      derived.sandboxLeaseReaperPeriodMs + derived.sandboxIdleCommandContainmentMs,
+    ).toBeLessThan(1_500_000);
+    expect(() =>
+      withEnv({ ...modal, OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "1440000" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS\*1000/);
+    // Without an explicit idle timeout the hard lifetime governs and 30m fits.
+    expect(
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+        },
+        () => getSettings(),
+      ).sandboxIdleCommandContainmentMs,
+    ).toBe(1_800_000);
+  });
+
   test("an explicit rotation lead overrides the provider-relative default", () => {
     const settings = withEnv(
       {
