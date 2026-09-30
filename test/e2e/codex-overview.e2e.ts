@@ -772,7 +772,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await page.getByRole("button", { name: "Redeem Full reset" }).click();
     await dialog.getByRole("button", { name: "Redeem reset" }).click();
     await page
-      .getByText(/API 503|ambiguous/i)
+      .getByText(/The outcome is uncertain/i)
       .first()
       .waitFor({ timeout: 10_000 });
     expect(provider.consumeBodies).toHaveLength(1);
