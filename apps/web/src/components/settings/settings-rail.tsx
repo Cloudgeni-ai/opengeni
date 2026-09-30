@@ -8,6 +8,7 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3Icon,
+  CodeIcon,
   ContainerIcon,
   GraduationCapIcon,
   KeyRoundIcon,
@@ -17,7 +18,6 @@ import {
   SparklesIcon,
   UsersIcon,
   VariableIcon,
-  WebhookIcon,
 } from "lucide-react";
 import type { ReactElement, ReactNode } from "react";
 
@@ -87,7 +87,7 @@ const SECTION_ICONS = {
   models: SparklesIcon,
   learning: GraduationCapIcon,
   "api-keys": KeyRoundIcon,
-  developer: WebhookIcon,
+  developer: CodeIcon,
 } as const;
 
 // Agent learning is still a settings URL, but it opens the Learning page of Knowledge.

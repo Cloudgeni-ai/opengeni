@@ -234,6 +234,23 @@ describe("settings rail", () => {
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
       }
 
+      // The same concept wears the same icon at every scope it appears in.
+      const iconOf = (section: HTMLElement | null, label: string) =>
+        Array.from(section?.querySelectorAll("a") ?? [])
+          .find((link) => link.textContent === label)
+          ?.querySelector("svg")
+          ?.getAttribute("class")
+          ?.split(" ")
+          .find((name) => name.startsWith("lucide-") && name !== "lucide");
+      for (const label of ["General", "Models", "Developer"]) {
+        const workspaceIcon = iconOf(workspaceSection, label);
+        expect(workspaceIcon).toBeDefined();
+        expect(iconOf(organizationSection, label)).toBe(workspaceIcon);
+      }
+      expect(iconOf(organizationSection, "Security & data")).toBe(
+        iconOf(view.section("account"), "Security"),
+      );
+
       expect(linkLabels(view.section("account"))).toEqual(["Security"]);
       expect(view.section("account")?.querySelector("a")?.getAttribute("href")).toBe(
         "/settings/security",
