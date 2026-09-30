@@ -2,11 +2,11 @@
 -- One idle rule contains legacy retained commands. When every session of a
 -- Modal sandbox group has been unused for the configured window, the reaper
 -- enrolls the commands that alone keep the box warm into the existing
--- capture -> terminate -> settle drain. Expand only: pre-0546 workers keep
+-- capture -> terminate -> settle drain. Expand only: pre-0547 workers keep
 -- calling the unchanged list_unobservable_command_drain_candidates(integer)
 -- with their own predicates, so they see no new candidates and take no extra
 -- workspace-control locks. A later contract migration may drop that function
--- once no pre-0546 worker remains.
+-- once no pre-0547 worker remains.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
@@ -35,7 +35,7 @@ CREATE TRIGGER sandbox_lease_holders_changed
 
 -- Truthful containment reason for the drain's settlement notice, recorded at
 -- enrollment ('idle_containment' | 'provider_deadline_containment'). A lease
--- enrolled by a pre-0546 worker has none and settles with neutral loss wording.
+-- enrolled by a pre-0547 worker has none and settles with neutral loss wording.
 -- It never outlives the enrollment it describes.
 ALTER TABLE sandbox_leases ADD COLUMN command_containment_reason text;
 ALTER TABLE sandbox_leases ADD CONSTRAINT sandbox_leases_command_containment_reason_check

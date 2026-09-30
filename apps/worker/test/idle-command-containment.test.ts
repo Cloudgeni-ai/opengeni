@@ -957,7 +957,7 @@ describe("idle command containment", () => {
   }, 180_000);
 
   test("a drain enrolled without a recorded reason settles with neutral loss wording", async () => {
-    // A pre-0546 worker enrolled this lease: drain ids but no containment reason.
+    // A pre-0547 worker enrolled this lease: drain ids but no containment reason.
     const fixture = await idleFixture();
     await admin`update sandbox_leases set unobservable_command_drain_ids = array[${fixture.processId}::uuid],
       liveness = 'draining', rotation_requested_at = now(), rotation_reason = 'operator',

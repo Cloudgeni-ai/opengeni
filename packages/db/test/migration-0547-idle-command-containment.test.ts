@@ -19,7 +19,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
-const MIGRATION = "0546_idle_command_containment.sql";
+const MIGRATION = "0547_idle_command_containment.sql";
 const FUNCTION = "opengeni_private.list_command_containment_candidates(integer,bigint)";
 const LEGACY_FUNCTION = "opengeni_private.list_unobservable_command_drain_candidates(integer)";
 const WINDOW_MS = 30 * 60_000;
@@ -40,7 +40,7 @@ let admin: postgres.Sql;
 let app: DbClient;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0546");
+  shared = await acquireSharedTestDatabase("migration-0547");
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   admin = shared.admin;
   app = createDb(shared.appUrl);
@@ -92,9 +92,9 @@ async function unusedFor(fixture: { workspaceId: string; leaseId: string }, minu
 /** A warm Modal lease whose only holder is one healthy legacy retained command. */
 async function leaseWithRetainedCommand() {
   const [account] = await admin<{ id: string }[]>`
-    insert into managed_accounts (name) values ('migration-0546') returning id`;
+    insert into managed_accounts (name) values ('migration-0547') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
-    insert into workspaces (account_id, name) values (${account!.id}, 'migration-0546') returning id`;
+    insert into workspaces (account_id, name) values (${account!.id}, 'migration-0547') returning id`;
   await admin`insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
   const ids = { accountId: account!.id, workspaceId: workspace!.id };
@@ -120,7 +120,7 @@ async function leaseWithRetainedCommand() {
     workflowId: `session-${session.id}`,
     workflowRunId: crypto.randomUUID(),
     attemptId,
-    dispatchId: `migration-0546-${crypto.randomUUID()}`,
+    dispatchId: `migration-0547-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
   });
   if (claim.action !== "claimed") throw new Error("fixture turn was not claimed");
@@ -183,12 +183,12 @@ async function leaseWithRetainedCommand() {
   };
 }
 
-describe("0546 idle command containment", () => {
+describe("0547 idle command containment", () => {
   test("is a rolling, expand-only migration", async () => {
     const source = await migrationSource();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\bDROP\s+(TABLE|COLUMN|FUNCTION|TRIGGER)\b/i);
-    // Pre-0546 workers keep calling the untouched legacy inventory.
+    // Pre-0547 workers keep calling the untouched legacy inventory.
     expect(source).not.toMatch(
       /CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+opengeni_private\.list_unobservable_command_drain_candidates/i,
     );
@@ -239,7 +239,7 @@ describe("0546 idle command containment", () => {
     // Every live blocker keeps it out.
     await admin`insert into sandbox_lease_holders (account_id, lease_id, workspace_id, kind,
       holder_id, subject_id) values (${fixture.accountId}, ${fixture.leaseId},
-      ${fixture.workspaceId}, 'viewer', 'viewer-0546', ${fixture.sessionId})`;
+      ${fixture.workspaceId}, 'viewer', 'viewer-0547', ${fixture.sessionId})`;
     expect(await candidateGroups()).not.toContain(fixture.sandboxGroupId);
     await admin`delete from sandbox_lease_holders where lease_id = ${fixture.leaseId}
       and kind = 'viewer'`;
@@ -263,7 +263,7 @@ describe("0546 idle command containment", () => {
     expect(await candidateGroups(null)).toContain(fixture.sandboxGroupId);
   });
 
-  test("pre-0546 workers keep their exact legacy inventory", async () => {
+  test("pre-0547 workers keep their exact legacy inventory", async () => {
     const fixture = await leaseWithRetainedCommand();
     await unusedFor(fixture, 31);
     // The old function is untouched: a healthy command never becomes one of

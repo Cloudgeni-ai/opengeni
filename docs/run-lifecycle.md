@@ -2163,7 +2163,7 @@ runs for it and the box would stay up until the provider deadline kills it
 uncaptured. One rule contains such commands, independent of command health:
 running, still draining output, stopping, unobservable, or repeatedly failing
 observation all qualify. The reaper reads a new inventory,
-`list_command_containment_candidates(limit, idle window)` from migration 0546,
+`list_command_containment_candidates(limit, idle window)` from migration 0547,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -2193,7 +2193,7 @@ workspace control fence and the process -> admission -> lease row locks:
   capture budget before an explicit `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS`). The
   newest attempt close, turn finish, lease holder-set change, and admission or
   settlement on the lease epoch must all be older than the window. Migration
-  0546 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
+  0547 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
   writer changes the holder counters, and gives the SECURITY DEFINER inventory
   inventory-only read policies on the turn, attempt, admission, system-update
   and goal tables so its screen sees them as the FORCE-RLS owner. Process age is
@@ -2209,7 +2209,7 @@ existing drain, and the box is terminated immediately after capture, so the
 archive is the final state. The cold commit settles each still-active enrolled
 command `lost` with the reason recorded on the lease at enrollment
 (`idle_containment`, or `provider_deadline_containment` on a deadline rotation),
-never an exit code; a drain enrolled by a pre-0546 worker records none and
+never an exit code; a drain enrolled by a pre-0547 worker records none and
 settles as plain `provider_instance_lost`. In the same transaction it appends
 `session.command.finished`, the typed `background_command_result` input and
 `system.update.pending`, exactly as ordinary exit/loss proof does. The notice
@@ -2221,7 +2221,7 @@ during the drain keeps its exit code. Failed checkpoints retain the provider and
 command holders for retry. Filesystem snapshots preserve neither running
 processes nor application transaction state.
 `opengeni_sandbox_command_containment_total{outcome}` counts inspections and
-enrolled cold commits. Pre-0546 workers keep calling the untouched legacy
+enrolled cold commits. Pre-0547 workers keep calling the untouched legacy
 `list_unobservable_command_drain_candidates(integer)` with their narrower
 predicates during a rolling deploy; a later contract migration can drop it.
 
