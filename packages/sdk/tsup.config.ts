@@ -14,6 +14,9 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/chat/index.ts",
+    "src/adapters/next.ts",
+    "src/adapters/express.ts",
+    "src/adapters/hono.ts",
     "src/index.ts",
     "src/accounts.ts",
     "src/core.ts",

@@ -324,6 +324,7 @@ import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -2126,7 +2127,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       operation: "session.control",
       surface: "http",
     });
-    const payload = UpdateSessionChannelRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSessionChannelRequest);
     try {
       const updated = await setSessionChannel(db, {
         workspaceId,
@@ -2248,7 +2249,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = UpdateSessionRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSessionRequest);
     const titleUpdate = await updateSessionTitle(deps, grant, sessionId, payload.title, "user");
     // A session-returning member route must preserve the caller's private pin
     // projection. Returning the generic mapSession() default here would reset a
@@ -2341,7 +2342,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const payload = UpdateSessionToolPolicyRequest.parse(await c.req.json().catch(() => null));
+    const payload = parseRequestBody(
+      UpdateSessionToolPolicyRequest,
+      await c.req.json().catch(() => null),
+    );
     try {
       const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
@@ -2415,7 +2419,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
-      const payload = ApplySessionGoalRevisionRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, ApplySessionGoalRevisionRequest);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -2479,7 +2483,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
-      const payload = RejectSessionGoalRevisionRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, RejectSessionGoalRevisionRequest);
       try {
         const result = await rejectSessionGoalRevisionWithEvent(db, {
           accountId: grant.accountId,
@@ -2507,7 +2511,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const sessionId = c.req.param("sessionId");
       await assertSessionExists(db, workspaceId, sessionId);
-      const payload = RollbackSessionGoalRevisionRequest.parse(await c.req.json());
+      const payload = await parseRequestJson(c, RollbackSessionGoalRevisionRequest);
       const revision = await getSessionGoalRevision(
         db,
         workspaceId,
@@ -2559,7 +2563,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = UpdateSessionGoalRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });
@@ -2744,7 +2748,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    CompactSessionContextRequest.parse((await c.req.json().catch(() => ({}))) ?? {});
+    parseRequestBody(CompactSessionContextRequest, (await c.req.json().catch(() => ({}))) ?? {});
     // /compact sets one durable request. The worker clears it only in the same
     // fenced transaction that installs replacement history, so failed or stale
     // attempts cannot lose the request.
@@ -3112,7 +3116,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = MoveSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, MoveSessionQueueItemRequest);
     try {
       const response = await moveHumanQueuePrompt(
         deps,
@@ -3139,7 +3143,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = EditSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, EditSessionQueueItemRequest);
     try {
       const response = await editHumanQueuePrompt(
         deps,
@@ -3166,7 +3170,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = SteerSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, SteerSessionQueueItemRequest);
     try {
       const response = await steerHumanQueuePrompt(
         deps,
@@ -3193,7 +3197,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = DeleteSessionQueueItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, DeleteSessionQueueItemRequest);
     try {
       const response = await deleteHumanQueuePrompt(
         deps,
@@ -3233,7 +3237,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const payload = SaveComposerDraftRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, SaveComposerDraftRequest);
     try {
       return c.json(
         await saveHumanComposerDraft(
@@ -3453,7 +3457,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
+    const payload = parseRequestBody(
+      SubmitComposerDraftRequest,
+      await c.req.json().catch(() => null),
+    );
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
       result = await withSiteCommandOrigin(c, workspaceId, () =>

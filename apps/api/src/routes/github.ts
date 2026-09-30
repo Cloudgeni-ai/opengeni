@@ -97,6 +97,7 @@ import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
+import { parseRequestJson } from "../http/request-body";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -244,7 +245,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/github/action-policies", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const payload = UpdateGitHubActionPolicyRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateGitHubActionPolicyRequest);
     const actor = payload.actor;
     if (actor.kind === "workspace_app") {
       const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
@@ -378,7 +379,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId);
     requirePublicGitHubRepositoryVerificationPermission(grant);
-    const request = VerifyPublicGitHubRepositoryRefRequest.parse(await c.req.json());
+    const request = await parseRequestJson(c, VerifyPublicGitHubRepositoryRefRequest);
     let repository: ReturnType<typeof parseCanonicalGitHubRepositoryUrl>;
     try {
       repository = parseCanonicalGitHubRepositoryUrl(request.url);
@@ -501,7 +502,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const payload = GitHubAppManifestCreate.parse(await c.req.json());
+    const payload = await parseRequestJson(c, GitHubAppManifestCreate);
     const baseUrl = (settings.githubAppManifestBaseUrl ?? new URL(c.req.url).origin).replace(
       /\/+$/,
       "",

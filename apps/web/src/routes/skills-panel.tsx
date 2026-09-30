@@ -4,6 +4,7 @@ import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import type {
   SkillRecord,
+  RemoveWorkspaceSkillRequest,
   SkillScope,
   SkillSummary,
   PreferenceRegistryRevisionSummary,
@@ -38,6 +39,7 @@ export function SkillsPanel({
   onImportSkill,
   refreshRevision = 0,
   onSkillsChange,
+  onRemoved,
   openSkillRef,
 }: {
   workspaceId: string;
@@ -47,6 +49,7 @@ export function SkillsPanel({
   onImportSkill?: (() => void) | undefined;
   refreshRevision?: number;
   onSkillsChange?: (skills: SkillSummary[]) => void;
+  onRemoved?: () => void;
   openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   return (
@@ -59,6 +62,7 @@ export function SkillsPanel({
       onImportSkill={onImportSkill}
       refreshRevision={refreshRevision}
       {...(onSkillsChange ? { onSkillsChange } : {})}
+      {...(onRemoved ? { onRemoved } : {})}
       {...(openSkillRef ? { openSkillRef } : {})}
     />
   );
@@ -73,6 +77,7 @@ export function SkillsPanelContent({
   onImportSkill,
   refreshRevision = 0,
   onSkillsChange,
+  onRemoved,
   openSkillRef,
 }: {
   context: AppContextValue;
@@ -83,6 +88,7 @@ export function SkillsPanelContent({
   onImportSkill?: (() => void) | undefined;
   refreshRevision?: number;
   onSkillsChange?: (skills: SkillSummary[]) => void;
+  onRemoved?: () => void;
   openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   const { client } = context;
@@ -90,6 +96,7 @@ export function SkillsPanelContent({
   // (`?open=skill:<id>`); elsewhere the page replaces the list in place.
   const slot = useCapabilityPageSlot();
   const openerRef = useRef<HTMLElement | null>(null);
+  const removalTriggerRef = useRef<HTMLElement | null>(null);
   const newSkillRef = useRef<HTMLButtonElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const grant = context.accessContext.workspaceGrants.find(
@@ -118,6 +125,11 @@ export function SkillsPanelContent({
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [reload, setReload] = useState(0);
+  const [removal, setRemoval] = useState<{
+    skill: SkillRecord;
+    request: RemoveWorkspaceSkillRequest;
+  } | null>(null);
+  const [removalError, setRemovalError] = useState<string | null>(null);
   const [discardAction, setDiscardAction] = useState<(() => void) | null>(null);
   // The id of a skill created on this page and not saved yet.
   const [draftId, setDraftId] = useState<string | null>(null);
@@ -144,6 +156,8 @@ export function SkillsPanelContent({
     setHistory([]);
     setNotice(null);
     setDiscardAction(null);
+    setRemoval(null);
+    setRemovalError(null);
     setSkills([]);
     setNextCursor(null);
     setError(null);
@@ -465,6 +479,37 @@ export function SkillsPanelContent({
       if (generation.current === current) setBusy(false);
     }
   }
+  async function remove(): Promise<boolean> {
+    if (!removal || busy) return false;
+    const current = ++generation.current;
+    setBusy(true);
+    setRemovalError(null);
+    try {
+      const receipt = await client.removeWorkspaceSkill(
+        workspaceId,
+        removal.skill.id,
+        removal.request,
+      );
+      if (generation.current !== current) return false;
+      if (!receipt.removed) throw new Error("The skill was not removed. Reload and try again.");
+      // Invalidate outstanding inventory reads before removing the row locally.
+      inventoryGeneration.current++;
+      setSkills((previous) => previous.filter((skill) => skill.id !== removal.skill.id));
+      setRecord(null);
+      setHistory([]);
+      setDraftId(null);
+      setNotice("Skill and all stored revisions permanently deleted.");
+      if (slot?.openKey?.startsWith("skill:")) slot.close({ replace: true });
+      onRemoved?.();
+      return true;
+    } catch (reason) {
+      if (generation.current === current)
+        setRemovalError(reason instanceof Error ? reason.message : "Could not remove skill");
+      return false;
+    } finally {
+      if (generation.current === current) setBusy(false);
+    }
+  }
   const editable =
     record &&
     canManage(record.scope) &&
@@ -507,6 +552,19 @@ export function SkillsPanelContent({
       onRemoveFile={() => {
         setFiles((current) => current.filter((file) => file.path !== path));
         setPath("SKILL.md");
+      }}
+      onRemove={() => {
+        removalTriggerRef.current = document.activeElement as HTMLElement | null;
+        setRemovalError(null);
+        setRemoval({
+          skill: record,
+          request: {
+            operationId: crypto.randomUUID(),
+            expectedRevisionId: record.activeRevisionId,
+            expectedScopeVersion: record.scopeVersion,
+            reason: "Remove skill from the Skills editor",
+          },
+        });
       }}
       onSave={() => void mutate("save")}
       onDiscard={() => {
@@ -608,6 +666,7 @@ export function SkillsPanelContent({
             name: humanizeName(skill.title || skill.stableKey),
             icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
             status: skillStatus(skill),
+            showStatus: skillStatus(skill) !== "Installed",
             needsAttention: Boolean(skill.pendingRevisionIds.length),
             disabled: busy,
             onOpen: () => {
@@ -628,6 +687,33 @@ export function SkillsPanelContent({
           pageContent
         )
       ) : null}
+      <ConfirmDialog
+        open={removal !== null}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setRemoval(null);
+        }}
+        title={`Remove “${humanizeName(removal?.skill.title || removal?.skill.stableKey || "skill")}”?`}
+        description="This permanently deletes the skill and all its saved revisions. It cannot be undone. Existing conversations stay unchanged."
+        confirmLabel="Remove skill"
+        cancelAutoFocus
+        restoreFocusRef={removalTriggerRef}
+        restoreFocusFallbackRef={headingRef}
+        onConfirm={remove}
+      >
+        {dirty ? (
+          <p className="text-sm text-fg-muted">Unsaved changes will also be discarded.</p>
+        ) : null}
+        {removal?.skill.source ? (
+          <p className="text-sm text-fg-muted">
+            If a plugin still owns this skill, remove it from the plugin first.
+          </p>
+        ) : null}
+        {removalError ? (
+          <p role="alert" className="text-sm text-danger">
+            {removalError}
+          </p>
+        ) : null}
+      </ConfirmDialog>
       <ConfirmDialog
         open={discardAction !== null}
         onOpenChange={(isOpen) => {

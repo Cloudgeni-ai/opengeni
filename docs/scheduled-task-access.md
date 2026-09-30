@@ -17,6 +17,17 @@ tools are absent, or the account it chose was disconnected. This page describes
 how OpenGeni shows that, how the owner refreshes it, and how the owner learns
 that a run could not use a connector.
 
+## Who owns a schedule
+
+A schedule's owner is the person who saved it: a managed human (or a verified
+external owning user) whose own accounts its runs resolve. A machine principal
+is never an owner. Schedules created by an organization or workspace API key,
+the deployment's configured key, a delegated service, or a delegated bearer
+are ownerless: the key stays the audited creator (`createdBy` with
+`kind: "service"`), runs use service authority with workspace accounts only,
+and anyone holding `scheduled_tasks:manage` (including the key) may change or
+run them.
+
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in
 `apps/api/src/routes/scheduled-tasks.ts`, and the Schedules pages
@@ -180,3 +191,36 @@ in-app:
 
 A proactive channel (email or a Slack message from the bot) would need its own
 durable delivery outbox and is not part of this change.
+
+## Runs waiting on a person
+
+A dispatched run whose own turn stops for a tool approval or a structured
+question stays `dispatched` (its lifecycle settles only when the turn
+finishes), but it is no longer indistinguishable from a running one:
+
+- `listScheduledTaskRuns` (`GET .../scheduled-tasks/:taskId/runs`, the SDK and
+  the `scheduled_task_runs_list` tool) adds `awaitingHuman: { since, expiresAt }`
+  to such a run. It is a read-time projection of the run's turn; nothing is
+  stored.
+- The attention list includes an active schedule whose latest run waits on a
+  person, with the same `awaitingHuman`, for the same viewers as the other
+  notices (the owner, or schedule managers for an ownerless schedule). The web
+  shows it on the Schedules item and on the schedule's page. The session itself
+  carries the usual `session.requiresAction` event.
+- `since` is when the current unanswered wait began. A person's decision
+  restarts it; the scheduler's own timeout decisions do not.
+
+`agentConfig.approvalTimeoutSeconds` (60 s to 30 days; default none: wait
+indefinitely) bounds that wait. It is frozen in each run's accepted execution.
+The session workflow sleeps on a durable Temporal timer until `expiresAt`
+(behind the `session-scheduled-human-wait-timeout-v1` patch; no polling), then
+the scheduler answers through the same acceptance boundary a person uses: the
+first pending tool approval is rejected (never approved) with the message
+"Rejected automatically by the scheduler: ...", or the first pending structured
+question is skipped, as a `system` decision with a deterministic
+`system:scheduled-approval-timeout:` client event id. It re-derives the deadline
+from durable facts and never acts early; a person answering first wins.
+Further pending approvals of the same wait are rejected one by one as they
+surface, since their deadline has already passed. Skill-review questions need a
+person and are never timed out. An agent still can never decide an approval.
+

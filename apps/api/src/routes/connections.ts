@@ -164,6 +164,7 @@ import {
 } from "@opengeni/contracts";
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
+import { parseRequestJson } from "../http/request-body";
 
 type OpenGeniSlackInstallState = {
   connectAttemptId?: string;
@@ -241,7 +242,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     const grant = access.grant;
     const beforeCommit = externalContinuationCommitAuthorizer(access);
-    const payload = CreateConnectionRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateConnectionRequest);
     // All writes in this closure must use the caller-owned scoped transaction.
     // eslint-disable-next-line no-shadow
     const persist = async (db: Database) => {
@@ -378,7 +379,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const payload = OpenGeniSlackBotInstallRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, OpenGeniSlackBotInstallRequest);
     return c.json(
       await withOrganizationIntegrationAcquisition(
         db,
@@ -615,7 +616,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       "connections:write",
     );
     const grant = authorization.grant;
-    const payload = FikenInstallRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, FikenInstallRequest);
     const persist = await prepareFikenTokenInstall(deps, grant, payload);
     const continuation = externalActorContinuationForAuthorization(authorization);
     const connection = await withOrganizationIntegrationAcquisition(
@@ -644,7 +645,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const payload = FikenOAuthStartRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, FikenOAuthStartRequest);
     requireEnvironmentEncryption(settings);
     return c.json(
       FikenOAuthStartResponse.parse(
@@ -909,7 +910,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       "connections:write",
     );
     const { grant } = authorization;
-    const payload = UpdateConnectionRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, UpdateConnectionRequest);
     // Policy first, then the existing tenancy prefix and exact credential row.
     // The locked live identity makes unchanged/reducing updates safe against a
     // concurrent replacement; all final writes below use this same transaction.

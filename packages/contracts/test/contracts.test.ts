@@ -174,6 +174,15 @@ describe("external workspace identity", () => {
         settings: {},
       }).success,
     ).toBe(false);
+    // An organization API key may omit the owning organization; the route
+    // resolves it from the key and refuses every other caller without it.
+    expect(
+      EnsureWorkspaceRequest.parse({
+        externalSource: "acme-product",
+        externalId: "tenant-42",
+        name: "Acme tenant",
+      }),
+    ).toEqual({ externalSource: "acme-product", externalId: "tenant-42", name: "Acme tenant" });
     expect(
       EnsureWorkspaceRequest.safeParse({
         accountId,

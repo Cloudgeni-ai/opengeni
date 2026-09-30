@@ -65,6 +65,7 @@ import {
   buildWorkspaceToolGatewayMcpServer,
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -156,7 +157,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
-    const payload = CreateFileUploadRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateFileUploadRequest);
     const privateOwner = fileRequestAuthority.get(c.req.raw)?.owner ?? null;
     const personal =
       payload.scope === "personal" ||

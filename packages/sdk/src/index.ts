@@ -149,6 +149,8 @@ export {
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
+export { parseDeprecationNotice } from "./deprecation";
+export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveAutomaticSessionTitlePreview,
@@ -175,6 +177,16 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
+export { createSessionProxyHandler } from "./session-proxy";
+export type {
+  SessionProxyContext,
+  SessionProxyCreateInput,
+  SessionProxyHandlerOptions,
+  SessionProxyMessageExtras,
+  SessionProxyMessageInput,
+  SessionProxyResolution,
+  SessionProxyResolve,
+} from "./session-proxy";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
@@ -423,6 +435,7 @@ export type {
   SkillPublicationReceipt,
   SkillSourceReleaseReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 export type {

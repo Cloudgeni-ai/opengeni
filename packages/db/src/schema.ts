@@ -11646,6 +11646,7 @@ export const scheduledTaskRuns = pgTable(
     acceptedExecutionSnapshot: jsonb("accepted_execution_snapshot").$type<unknown>(),
     acceptedExecutionDigest: text("accepted_execution_digest"),
     admissionDiagnostic: jsonb("admission_diagnostic").$type<unknown>(),
+    admissionRefusal: jsonb("admission_refusal").$type<unknown>(),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

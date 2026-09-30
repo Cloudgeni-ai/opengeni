@@ -25,6 +25,10 @@ import { createDemoBrowserWebSocketFactory } from "./fake-browser";
 import { createDemoComputerWebSocketFactory } from "./fake-computer";
 import { createDeterministicRealtimeHarness } from "./realtime-controller";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 type DemoView = "session" | "fleet" | "schedules";
 

@@ -2,6 +2,8 @@ import type { FetchLike } from "../client";
 import type {
   CreateSessionRequest,
   HumanInputAnswer,
+  LatencyMode,
+  ReasoningEffort,
   SessionEvent,
   Session,
   SessionSkill,
@@ -137,6 +139,16 @@ export type ChatSendOptions = {
    * after the first message OpenGeni owns the history.
    */
   importedHistory?: ChatImportedMessage[] | undefined;
+  /** Model for this message's turn; omitted keeps the session's current policy. */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
+  /**
+   * Model-visible application context for this one message (for example the
+   * page or record the user is looking at). Not shown in the transcript and not
+   * secret. On the creating message it is combined with imported history.
+   */
+  modelContext?: string | undefined;
 };
 
 export type ChatSessionListOptions = ChatTarget & {

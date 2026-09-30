@@ -14,6 +14,7 @@ import {
   getSessionEvent,
   getSessionTurnForAttempt,
   expireSessionInteractionIntervention as expireSessionInteractionInterventionDb,
+  expireScheduledRunHumanWait as expireScheduledRunHumanWaitDb,
   expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
@@ -33,6 +34,8 @@ import type {
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
   ExpireSessionInteractionInterventionInput,
+  ExpireScheduledRunHumanWaitInput,
+  ExpireScheduledRunHumanWaitResult,
   ExpireSessionInteractionInterventionResult,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
@@ -67,6 +70,7 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   expireSessionInteractionIntervention: typeof expireSessionInteractionInterventionDb;
+  expireScheduledRunHumanWait: typeof expireScheduledRunHumanWaitDb;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
@@ -113,6 +117,8 @@ export function createSessionStateActivities(
     overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const expireSessionInteractionInterventionFn =
     overrides.expireSessionInteractionIntervention ?? expireSessionInteractionInterventionDb;
+  const expireScheduledRunHumanWaitFn =
+    overrides.expireScheduledRunHumanWait ?? expireScheduledRunHumanWaitDb;
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
@@ -610,6 +616,18 @@ export function createSessionStateActivities(
     return { action: result.action };
   }
 
+  /** A scheduled run's approval timeout answers for its unanswered human wait. */
+  async function expireScheduledRunHumanWait(
+    input: ExpireScheduledRunHumanWaitInput,
+  ): Promise<ExpireScheduledRunHumanWaitResult> {
+    const { db, bus } = await services();
+    const result = await expireScheduledRunHumanWaitFn(db, input);
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return { action: result.action };
+  }
+
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const settled = await settleSessionIdleWithParentOutboxFn(
@@ -646,6 +664,7 @@ export function createSessionStateActivities(
     settleSessionInputWait,
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
+    expireScheduledRunHumanWait,
     markSessionIdle,
   };
 }

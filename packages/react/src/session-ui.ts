@@ -32,6 +32,10 @@ export type {
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
 export { SessionConversation } from "./components/session-conversation";
+export { SessionList } from "./components/session-list";
+export type { SessionListLabels, SessionListProps } from "./components/session-list";
+export { OpenGeniChat } from "./components/open-geni-chat";
+export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
 export type { SessionConversationProps } from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {

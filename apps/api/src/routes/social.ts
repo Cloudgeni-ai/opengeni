@@ -26,6 +26,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, observability } = deps;
@@ -46,7 +47,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/social/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = CreateSocialConnectionRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateSocialConnectionRequest);
     try {
       return c.json(
         await withOrganizationIntegrationAcquisition(
@@ -176,7 +177,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/social/posts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = CreateSocialPostRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateSocialPostRequest);
     try {
       return c.json(
         await createSocialPost(db, {

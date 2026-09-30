@@ -46,6 +46,7 @@ import {
   getSession,
   listActiveScheduledTasksWithConnectionAccounts,
   listScheduledTaskAccessAttentionEvents,
+  listScheduledTaskHumanWaitAttention,
   listScheduledTaskCreatorPolicies,
   listScheduledTaskRunAuthNeededEvents,
   requireWorkspace,
@@ -918,7 +919,7 @@ export async function listScheduledTaskAccessAttention(input: {
     subjectId: scope.ownerSubjectId ?? "",
     includeOwnerless: scope.includeOwnerless,
   };
-  const [events, candidates] = await Promise.all([
+  const [events, candidates, humanWaits] = await Promise.all([
     listScheduledTaskAccessAttentionEvents(input.db, grant.workspaceId, {
       ...query,
       taskLimit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
@@ -926,6 +927,10 @@ export async function listScheduledTaskAccessAttention(input: {
     listActiveScheduledTasksWithConnectionAccounts(input.db, grant.workspaceId, {
       ...query,
       limit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
+    }),
+    listScheduledTaskHumanWaitAttention(input.db, grant.workspaceId, {
+      ...query,
+      taskLimit: SCHEDULED_TASK_ACCESS_ATTENTION_MAX,
     }),
   ]);
   const blocked = await scheduledTasksWithUnavailableAccounts({
@@ -935,7 +940,7 @@ export async function listScheduledTaskAccessAttention(input: {
     tasks: candidates,
     onError: input.onError,
   });
-  if (events.length === 0 && blocked.length === 0) return [];
+  if (events.length === 0 && blocked.length === 0 && humanWaits.length === 0) return [];
   const names =
     events.length > 0
       ? await connectorNames(input.db, input.settings, grant.workspaceId, grant.subjectId)
@@ -973,6 +978,7 @@ export async function listScheduledTaskAccessAttention(input: {
       firedAt: task.firedAt,
       failures,
       unavailableAccounts: [],
+      awaitingHuman: null,
     });
   }
   for (const { task, unavailableAccounts } of blocked) {
@@ -989,6 +995,34 @@ export async function listScheduledTaskAccessAttention(input: {
             firedAt: null,
             failures: [],
             unavailableAccounts,
+            awaitingHuman: null,
+          },
+    );
+  }
+  // A latest run waiting on a person needs its owner (or, for an ownerless
+  // schedule, whoever manages schedules) to answer before it can finish.
+  for (const wait of humanWaits) {
+    const awaitingHuman = { since: wait.since, expiresAt: wait.expiresAt };
+    const prior = attention.get(wait.taskId);
+    attention.set(
+      wait.taskId,
+      prior
+        ? {
+            ...prior,
+            ...(prior.runId === null || prior.runId === wait.runId
+              ? { runId: wait.runId, firedAt: wait.firedAt }
+              : {}),
+            awaitingHuman,
+          }
+        : {
+            taskId: wait.taskId,
+            taskName: wait.taskName,
+            executionDigest: wait.taskExecutionDigest,
+            runId: wait.runId,
+            firedAt: wait.firedAt,
+            failures: [],
+            unavailableAccounts: [],
+            awaitingHuman,
           },
     );
   }

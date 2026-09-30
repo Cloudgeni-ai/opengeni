@@ -48,6 +48,7 @@ import { listMachines, machineUpdateBlockedReason, metricRowToSample } from "../
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { ControlRequest, ErrorCode } from "@opengeni/agent-proto";
 import { NatsControlRpc, subjectFor } from "@opengeni/runtime/sandbox";
+import { parseRequestJson } from "../http/request-body";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -392,7 +393,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw error;
       }
     }
-    const body = SwapActiveSandboxRequest.parse(await c.req.json());
+    const body = await parseRequestJson(c, SwapActiveSandboxRequest);
     const ctx = await buildFleetContextForSession(deps, {
       accountId: grant.accountId,
       workspaceId,

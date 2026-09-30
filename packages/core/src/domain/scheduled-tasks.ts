@@ -199,12 +199,23 @@ export function scheduledConnectionSurfaceEligibility(
   };
 }
 
+/**
+ * An organization/workspace API key or the deployment's configured key is a
+ * machine principal. It is never a person, so it can never be a schedule's
+ * execution owner (a human revision authorizer): its schedules are ownerless
+ * and run under service authority, exactly like a delegated service's.
+ */
+function isScheduledTaskMachinePrincipal(grant: AccessGrant): boolean {
+  return grant.principalKind === "api_key" || grant.principalKind === "configured_key";
+}
+
 /** Service attribution cannot become a personal schedule execution owner. */
 function scheduledTaskInitiatorForGrant(grant: AccessGrant) {
   const creator = creationInitiatorForGrant(grant);
   if (
     creator.initiator?.kind === "subject" &&
-    personalConnectionDelegationSourceForGrant(grant).kind === "none"
+    (personalConnectionDelegationSourceForGrant(grant).kind === "none" ||
+      isScheduledTaskMachinePrincipal(grant))
   ) {
     return { ...creator, initiator: { ...creator.initiator, kind: "service" as const } };
   }

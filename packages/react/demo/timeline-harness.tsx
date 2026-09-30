@@ -24,6 +24,10 @@ import {
   workerGoalEvents,
 } from "./timeline-fixtures";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 /* ----------------------------------------------------------------------------
    Timeline renderer harness

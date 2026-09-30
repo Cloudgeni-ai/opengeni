@@ -3,6 +3,10 @@ import { createRoot } from "react-dom/client";
 import { MessageTimeline } from "@opengeni/react";
 import type { SessionEvent } from "@opengeni/sdk";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 let sequence = 0;
 const turnId = "11111111-1111-4111-8111-111111111111";

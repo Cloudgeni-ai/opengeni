@@ -9,6 +9,10 @@ import {
 } from "@opengeni/react/session-ui";
 import type { SessionEvent } from "@opengeni/sdk";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 type Scenario = "Unhurried" | "Quick" | "Long wait" | "Failure";
 const BUTTON =

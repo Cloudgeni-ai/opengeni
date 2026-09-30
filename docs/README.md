@@ -6,7 +6,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Audience | Reads | Notes |
 | --- | --- | --- |
-| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the `@opengeni/sdk/chat` facade and the chat quickstart; `docs/embedding.md` is only for advanced in-process hosts. |
+| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the default `SessionConversation` embed behind `createSessionProxyHandler`; the `@opengeni/sdk/chat` facade and chat quickstart are a text-only fallback for existing chat UIs; `docs/embedding.md` is only for advanced in-process hosts. |
 | Maintainer | `CONTRIBUTING.md`, `docs/local-development.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
@@ -67,7 +67,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
 | First-party MCP response contracts | `docs/mcp-response-contracts.md` | Mutation handlers, consumer migration notes, and release notes should link instead of restating the receipt schema and tool classification. |
 | Codemode programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/codemode.md` | Runtime/API/worker comments should link instead of restating security invariants. |
-| Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |
+| Public API compatibility policy, public surface, deprecation, and enforcement | `docs/design/api-compatibility-policy.md` (accepted ADR, append-only exception log; the one design record that is current policy) | `docs/architecture.md` §3.10 summarizes; `packages/sdk/README.md`, `AGENTS.md`, the PR template, and release notes link instead of restating the rules. |
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |
 | Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `docs/local-development.md` § Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |

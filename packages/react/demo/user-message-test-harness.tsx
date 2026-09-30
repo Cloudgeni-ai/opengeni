@@ -11,6 +11,10 @@ import {
   type UserMessageDisclosureLabels,
 } from "@opengeni/react";
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 type UserMessageHarness = {
   prepend: () => void;

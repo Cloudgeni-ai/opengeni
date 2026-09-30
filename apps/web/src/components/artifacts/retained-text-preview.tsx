@@ -1,9 +1,13 @@
 import { Component, type ReactNode, useEffect, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { PierreFile } from "@opengeni/react";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { decodeRetainedText, TEXT_PREVIEW_MAX_BYTES } from "./retained-text-preview-policy";
+
+// Highlighted file views load @pierre/diffs lazily, only where they render.
+enablePierreDiffs();
 
 class HighlightBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },

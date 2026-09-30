@@ -410,8 +410,8 @@ async function finalizeTurnAttemptSteps(
     monitor.enter("provider_leases");
     if (providerTurn.effectiveCodexCredentialId) {
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-      // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
-      // is byte-identical to the /wham/usage write — no partial-window clobber.
+      // full duration-identified snapshot (parseCodexUsageHeaders gates on both),
+      // so untyped response headers cannot mislabel weekly-only quota.
       if (
         providerTurn.latestCodexUsage &&
         attempt.turnId &&
