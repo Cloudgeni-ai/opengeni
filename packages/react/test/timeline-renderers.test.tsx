@@ -363,6 +363,31 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("does not render background command delivery notices in chat", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "command-result",
+                kind: "background_command_result",
+                classification: "success",
+                sourceId: "command-1",
+                summary: "execCommand: completed successfully.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("details[data-og-machine-input-batch]")).toBeNull();
+    expect(r.container.textContent).not.toContain("Command result received");
+    await r.unmount();
+  });
+
   test("opens the typed child source without treating receipt delivery as work completion", async () => {
     resetTimelineEvents();
     const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

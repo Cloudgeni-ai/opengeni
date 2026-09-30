@@ -8,8 +8,11 @@ import {
 } from "@opengeni/contracts";
 import {
   claimWorkspaceWebhookDeliveries,
+  claimOrganizationWebhookDeliveries,
   decryptEnvironmentValue,
+  pruneOrganizationWebhookDeliveries,
   pruneWorkspaceWebhookDeliveries,
+  settleOrganizationWebhookDelivery,
   settleWorkspaceWebhookDelivery,
   type ClaimedWorkspaceWebhookDelivery,
   type Database,
@@ -45,6 +48,7 @@ async function deliverOne(
   key: Uint8Array,
   claimId: string,
   delivery: ClaimedWorkspaceWebhookDelivery,
+  organization = false,
 ): Promise<"delivered" | "failed"> {
   let status: number | null = null;
   let error: string | null = null;
@@ -66,7 +70,10 @@ async function deliverOne(
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
       },
       deps.settings,
-      { label: "Workspace webhook", requireHttpsOutsideLocalTest: true },
+      {
+        label: organization ? "Organization webhook" : "Workspace webhook",
+        requireHttpsOutsideLocalTest: true,
+      },
     );
     status = response.status;
     await response.body?.cancel().catch(() => undefined);
@@ -74,12 +81,15 @@ async function deliverOne(
   } catch (caught) {
     error = errorText(caught);
   }
-  await settleWorkspaceWebhookDelivery(deps.db, {
-    deliveryId: delivery.deliveryId,
-    claimId,
-    status,
-    error,
-  });
+  await (organization ? settleOrganizationWebhookDelivery : settleWorkspaceWebhookDelivery)(
+    deps.db,
+    {
+      deliveryId: delivery.deliveryId,
+      claimId,
+      status,
+      error,
+    },
+  );
   return error === null ? "delivered" : "failed";
 }
 
@@ -95,10 +105,20 @@ export async function drainWorkspaceWebhookDeliveries(
     limit: WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE,
     claimSeconds: CLAIM_SECONDS,
   });
+  // Each lane is bounded; the shared pump does not starve organization queues
+  // behind a sustained workspace backlog.
+  const organizationClaims = await claimOrganizationWebhookDeliveries(deps.db, {
+    claimId,
+    limit: WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE,
+    claimSeconds: CLAIM_SECONDS,
+  });
   const outcomes = await Promise.all(
-    claims.map(async (delivery) => {
+    [
+      ...claims.map((delivery) => ({ delivery, organization: false })),
+      ...organizationClaims.map((delivery) => ({ delivery, organization: true })),
+    ].map(async ({ delivery, organization }) => {
       try {
-        return await deliverOne(deps, key, claimId, delivery);
+        return await deliverOne(deps, key, claimId, delivery, organization);
       } catch (error) {
         deps.observability?.warn("Workspace webhook settlement failed", {
           deliveryId: delivery.deliveryId,
@@ -109,7 +129,7 @@ export async function drainWorkspaceWebhookDeliveries(
     }),
   );
   return {
-    claimed: claims.length,
+    claimed: claims.length + organizationClaims.length,
     delivered: outcomes.filter((outcome) => outcome === "delivered").length,
     failed: outcomes.filter((outcome) => outcome === "failed").length,
   };
@@ -141,7 +161,10 @@ export function startWorkspaceWebhookDispatchPump(
       const result = await drain(deps);
       backlog = result.claimed >= WORKSPACE_WEBHOOK_DISPATCH_BATCH_SIZE;
       if (result.claimed > 0) deps.observability?.info("Workspace webhook batch settled", result);
-      if (ticks % PRUNE_EVERY_TICKS === 0) await pruneWorkspaceWebhookDeliveries(deps.db);
+      if (ticks % PRUNE_EVERY_TICKS === 0) {
+        await pruneWorkspaceWebhookDeliveries(deps.db);
+        await pruneOrganizationWebhookDeliveries(deps.db);
+      }
     })()
       .catch((error: unknown) => {
         deps.observability?.error("Workspace webhook dispatch failed", { error: errorText(error) });

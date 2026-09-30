@@ -12,17 +12,31 @@
   --og-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* The landing page's soft aqua and peach glows. Kept clear of the sidebar, which paints its
-   own background and would cut a glow off at a hard edge. */
+/* The landing page's aqua and peach glows, fixed behind the page. */
 #background-color {
   background-image:
-    radial-gradient(40rem 26rem at 34% -10%, rgb(159 227 211 / 0.34), transparent 70%),
-    radial-gradient(40rem 32rem at 106% 22%, rgb(255 183 135 / 0.3), transparent 70%);
+    radial-gradient(60rem 44rem at 6% -8%, rgb(159 227 211 / 0.6), transparent 70%),
+    radial-gradient(54rem 46rem at 102% 26%, rgb(255 183 135 / 0.5), transparent 70%),
+    radial-gradient(48rem 36rem at 40% 108%, rgb(159 227 211 / 0.28), transparent 70%);
 }
 .dark #background-color {
   background-image:
-    radial-gradient(40rem 26rem at 34% -10%, rgb(159 227 211 / 0.1), transparent 70%),
-    radial-gradient(40rem 32rem at 106% 22%, rgb(255 183 135 / 0.07), transparent 70%);
+    radial-gradient(60rem 44rem at 6% -8%, rgb(159 227 211 / 0.22), transparent 70%),
+    radial-gradient(54rem 46rem at 102% 26%, rgb(255 183 135 / 0.16), transparent 70%),
+    radial-gradient(48rem 36rem at 40% 108%, rgb(159 227 211 / 0.1), transparent 70%);
+}
+/* Let the glow show through the header and the top of the sidebar, as on the landing page:
+   Mintlify paints both with the flat page color, which would cut the glow off in hard lines. */
+#navbar > div:first-child {
+  background-color: rgb(251 251 248 / 0.72);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  backdrop-filter: saturate(1.4) blur(14px);
+}
+.dark #navbar > div:first-child {
+  background-color: rgb(15 17 21 / 0.72);
+}
+#sidebar-content .sticky.top-0.pointer-events-none {
+  background-image: none;
 }
 
 /* Tight display tracking, as on the landing headings. */
