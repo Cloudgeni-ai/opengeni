@@ -3359,7 +3359,7 @@ function SessionGroupPaginationControl(
             : `${action} older sessions in ${group.label}`
         }
         onClick={() => void loadWithFocus()}
-        className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
+        className="min-h-8 rounded-md px-2 text-xs font-normal text-fg-muted hover:bg-hover hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
       >
         {revealCount !== undefined
           ? loading
@@ -3503,7 +3503,7 @@ function SessionGroup(props: {
           onDragLeave={() => setSessionDragOver(false)}
           className={cn(
             sessionDragOver && "bg-accent ring-1 ring-ring",
-            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-surface-2 pointer-coarse:h-11",
+            "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-hover pointer-coarse:h-11",
             props.project && "cursor-grab active:cursor-grabbing",
             props.project && props.draggedProjectId === props.project.id && "opacity-45",
             props.project &&
@@ -3529,7 +3529,19 @@ function SessionGroup(props: {
               )}
             </span>
             <span className="min-w-0 flex-1 truncate">{props.label}</span>
-            {props.showSummary !== false ? <RailTrailingMetadata summary={summary} /> : null}
+            {props.showSummary !== false ? (
+              // The row's actions sit where the summary is, on the translucent
+              // hover wash, so the summary steps aside while they show.
+              <span
+                className={cn(
+                  "inline-flex shrink-0",
+                  (props.project || props.allowNewSession !== false) &&
+                    "group-hover/section:invisible group-focus-within/section:invisible pointer-coarse:invisible",
+                )}
+              >
+                <RailTrailingMetadata summary={summary} />
+              </span>
+            ) : null}
           </button>
           {props.project ? (
             <DropdownMenu>
@@ -3538,7 +3550,7 @@ function SessionGroup(props: {
                   type="button"
                   aria-label={`Actions for ${props.label}`}
                   className={cn(
-                    "absolute top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:size-9 pointer-coarse:opacity-100",
+                    "absolute top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded text-fg-subtle opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:size-9 pointer-coarse:opacity-100",
                     props.allowNewSession !== false ? "right-7" : "right-0.5",
                   )}
                 >
@@ -3574,7 +3586,7 @@ function SessionGroup(props: {
                 <NewSessionLink
                   channelId={props.channelId}
                   aria-label={`New chat in ${props.label}`}
-                  className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
+                  className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded text-fg-subtle opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
                 >
                   <PlusIcon aria-hidden="true" className="size-3.5" />
                 </NewSessionLink>
@@ -3826,7 +3838,7 @@ function TreeLoadRow({
         type="button"
         onClick={onClick}
         style={style}
-        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-muted hover:bg-surface-2 hover:text-fg pointer-coarse:h-11"
+        className="h-8 w-full rounded-md pr-2 text-left text-xs text-fg-muted hover:bg-hover hover:text-fg pointer-coarse:h-11"
       >
         {text}
       </button>
@@ -3898,8 +3910,10 @@ function SessionRow(props: {
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     props.active
       ? "border-brand/20 bg-selection text-fg"
-      : "border-transparent text-fg-label hover:bg-surface-2 hover:text-fg",
-    props.focused && !props.active ? "bg-surface-2/60" : "",
+      : "border-transparent text-fg-label hover:bg-hover hover:text-fg",
+    // The roving tab stop shows the hover wash only while it holds keyboard
+    // focus; otherwise it would read as a stray hover.
+    !props.active && "has-[[data-session-focus]:focus-visible]:bg-hover",
   );
 
   const lead = (
@@ -4238,7 +4252,7 @@ export function RowQuickActions({
 
   return (
     <div
-      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md bg-surface-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
+      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
       data-session-quick-actions={session.id}
     >
       {canPin ? (

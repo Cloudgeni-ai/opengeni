@@ -84,8 +84,8 @@ export function WorkspaceConfigLink(props: {
         }
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10",
-          "hover:bg-surface-2 hover:text-fg",
-          "data-[active=true]:bg-surface-2 data-[active=true]:text-fg",
+          "hover:bg-hover hover:text-fg",
+          "data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection",
           collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
         )}
         onClick={onNavigate}
@@ -116,8 +116,8 @@ export function WorkspaceConfigLink(props: {
         title={item.description}
         className={cn(
           "flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none",
-          "hover:bg-accent hover:text-accent-foreground",
-          active ? "bg-accent text-accent-foreground" : "text-fg",
+          "hover:bg-hover hover:text-fg",
+          active ? "bg-selection text-fg hover:bg-selection" : "text-fg",
         )}
         onClick={onNavigate}
       >
@@ -132,7 +132,7 @@ export function WorkspaceConfigLink(props: {
       to={item.to}
       params={{ workspaceId }}
       title={item.description}
-      className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+      className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
       onClick={onNavigate}
     >
       <WorkspaceConfigGlyph icon={item.icon} className="size-3.5 shrink-0 text-brand" />

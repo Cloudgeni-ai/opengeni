@@ -13,15 +13,15 @@ export const MENU_SURFACE_CLASS =
 export const MENU_ITEM_BASE_CLASS =
   "relative flex min-h-8 w-full min-w-0 cursor-default items-center gap-2.5 rounded-og-md px-2.5 py-1.5 text-left text-og-menu font-normal text-og-fg outline-hidden select-none transition-colors duration-[120ms] pointer-coarse:min-h-11 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-og-fg-muted";
 
-/** Radix menu items: hover and keyboard focus fill surface-2; disabled is 50%. */
+/** Radix menu items: hover and keyboard focus take the hover wash; disabled is 50%. */
 export const MENU_ITEM_STATE_CLASS =
-  "focus:bg-og-surface-2 data-[highlighted]:bg-og-surface-2 data-[state=open]:bg-og-surface-2 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[variant=destructive]:text-og-danger data-[variant=destructive]:focus:bg-og-danger/10 data-[variant=destructive]:*:[svg]:text-og-danger!";
+  "focus:bg-og-hover data-[highlighted]:bg-og-hover data-[state=open]:bg-og-hover data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[variant=destructive]:text-og-danger data-[variant=destructive]:focus:bg-og-danger/10 data-[variant=destructive]:*:[svg]:text-og-danger!";
 
 export const MENU_ITEM_CLASS = `${MENU_ITEM_BASE_CLASS} ${MENU_ITEM_STATE_CLASS}`;
 
 /** The same row as a plain button inside a hand-built popover. */
 export const MENU_BUTTON_STATE_CLASS =
-  "cursor-pointer hover:bg-og-surface-2 focus-visible:bg-og-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 disabled:pointer-events-none disabled:opacity-50";
+  "cursor-pointer hover:bg-og-hover focus-visible:bg-og-hover focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-og-accent/55 disabled:pointer-events-none disabled:opacity-50";
 
 export const MENU_BUTTON_CLASS = `${MENU_ITEM_BASE_CLASS} ${MENU_BUTTON_STATE_CLASS}`;
 

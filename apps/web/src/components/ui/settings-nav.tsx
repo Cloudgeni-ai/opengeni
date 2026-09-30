@@ -9,8 +9,8 @@ import { cn } from "@/lib/utils";
 /**
  * Navigation items for the main rail and the settings rail.
  *
- * NavItem: 32px, radius 10, 16px icon, 14/500 muted. Active is a surface-2
- * fill, full-strength text and a 2x16px brand bar on the left edge. Every
+ * NavItem: 32px, radius 10, 16px icon, 14/500 muted. Hover is the `hover` wash; active is the
+ * stronger `selection` fill, full-strength text and a 2x16px brand bar on the left edge. Every
  * destination appears once, with one name and one icon. Coarse pointers get a
  * 44px target.
  *
@@ -52,7 +52,7 @@ export interface NavItemProps extends Omit<ComponentProps<"a">, "children"> {
 }
 
 const ITEM_BASE =
-  "group/nav-item relative flex min-w-0 items-center rounded-[10px] text-sm font-normal text-fg-label transition-colors duration-[120ms] outline-none select-none hover:bg-surface-2 hover:text-fg data-[active=true]:bg-surface-2 data-[active=true]:text-fg aria-disabled:cursor-not-allowed aria-disabled:text-fg-subtle aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg-subtle";
+  "group/nav-item relative flex min-w-0 items-center rounded-[10px] text-sm font-normal text-fg-label transition-colors duration-[120ms] outline-none select-none hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection aria-disabled:cursor-not-allowed aria-disabled:text-fg-subtle aria-disabled:hover:bg-transparent aria-disabled:hover:text-fg-subtle";
 
 function textLabel(label: ReactNode): string | undefined {
   return typeof label === "string" ? label : undefined;

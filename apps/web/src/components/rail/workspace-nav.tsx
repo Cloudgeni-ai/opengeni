@@ -45,8 +45,8 @@ export function WorkspaceNav({ compact = false }: { compact?: boolean }) {
             onClick={() => rail.setDrawerOpen(false)}
             className={cn(
               "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
-              "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
-              active && "bg-surface-2 text-fg",
+              "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
+              active && "bg-selection text-fg hover:bg-selection",
               rail.collapsed || compact
                 ? "w-8 justify-center pointer-coarse:w-10"
                 : "gap-2.5 px-2.5",

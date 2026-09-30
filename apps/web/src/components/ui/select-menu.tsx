@@ -340,7 +340,7 @@ export interface SelectMenuPanelProps<V extends string = string> {
 /**
  * The option list. Every option shows its label, meta (for example the
  * payment source) and description; the selected one gets the menu check on
- * the right (menu-styles.ts), hover and keyboard focus the surface-2 fill.
+ * the right (menu-styles.ts), hover and keyboard focus the `hover` wash.
  */
 export function SelectMenuPanel<V extends string>({
   options,
@@ -411,7 +411,7 @@ export function SelectMenuPanel<V extends string>({
         }}
         className={cn(
           "group/option flex min-h-8 min-w-0 cursor-pointer items-start gap-2.5 rounded-[10px] px-2.5 py-1.5 transition-colors duration-[120ms] pointer-coarse:min-h-11",
-          active ? "bg-surface-2" : null,
+          active ? "bg-hover" : null,
           option.disabled ? "cursor-not-allowed" : null,
         )}
       >

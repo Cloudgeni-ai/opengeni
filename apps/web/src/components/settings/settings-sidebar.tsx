@@ -290,7 +290,7 @@ export function SettingsShell({
       <LinkShell
         link={back.link}
         aria-label={back.label}
-        className="flex size-11 shrink-0 items-center justify-center rounded-md text-fg-muted outline-none transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55"
+        className="flex size-11 shrink-0 items-center justify-center rounded-md text-fg-muted outline-none transition-colors hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55"
       >
         <ArrowLeftIcon aria-hidden="true" className="size-4" />
       </LinkShell>

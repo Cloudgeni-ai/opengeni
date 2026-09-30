@@ -51,9 +51,10 @@ Use the Tailwind semantic names only. No raw hex, no `var(--og-x, #fallback)`, n
 | `bg` | Rail and page chrome (behind the rail glow). Inside the content pane `bg` resolves to `canvas` |
 | `canvas` | The main content pane beside the rail or settings rail (`data-canvas`) |
 | `surface` | Inputs, dialogs, menus, outline buttons |
-| `surface-2` | Row hover, active nav, chips, segmented track, the detail page aside card |
+| `surface-2` | Chips, segmented track, the detail page aside card |
 | `surface-3` | Pressed, open |
-| `selection` | The selected row (open session in the rail), secondary button fill |
+| `hover` | The one hover: rail and settings-rail items, session and folder rows, list rows, suggestion cards, menu rows (highlight and keyboard focus), ghost buttons. A translucent `fg` wash, never a solid grey |
+| `selection` | Selected and active: the open session row, the active nav item, a selected list row; also the secondary button fill. Always a clear step stronger than `hover` |
 | `border` | Every hairline |
 | `border-strong` | Outline hover |
 | `fg` | Titles, labels, the active nav item |
@@ -80,18 +81,29 @@ primary button's teal wash, the soft teal/peach glow and the status hues.
 | `bg` (rail, chrome) | `#f6f6f6` | `#303030` |
 | `canvas` (content pane) | `#ffffff` | `#202020` (darker than the rail) |
 | `surface` / `surface-2` / `surface-3` | `#ffffff` / `#eeeeee` / `#e5e5e5` | `#333333` / `#383838` / `#404040` |
-| `selection` | `#e9e9e9` | `#424242` |
+| `hover` | `fg` at 6% (`rgb(36 36 36 / 0.06)`) | `fg` at 8% (`rgb(230 230 230 / 0.08)`) |
+| `selection` | `#e2e2e2` | `#484848` |
 | `border` / `border-strong` | `#dedede` / `#bdbdbd` | `#454545` / `#555555` |
-| `fg` / `fg-label` / `fg-muted` / `fg-subtle` | `#242424` / `#3a3a3a` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#d4d4d4` / `#b0b0b0` / `#a3a3a3` |
+| `fg` / `fg-label` / `fg-muted` / `fg-subtle` | `#242424` / `#3a3a3a` / `#5f5f5f` / `#696969` | `#e6e6e6` / `#d4d4d4` / `#b8b8b8` / `#a3a3a3` |
 | `brand` (accent) / accent-deep / accent-fg | `#545454` / `#383838` / `#ffffff` | `#c4c4c4` / `#d5d5d5` / `#242424` |
 | `primary` fill / ink / edge | `#ebf2f0` / `#292929` / `#c4d5d0` | `#2b3432` / `#eeeeee` / `#4e5e59` |
-| `status-waiting` / `running` / `idle` | `#915826` / `#766623` / `#237058` | `#e9ab77` / `#d5bd72` / `#83cbb0` |
+| `status-waiting` / `running` / `idle` | `#8c5524` / `#716122` / `#237058` | `#e9ab77` / `#d5bd72` / `#83cbb0` |
 | Glow teal / peach | `#9fe3d359` / `#ffb78752` | `#79d9c125` / `#ffb78724` |
 
 Light `fg-muted`, `fg-subtle` and the light status hues are a step darker than the studio values
-(`#686868`, `#767676`, `#a3652f`, `#8b782c`, `#287d64`), and dark `fg-subtle` a step lighter than
-`#949494`, so every text token keeps 4.5:1 as 11-12px text on the rail, `surface-2` and the
-selected row.
+(`#686868`, `#767676`, `#a3652f`, `#8b782c`, `#287d64`), and dark `fg-muted` and `fg-subtle` a step
+lighter than `#b0b0b0` and `#949494`, so every text token keeps 4.5:1 as 11-12px text on the rail,
+`surface-2` and the hover wash, and `fg`, `fg-label`, `fg-muted` and the status hues keep it on the
+selected row too (`fg-subtle` there is for icons only).
+
+**Hover and selected.** There is one hover, the `hover` token: `fg` mixed into transparent (6% in
+light, 8% in dark). Because it is translucent it darkens (light) or lightens (dark) whatever sits
+under it by the same step - the rail glow, the canvas, a card, a menu panel - so it never blends
+into the glow the way a solid grey does. Use `hover:bg-hover` on transparent rows and items; on
+something with its own fill (a suggestion card) keep the fill and add the wash as a layer with
+`hover:hover-layer`. Selected and active is a separate, stronger, opaque state: `selection` fill,
+`fg` text, plus the brand bar (nav) or the `brand/20` edge (session row). A selected item keeps its
+fill on hover. A roving keyboard tab stop shows the hover wash only while it holds focus.
 
 **Buttons.** Primary: the teal wash, no shadow, hover mixes 15% ink into the fill. Secondary:
 `selection` fill, `fg-muted` text. Outline: `surface` fill, `border`, `fg` text. Disabled: 50%
@@ -203,15 +215,16 @@ opacity-muted text.
   secondary button's 10px radius and border; a model picker in settings uses the "field" trigger
   (model name, then the payer in muted text, never the reasoning effort, never a pill). Switches
   keep their own 20px size.
-- Elevation: pages and rows are flat, hover is a `surface-2` fill. Dialogs: 1px border +
+- Elevation: pages and rows are flat, hover is the `hover` wash. Dialogs: 1px border +
   `shadow-lg`. Menus: `shadow-md` (see "Menus and popovers" below).
 - Focus: 2px ring in brand (neutral grey) at 55%, 2px offset. Motion: 120ms, color and opacity
   only.
 - Rail: 240px in every mode, on the rail glow. Nav item 32px, radius 10, 16px icon, 14/400
-  `fg-label` (icon and text alike); active = `surface-2` + `fg` + a 2x16px brand bar. Session
+  `fg-label` (icon and text alike); hover = the `hover` wash; active = `selection` + `fg` + a 2x16px
+  brand bar. Session
   titles and the "Sessions" heading are `fg-label` too; only true meta (timestamps, counts, "Show
   2 more", the empty note) is `fg-muted` or `fg-subtle`. The open session row is a selected row:
-  `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is `surface-2`. The
+  `selection` fill, `fg` text and a 1px `brand/20` edge, radius 10; row hover is the `hover` wash. The
   settings rail follows the same rule, with its group labels in `fg-muted`.
 - Every page works at 390px wide with no horizontal scroll and 44px touch targets on coarse
   pointers.
@@ -229,7 +242,7 @@ them, so a call site sets a width and nothing else.
   16px radius, `shadow-og-md`, 6px inset. No second border, tint or shadow on a call site.
 - **Row:** 32px (44px on coarse pointers), 10px side padding, radius 10. A 16px icon in
   `fg-muted`, 10px gap, then the label in 14/400 `fg`. Hover and keyboard focus are the same
-  `surface-2` fill; menu items draw no focus ring (triggers and plain buttons keep theirs).
+  `hover` wash (the app-wide hover token); menu items draw no focus ring (triggers and plain buttons keep theirs).
   Disabled is 50% opacity; destructive is `danger` text and icon.
 - **Right side**, in this order: meta (a count or the current value, 12px `fg-muted`), then a
   16px chevron in `fg-muted` for a row that opens a submenu, or the check. **The chosen option
@@ -524,9 +537,9 @@ Colors, fonts and most sizes are tokens, so a restyle happens in two files, not 
 
 - `packages/react/styles/tokens.css` (`@opengeni/react` tokens) defines the palette and fonts as
   `--og-*` variables for light and dark (`--og-color-bg`, `--og-color-canvas`,
-  `--og-color-surface-1`, `--og-color-selection`, `--og-color-accent`, `--og-color-primary*`,
-  `--og-glow-*`, `--og-color-status-*`, `--og-font-sans`, ...). Change a color or font there
-  and every surface follows, in both themes. Run `bun run build:css` in `packages/react` after
+  `--og-color-surface-1`, `--og-color-selection`, `--og-color-hover`, `--og-color-accent`,
+  `--og-color-primary*`, `--og-glow-*`, `--og-color-status-*`, `--og-font-sans`, ...). Change a
+  color or font there and every surface follows, in both themes. Run `bun run build:css` in `packages/react` after
   editing it; `compiled.css` is checked in.
 - `apps/web/src/styles.css` maps those onto Tailwind names in `@theme` (`--color-bg`,
   `--color-canvas`, `--color-brand`, `--color-primary`, `--font-sans`, `--radius-md` 10px,

@@ -73,7 +73,7 @@ export function NewSessionStarters({
               type="button"
               variant="outline"
               disabled={disabled}
-              className="h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left"
+              className="h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer"
               onClick={() => onSelect(starter.prompt)}
             >
               {logo ? (

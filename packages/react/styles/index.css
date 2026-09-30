@@ -123,6 +123,7 @@
   --color-og-bg: var(--og-color-bg);
   --color-og-canvas: var(--og-color-canvas);
   --color-og-selection: var(--og-color-selection);
+  --color-og-hover: var(--og-color-hover);
   --color-og-surface-1: var(--og-color-surface-1);
   --color-og-surface-2: var(--og-color-surface-2);
   --color-og-surface-3: var(--og-color-surface-3);
@@ -159,6 +160,7 @@
   --color-bg: var(--og-color-bg);
   --color-canvas: var(--og-color-canvas);
   --color-selection: var(--og-color-selection);
+  --color-hover: var(--og-color-hover);
   --color-surface: var(--og-color-surface-1);
   --color-surface-2: var(--og-color-surface-2);
   --color-surface-3: var(--og-color-surface-3);

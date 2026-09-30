@@ -329,7 +329,7 @@ function HeaderCell({
           })
         }
         className={cn(
-          "-mx-1.5 inline-flex max-w-full items-center gap-1 rounded-[6px] px-1.5 py-0.5 transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg pointer-coarse:min-h-11",
+          "-mx-1.5 inline-flex max-w-full items-center gap-1 rounded-[6px] px-1.5 py-0.5 transition-colors duration-[120ms] hover:bg-hover hover:text-fg pointer-coarse:min-h-11",
           text,
           active && "text-fg",
           align === "end" && "flex-row-reverse",
@@ -894,10 +894,10 @@ export function ListRow({
     // secondary line; a title-only row centers in the same height).
     variant === "resource" && cn(SUBGRID, "min-h-16 px-3 py-3"),
     table && cn(SUBGRID, "min-h-11 px-3 py-2"),
-    actionable && "hover:bg-surface-2",
+    actionable && "hover:bg-hover",
     selected &&
       cn(
-        "bg-surface-2",
+        "bg-selection hover:bg-selection",
         "before:absolute before:top-1/2 before:left-0 before:h-4 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-brand before:content-['']",
       ),
     // Focus ring on the whole row when its target has keyboard focus.

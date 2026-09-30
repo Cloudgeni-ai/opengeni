@@ -128,7 +128,7 @@ export function RailFooter() {
                     displayName,
                     pendingCount: organizationInvitations.pendingCount,
                   })}
-                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
+                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
                 >
                   <span className="relative shrink-0">
                     <Avatar size="sm">

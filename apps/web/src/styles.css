@@ -39,6 +39,7 @@
   --color-bg: var(--og-color-bg);
   --color-canvas: var(--og-color-canvas);
   --color-selection: var(--og-color-selection);
+  --color-hover: var(--og-color-hover);
   --color-surface: var(--og-color-surface-1);
   --color-surface-2: var(--og-color-surface-2);
   --color-surface-3: var(--og-color-surface-3);
@@ -163,6 +164,13 @@ body {
   background-color: var(--og-color-canvas);
 }
 
+/* The hover wash on something that has its own fill (a suggestion card, an
+   outline card): the same --color-hover, layered over the fill instead of
+   replacing it. Transparent rows and menu items use `hover:bg-hover`. */
+@utility hover-layer {
+  background-image: linear-gradient(var(--color-hover), var(--color-hover));
+}
+
 /* Rail glow: a soft teal wash from the top-left and a peach wash from the
    bottom-right over the rail color. Used by the main rail and the settings
    rail; layered so a rail's own background utilities can still override it. */
@@ -241,7 +249,7 @@ body {
      Mouse-click + any key (e.g. Shift) flips keyboard modality and would paint
      a huge ring around the whole pane — skip those; real tab stops use 0+.
    - menu items take roving, programmatic focus even under the mouse; their
-     focus is the menu highlight (the surface-2 fill), the same for pointer
+     focus is the menu highlight (the `hover` wash), the same for pointer
      and keyboard (DESIGN.md "Menus and popovers"). */
 :where(
   button,

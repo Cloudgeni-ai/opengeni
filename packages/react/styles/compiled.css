@@ -226,7 +226,12 @@
 @property --og-color-selection {
   syntax: "*";
   inherits: true;
-  initial-value: #424242;
+  initial-value: #484848;
+}
+@property --og-color-hover {
+  syntax: "*";
+  inherits: true;
+  initial-value: rgb(230 230 230 / 0.08);
 }
 @property --og-color-border {
   syntax: "*";
@@ -251,7 +256,7 @@
 @property --og-color-fg-muted {
   syntax: "*";
   inherits: true;
-  initial-value: #b0b0b0;
+  initial-value: #b8b8b8;
 }
 @property --og-color-fg-subtle {
   syntax: "*";
@@ -569,6 +574,7 @@
 @supports (color: color-mix(in lab, red, red)) {
   :where(.og-root) {
     --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
+    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 8%, transparent);
     --_og-color-primary-hover: var(--og-color-primary-hover, color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg)));
     --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
     --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
@@ -612,7 +618,8 @@
   --og-color-surface-1: #ffffff;
   --og-color-surface-2: #eeeeee;
   --og-color-surface-3: #e5e5e5;
-  --og-color-selection: #e9e9e9;
+  --og-color-selection: #e2e2e2;
+  --og-color-hover: rgb(36 36 36 / 0.06);
   --og-color-border: #dedede;
   --og-color-border-strong: #bdbdbd;
   --og-color-fg: #242424;
@@ -635,9 +642,9 @@
   --og-glow-teal-quiet: #9fe3d32b;
   --og-glow-peach-quiet: #ffb78729;
   --og-color-status-queued: #696969;
-  --og-color-status-running: #766623;
+  --og-color-status-running: #716122;
   --og-color-status-idle: #237058;
-  --og-color-status-waiting: #915826;
+  --og-color-status-waiting: #8c5524;
   --og-color-status-failed: oklch(0.5 0.19 22);
   --og-color-status-cancelled: #696969;
   --og-color-danger: oklch(0.52 0.2 22);
@@ -664,6 +671,7 @@
 @supports (color: color-mix(in lab, red, red)) {
   :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
     --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
     --og-color-primary-hover: color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg));
     --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
     --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
@@ -4786,6 +4794,13 @@
       }
     }
   }
+:where(.og-root).hover\:bg-og-hover,:where(.og-root) .hover\:bg-og-hover {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--og-color-hover);
+      }
+    }
+  }
 :where(.og-root).hover\:bg-og-primary-hover,:where(.og-root) .hover\:bg-og-primary-hover {
     &:hover {
       @media (hover: hover) {
@@ -5047,9 +5062,9 @@
       border-color: var(--og-color-accent);
     }
   }
-:where(.og-root).focus\:bg-og-surface-2,:where(.og-root) .focus\:bg-og-surface-2 {
+:where(.og-root).focus\:bg-og-hover,:where(.og-root) .focus\:bg-og-hover {
     &:focus {
-      background-color: var(--og-color-surface-2);
+      background-color: var(--og-color-hover);
     }
   }
 :where(.og-root).focus\:opacity-100,:where(.og-root) .focus\:opacity-100 {
@@ -5094,6 +5109,11 @@
 :where(.og-root).focus-visible\:bg-og-accent,:where(.og-root) .focus-visible\:bg-og-accent {
     &:focus-visible {
       background-color: var(--og-color-accent);
+    }
+  }
+:where(.og-root).focus-visible\:bg-og-hover,:where(.og-root) .focus-visible\:bg-og-hover {
+    &:focus-visible {
+      background-color: var(--og-color-hover);
     }
   }
 :where(.og-root).focus-visible\:bg-og-surface-2,:where(.og-root) .focus-visible\:bg-og-surface-2 {
@@ -5336,9 +5356,9 @@
       opacity: 50%;
     }
   }
-:where(.og-root).data-\[highlighted\]\:bg-og-surface-2,:where(.og-root) .data-\[highlighted\]\:bg-og-surface-2 {
+:where(.og-root).data-\[highlighted\]\:bg-og-hover,:where(.og-root) .data-\[highlighted\]\:bg-og-hover {
     &[data-highlighted] {
-      background-color: var(--og-color-surface-2);
+      background-color: var(--og-color-hover);
     }
   }
 :where(.og-root).data-\[inset\]\:pl-9,:where(.og-root) .data-\[inset\]\:pl-9 {
@@ -5394,9 +5414,9 @@
       animation: og-expand var(--_og-duration-disclose) var(--og-ease-in-out);
     }
   }
-:where(.og-root).data-\[state\=open\]\:bg-og-surface-2,:where(.og-root) .data-\[state\=open\]\:bg-og-surface-2 {
+:where(.og-root).data-\[state\=open\]\:bg-og-hover,:where(.og-root) .data-\[state\=open\]\:bg-og-hover {
     &[data-state="open"] {
-      background-color: var(--og-color-surface-2);
+      background-color: var(--og-color-hover);
     }
   }
 :where(.og-root).data-\[variant\=destructive\]\:text-og-danger,:where(.og-root) .data-\[variant\=destructive\]\:text-og-danger {

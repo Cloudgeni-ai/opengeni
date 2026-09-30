@@ -90,7 +90,13 @@
   --og-color-surface-1: #333333;
   --og-color-surface-2: #383838;
   --og-color-surface-3: #404040;
-  --og-color-selection: #424242;
+  --og-color-selection: #484848;
+  /* Hover: one treatment for every navigation item, list row and menu row
+     (menu highlight and keyboard focus included). A translucent fg wash, so
+     it darkens or lightens whatever sits under it - the rail glow, the
+     canvas, a card or a menu panel - by the same visible step. Selected and
+     active rows use the stronger, opaque `selection`. */
+  --og-color-hover: rgb(230 230 230 / 0.08);
   --og-color-border: #454545;
   --og-color-border-strong: #555555;
   --og-color-fg: #e6e6e6;
@@ -98,7 +104,9 @@
      rows. A hair under fg so the active item (fg) still stands out, never
      muted like meta text. */
   --og-color-fg-label: #d4d4d4;
-  --og-color-fg-muted: #b0b0b0;
+  /* A step over the studio's #b0b0b0 so muted text (secondary buttons, list
+     meta) keeps 4.5:1 on the selected-row fill too. */
+  --og-color-fg-muted: #b8b8b8;
   /* Lifted from the studio's #949494 so quiet meta keeps 4.5:1 on the rail,
      Surface 1-2 and the canvas. */
   --og-color-fg-subtle: #a3a3a3;
@@ -190,6 +198,7 @@
 @supports (color: color-mix(in lab, red, red)) {
   :root {
     --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
+    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 8%, transparent);
     --og-color-primary-hover: color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg));
     --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 14%, transparent);
     --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 14%, transparent);
@@ -241,7 +250,8 @@
   --og-color-surface-1: #ffffff;
   --og-color-surface-2: #eeeeee;
   --og-color-surface-3: #e5e5e5;
-  --og-color-selection: #e9e9e9;
+  --og-color-selection: #e2e2e2;
+  --og-color-hover: rgb(36 36 36 / 0.06);
   --og-color-border: #dedede;
   --og-color-border-strong: #bdbdbd;
   --og-color-fg: #242424;
@@ -273,11 +283,12 @@
 
   /* Status letters are ordinary 11-12 px text, including over row hover and
      selected rows, and on the pale diff tints. The studio hues (#a3652f,
-     #8b782c, #287d64) are darkened just enough for 4.5:1 on Surface 2. */
+     #8b782c, #287d64) are darkened just enough for 4.5:1 on Surface 2 and
+     on the selected-row fill. */
   --og-color-status-queued: #696969;
-  --og-color-status-running: #766623;
+  --og-color-status-running: #716122;
   --og-color-status-idle: #237058;
-  --og-color-status-waiting: #915826;
+  --og-color-status-waiting: #8c5524;
   --og-color-status-failed: oklch(0.5 0.19 22);
   --og-color-status-cancelled: #696969;
   /* Ordinary 14 px destructive menu text also appears on Surface 3. Keep
@@ -310,6 +321,7 @@
   [data-og-theme="light"],
   .og-light {
     --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+    --og-color-hover: color-mix(in srgb, var(--og-color-fg) 6%, transparent);
     --og-color-primary-hover: color-mix(in srgb, var(--og-color-primary) 85%, var(--og-color-primary-fg));
     --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
     --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
