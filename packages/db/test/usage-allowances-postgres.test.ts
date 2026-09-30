@@ -6,6 +6,8 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
+import { execFileSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import {
   applyCreditDebitAfterUse,
   applyCreditDebitUpToBalance,
@@ -17,6 +19,12 @@ import {
   createSession,
   ensureExternalIdentity,
   getWorkspaceAllowance,
+  getWorkspaceAllowanceState,
+  inspectRuntimeDatabasePosture,
+  evaluateRuntimeDatabasePosture,
+  RUNTIME_ALLOWANCE_PRIVATE_TABLES,
+  saveKnowledgeEntry,
+  transitionSessionVisibility,
   getWorkspaceUsage,
   initializeSessionStartAtomically,
   grantWorkspaceCredits,
@@ -85,6 +93,230 @@ async function charge(
 }
 
 describe("usage allowance DB lifecycle", () => {
+  test("clear tombstone version is discoverable and exact lost-response replay cannot clear a successor", async () => {
+    const scope = await fixture();
+    expect(await getWorkspaceAllowanceState(app.db, scope)).toEqual({ version: 0, config: null });
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    const request = { ...scope, expectedVersion: 1, operationId: crypto.randomUUID() };
+    expect(await clearWorkspaceAllowance(app.db, request)).toEqual({ version: 2 });
+    expect(await getWorkspaceAllowance(app.db, scope)).toBeNull();
+    expect(await getWorkspaceAllowanceState(app.db, scope)).toEqual({ version: 2, config: null });
+    expect(await clearWorkspaceAllowance(app.db, request)).toEqual({ version: 2 });
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 200,
+      period: "none",
+      expectedVersion: 2,
+    });
+    await expect(clearWorkspaceAllowance(app.db, request)).rejects.toBeInstanceOf(
+      UsageAllowanceVersionConflictError,
+    );
+    expect((await getWorkspaceAllowanceState(app.db, scope)).version).toBe(3);
+    await expect(
+      clearWorkspaceAllowance(app.db, { ...request, expectedVersion: 3 }).catch(
+        nestedPostgresSqlState,
+      ),
+    ).resolves.toBe("23505");
+  });
+
+  test("idle expired monthly window advances during debit and BEFORE monthly-to-none edit", async () => {
+    for (const debitFirst of [true, false]) {
+      const scope = await fixture();
+      await setWorkspaceAllowance(app.db, {
+        ...scope,
+        includedCredits: 100,
+        period: "monthly",
+        anchorDay: 31,
+        expectedVersion: 0,
+      });
+      await charge(scope, 20);
+      const [saved] =
+        await shared.admin`select active_period_key from opengeni_private.workspace_usage_allowances
+        where workspace_id=${scope.workspaceId}`;
+      await shared.admin.begin(async (tx) => {
+        await tx`update opengeni_private.workspace_usage_allowances set active_period_key='2000-01',
+          active_start_at='2000-01-31',active_end_at='2000-02-29' where workspace_id=${scope.workspaceId}`;
+        await tx`update opengeni_private.workspace_allowance_periods set period_key='2000-01',
+          start_at='2000-01-31',end_at='2000-02-29' where workspace_id=${scope.workspaceId}`;
+        await tx`update opengeni_private.workspace_allowance_counters set period_key='2000-01'
+          where workspace_id=${scope.workspaceId} and period_key=${saved!.active_period_key}`;
+      });
+      // No read or maintenance between expiration and settlement/config edit.
+      if (debitFirst) await charge(scope, 80);
+      await setWorkspaceAllowance(app.db, {
+        ...scope,
+        includedCredits: 100,
+        period: "none",
+        expectedVersion: 1,
+      });
+      if (!debitFirst) await charge(scope, 80);
+      expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(80);
+      const [state] =
+        await shared.admin`select active_period_key,active_end_at from opengeni_private.workspace_usage_allowances
+        where workspace_id=${scope.workspaceId}`;
+      expect(state!.active_period_key).not.toBe("2000-01");
+      expect(state!.active_end_at).toBeNull();
+      expect(
+        (await getWorkspaceUsage(app.db, { ...scope, period: "2000-01" })).workspace.used,
+      ).toBe(20);
+    }
+  });
+
+  test("old complete readiness and old role provisioning stay compatible with private allowance storage", async () => {
+    const repoRoot = new URL("../../..", import.meta.url).pathname;
+    // Exact pre-allowance origin/main ancestor of PR3038. A moving merge-base
+    // would stop exercising the old binary as soon as the PR itself merges.
+    const oldRevision = "3a354ce4637d71e632f92be6f9aa6ff97f470fba";
+    const directory = `${repoRoot}/.allowance-old-runtime-${crypto.randomUUID()}`;
+    // Build immutable old source with the current dependency resolver, without
+    // copying/modifying source or substituting today's evaluator constants.
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const root = await mkdtemp(directory);
+    try {
+      for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"]) {
+        await writeFile(
+          `${root}/${name}`,
+          execFileSync("git", ["show", `${oldRevision}:packages/db/src/${name}`], {
+            cwd: repoRoot,
+          }),
+        );
+      }
+      const old = await import(pathToFileURL(`${root}/runtime-posture.ts`).href);
+      const oldProvision = await import(pathToFileURL(`${root}/provision-roles.ts`).href);
+      const options = {
+        expectedRole: "opengeni_app",
+        rlsStrategy: "force" as const,
+        targetSchema: "public",
+      };
+      await oldProvision.provisionRoles(shared.adminUrl, {
+        appRole: "opengeni_app",
+        appPassword: new URL(shared.appUrl).password,
+        rlsStrategy: "force",
+      });
+      const previous = await old.inspectRuntimeDatabasePosture(app.db, options);
+      expect(old.evaluateRuntimeDatabasePosture(previous, options)).toEqual([]);
+      // Re-provisioning current roles must both restore new EXECUTE seams and
+      // preserve all previously required exact privileges.
+      await provisionRoles(shared.adminUrl, {
+        appRole: "opengeni_app",
+        appPassword: new URL(shared.appUrl).password,
+        rlsStrategy: "force",
+      });
+      const current = await inspectRuntimeDatabasePosture(app.db, options);
+      expect(evaluateRuntimeDatabasePosture(current, options)).toEqual([]);
+      expect(
+        current.tables.some((table) =>
+          (RUNTIME_ALLOWANCE_PRIVATE_TABLES as readonly string[]).includes(table.name),
+        ),
+      ).toBe(false);
+      const unsafe = structuredClone(current);
+      unsafe.privateTables.find((table) => table.name === "workspace_usage_allowances")!.insert =
+        true;
+      expect(evaluateRuntimeDatabasePosture(unsafe, options)).toContain(
+        "usage allowance private table workspace_usage_allowances is missing or unsafe",
+      );
+      // Real catalog probe: table-level checks alone miss column-only DML.
+      await shared.admin`grant insert(config) on opengeni_private.workspace_usage_allowances to opengeni_app`;
+      const columnGrant = await inspectRuntimeDatabasePosture(app.db, options);
+      expect(evaluateRuntimeDatabasePosture(columnGrant, options)).toContain(
+        "usage allowance private table workspace_usage_allowances is missing or unsafe",
+      );
+      await provisionRoles(shared.adminUrl, {
+        appRole: "opengeni_app",
+        appPassword: new URL(shared.appUrl).password,
+        rlsStrategy: "force",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  test("allowance mutation waits for organization BEFORE tenancy while a real visibility transition completes", async () => {
+    const scope = await fixture();
+    const [membership] =
+      await shared.admin`select personal_workspace_id from organization_memberships
+      where account_id=${scope.accountId} and subject_id=${scope.subjectId}`;
+    const personal = { ...scope, workspaceId: String(membership!.personal_workspace_id) };
+    await shared.admin`insert into workspace_inference_controls(account_id,workspace_id)
+      values(${scope.accountId},${personal.workspaceId})`;
+    await shared.admin`insert into session_tenancy_activations
+      (account_id,activation_version,activated_by,inventory_digest,parity_digest)
+      values(${scope.accountId},1,${scope.subjectId},${"a".repeat(64)},${"b".repeat(64)})`;
+    const session = await createSession(app.db, {
+      ...personal,
+      initialMessage: "Allowance lock",
+      model: "test",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+    });
+    const holder = await shared.admin.reserve();
+    const [baseline] =
+      await shared.admin`select deadlocks from pg_stat_database where datname=current_database()`;
+    let pending: Promise<unknown> | undefined;
+    try {
+      await holder`begin`;
+      await holder`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${scope.accountId}`},0))`;
+      const [backend] = await holder`select pg_backend_pid() as pid`;
+      const pid = Number(backend!.pid);
+      pending = setWorkspaceAllowance(app.db, {
+        ...personal,
+        includedCredits: 100,
+        period: "none",
+        expectedVersion: 0,
+      });
+      const deadline = Date.now() + 5000;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        const [observed] = await shared.admin`select exists(select 1 from pg_stat_activity
+          where ${pid}::integer=any(pg_blocking_pids(pid))) as blocked`;
+        if (observed!.blocked) {
+          blocked = true;
+          break;
+        }
+        await Bun.sleep(10);
+      }
+      expect(blocked).toBe(true);
+      await holder`set local lock_timeout='2s'`;
+      // This fails in the old helper: its blocked mutation already held shared
+      // tenancy and the organization's exclusive-tenancy waiter forms a cycle.
+      await holder`select pg_advisory_xact_lock(hashtextextended(
+        ${`session-tenancy:${personal.workspaceId}`},0))`;
+      await holder`commit`;
+      const [, transition] = await Promise.all([
+        pending,
+        transitionSessionVisibility(app.db, {
+          workspaceId: personal.workspaceId,
+          sessionId: session.id,
+          actorSubjectId: scope.subjectId,
+          targetVisibility: "user_private",
+          expectedAuthorityEpoch: 1,
+          operationKey: crypto.randomUUID(),
+        }),
+      ]);
+      expect(transition).toMatchObject({
+        changed: true,
+        visibility: "user_private",
+        authorityEpoch: 2,
+      });
+      const [after] =
+        await shared.admin`select deadlocks from pg_stat_database where datname=current_database()`;
+      expect(after!.deadlocks).toBe(baseline!.deadlocks);
+    } finally {
+      await holder`rollback`.catch(() => undefined);
+      holder.release();
+      await pending?.catch(() => undefined);
+    }
+  });
   test("Personal owner participates in the same eligible roster, denominator and member mutation", async () => {
     const scope = await fixture();
     const [membership] =
@@ -120,17 +352,17 @@ describe("usage allowance DB lifecycle", () => {
       expectedVersion: 0,
     });
     const before = await shared.admin`select to_jsonb(a) allowance,(select jsonb_agg(to_jsonb(p))
-      from workspace_allowance_periods p where p.workspace_id=a.workspace_id) periods
-      from workspace_usage_allowances a where workspace_id=${scope.workspaceId}`;
+      from opengeni_private.workspace_allowance_periods p where p.workspace_id=a.workspace_id) periods
+      from opengeni_private.workspace_usage_allowances a where workspace_id=${scope.workspaceId}`;
     await getWorkspaceAllowance(app.db, scope);
     await getWorkspaceUsage(app.db, scope);
     await checkWorkspaceAllowance(app.db, scope);
     const after = await shared.admin`select to_jsonb(a) allowance,(select jsonb_agg(to_jsonb(p))
-      from workspace_allowance_periods p where p.workspace_id=a.workspace_id) periods
-      from workspace_usage_allowances a where workspace_id=${scope.workspaceId}`;
+      from opengeni_private.workspace_allowance_periods p where p.workspace_id=a.workspace_id) periods
+      from opengeni_private.workspace_usage_allowances a where workspace_id=${scope.workspaceId}`;
     expect([...after]).toEqual([...before]);
     const [notifications] =
-      await shared.admin`select count(*)::integer count from workspace_allowance_notifications
+      await shared.admin`select count(*)::integer count from opengeni_private.workspace_allowance_notifications
       where workspace_id=${scope.workspaceId}`;
     expect(notifications!.count).toBe(0);
   });
@@ -183,14 +415,15 @@ describe("usage allowance DB lifecycle", () => {
       values(${scope.accountId},${scope.workspaceId},'https://example.test','sealed',
         array['usage.period_reset','usage.exhausted'])`;
     const [old] =
-      await shared.admin`select active_period_key from workspace_usage_allowances where workspace_id=${scope.workspaceId}`;
-    await shared.admin`update workspace_usage_allowances set active_period_key='2000-01',
+      await shared.admin`select active_period_key from opengeni_private.workspace_usage_allowances where workspace_id=${scope.workspaceId}`;
+    await shared.admin`update opengeni_private.workspace_usage_allowances set active_period_key='2000-01',
       active_start_at='2000-01-01',active_end_at='2000-02-01',maintenance_next_at=now()-interval '1 minute'
       where workspace_id=${scope.workspaceId}`;
-    await shared.admin`update workspace_allowance_periods set period_key='2000-01',start_at='2000-01-01',end_at='2000-02-01'
+    await shared.admin`update opengeni_private.workspace_allowance_periods set period_key='2000-01',start_at='2000-01-01',end_at='2000-02-01'
       where workspace_id=${scope.workspaceId} and period_key=${old!.active_period_key}`;
     await maintainWorkspaceAllowances(app.db, { limit: 100 });
-    const [closed] = await shared.admin`select closed_at from workspace_allowance_periods
+    const [closed] =
+      await shared.admin`select closed_at from opengeni_private.workspace_allowance_periods
       where workspace_id=${scope.workspaceId} and period_key='2000-01'`;
     expect(closed!.closed_at).not.toBeNull();
     const events = await shared.admin`select event_type from workspace_webhook_deliveries
@@ -232,12 +465,12 @@ describe("usage allowance DB lifecycle", () => {
       await adminTx`alter table workspace_webhook_deliveries drop constraint allowance_test_enqueue_failure`;
     });
     const [failed] =
-      await shared.admin`select maintenance_error from workspace_usage_allowances where workspace_id=${scope.workspaceId}`;
+      await shared.admin`select maintenance_error from opengeni_private.workspace_usage_allowances where workspace_id=${scope.workspaceId}`;
     expect(failed!.maintenance_error).toBe("23514");
     const [before] =
-      await shared.admin`select count(*)::integer count from workspace_allowance_notifications where workspace_id=${scope.workspaceId}`;
+      await shared.admin`select count(*)::integer count from opengeni_private.workspace_allowance_notifications where workspace_id=${scope.workspaceId}`;
     expect(before!.count).toBe(0);
-    await shared.admin`update workspace_usage_allowances set maintenance_next_at=now()-interval '1 second'
+    await shared.admin`update opengeni_private.workspace_usage_allowances set maintenance_next_at=now()-interval '1 second'
       where workspace_id=${scope.workspaceId}`;
     await maintainWorkspaceAllowances(app.db, { limit: 100 });
     const [after] =
@@ -315,18 +548,18 @@ describe("usage allowance DB lifecycle", () => {
       period: "monthly",
       expectedVersion: 0,
     });
-    await shared.admin`insert into workspace_allowance_periods
+    await shared.admin`insert into opengeni_private.workspace_allowance_periods
       (account_id,workspace_id,period_key,config,start_at,end_at,grants_remaining,member_count,grants_snapshot,member_rules)
       values(${scope.accountId},${scope.workspaceId},'2000-01',
         '{"includedCredits":100,"period":"monthly","memberDefault":"equal_share"}',
         '2000-01-01T00:00:00Z','2000-02-01T00:00:00Z',20,2,
         '[{"remaining":20,"expiresAt":null},{"remaining":80,"expiresAt":"2000-01-15T00:00:00Z"}]',
         '{"placeholder":{"rule":{"credits":40},"version":3}}'::jsonb)`;
-    await shared.admin`update workspace_allowance_periods
+    await shared.admin`update opengeni_private.workspace_allowance_periods
       set member_rules=jsonb_build_object(${scope.subjectId}::text,
         jsonb_build_object('rule',jsonb_build_object('credits',40),'version',3))
       where workspace_id=${scope.workspaceId} and period_key='2000-01'`;
-    await shared.admin`insert into workspace_allowance_counters(account_id,workspace_id,period_key,subject_id,used,grants_used)
+    await shared.admin`insert into opengeni_private.workspace_allowance_counters(account_id,workspace_id,period_key,subject_id,used,grants_used)
       values(${scope.accountId},${scope.workspaceId},'2000-01','',70,0),
         (${scope.accountId},${scope.workspaceId},'2000-01',${scope.subjectId},30,0)`;
     await setMemberAllowance(app.db, { ...scope, rule: { credits: 900 }, expectedVersion: 0 });
@@ -477,7 +710,7 @@ describe("usage allowance DB lifecycle", () => {
     });
     expect(usage.members[0]!.limit).toBe(95);
     const grants =
-      await shared.admin`select operation_id,remaining::integer from workspace_allowance_grants
+      await shared.admin`select operation_id,remaining::integer from opengeni_private.workspace_allowance_grants
       where workspace_id=${scope.workspaceId} order by operation_id`;
     expect([...grants]).toEqual([
       { operation_id: "early", remaining: 10 },
@@ -704,6 +937,66 @@ test("0547 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
     url.password = owner.appPassword;
     ownerApp = createDb(url.toString());
     const scope = await fixture(ownerApp.db, owner.admin);
+    const knowledge = await saveKnowledgeEntry(
+      ownerApp.db,
+      {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        actor: {
+          kind: "human",
+          principalKind: "human_session",
+          subjectId: scope.subjectId,
+          writeScopes: ["workspace"],
+          settingsScopes: ["workspace"],
+          review: true,
+        },
+      },
+      {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        scope: "workspace",
+        entry: {
+          kind: "fact",
+          title: "Definer shadow",
+          content: "Real index job",
+          groupIds: [],
+          evidence: [],
+          relationships: [],
+        },
+      },
+    );
+    const malicious = postgres(url.toString(), { max: 1 });
+    try {
+      const columns = await owner.admin`select quote_ident(attname) as name,
+        format_type(atttypid,atttypmod) as type from pg_attribute
+        where attrelid='knowledge_index_jobs'::regclass and attnum>0 and not attisdropped order by attnum`;
+      await malicious.begin(async (tx) => {
+        await tx.unsafe(
+          `create temp table knowledge_index_jobs (${columns
+            .map((column) => `${column.name} ${column.type}`)
+            .join(",")})`,
+        );
+        await tx.unsafe(
+          `grant select,update on pg_temp.knowledge_index_jobs to "${owner.ownerRole.replaceAll('"', '""')}"`,
+        );
+        await tx`create function pg_temp.shadow_owner_probe() returns trigger language plpgsql as $$
+          begin raise exception 'SHADOW_OWNER_TRIGGER_EXECUTED'; end $$`;
+        await tx`create trigger shadow_owner_probe before update on pg_temp.knowledge_index_jobs
+          for each statement execute function pg_temp.shadow_owner_probe()`;
+        const [claimed] = await tx`select public.knowledge_index_claim('shadow-test',3,20) as jobs`;
+        expect(
+          claimed!.jobs.some(
+            (job: { revisionId: string }) => job.revisionId === knowledge.revisionId,
+          ),
+        ).toBe(true);
+      });
+      const [path] = await owner.admin`select proconfig from pg_proc
+        where oid='knowledge_index_claim(text,integer,integer)'::regprocedure`;
+      expect(path!.proconfig).toContain("search_path=pg_catalog, public, pg_temp");
+    } finally {
+      await malicious.end();
+    }
     await setWorkspaceAllowance(ownerApp.db, {
       ...scope,
       includedCredits: 10,
@@ -745,7 +1038,7 @@ test("0547 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
       grantsRemaining: 3,
     });
     const [direct] =
-      await ownerSql`select count(*)::integer as count from workspace_allowance_counters`;
+      await ownerSql`select count(*)::integer as count from opengeni_private.workspace_allowance_counters`;
     expect(direct!.count).toBe(0);
     const [capabilities] =
       await owner.admin`select count(*)::integer as count from opengeni_private.usage_allowance_capabilities`;
@@ -756,13 +1049,13 @@ test("0547 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
         scope,
         async (tx) =>
           await tx.execute(
-            sql`update workspace_usage_allowances set version=99 where workspace_id=${scope.workspaceId}`,
+            sql`update opengeni_private.workspace_usage_allowances set version=99 where workspace_id=${scope.workspaceId}`,
           ),
       ).catch(nestedPostgresSqlState),
     ).resolves.toBe("42501");
     const policies = await owner.admin`select tablename,cmd from pg_policies
       where policyname='usage_allowance_owner' order by tablename`;
-    expect(policies).toHaveLength(7);
+    expect(policies).toHaveLength(8);
     expect(policies.every((p) => p.cmd === "ALL")).toBe(true);
     const attributionPolicies = await owner.admin`select tablename,cmd from pg_policies
       where policyname='usage_allowance_owner_read' order by tablename`;
@@ -776,6 +1069,92 @@ test("0547 portable owner capabilities cover every SELECT/INSERT/UPDATE and reje
   } finally {
     await ownerApp?.close();
     await ownerSql.end();
+    await owner.release();
+  }
+}, 240_000);
+
+test("private allowance storage binds a dedicated data schema under a non-bypass owner", async () => {
+  const owner = await acquireOwnerMigratedTestDatabase("allowance-dedicated");
+  if (!owner) throw new Error("Owner-migrated PostgreSQL database unavailable");
+  const schema = "allowance_data";
+  let client: ReturnType<typeof createDb> | undefined;
+  const admin = postgres(owner.adminUrl, { max: 1, connection: { search_path: schema } });
+  try {
+    // The production fixture preinstalls vector in public. A dedicated schema
+    // must own its extension namespace too: migrations pin schema-only paths.
+    await owner.admin.unsafe(
+      `create schema allowance_data authorization "${owner.ownerRole.replaceAll('"', '""')}"`,
+    );
+    await owner.admin`alter extension vector set schema allowance_data`;
+    await migrate(owner.ownerUrl, schema, { applicationDatabaseRoles: ["opengeni_app"] });
+    await provisionRoles(owner.adminUrl, {
+      targetSchema: schema,
+      appRole: "opengeni_app",
+      appPassword: owner.appPassword,
+      rlsStrategy: "force",
+    });
+    const appUrl = new URL(owner.adminUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = owner.appPassword;
+    client = createDb(appUrl.toString(), { searchPath: schema });
+    const scope = await fixture(client.db, admin);
+    await setWorkspaceAllowance(client.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "monthly",
+      anchorDay: 31,
+      expectedVersion: 0,
+    });
+    const [prior] =
+      await admin`select active_period_key from opengeni_private.workspace_usage_allowances
+      where workspace_id=${scope.workspaceId}`;
+    await admin`update opengeni_private.workspace_usage_allowances set active_period_key='2000-01',
+      active_start_at='2000-01-31',active_end_at='2000-02-29' where workspace_id=${scope.workspaceId}`;
+    await admin`update opengeni_private.workspace_allowance_periods set period_key='2000-01',
+      start_at='2000-01-31',end_at='2000-02-29'
+      where workspace_id=${scope.workspaceId} and period_key=${prior!.active_period_key}`;
+    await applyCreditDebitAfterUse(client.db, {
+      ...scope,
+      amountMicros: 80,
+      type: "test",
+      sourceType: "service",
+      sourceId: "dedicated",
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await setWorkspaceAllowance(client.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "none",
+      expectedVersion: 1,
+    });
+    expect((await getWorkspaceUsage(client.db, scope)).workspace.used).toBe(80);
+    const clear = { ...scope, expectedVersion: 2, operationId: crypto.randomUUID() };
+    expect(await clearWorkspaceAllowance(client.db, clear)).toEqual({ version: 3 });
+    expect(await getWorkspaceAllowanceState(client.db, scope)).toEqual({
+      version: 3,
+      config: null,
+    });
+    expect(await clearWorkspaceAllowance(client.db, clear)).toEqual({ version: 3 });
+    const options = {
+      expectedRole: "opengeni_app",
+      rlsStrategy: "force" as const,
+      targetSchema: schema,
+    };
+    expect(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client.db, options),
+        options,
+      ),
+    ).toEqual([]);
+    const [path] = await admin`select proconfig from pg_proc
+      where oid='knowledge_index_claim(text,integer,integer)'::regprocedure`;
+    expect(path!.proconfig).toContain("search_path=pg_catalog, allowance_data, pg_temp");
+    const [stamp] =
+      await admin`select count(*)::integer as count from opengeni_private.usage_allowance_capabilities`;
+    expect(stamp!.count).toBe(0);
+  } finally {
+    await client?.close();
+    await admin.end();
     await owner.release();
   }
 }, 240_000);

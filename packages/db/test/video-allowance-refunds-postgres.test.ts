@@ -123,7 +123,8 @@ async function refund(scope: Scope, db: Database = app.db) {
   await applyCreditLedgerEntry(db, ledgerInput(scope, true));
 }
 async function grantBalances(scope: Scope, admin = shared.admin) {
-  const rows = await admin`select operation_id,remaining from workspace_allowance_grants
+  const rows =
+    await admin`select operation_id,remaining from opengeni_private.workspace_allowance_grants
     where workspace_id=${scope.workspaceId} order by operation_id`;
   return rows.map((row) => [row.operation_id, Number(row.remaining)]);
 }
@@ -131,7 +132,7 @@ async function grantBalances(scope: Scope, admin = shared.admin) {
 async function workspaceCounters(scope: Scope, period: string | null = null, admin = shared.admin) {
   const [row] = await admin`
     select used::integer as used,included_used::integer as "includedUsed",
-      grants_used::integer as "grantsUsed" from workspace_allowance_counters
+      grants_used::integer as "grantsUsed" from opengeni_private.workspace_allowance_counters
     where workspace_id=${scope.workspaceId} and subject_id=''
       and (${period}::text is null or period_key=${period})
     order by period_key desc limit 1`;
@@ -142,7 +143,8 @@ describe("existing prepaid video allowance refunds", () => {
   test("concurrent duplicate refund restores exact included/FEFO/member facts once and preserves another debit", async () => {
     const scope = await fixture();
     await Promise.all([debit(scope), debit(scope)]);
-    const [allocation] = await shared.admin`select * from workspace_video_allowance_allocations
+    const [allocation] =
+      await shared.admin`select * from opengeni_private.workspace_video_allowance_allocations
       where workspace_id=${scope.workspaceId}`;
     expect(Number(allocation!.included_used)).toBe(100);
     expect(Number(allocation!.grants_used)).toBe(80);
@@ -172,7 +174,7 @@ describe("existing prepaid video allowance refunds", () => {
       ["late", 60],
     ]);
     const [receipt] = await shared.admin`select a.reversed_by_ledger_id,r.id
-      from workspace_video_allowance_allocations a join credit_ledger_entries r
+      from opengeni_private.workspace_video_allowance_allocations a join credit_ledger_entries r
         on r.id=a.reversed_by_ledger_id where a.workspace_id=${scope.workspaceId}`;
     expect(receipt!.reversed_by_ledger_id).toBe(receipt!.id);
     const [count] = await shared.admin`select count(*)::int as count from credit_ledger_entries
@@ -220,14 +222,14 @@ describe("existing prepaid video allowance refunds", () => {
     await debit(scope);
     // Move the observed settlement facts to an original period. No production
     // clock override or caller occurred_at affects settlement-time admission.
-    await shared.admin`update workspace_allowance_counters set period_key='2000-01'
+    await shared.admin`update opengeni_private.workspace_allowance_counters set period_key='2000-01'
       where workspace_id=${scope.workspaceId}`;
-    await shared.admin`update workspace_video_allowance_allocations set period_key='2000-01'
+    await shared.admin`update opengeni_private.workspace_video_allowance_allocations set period_key='2000-01'
       where workspace_id=${scope.workspaceId}`;
-    await shared.admin`update workspace_allowance_periods set period_key='2000-01',
+    await shared.admin`update opengeni_private.workspace_allowance_periods set period_key='2000-01',
       start_at='2000-01-01',end_at='2000-02-01'
       where workspace_id=${scope.workspaceId}`;
-    await shared.admin`update workspace_allowance_grants set expires_at='2000-01-15'
+    await shared.admin`update opengeni_private.workspace_allowance_grants set expires_at='2000-01-15'
       where workspace_id=${scope.workspaceId} and operation_id='early'`;
     await applyCreditLedgerEntry(app.db, {
       ...ledgerInput(scope, false, 20),
@@ -323,7 +325,7 @@ test("0549 non-superuser FORCE-RLS owner can read exact debit and restore all al
       ["late", 80],
     ]);
     const [hidden] =
-      await ownerSql`select count(*)::int as count from workspace_video_allowance_allocations`;
+      await ownerSql`select count(*)::int as count from opengeni_private.workspace_video_allowance_allocations`;
     expect(hidden!.count).toBe(0);
     const [capabilities] =
       await owner.admin`select count(*)::int as count from opengeni_private.usage_allowance_capabilities`;
@@ -333,7 +335,7 @@ test("0549 non-superuser FORCE-RLS owner can read exact debit and restore all al
     expect(policy!.cmd).toBe("SELECT");
     await expect(
       withRlsContext(ownerApp.db, scope, async (tx) => {
-        await tx.execute(sql`update workspace_video_allowance_allocations
+        await tx.execute(sql`update opengeni_private.workspace_video_allowance_allocations
         set reversed_by_ledger_id=null where workspace_id=${scope.workspaceId}`);
       }),
     ).rejects.toMatchObject({ cause: { code: "42501" } });

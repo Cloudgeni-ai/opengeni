@@ -34,7 +34,7 @@ CREATE OR REPLACE FUNCTION knowledge_enqueue_index() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
   attribution jsonb := '{"kind":"unknown"}'::jsonb;
-  causal_turn usage_allowance_attribution_receipts%ROWTYPE;
+  causal_turn opengeni_private.usage_allowance_attribution_receipts%ROWTYPE;
   preparation jsonb;
   accepted jsonb;
   document_attribution jsonb;
@@ -54,7 +54,7 @@ BEGIN
   -- knowledge_entry_apply already resolved the trusted actor and held the exact
   -- attempt/publication locks. Do not read a session's latest turn or creator.
   IF NEW.actor->>'kind'='agent' THEN
-    SELECT * INTO causal_turn FROM usage_allowance_attribution_receipts t
+    SELECT * INTO causal_turn FROM opengeni_private.usage_allowance_attribution_receipts t
       WHERE t.account_id=NEW.account_id AND t.workspace_id=billing_workspace
         AND t.source_kind='turn' AND t.source_id=NEW.created_by_turn_id::text
         AND t.session_id=NEW.created_by_session_id
@@ -80,7 +80,7 @@ BEGIN
         ON d.account_id=e.account_id AND d.id=e.legacy_document_id
       WHERE e.account_id=NEW.account_id AND e.id=NEW.entry_id;
     IF preparation->>'scheduledTaskRunId' IS NOT NULL THEN
-      SELECT r.attribution INTO accepted FROM usage_allowance_attribution_receipts r
+      SELECT r.attribution INTO accepted FROM opengeni_private.usage_allowance_attribution_receipts r
         WHERE r.account_id=NEW.account_id AND r.workspace_id=billing_workspace
           AND r.source_kind='schedule'
           AND r.source_id=(preparation->>'scheduledTaskRunId')::uuid::text;
@@ -163,7 +163,7 @@ CREATE TRIGGER knowledge_query_billing_receipt_immutable BEFORE UPDATE ON usage_
 -- refunds a definite failure/cancel. Record the actual debit's allocation so
 -- its refund removes phantom spend without repricing under today's policy.
 -- This is an accounting receipt, not a new compute/credit reservation.
-CREATE TABLE workspace_video_allowance_allocations (
+CREATE TABLE opengeni_private.workspace_video_allowance_allocations (
   ledger_id uuid PRIMARY KEY,
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
@@ -179,25 +179,25 @@ CREATE TABLE workspace_video_allowance_allocations (
   CHECK(human_subject_id IS NULL OR octet_length(human_subject_id) BETWEEN 1 AND 1024)
 );
 CREATE UNIQUE INDEX workspace_video_allowance_allocations_operation_idx
-  ON workspace_video_allowance_allocations(account_id,workspace_id,operation_id);
-ALTER TABLE workspace_video_allowance_allocations ENABLE ROW LEVEL SECURITY;
-ALTER TABLE workspace_video_allowance_allocations FORCE ROW LEVEL SECURITY;
+  ON opengeni_private.workspace_video_allowance_allocations(account_id,workspace_id,operation_id);
+ALTER TABLE opengeni_private.workspace_video_allowance_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.workspace_video_allowance_allocations FORCE ROW LEVEL SECURITY;
 DO $video_allocation_policy$
 DECLARE owner_name text:=current_user; target_schema text:=current_schema();
 BEGIN
-  EXECUTE format('CREATE POLICY usage_allowance_owner ON workspace_video_allowance_allocations
+  EXECUTE format('CREATE POLICY usage_allowance_owner ON opengeni_private.workspace_video_allowance_allocations
     FOR ALL USING(current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id))
     WITH CHECK(current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id))',
     owner_name,target_schema,owner_name,target_schema);
 END $video_allocation_policy$;
-REVOKE ALL ON TABLE workspace_video_allowance_allocations FROM PUBLIC;
+REVOKE ALL ON TABLE opengeni_private.workspace_video_allowance_allocations FROM PUBLIC;
 
 -- Amend only the current 0547 declaration/allocation/attribution boundaries.
 -- Exact unique anchors reject a changed implementation instead of silently
 -- losing either attribution or grant restoration during a future migration.
 -- The DO only installs a function body, never executes its embedded INSERT.
 -- Keep its migration-time owner posture explicit for the static RLS guard.
-ALTER TABLE workspace_video_allowance_allocations NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.workspace_video_allowance_allocations NO FORCE ROW LEVEL SECURITY;
 DO $video_allocation_capture$
 DECLARE
   definition text:=pg_get_functiondef('count_workspace_allowance_debit()'::regprocedure);
@@ -229,7 +229,7 @@ BEGIN
   replacement:=$capture_video$IF NEW.type='video_generation_debit' AND NEW.source_type='video_generation_operation'
     AND NEW.source_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     AND NEW.idempotency_key='credit:video_generation_debit:'||NEW.source_id THEN
-    INSERT INTO workspace_video_allowance_allocations
+    INSERT INTO opengeni_private.workspace_video_allowance_allocations
       (ledger_id,account_id,workspace_id,operation_id,period_key,human_subject_id,
         amount,included_used,grants_used,grant_allocations)
     VALUES(NEW.id,NEW.account_id,NEW.workspace_id,NEW.source_id::uuid,p.period_key,human,
@@ -241,12 +241,12 @@ BEGIN
   END IF;
   EXECUTE replace(definition,anchor,replacement);
 END $video_allocation_capture$;
-ALTER TABLE workspace_video_allowance_allocations FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.workspace_video_allowance_allocations FORCE ROW LEVEL SECURITY;
 
 CREATE FUNCTION reverse_video_allowance_refund() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
-  allocation workspace_video_allowance_allocations%ROWTYPE;
+  allocation opengeni_private.workspace_video_allowance_allocations%ROWTYPE;
   grant_allocation jsonb;
   restored bigint:=0;
   affected integer;
@@ -266,14 +266,14 @@ BEGIN
     (pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,NEW.workspace_id)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened=ROW_COUNT;
-  SELECT * INTO allocation FROM workspace_video_allowance_allocations
+  SELECT * INTO allocation FROM opengeni_private.workspace_video_allowance_allocations
     WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
       AND operation_id::text=NEW.source_id FOR UPDATE;
   IF FOUND THEN
     IF allocation.reversed_by_ledger_id IS NOT NULL OR allocation.amount<>NEW.amount_micros THEN
       RAISE EXCEPTION 'Video allowance refund does not match its debit' USING ERRCODE='23514';
     END IF;
-    UPDATE workspace_allowance_counters SET used=used-allocation.amount,
+    UPDATE opengeni_private.workspace_allowance_counters SET used=used-allocation.amount,
       included_used=included_used-allocation.included_used,
       grants_used=grants_used-allocation.grants_used
     WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
@@ -283,7 +283,7 @@ BEGIN
       RAISE EXCEPTION 'Video allowance refund counter unavailable' USING ERRCODE='23514';
     END IF;
     IF allocation.human_subject_id IS NOT NULL THEN
-      UPDATE workspace_allowance_counters SET used=used-allocation.amount
+      UPDATE opengeni_private.workspace_allowance_counters SET used=used-allocation.amount
       WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
         AND period_key=allocation.period_key AND subject_id=allocation.human_subject_id;
       GET DIAGNOSTICS affected=ROW_COUNT;
@@ -292,7 +292,7 @@ BEGIN
       END IF;
     END IF;
     FOR grant_allocation IN SELECT value FROM jsonb_array_elements(allocation.grant_allocations) LOOP
-      UPDATE workspace_allowance_grants SET remaining=remaining+(grant_allocation->>'credits')::bigint
+      UPDATE opengeni_private.workspace_allowance_grants SET remaining=remaining+(grant_allocation->>'credits')::bigint
         WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
           AND operation_id=grant_allocation->>'operationId'
         RETURNING expires_at INTO grant_expiry;
@@ -301,12 +301,12 @@ BEGIN
         RAISE EXCEPTION 'Video allowance refund grant unavailable' USING ERRCODE='23514';
       END IF;
       restored:=restored+(grant_allocation->>'credits')::bigint;
-      SELECT updated_at INTO original_snapshot_at FROM workspace_allowance_periods
+      SELECT updated_at INTO original_snapshot_at FROM opengeni_private.workspace_allowance_periods
         WHERE workspace_id=NEW.workspace_id AND period_key=allocation.period_key;
       IF original_snapshot_at IS NOT NULL THEN
         -- Preserve the original period's observed expiry boundary and policy;
         -- append only the restored portion, not today's unrelated grant pool.
-        UPDATE workspace_allowance_periods SET
+        UPDATE opengeni_private.workspace_allowance_periods SET
           grants_remaining=grants_remaining+CASE WHEN grant_expiry IS NULL
             OR grant_expiry>original_snapshot_at THEN (grant_allocation->>'credits')::bigint ELSE 0 END,
           grants_snapshot=grants_snapshot||jsonb_build_array(jsonb_build_object(
@@ -317,11 +317,11 @@ BEGIN
     IF restored<>allocation.grants_used THEN
       RAISE EXCEPTION 'Video allowance refund allocation mismatch' USING ERRCODE='23514';
     END IF;
-    UPDATE workspace_video_allowance_allocations SET reversed_by_ledger_id=NEW.id
+    UPDATE opengeni_private.workspace_video_allowance_allocations SET reversed_by_ledger_id=NEW.id
       WHERE ledger_id=allocation.ledger_id;
     -- Expired grants stay expired. Historical counters use their original
     -- period; only a still-current observed snapshot sees the restored pool.
-    SELECT config INTO cfg FROM workspace_usage_allowances WHERE workspace_id=NEW.workspace_id;
+    SELECT config INTO cfg FROM opengeni_private.workspace_usage_allowances WHERE workspace_id=NEW.workspace_id;
     PERFORM capture_usage_allowance_period(NEW.account_id,NEW.workspace_id,cfg,clock_timestamp());
   ELSE
     -- A refund of an old pre-allowance operation has no counters to reverse.
@@ -332,7 +332,7 @@ BEGIN
       WHERE debit.account_id=NEW.account_id AND debit.workspace_id=NEW.workspace_id
         AND debit.source_type='video_generation_operation' AND debit.source_id=NEW.source_id
         AND debit.type='video_generation_debit' AND debit.amount_micros=-NEW.amount_micros
-        AND EXISTS(SELECT 1 FROM workspace_allowance_counters
+        AND EXISTS(SELECT 1 FROM opengeni_private.workspace_allowance_counters
           WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id AND used>0))
       INTO existing_counted_debit;
     IF existing_counted_debit THEN
@@ -369,8 +369,8 @@ BEGIN
   FOR principal IN SELECT DISTINCT r.rolname FROM pg_class c,
     LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
     JOIN pg_roles r ON r.oid=acl.grantee
-    WHERE c.oid='workspace_video_allowance_allocations'::regclass AND acl.grantee<>c.relowner
-  LOOP EXECUTE format('REVOKE ALL ON TABLE workspace_video_allowance_allocations FROM %I',principal); END LOOP;
+    WHERE c.oid='opengeni_private.workspace_video_allowance_allocations'::regclass AND acl.grantee<>c.relowner
+  LOOP EXECUTE format('REVOKE ALL ON TABLE opengeni_private.workspace_video_allowance_allocations FROM %I',principal); END LOOP;
 END $nonmodel_attribution_acl$;
 
 CREATE OR REPLACE FUNCTION knowledge_index_claim(p_model text,p_dimensions integer,p_limit integer)
@@ -405,3 +405,10 @@ REVOKE ALL ON FUNCTION knowledge_index_attribution_immutable() FROM PUBLIC;
 REVOKE ALL ON FUNCTION sandbox_warm_attribution_immutable() FROM PUBLIC;
 REVOKE ALL ON FUNCTION knowledge_query_billing_receipt_immutable() FROM PUBLIC;
 REVOKE ALL ON FUNCTION knowledge_index_claim(text,integer,integer) FROM PUBLIC;
+-- CREATE OR REPLACE resets the function SET clauses. Pin only AFTER the final
+-- replacement so a caller's temporary relation cannot run an owner trigger.
+DO $knowledge_claim_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION %I.knowledge_index_claim(text,integer,integer) SET search_path=pg_catalog,%I,pg_temp',
+    current_schema(),current_schema());
+END $knowledge_claim_path$;

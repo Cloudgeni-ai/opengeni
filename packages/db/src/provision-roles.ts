@@ -719,9 +719,14 @@ BEGIN
       END IF;
       FOREACH runtime_table IN ARRAY ARRAY['workspace_usage_allowances','workspace_member_allowances',
         'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods',
-        'workspace_video_allowance_allocations','usage_allowance_attribution_receipts']
+        'workspace_video_allowance_allocations','usage_allowance_attribution_receipts',
+        'workspace_allowance_clear_receipts']
       LOOP
-        EXECUTE format('REVOKE ALL ON TABLE %I.%I FROM %I', ${literal(schema)},runtime_table,${literal(role)});
+        EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM %I',runtime_table,${literal(role)});
+        EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM %I',
+          (SELECT string_agg(quote_ident(attname),',') FROM pg_attribute
+            WHERE attrelid=format('opengeni_private.%I',runtime_table)::regclass
+              AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
       END LOOP;
     END IF;
     -- Migration 0300's tenancy backfill ledger seam has the same shape: its

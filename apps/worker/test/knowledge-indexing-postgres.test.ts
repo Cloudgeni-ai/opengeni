@@ -421,7 +421,7 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
     initiatingHumanSubjectId: "user:rollback-index-owner",
   });
   const [memberUsage] = await shared.admin`
-    SELECT coalesce(sum(used),0)::bigint AS used FROM workspace_allowance_counters
+    SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
     WHERE workspace_id=${workspaceId} AND subject_id='user:rollback-index-owner'`;
   expect(Number(memberUsage?.used)).toBe(
     1_000_000 - (await getBillingBalance(client.db, accountId)).balanceMicros,

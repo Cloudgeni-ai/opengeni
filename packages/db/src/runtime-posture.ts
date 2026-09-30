@@ -1092,14 +1092,9 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
-  "usage_allowance_attribution_receipts",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
-  "workspace_allowance_counters",
-  "workspace_allowance_grants",
-  "workspace_allowance_notifications",
-  "workspace_allowance_periods",
   "workspace_artifact_events",
   "workspace_artifact_uploads",
   "workspace_artifact_versions",
@@ -1121,14 +1116,11 @@ export const FORCE_RLS_TABLES = [
   "workspace_learning_policy_heads",
   "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
-  "workspace_member_allowances",
   "workspace_model_policies",
   "workspace_screenshot_quotas",
   "workspace_session_activity_revisions",
-  "workspace_usage_allowances",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
-  "workspace_video_allowance_allocations",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
   "workspace_webhook_deliveries",
@@ -1600,16 +1592,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
-  "usage_allowance_attribution_receipts",
-  "workspace_allowance_counters",
-  "workspace_allowance_grants",
-  "workspace_allowance_notifications",
-  "workspace_allowance_periods",
-  "workspace_member_allowances",
-  "workspace_usage_allowances",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
-  "workspace_video_allowance_allocations",
 ] as const;
 
 export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
@@ -1719,6 +1703,9 @@ export type RuntimePrivateTablePosture = {
   insert: boolean;
   update: boolean;
   delete: boolean;
+  truncate?: boolean;
+  references?: boolean;
+  trigger?: boolean;
 };
 
 export type RuntimeDatabasePosture = {
@@ -2020,6 +2007,9 @@ export async function inspectRuntimeDatabasePosture(
         can_insert: boolean;
         can_update: boolean;
         can_delete: boolean;
+        can_truncate: boolean;
+        can_references: boolean;
+        can_trigger: boolean;
       }>(
         await tx.execute(sql`
           select
@@ -2032,15 +2022,22 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on the inventory stamp are also unsafe; in
             -- particular INSERT can mint authority without a table grant.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              (c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') and
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              (c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') and
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              (c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') and
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
-            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
+            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
+            has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
+            (has_table_privilege(current_user, c.oid, 'REFERENCES') or
+              has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
+            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'opengeni_private'
@@ -2058,6 +2055,15 @@ export async function inspectRuntimeDatabasePosture(
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
+              'workspace_usage_allowances',
+              'workspace_member_allowances',
+              'workspace_allowance_grants',
+              'workspace_allowance_counters',
+              'workspace_allowance_periods',
+              'workspace_allowance_notifications',
+              'usage_allowance_attribution_receipts',
+              'workspace_video_allowance_allocations',
+              'workspace_allowance_clear_receipts',
               'session_file_attachments',
               'session_file_read_capabilities',
               'modal_inventory_read_capabilities',
@@ -2076,6 +2082,9 @@ export async function inspectRuntimeDatabasePosture(
         insert: row.can_insert,
         update: row.can_update,
         delete: row.can_delete,
+        truncate: row.can_truncate,
+        references: row.can_references,
+        trigger: row.can_trigger,
       }));
 
       const targetRoutines = resultRows<{
@@ -2174,6 +2183,19 @@ export async function inspectRuntimeDatabasePosture(
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
 }
+
+/** Additive private inventory; absent from older binaries' exact data tables. */
+export const RUNTIME_ALLOWANCE_PRIVATE_TABLES = [
+  "workspace_usage_allowances",
+  "workspace_member_allowances",
+  "workspace_allowance_grants",
+  "workspace_allowance_counters",
+  "workspace_allowance_periods",
+  "workspace_allowance_notifications",
+  "usage_allowance_attribution_receipts",
+  "workspace_video_allowance_allocations",
+  "workspace_allowance_clear_receipts",
+] as const;
 
 /** Pure deterministic evaluator used by startup/readiness and unit tests. */
 export function evaluateRuntimeDatabasePosture(
@@ -2434,19 +2456,14 @@ export function evaluateRuntimeDatabasePosture(
       routine.name.startsWith("usage_allowance_") ||
       routine.name === "maintain_usage_allowances(integer, integer)"
     ) {
-      const allowanceTables = [
-        "usage_allowance_attribution_receipts",
-        "workspace_usage_allowances",
-        "workspace_member_allowances",
-        "workspace_allowance_grants",
-        "workspace_allowance_counters",
-        "workspace_allowance_notifications",
-        "workspace_allowance_periods",
-        "workspace_video_allowance_allocations",
-      ];
-      const owners = new Set(allowanceTables.map((name) => tableByName.get(name)?.owner));
+      const owners = new Set(
+        RUNTIME_ALLOWANCE_PRIVATE_TABLES.map(
+          (name) => posture.privateTables.find((table) => table.name === name)?.owner,
+        ),
+      );
       if (
-        (!options.protectedTables || allowanceTables.some((name) => tableByName.has(name))) &&
+        (!options.protectedTables ||
+          posture.privateTables.some((table) => table.name === "usage_allowance_capabilities")) &&
         (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
       ) {
         violations.push(
@@ -3859,10 +3876,35 @@ export function evaluateRuntimeDatabasePosture(
   const usageAllowanceCapability = posture.privateTables.find(
     (table) => table.name === "usage_allowance_capabilities",
   );
+  if (!options.protectedTables || usageAllowanceCapability) {
+    const authorityOwner = tableByName.get("workspaces")?.owner;
+    for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner === expectedRole ||
+        table.owner !== authorityOwner ||
+        !table.rlsEnabled ||
+        !table.rlsForced ||
+        !table.rlsActive ||
+        (table.policyCount ?? 0) < 1 ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`usage allowance private table ${name} is missing or unsafe`);
+      }
+    }
+  }
   if (
     usageAllowanceCapability &&
     (usageAllowanceCapability.owner === expectedRole ||
-      usageAllowanceCapability.owner !== tableByName.get("workspace_usage_allowances")?.owner ||
+      usageAllowanceCapability.owner !==
+        posture.privateTables.find((table) => table.name === "workspace_usage_allowances")?.owner ||
       usageAllowanceCapability.select ||
       usageAllowanceCapability.insert ||
       usageAllowanceCapability.update ||
@@ -3870,11 +3912,13 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("usage allowance capability has unsafe owner or direct runtime privileges");
   }
-  const allowanceAttribution = tableByName.get("usage_allowance_attribution_receipts");
+  const allowanceAttribution = posture.privateTables.find(
+    (table) => table.name === "usage_allowance_attribution_receipts",
+  );
   if (
     allowanceAttribution &&
-    (!options.protectedTables || options.protectedTables.includes(allowanceAttribution.name)) &&
-    (allowanceAttribution.owner !== tableByName.get("workspace_usage_allowances")?.owner ||
+    (allowanceAttribution.owner !==
+      posture.privateTables.find((table) => table.name === "workspace_usage_allowances")?.owner ||
       !allowanceAttribution.rlsEnabled ||
       !allowanceAttribution.rlsForced ||
       !allowanceAttribution.rlsActive)

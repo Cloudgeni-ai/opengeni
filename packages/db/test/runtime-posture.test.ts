@@ -4,6 +4,7 @@ import {
   FORCE_RLS_TABLES,
   NON_RLS_RUNTIME_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_ALLOWANCE_PRIVATE_TABLES,
   RUNTIME_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
@@ -584,20 +585,29 @@ describe("runtime database posture evaluator", () => {
     const receipt = posture.tables.find(
       (table) => table.name === "usage_allowance_attribution_receipts",
     )!;
+    posture.tables = posture.tables.filter((table) => table !== receipt);
+    posture.privateTables.push({
+      ...receipt,
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 2,
+    });
+    const privateReceipt = posture.privateTables.at(-1)!;
+    posture.privateTables.push({ ...privateReceipt, name: "workspace_usage_allowances" });
     const lifecycle = posture.targetRoutines.find(
       (routine) => routine.name === "capture_usage_allowance_attribution()",
     )!;
     const receiptOptions = {
       ...options,
-      protectedTables: ["tenant_rows", receipt.name],
-      protectedNoDirectDmlTables: [receipt.name],
+      protectedTables: ["tenant_rows"],
     };
     receipt.rlsEnabled = true;
     receipt.rlsForced = true;
     receipt.rlsActive = true;
     receipt.policyCount = 2;
     expect(evaluateRuntimeDatabasePosture(posture, receiptOptions)).toEqual([]);
-    receipt.rlsForced = false;
+    privateReceipt.rlsForced = false;
     lifecycle.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, receiptOptions)).toEqual(
       expect.arrayContaining([
@@ -641,8 +651,19 @@ describe("runtime database posture evaluator", () => {
       update: false,
       delete: false,
     });
+    const capability = posture.privateTables.at(-1)!;
+    for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
+      posture.privateTables.push({
+        ...capability,
+        name,
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        policyCount: 1,
+      });
+    }
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
-    posture.privateTables.at(-1)!.insert = true;
+    capability.insert = true;
     posture.targetRoutines.find((r) => r.name === "usage_allowance_command(jsonb)")!.owner =
       "wrong_owner";
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
@@ -970,7 +991,7 @@ describe("runtime database posture evaluator", () => {
             : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
               ? 1
               : 0) +
-          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 12 : 0) +
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 4 : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -1035,13 +1056,15 @@ describe("runtime database posture evaluator", () => {
         tableCount +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
-          organizationRecoveryProtectedTableCount,
+          organizationRecoveryProtectedTableCount -
+          8,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
-          organizationRecoveryProtectedTableCount,
+          organizationRecoveryProtectedTableCount -
+          8,
       );
       expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([

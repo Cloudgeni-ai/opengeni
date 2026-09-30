@@ -218,7 +218,7 @@ test("real non-bypass owner migrates receipts while all original source policies
     await migrate(owned.ownerUrl);
     expect([...(await snapshot())]).toEqual([...before]);
     const [backfill] =
-      await owned.admin`select attribution from usage_allowance_attribution_receipts
+      await owned.admin`select attribution from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='turn' and source_id=${String(turn!.id)}`;
     expect(backfill!.attribution).toEqual({
       kind: "turn",
@@ -226,7 +226,7 @@ test("real non-bypass owner migrates receipts while all original source policies
       initiatingHumanSubjectId: subjectId,
     });
     const [queryReceipt] =
-      await owned.admin`select attribution,quantity from usage_allowance_attribution_receipts
+      await owned.admin`select attribution,quantity from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='knowledge_query' and source_id=${queryId}`;
     expect(queryReceipt!.attribution).toEqual({
       kind: "human",
@@ -234,14 +234,14 @@ test("real non-bypass owner migrates receipts while all original source policies
     });
     expect(Number(queryReceipt!.quantity)).toBe(7);
     const [scheduleReceipt] =
-      await owned.admin`select attribution from usage_allowance_attribution_receipts
+      await owned.admin`select attribution from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='schedule' and source_id=${run.id}`;
     expect(scheduleReceipt!.attribution).toEqual({
       kind: "human",
       initiatingHumanSubjectId: subjectId,
     });
     const [content] = await owned.admin`select column_name from information_schema.columns
-      where table_name='usage_allowance_attribution_receipts'
+      where table_schema='opengeni_private' and table_name='usage_allowance_attribution_receipts'
         and column_name in ('prompt','accepted_execution_snapshot','initiator_context','metadata')`;
     expect(content).toBeUndefined();
 
@@ -254,11 +254,12 @@ test("real non-bypass owner migrates receipts while all original source policies
     const scope = { accountId, workspaceId };
     for (const privilege of ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "TRIGGER"]) {
       const [permission] = await owned.admin`select
-        has_table_privilege('opengeni_app','usage_allowance_attribution_receipts',${privilege}) as allowed`;
+        has_table_privilege('opengeni_app','opengeni_private.usage_allowance_attribution_receipts',${privilege}) as allowed`;
       expect(permission!.allowed).toBe(false);
     }
     await expectSqlState(
-      async () => await appSql!`select * from usage_allowance_attribution_receipts`,
+      async () =>
+        await appSql!`select * from opengeni_private.usage_allowance_attribution_receipts`,
       "42501",
     );
     const [execute] = await owned.admin`select
@@ -273,12 +274,12 @@ test("real non-bypass owner migrates receipts while all original source policies
         await tx`select count(*)::int as count from session_turns where id=${turn!.id}`;
       expect(hidden!.count).toBe(0);
       const [visible] =
-        await tx`select count(*)::int as count from usage_allowance_attribution_receipts
+        await tx`select count(*)::int as count from opengeni_private.usage_allowance_attribution_receipts
         where account_id=${accountId} and workspace_id=${workspaceId}
           and source_id in (${String(turn!.id)},${run.id},${queryId})`;
       expect(visible!.count).toBe(3);
       const changed =
-        await tx`update usage_allowance_attribution_receipts set attribution='{"kind":"service"}'::jsonb
+        await tx`update opengeni_private.usage_allowance_attribution_receipts set attribution='{"kind":"service"}'::jsonb
         where account_id=${accountId} and workspace_id=${workspaceId}`;
       expect(changed.count).toBe(0);
       await tx`delete from opengeni_private.usage_allowance_capabilities where backend_pid=pg_backend_pid()`;
@@ -346,7 +347,7 @@ test("real non-bypass owner migrates receipts while all original source policies
       idempotencyKey: crypto.randomUUID(),
     });
     const foreignCounters =
-      await owned.admin`select subject_id,used::int as used from workspace_allowance_counters
+      await owned.admin`select subject_id,used::int as used from opengeni_private.workspace_allowance_counters
       where account_id=${accountId} and workspace_id=${otherWorkspace}`;
     expect([...foreignCounters]).toEqual([{ subject_id: "", used: 2 }]);
     await applyCreditDebitAfterUse(app.db, {
@@ -377,7 +378,7 @@ test("real non-bypass owner migrates receipts while all original source policies
       metadata: { turnId: newTurn!.id, initiatingHumanSubjectId: "user:spoof" },
     });
     const counters =
-      await owned.admin`select subject_id,used::int as used from workspace_allowance_counters
+      await owned.admin`select subject_id,used::int as used from opengeni_private.workspace_allowance_counters
       where account_id=${accountId} and workspace_id=${workspaceId} order by subject_id`;
     expect([...counters]).toEqual([
       { subject_id: "", used: 47 },

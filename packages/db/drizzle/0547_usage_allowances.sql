@@ -19,7 +19,7 @@ BEGIN
     '''insufficient_credits'', ''monthly_model_cost_limit'', ''monthly_agent_run_limit'', ''allowance_exhausted'')');
 END $scheduled_allowance_refusal$;
 
-CREATE TABLE workspace_usage_allowances (
+CREATE TABLE opengeni_private.workspace_usage_allowances (
   workspace_id uuid PRIMARY KEY,
   account_id uuid NOT NULL,
   config jsonb,
@@ -37,7 +37,7 @@ CREATE TABLE workspace_usage_allowances (
   CHECK (octet_length(actor_subject_id) BETWEEN 1 AND 1024),
   CHECK (octet_length(actor_type) BETWEEN 1 AND 128)
 );
-CREATE TABLE workspace_member_allowances (
+CREATE TABLE opengeni_private.workspace_member_allowances (
   workspace_id uuid NOT NULL,
   account_id uuid NOT NULL,
   subject_id text NOT NULL CHECK (octet_length(subject_id) BETWEEN 1 AND 1024),
@@ -49,9 +49,20 @@ CREATE TABLE workspace_member_allowances (
   PRIMARY KEY (workspace_id, subject_id),
   FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
 );
-CREATE INDEX workspace_usage_allowances_maintenance_due ON workspace_usage_allowances
+-- A committed clear can be recovered after its response was lost while its
+-- exact tombstone is still current. Superseded receipts conflict.
+CREATE TABLE opengeni_private.workspace_allowance_clear_receipts (
+  workspace_id uuid NOT NULL,
+  account_id uuid NOT NULL,
+  operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+  request jsonb NOT NULL,
+  result jsonb NOT NULL,
+  PRIMARY KEY (workspace_id, operation_id),
+  FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
+);
+CREATE INDEX workspace_usage_allowances_maintenance_due ON opengeni_private.workspace_usage_allowances
   (maintenance_next_at,workspace_id) WHERE config IS NOT NULL;
-CREATE TABLE workspace_allowance_grants (
+CREATE TABLE opengeni_private.workspace_allowance_grants (
   workspace_id uuid NOT NULL,
   account_id uuid NOT NULL,
   operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -64,9 +75,9 @@ CREATE TABLE workspace_allowance_grants (
   PRIMARY KEY (workspace_id, operation_id),
   FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
 );
-CREATE INDEX workspace_allowance_grants_fefo ON workspace_allowance_grants
+CREATE INDEX workspace_allowance_grants_fefo ON opengeni_private.workspace_allowance_grants
   (workspace_id, expires_at, created_at, operation_id) WHERE remaining > 0;
-CREATE TABLE workspace_allowance_counters (
+CREATE TABLE opengeni_private.workspace_allowance_counters (
   workspace_id uuid NOT NULL,
   account_id uuid NOT NULL,
   period_key text NOT NULL,
@@ -77,7 +88,7 @@ CREATE TABLE workspace_allowance_counters (
   PRIMARY KEY (workspace_id, period_key, subject_id),
   FOREIGN KEY (workspace_id, account_id) REFERENCES workspaces(id, account_id) ON DELETE CASCADE
 );
-CREATE TABLE workspace_allowance_periods (
+CREATE TABLE opengeni_private.workspace_allowance_periods (
   workspace_id uuid NOT NULL,
   account_id uuid NOT NULL,
   period_key text NOT NULL,
@@ -93,7 +104,7 @@ CREATE TABLE workspace_allowance_periods (
   PRIMARY KEY (workspace_id,period_key),
   FOREIGN KEY (workspace_id,account_id) REFERENCES workspaces(id,account_id) ON DELETE CASCADE
 );
-CREATE TABLE workspace_allowance_notifications (
+CREATE TABLE opengeni_private.workspace_allowance_notifications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id uuid NOT NULL,
   account_id uuid NOT NULL,
@@ -126,7 +137,7 @@ REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM PUBLIC;
 -- Accounting facts, never source content or read authority. Keep receipts after
 -- source retention/deletion so late settlements retain their accepted payer;
 -- deleting the tenant still cascades. Only the lifecycle below may append.
-CREATE TABLE usage_allowance_attribution_receipts (
+CREATE TABLE opengeni_private.usage_allowance_attribution_receipts (
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
   source_kind text NOT NULL CHECK (source_kind IN ('turn','schedule','knowledge_query')),
@@ -166,7 +177,7 @@ RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURREN
     WHERE c.backend_pid = pg_backend_pid()
       AND c.transaction_id = pg_current_xact_id_if_assigned()
       AND c.data_schema = (SELECT n.nspname FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
-        WHERE t.oid='workspace_usage_allowances'::regclass)
+        WHERE t.oid='workspaces'::regclass)
       AND ((c.account_id = p_account AND (p_workspace IS NULL OR c.workspace_id = p_workspace))
         OR (p_account IS NULL AND p_workspace IS NULL
           AND c.account_id='00000000-0000-0000-0000-000000000000'::uuid
@@ -179,17 +190,18 @@ DO $policies$
 DECLARE t text; target_schema text := current_schema(); owner_name text := current_user;
 BEGIN
   FOREACH t IN ARRAY ARRAY['workspace_usage_allowances','workspace_member_allowances',
-    'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods']
+    'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications',
+    'workspace_allowance_periods','workspace_allowance_clear_receipts']
   LOOP
-    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
-    EXECUTE format('CREATE POLICY usage_allowance_owner ON %I FOR ALL USING
+    EXECUTE format('ALTER TABLE opengeni_private.%I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE opengeni_private.%I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format('CREATE POLICY usage_allowance_owner ON opengeni_private.%I FOR ALL USING
       (current_user = %L AND %I.usage_allowance_capability_active(account_id, workspace_id))
       WITH CHECK (current_user = %L AND %I.usage_allowance_capability_active(account_id, workspace_id))',
       t, owner_name, target_schema, owner_name, target_schema);
-    EXECUTE format('REVOKE ALL ON TABLE %I FROM PUBLIC', t);
+    EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM PUBLIC', t);
   END LOOP;
-  EXECUTE format('CREATE POLICY usage_allowance_maintenance_inventory ON workspace_usage_allowances
+  EXECUTE format('CREATE POLICY usage_allowance_maintenance_inventory ON opengeni_private.workspace_usage_allowances
     FOR SELECT USING (current_user=%L AND %I.usage_allowance_capability_active(NULL::uuid,NULL::uuid))',
     owner_name,target_schema);
   -- Exact read-only authority for immutable debit attribution and identity
@@ -285,7 +297,7 @@ BEGIN
     (pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,NEW.workspace_id)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened=ROW_COUNT;
-  INSERT INTO usage_allowance_attribution_receipts
+  INSERT INTO opengeni_private.usage_allowance_attribution_receipts
     (account_id,workspace_id,source_kind,source_id,session_id,attribution,quantity,idempotency_key)
     VALUES(NEW.account_id,NEW.workspace_id,v_source_kind,v_source_id,v_session_id,v_attribution,v_quantity,v_idempotency_key);
   IF opened=1 THEN
@@ -308,12 +320,12 @@ CREATE TRIGGER allowance_query_attribution AFTER INSERT OR UPDATE ON usage_event
 ALTER TABLE session_turns NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE scheduled_task_runs NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE usage_events NO FORCE ROW LEVEL SECURITY;
-INSERT INTO usage_allowance_attribution_receipts
+INSERT INTO opengeni_private.usage_allowance_attribution_receipts
   (account_id,workspace_id,source_kind,source_id,session_id,attribution)
 SELECT account_id,workspace_id,'turn',id::text,session_id,
   jsonb_build_object('kind','turn','turnId',id,'initiatingHumanSubjectId',initiating_human_subject_id)
 FROM session_turns;
-INSERT INTO usage_allowance_attribution_receipts
+INSERT INTO opengeni_private.usage_allowance_attribution_receipts
   (account_id,workspace_id,source_kind,source_id,attribution)
 SELECT account_id,workspace_id,'schedule',id::text,
   CASE WHEN NOT coalesce(accepted_execution_snapshot ? 'causalHumanSubjectId',false)
@@ -322,7 +334,7 @@ SELECT account_id,workspace_id,'schedule',id::text,
     ELSE jsonb_build_object('kind','human',
       'initiatingHumanSubjectId',accepted_execution_snapshot->>'causalHumanSubjectId') END
 FROM scheduled_task_runs;
-INSERT INTO usage_allowance_attribution_receipts
+INSERT INTO opengeni_private.usage_allowance_attribution_receipts
   (account_id,workspace_id,source_kind,source_id,attribution,quantity,idempotency_key)
 SELECT account_id,workspace_id,'knowledge_query',source_resource_id,
   CASE initiator_context#>>'{creditDebitAttribution,kind}'
@@ -339,12 +351,12 @@ FROM usage_events WHERE source_resource_type='knowledge_query'
 DO $attribution_backfill_convergence$
 BEGIN
   IF EXISTS (SELECT 1 FROM session_turns t WHERE NOT EXISTS (
-      SELECT 1 FROM usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
+      SELECT 1 FROM opengeni_private.usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
         AND r.workspace_id=t.workspace_id AND r.source_kind='turn' AND r.source_id=t.id::text
         AND r.session_id=t.session_id AND r.attribution=jsonb_build_object('kind','turn','turnId',t.id,
           'initiatingHumanSubjectId',t.initiating_human_subject_id)))
     OR EXISTS (SELECT 1 FROM scheduled_task_runs t WHERE NOT EXISTS (
-      SELECT 1 FROM usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
+      SELECT 1 FROM opengeni_private.usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
         AND r.workspace_id=t.workspace_id AND r.source_kind='schedule' AND r.source_id=t.id::text
         AND r.attribution=CASE WHEN NOT coalesce(t.accepted_execution_snapshot ? 'causalHumanSubjectId',false)
           THEN '{"kind":"unknown"}'::jsonb
@@ -354,7 +366,7 @@ BEGIN
     OR EXISTS (SELECT 1 FROM usage_events t WHERE t.source_resource_type='knowledge_query'
       AND t.event_type='document.query_embedding_cost' AND t.workspace_id IS NOT NULL
       AND t.source_resource_id IS NOT NULL AND t.idempotency_key='knowledge.query_cost:'||t.source_resource_id
-      AND NOT EXISTS (SELECT 1 FROM usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
+      AND NOT EXISTS (SELECT 1 FROM opengeni_private.usage_allowance_attribution_receipts r WHERE r.account_id=t.account_id
         AND r.workspace_id=t.workspace_id AND r.source_kind='knowledge_query'
         AND r.source_id=t.source_resource_id AND r.quantity=t.quantity AND r.idempotency_key=t.idempotency_key)) THEN
     RAISE EXCEPTION 'Allowance attribution backfill did not converge' USING ERRCODE='55000';
@@ -363,19 +375,19 @@ END $attribution_backfill_convergence$;
 ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
 ALTER TABLE scheduled_task_runs FORCE ROW LEVEL SECURITY;
 ALTER TABLE usage_events FORCE ROW LEVEL SECURITY;
-ALTER TABLE usage_allowance_attribution_receipts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE usage_allowance_attribution_receipts FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.usage_allowance_attribution_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.usage_allowance_attribution_receipts FORCE ROW LEVEL SECURITY;
 DO $attribution_policy$
 DECLARE owner_name text:=current_user; target_schema text:=current_schema();
 BEGIN
-  EXECUTE format('CREATE POLICY usage_allowance_attribution_owner ON usage_allowance_attribution_receipts
+  EXECUTE format('CREATE POLICY usage_allowance_attribution_owner ON opengeni_private.usage_allowance_attribution_receipts
     FOR SELECT USING(current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id))',
     owner_name,target_schema);
-  EXECUTE format('CREATE POLICY usage_allowance_attribution_lifecycle ON usage_allowance_attribution_receipts
+  EXECUTE format('CREATE POLICY usage_allowance_attribution_lifecycle ON opengeni_private.usage_allowance_attribution_receipts
     FOR INSERT WITH CHECK(current_user=%L AND %I.usage_allowance_capability_active(account_id,workspace_id))',
     owner_name,target_schema);
 END $attribution_policy$;
-REVOKE ALL ON TABLE usage_allowance_attribution_receipts FROM PUBLIC;
+REVOKE ALL ON TABLE opengeni_private.usage_allowance_attribution_receipts FROM PUBLIC;
 
 CREATE FUNCTION usage_allowance_period(p_config jsonb, p_at timestamptz)
 RETURNS TABLE (period_key text, start_at timestamptz, end_at timestamptz)
@@ -423,9 +435,9 @@ $$;
 CREATE FUNCTION usage_allowance_effective_period(p_workspace uuid,p_config jsonb,p_at timestamptz)
 RETURNS TABLE(period_key text,start_at timestamptz,end_at timestamptz)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $$
-DECLARE saved workspace_usage_allowances%ROWTYPE; calculated record;
+DECLARE saved opengeni_private.workspace_usage_allowances%ROWTYPE; calculated record;
 BEGIN
-  SELECT * INTO saved FROM workspace_usage_allowances WHERE workspace_id=p_workspace;
+  SELECT * INTO saved FROM opengeni_private.workspace_usage_allowances WHERE workspace_id=p_workspace;
   IF saved.active_period_key IS NOT NULL AND p_config->>'period'='none' THEN
     RETURN QUERY SELECT saved.active_period_key,saved.active_start_at,NULL::timestamptz;
     RETURN;
@@ -489,22 +501,22 @@ RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $
 DECLARE period_row record;
 BEGIN
   SELECT * INTO period_row FROM usage_allowance_effective_period(p_workspace,p_config,p_at);
-  INSERT INTO workspace_allowance_periods
+  INSERT INTO opengeni_private.workspace_allowance_periods
     (account_id,workspace_id,period_key,config,start_at,end_at,grants_remaining,member_count,grants_snapshot,member_rules)
   SELECT p_account,p_workspace,period_row.period_key,p_config,period_row.start_at,period_row.end_at,
-    coalesce((SELECT sum(remaining) FROM workspace_allowance_grants WHERE workspace_id=p_workspace
+    coalesce((SELECT sum(remaining) FROM opengeni_private.workspace_allowance_grants WHERE workspace_id=p_workspace
       AND (expires_at IS NULL OR expires_at>p_at)),0),
     (SELECT count(*) FROM usage_allowance_members(p_account,p_workspace)),
     coalesce((SELECT jsonb_agg(jsonb_build_object('remaining',remaining,'expiresAt',expires_at))
-      FROM workspace_allowance_grants WHERE workspace_id=p_workspace AND remaining>0),'[]'::jsonb),
+      FROM opengeni_private.workspace_allowance_grants WHERE workspace_id=p_workspace AND remaining>0),'[]'::jsonb),
     coalesce((SELECT jsonb_object_agg(m.subject_id,jsonb_build_object('rule',rules.rule,'version',coalesce(rules.version,0)))
-      FROM usage_allowance_members(p_account,p_workspace) m LEFT JOIN workspace_member_allowances rules
+      FROM usage_allowance_members(p_account,p_workspace) m LEFT JOIN opengeni_private.workspace_member_allowances rules
         ON rules.workspace_id=p_workspace AND rules.subject_id=m.subject_id),'{}'::jsonb)
   ON CONFLICT (workspace_id,period_key) DO UPDATE SET config=excluded.config,
     start_at=excluded.start_at,end_at=excluded.end_at,grants_remaining=excluded.grants_remaining,
     member_count=excluded.member_count,grants_snapshot=excluded.grants_snapshot,
     member_rules=excluded.member_rules,updated_at=now()
-    WHERE workspace_allowance_periods.closed_at IS NULL;
+    WHERE opengeni_private.workspace_allowance_periods.closed_at IS NULL;
 END $$;
 
 CREATE FUNCTION emit_usage_allowance_notifications(p_account uuid,p_workspace uuid,p_config jsonb,p_period text,p_end timestamptz,p_subject text)
@@ -513,14 +525,14 @@ DECLARE c record; threshold_value numeric; member_rule jsonb; pool bigint; grant
   member_count integer; cap numeric; event_name text; payload_value jsonb; receipt_id uuid; event_id_value uuid;
 BEGIN
   IF p_config IS NULL THEN RETURN; END IF;
-  SELECT coalesce(sum(remaining),0) INTO grant_remaining FROM workspace_allowance_grants
+  SELECT coalesce(sum(remaining),0) INTO grant_remaining FROM opengeni_private.workspace_allowance_grants
     WHERE workspace_id=p_workspace AND (expires_at IS NULL OR expires_at>clock_timestamp());
   SELECT count(*) INTO member_count FROM usage_allowance_members(p_account,p_workspace);
   pool:=(p_config->>'includedCredits')::bigint+grant_remaining;
-  IF p_config->>'period'='monthly' AND EXISTS (SELECT 1 FROM workspace_allowance_periods
+  IF p_config->>'period'='monthly' AND EXISTS (SELECT 1 FROM opengeni_private.workspace_allowance_periods
     WHERE workspace_id=p_workspace AND period_key<>p_period AND closed_at IS NOT NULL) THEN
     payload_value:=jsonb_build_object('workspaceId',p_workspace,'period',p_period,'resetsAt',p_end);
-    INSERT INTO workspace_allowance_notifications (account_id,workspace_id,period_key,subject_id,threshold,payload)
+    INSERT INTO opengeni_private.workspace_allowance_notifications (account_id,workspace_id,period_key,subject_id,threshold,payload)
       VALUES (p_account,p_workspace,p_period,'',-1,payload_value)
       ON CONFLICT DO NOTHING RETURNING id INTO receipt_id;
     IF receipt_id IS NOT NULL THEN
@@ -532,8 +544,8 @@ BEGIN
       ON CONFLICT DO NOTHING;
     END IF;
   END IF;
-  FOR c IN SELECT counter.*,rules.rule FROM workspace_allowance_counters counter
-    LEFT JOIN workspace_member_allowances rules ON rules.workspace_id=counter.workspace_id AND rules.subject_id=counter.subject_id
+  FOR c IN SELECT counter.*,rules.rule FROM opengeni_private.workspace_allowance_counters counter
+    LEFT JOIN opengeni_private.workspace_member_allowances rules ON rules.workspace_id=counter.workspace_id AND rules.subject_id=counter.subject_id
     WHERE counter.workspace_id=p_workspace AND counter.period_key=p_period
       AND counter.subject_id IN ('',coalesce(p_subject,''))
       AND (counter.subject_id='' OR EXISTS (SELECT 1 FROM usage_allowance_members(p_account,p_workspace) m
@@ -560,7 +572,7 @@ BEGIN
       payload_value:=jsonb_build_object('scope',CASE WHEN c.subject_id='' THEN 'workspace' ELSE 'member' END,
         'subjectId',nullif(c.subject_id,''),'period',p_period,'limit',cap,'used',c.used,
         'fraction',CASE WHEN cap=0 THEN 1 ELSE c.used/cap END,'threshold',threshold_value,'resetsAt',p_end);
-      INSERT INTO workspace_allowance_notifications (account_id,workspace_id,period_key,subject_id,threshold,payload)
+      INSERT INTO opengeni_private.workspace_allowance_notifications (account_id,workspace_id,period_key,subject_id,threshold,payload)
         VALUES (p_account,p_workspace,p_period,c.subject_id,threshold_value,payload_value)
         ON CONFLICT DO NOTHING RETURNING id INTO receipt_id;
       IF receipt_id IS NOT NULL THEN
@@ -591,18 +603,20 @@ DECLARE
   action text := p_input->>'action';
   subject text := p_input->>'subjectId';
   expected bigint := (p_input->>'expectedVersion')::bigint;
-  prior workspace_usage_allowances%ROWTYPE;
-  member_prior workspace_member_allowances%ROWTYPE;
-  grant_prior workspace_allowance_grants%ROWTYPE;
+  prior opengeni_private.workspace_usage_allowances%ROWTYPE;
+  member_prior opengeni_private.workspace_member_allowances%ROWTYPE;
+  grant_prior opengeni_private.workspace_allowance_grants%ROWTYPE;
+  clear_prior opengeni_private.workspace_allowance_clear_receipts%ROWTYPE;
+  clear_request jsonb;
   v bigint;
   opened integer;
   result jsonb;
   period_row record;
   as_of timestamptz := clock_timestamp();
-  read_config jsonb; historical workspace_allowance_periods%ROWTYPE;
+  read_config jsonb; historical opengeni_private.workspace_allowance_periods%ROWTYPE;
   historical_read boolean:=false;
   v_data_schema text := (SELECT n.nspname FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
-    WHERE t.oid='workspace_usage_allowances'::regclass);
+    WHERE t.oid='workspaces'::regclass);
 BEGIN
   IF opengeni_private.workspace_rls_visible(a, w) IS DISTINCT FROM true OR a IS NULL OR w IS NULL THEN
     RAISE EXCEPTION 'allowance workspace scope denied' USING ERRCODE = '42501';
@@ -637,7 +651,7 @@ BEGIN
     VALUES (pg_backend_pid(), pg_current_xact_id(), v_data_schema, a, w)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened = ROW_COUNT;
-  SELECT * INTO prior FROM workspace_usage_allowances WHERE workspace_id = w AND account_id = a;
+  SELECT * INTO prior FROM opengeni_private.workspace_usage_allowances WHERE workspace_id = w AND account_id = a;
   IF action='member' AND p_input->>'actorSubjectId' NOT LIKE 'api_key:%'
     AND NOT (p_input->>'actorSubjectId'='dev' AND EXISTS (SELECT 1 FROM managed_accounts local_account
       WHERE local_account.id=a AND local_account.external_source='opengeni:local' AND local_account.external_id='default'))
@@ -650,8 +664,43 @@ BEGIN
     WHERE m.workspace_id=w AND m.subject_id=p_input->>'actorSubjectId'
       AND (m.role IN ('owner','admin') OR m.permissions ? 'workspace:admin')
   ) THEN RAISE EXCEPTION 'workspace administrator required' USING ERRCODE='42501'; END IF;
-  -- Snapshot the pre-edit period before changing an anchor/config/pool.
+  IF action='clear' AND p_input ? 'operationId' THEN
+    IF octet_length(coalesce(p_input->>'operationId','')) NOT BETWEEN 1 AND 256 THEN
+      RAISE EXCEPTION 'invalid allowance clear operation' USING ERRCODE='22023';
+    END IF;
+    clear_request:=jsonb_build_object('expectedVersion',expected,
+      'actorSubjectId',p_input->>'actorSubjectId','actorType',p_input->>'actorType');
+    SELECT * INTO clear_prior FROM opengeni_private.workspace_allowance_clear_receipts
+      WHERE workspace_id=w AND account_id=a AND operation_id=p_input->>'operationId';
+    IF FOUND THEN
+      IF clear_prior.request IS DISTINCT FROM clear_request THEN
+        RAISE EXCEPTION 'allowance clear operation conflict' USING ERRCODE='23505';
+      END IF;
+      IF prior.config IS NOT NULL OR prior.version IS DISTINCT FROM
+        (clear_prior.result->>'version')::bigint THEN
+        RAISE EXCEPTION 'allowance clear replay superseded' USING ERRCODE='40001';
+      END IF;
+      IF opened=1 THEN
+        DELETE FROM opengeni_private.usage_allowance_capabilities
+          WHERE backend_pid=pg_backend_pid() AND transaction_id=pg_current_xact_id_if_assigned()
+            AND data_schema=v_data_schema AND workspace_id=w;
+      END IF;
+      RETURN clear_prior.result;
+    END IF;
+  END IF;
+  -- Settle the pre-edit active window BEFORE switching period mode. In
+  -- particular monthly -> none retains this window's settled counters, never
+  -- a stale window's counters when no maintenance/read ran during rollover.
   IF action IN ('set','clear','member','grant') AND prior.config IS NOT NULL THEN
+    SELECT * INTO period_row FROM usage_allowance_effective_period(w,prior.config,as_of);
+    IF prior.active_period_key IS DISTINCT FROM period_row.period_key THEN
+      UPDATE opengeni_private.workspace_allowance_periods
+        SET closed_at=coalesce(prior.active_end_at,as_of)
+        WHERE workspace_id=w AND period_key=prior.active_period_key AND closed_at IS NULL;
+    END IF;
+    UPDATE opengeni_private.workspace_usage_allowances SET active_period_key=period_row.period_key,
+      active_start_at=period_row.start_at,active_end_at=period_row.end_at WHERE workspace_id=w
+      RETURNING * INTO prior;
     PERFORM capture_usage_allowance_period(a,w,prior.config,as_of);
   END IF;
   IF action IN ('set','clear','member','grant') THEN
@@ -674,7 +723,7 @@ BEGIN
       RAISE EXCEPTION 'allowance version conflict' USING ERRCODE = '40001';
     END IF;
     v := coalesce(prior.version, 0) + 1;
-    INSERT INTO workspace_usage_allowances
+    INSERT INTO opengeni_private.workspace_usage_allowances
       (workspace_id, account_id, config, version, actor_subject_id, actor_type)
     VALUES (w, a, CASE WHEN action = 'set' THEN p_input->'config' END, v,
       p_input->>'actorSubjectId', p_input->>'actorType')
@@ -684,6 +733,11 @@ BEGIN
     result := CASE WHEN action = 'set'
       THEN (p_input->'config') || jsonb_build_object('version', v)
       ELSE jsonb_build_object('version', v) END;
+    IF action='clear' AND p_input ? 'operationId' THEN
+      INSERT INTO opengeni_private.workspace_allowance_clear_receipts
+        (workspace_id,account_id,operation_id,request,result)
+        VALUES(w,a,p_input->>'operationId',clear_request,result);
+    END IF;
   ELSIF action = 'member' THEN
     IF p_input ? 'externalIdentity' THEN
       IF subject IS NOT NULL OR jsonb_typeof(p_input->'externalIdentity') IS DISTINCT FROM 'object' THEN
@@ -704,12 +758,12 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM usage_allowance_members(a,w) eligible WHERE eligible.subject_id=subject)
     THEN RAISE EXCEPTION 'active allowance member required' USING ERRCODE='23503'; END IF;
-    SELECT * INTO member_prior FROM workspace_member_allowances WHERE workspace_id = w AND subject_id = subject;
+    SELECT * INTO member_prior FROM opengeni_private.workspace_member_allowances WHERE workspace_id = w AND subject_id = subject;
     IF expected IS NULL OR expected <> coalesce(member_prior.version, 0) THEN
       RAISE EXCEPTION 'member allowance version conflict' USING ERRCODE = '40001';
     END IF;
     v := coalesce(member_prior.version, 0) + 1;
-    INSERT INTO workspace_member_allowances
+    INSERT INTO opengeni_private.workspace_member_allowances
       (workspace_id, account_id, subject_id, rule, version, actor_subject_id, actor_type)
     VALUES (w, a, subject, nullif(p_input->'rule','null'::jsonb), v,
       p_input->>'actorSubjectId', p_input->>'actorType')
@@ -723,7 +777,7 @@ BEGIN
       OR (p_input->>'credits')::numeric<=0 THEN
       RAISE EXCEPTION 'invalid allowance grant' USING ERRCODE='22023';
     END IF;
-    SELECT * INTO grant_prior FROM workspace_allowance_grants
+    SELECT * INTO grant_prior FROM opengeni_private.workspace_allowance_grants
       WHERE workspace_id = w AND operation_id = p_input->>'operationId';
     IF FOUND THEN
       IF grant_prior.credits <> (p_input->>'credits')::bigint
@@ -731,7 +785,7 @@ BEGIN
         RAISE EXCEPTION 'allowance grant operation conflict' USING ERRCODE = '23505';
       END IF;
     ELSE
-      INSERT INTO workspace_allowance_grants
+      INSERT INTO opengeni_private.workspace_allowance_grants
         (workspace_id, account_id, operation_id, credits, remaining, expires_at, actor_subject_id, actor_type)
       VALUES (w, a, p_input->>'operationId', (p_input->>'credits')::bigint,
         (p_input->>'credits')::bigint, (p_input->>'expiresAt')::timestamptz,
@@ -742,6 +796,9 @@ BEGIN
       'credits', grant_prior.credits, 'remaining', grant_prior.remaining, 'expiresAt', grant_prior.expires_at);
   ELSIF action = 'get' THEN
     result := CASE WHEN prior.config IS NULL THEN NULL ELSE prior.config || jsonb_build_object('version', prior.version) END;
+  ELSIF action = 'state' THEN
+    result := jsonb_build_object('version',coalesce(prior.version,0),'config',
+      CASE WHEN prior.config IS NULL THEN NULL ELSE prior.config || jsonb_build_object('version',prior.version) END);
   ELSIF action IN ('usage','check') THEN
     read_config:=prior.config;
     historical_read:=coalesce(p_input->>'period','current')<>'current' AND
@@ -758,7 +815,7 @@ BEGIN
     END IF;
     SELECT * INTO period_row FROM usage_allowance_effective_period(w,prior.config, as_of);
     IF historical_read THEN
-      SELECT * INTO historical FROM workspace_allowance_periods WHERE workspace_id=w
+      SELECT * INTO historical FROM opengeni_private.workspace_allowance_periods WHERE workspace_id=w
         AND period_key=p_input->>'period';
       read_config:=historical.config;
       IF FOUND THEN
@@ -776,13 +833,13 @@ BEGIN
     END IF;
     SELECT jsonb_build_object(
       'config', read_config, 'period', jsonb_build_object('start',period_row.start_at,'end',period_row.end_at),
-      'used', coalesce((SELECT used FROM workspace_allowance_counters WHERE workspace_id=w AND period_key=period_row.period_key AND subject_id=''),0),
-      'includedUsed', coalesce((SELECT included_used FROM workspace_allowance_counters WHERE workspace_id=w AND period_key=period_row.period_key AND subject_id=''),0),
-      'grantsUsed', coalesce((SELECT grants_used FROM workspace_allowance_counters WHERE workspace_id=w AND period_key=period_row.period_key AND subject_id=''),0),
+      'used', coalesce((SELECT used FROM opengeni_private.workspace_allowance_counters WHERE workspace_id=w AND period_key=period_row.period_key AND subject_id=''),0),
+      'includedUsed', coalesce((SELECT included_used FROM opengeni_private.workspace_allowance_counters WHERE workspace_id=w AND period_key=period_row.period_key AND subject_id=''),0),
+      'grantsUsed', coalesce((SELECT grants_used FROM opengeni_private.workspace_allowance_counters WHERE workspace_id=w AND period_key=period_row.period_key AND subject_id=''),0),
       'grantsRemaining', CASE WHEN historical_read THEN coalesce((SELECT sum((g->>'remaining')::bigint)
         FROM jsonb_array_elements(historical.grants_snapshot) g WHERE g->>'expiresAt' IS NULL
           OR (g->>'expiresAt')::timestamptz>coalesce(historical.end_at,historical.updated_at)),0)
-        ELSE coalesce((SELECT sum(remaining) FROM workspace_allowance_grants WHERE workspace_id=w AND (expires_at IS NULL OR expires_at > clock_timestamp())),0) END,
+        ELSE coalesce((SELECT sum(remaining) FROM opengeni_private.workspace_allowance_grants WHERE workspace_id=w AND (expires_at IS NULL OR expires_at > clock_timestamp())),0) END,
       'memberCount', CASE WHEN historical_read THEN coalesce(historical.member_count,0)
         ELSE (SELECT count(*) FROM usage_allowance_members(a,w)) END,
       'members', coalesce((SELECT jsonb_agg(row_data ORDER BY row_data->>'subjectId') FROM (
@@ -798,11 +855,11 @@ BEGIN
             SELECT 1 FROM usage_allowance_members(a,w) eligible WHERE eligible.subject_id=subject)
           UNION SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(historical.member_rules)='object'
             THEN historical.member_rules ELSE '{}'::jsonb END) WHERE historical_read AND action<>'check'
-          UNION SELECT subject_id FROM workspace_allowance_counters WHERE workspace_id=w
+          UNION SELECT subject_id FROM opengeni_private.workspace_allowance_counters WHERE workspace_id=w
             AND period_key=period_row.period_key AND subject_id<>'' AND historical_read AND action<>'check'
         ) subjects
-        LEFT JOIN workspace_member_allowances rules ON rules.workspace_id=w AND rules.subject_id=subjects.subject_id
-        LEFT JOIN workspace_allowance_counters counter ON counter.workspace_id=w AND counter.period_key=period_row.period_key AND counter.subject_id=subjects.subject_id
+        LEFT JOIN opengeni_private.workspace_member_allowances rules ON rules.workspace_id=w AND rules.subject_id=subjects.subject_id
+        LEFT JOIN opengeni_private.workspace_allowance_counters counter ON counter.workspace_id=w AND counter.period_key=period_row.period_key AND counter.subject_id=subjects.subject_id
         WHERE (subject IS NULL OR subjects.subject_id=subject)
           AND (p_input->>'cursor' IS NULL OR subjects.subject_id > p_input->>'cursor')
         ORDER BY subjects.subject_id LIMIT least(greatest(coalesce((p_input->>'limit')::integer,100),1),500)+1
@@ -812,14 +869,14 @@ BEGIN
     RAISE EXCEPTION 'invalid allowance action' USING ERRCODE = '22023';
   END IF;
   IF action IN ('set','grant','member') THEN
-    SELECT config INTO read_config FROM workspace_usage_allowances WHERE workspace_id=w;
+    SELECT config INTO read_config FROM opengeni_private.workspace_usage_allowances WHERE workspace_id=w;
     IF read_config IS NOT NULL THEN
       SELECT * INTO period_row FROM usage_allowance_effective_period(w,read_config,clock_timestamp());
       IF prior.active_period_key IS NOT NULL AND prior.active_period_key IS DISTINCT FROM period_row.period_key THEN
-        UPDATE workspace_allowance_periods SET closed_at=coalesce(prior.active_end_at,clock_timestamp())
+        UPDATE opengeni_private.workspace_allowance_periods SET closed_at=coalesce(prior.active_end_at,clock_timestamp())
           WHERE workspace_id=w AND period_key=prior.active_period_key AND closed_at IS NULL;
       END IF;
-      UPDATE workspace_usage_allowances SET
+      UPDATE opengeni_private.workspace_usage_allowances SET
         active_period_key=period_row.period_key,active_start_at=period_row.start_at,active_end_at=period_row.end_at,
         maintenance_next_at=clock_timestamp(),maintenance_cursor=NULL WHERE workspace_id=w;
       PERFORM capture_usage_allowance_period(a,w,read_config,clock_timestamp());
@@ -839,19 +896,19 @@ END $$;
 CREATE FUNCTION maintain_usage_allowances(p_limit integer,p_member_limit integer)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
-  target record; saved workspace_usage_allowances%ROWTYPE; p record; member_row record;
+  target record; saved opengeni_private.workspace_usage_allowances%ROWTYPE; p record; member_row record;
   opened integer; tenant_opened integer; processed integer:=0; seen integer;
   last_subject text; previous_account text:=current_setting('opengeni.account_id',true);
   previous_workspace text:=current_setting('opengeni.workspace_id',true);
   v_data_schema text:=(SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE c.oid='workspace_usage_allowances'::regclass);
+    WHERE c.oid='workspaces'::regclass);
   member_limit integer:=greatest(1,least(coalesce(p_member_limit,100),200));
 BEGIN
   INSERT INTO opengeni_private.usage_allowance_capabilities VALUES(pg_backend_pid(),pg_current_xact_id(),
     v_data_schema,'00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000')
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened=ROW_COUNT;
-  FOR target IN SELECT account_id,workspace_id FROM workspace_usage_allowances
+  FOR target IN SELECT account_id,workspace_id FROM opengeni_private.workspace_usage_allowances
     WHERE config IS NOT NULL AND maintenance_next_at<=clock_timestamp()
     ORDER BY maintenance_next_at,workspace_id LIMIT greatest(1,least(coalesce(p_limit,20),100))
   LOOP
@@ -864,18 +921,18 @@ BEGIN
       v_data_schema,target.account_id,target.workspace_id) ON CONFLICT DO NOTHING;
     GET DIAGNOSTICS tenant_opened=ROW_COUNT;
     BEGIN
-      SELECT * INTO saved FROM workspace_usage_allowances WHERE workspace_id=target.workspace_id;
+      SELECT * INTO saved FROM opengeni_private.workspace_usage_allowances WHERE workspace_id=target.workspace_id;
       IF saved.config IS NOT NULL AND saved.maintenance_next_at<=clock_timestamp() THEN
         SELECT * INTO p FROM usage_allowance_effective_period(target.workspace_id,saved.config,clock_timestamp());
         IF saved.active_period_key IS DISTINCT FROM p.period_key THEN
-          UPDATE workspace_allowance_periods SET closed_at=coalesce(saved.active_end_at,clock_timestamp())
+          UPDATE opengeni_private.workspace_allowance_periods SET closed_at=coalesce(saved.active_end_at,clock_timestamp())
             WHERE workspace_id=target.workspace_id AND period_key=saved.active_period_key AND closed_at IS NULL;
           saved.maintenance_cursor:=NULL;
         END IF;
-        UPDATE workspace_usage_allowances SET active_period_key=p.period_key,active_start_at=p.start_at,
+        UPDATE opengeni_private.workspace_usage_allowances SET active_period_key=p.period_key,active_start_at=p.start_at,
           active_end_at=p.end_at WHERE workspace_id=target.workspace_id;
         PERFORM capture_usage_allowance_period(target.account_id,target.workspace_id,saved.config,clock_timestamp());
-        INSERT INTO workspace_allowance_counters(account_id,workspace_id,period_key,subject_id)
+        INSERT INTO opengeni_private.workspace_allowance_counters(account_id,workspace_id,period_key,subject_id)
           VALUES(target.account_id,target.workspace_id,p.period_key,'') ON CONFLICT DO NOTHING;
         PERFORM emit_usage_allowance_notifications(target.account_id,target.workspace_id,saved.config,p.period_key,p.end_at,NULL);
         seen:=0; last_subject:=NULL;
@@ -885,19 +942,19 @@ BEGIN
         LOOP
           seen:=seen+1;
           EXIT WHEN seen>member_limit;
-          INSERT INTO workspace_allowance_counters(account_id,workspace_id,period_key,subject_id)
+          INSERT INTO opengeni_private.workspace_allowance_counters(account_id,workspace_id,period_key,subject_id)
             VALUES(target.account_id,target.workspace_id,p.period_key,member_row.subject_id) ON CONFLICT DO NOTHING;
           PERFORM emit_usage_allowance_notifications(target.account_id,target.workspace_id,saved.config,
             p.period_key,p.end_at,member_row.subject_id);
           last_subject:=member_row.subject_id;
         END LOOP;
-        UPDATE workspace_usage_allowances SET maintenance_cursor=CASE WHEN seen>member_limit THEN last_subject END,
+        UPDATE opengeni_private.workspace_usage_allowances SET maintenance_cursor=CASE WHEN seen>member_limit THEN last_subject END,
           maintenance_next_at=clock_timestamp()+CASE WHEN seen>member_limit THEN interval '1 second' ELSE interval '1 minute' END,
           maintenance_error=NULL WHERE workspace_id=target.workspace_id;
         processed:=processed+1;
       END IF;
     EXCEPTION WHEN OTHERS THEN
-      UPDATE workspace_usage_allowances SET maintenance_next_at=clock_timestamp()+interval '1 minute',
+      UPDATE opengeni_private.workspace_usage_allowances SET maintenance_next_at=clock_timestamp()+interval '1 minute',
         maintenance_error=SQLSTATE WHERE workspace_id=target.workspace_id;
     END;
     IF tenant_opened=1 THEN DELETE FROM opengeni_private.usage_allowance_capabilities
@@ -917,7 +974,8 @@ END $$;
 CREATE FUNCTION count_workspace_allowance_debit()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
-  cfg jsonb; p record; c workspace_allowance_counters%ROWTYPE; g record;
+  cfg jsonb; p record; c opengeni_private.workspace_allowance_counters%ROWTYPE; g record;
+  saved opengeni_private.workspace_usage_allowances%ROWTYPE;
   human text; candidate text; amount bigint := -NEW.amount_micros;
   attribution jsonb; billing_workspace uuid;
   included bigint := 0; grant_used bigint := 0; pending bigint;
@@ -931,45 +989,55 @@ BEGIN
     (pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,NEW.workspace_id)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened = ROW_COUNT;
-  SELECT config INTO cfg FROM workspace_usage_allowances WHERE workspace_id=NEW.workspace_id;
+  SELECT * INTO saved FROM opengeni_private.workspace_usage_allowances WHERE workspace_id=NEW.workspace_id;
+  cfg:=saved.config;
   -- Settlement time, not caller-supplied occurred_at, decides pool expiry and
   -- period. Late settlements cannot spend an already expired historical pool.
   SELECT * INTO p FROM usage_allowance_effective_period(NEW.workspace_id,cfg, clock_timestamp());
-  SELECT * INTO c FROM workspace_allowance_counters
+  IF cfg IS NOT NULL THEN
+    IF saved.active_period_key IS DISTINCT FROM p.period_key THEN
+      UPDATE opengeni_private.workspace_allowance_periods
+        SET closed_at=coalesce(saved.active_end_at,clock_timestamp())
+        WHERE workspace_id=NEW.workspace_id AND period_key=saved.active_period_key AND closed_at IS NULL;
+    END IF;
+    UPDATE opengeni_private.workspace_usage_allowances SET active_period_key=p.period_key,
+      active_start_at=p.start_at,active_end_at=p.end_at WHERE workspace_id=NEW.workspace_id;
+  END IF;
+  SELECT * INTO c FROM opengeni_private.workspace_allowance_counters
     WHERE workspace_id=NEW.workspace_id AND period_key=p.period_key AND subject_id='';
   IF cfg IS NOT NULL THEN
     included := least(amount,greatest(0,(cfg->>'includedCredits')::bigint-
       (coalesce(c.used,0)-coalesce(c.grants_used,0))));
     pending := amount-included;
-    FOR g IN SELECT * FROM workspace_allowance_grants WHERE workspace_id=NEW.workspace_id
+    FOR g IN SELECT * FROM opengeni_private.workspace_allowance_grants WHERE workspace_id=NEW.workspace_id
       AND remaining>0 AND (expires_at IS NULL OR expires_at>clock_timestamp())
       ORDER BY expires_at NULLS LAST,created_at,operation_id
     LOOP
       EXIT WHEN pending=0;
-      UPDATE workspace_allowance_grants SET remaining=remaining-least(pending,g.remaining)
+      UPDATE opengeni_private.workspace_allowance_grants SET remaining=remaining-least(pending,g.remaining)
         WHERE workspace_id=NEW.workspace_id AND operation_id=g.operation_id;
       grant_used := grant_used+least(pending,g.remaining);
       pending := pending-least(pending,g.remaining);
     END LOOP;
   END IF;
-  INSERT INTO workspace_allowance_counters (workspace_id,account_id,period_key,subject_id,used,included_used,grants_used)
+  INSERT INTO opengeni_private.workspace_allowance_counters (workspace_id,account_id,period_key,subject_id,used,included_used,grants_used)
     VALUES (NEW.workspace_id,NEW.account_id,p.period_key,'',amount,included,grant_used)
   ON CONFLICT (workspace_id,period_key,subject_id) DO UPDATE SET
-    used=workspace_allowance_counters.used+excluded.used,
-    included_used=workspace_allowance_counters.included_used+excluded.included_used,
-    grants_used=workspace_allowance_counters.grants_used+excluded.grants_used;
+    used=opengeni_private.workspace_allowance_counters.used+excluded.used,
+    included_used=opengeni_private.workspace_allowance_counters.included_used+excluded.included_used,
+    grants_used=opengeni_private.workspace_allowance_counters.grants_used+excluded.grants_used;
   -- Exact source receipts take precedence over caller metadata. to_jsonb
   -- allows 0547 to coexist with old writers until 0548 adds the immutable
   -- attribution column; absent legacy receipts remain workspace-only.
   IF NEW.source_type='knowledge_query' THEN
-    SELECT receipt.attribution INTO attribution FROM usage_allowance_attribution_receipts receipt
+    SELECT receipt.attribution INTO attribution FROM opengeni_private.usage_allowance_attribution_receipts receipt
     WHERE receipt.account_id=NEW.account_id AND receipt.workspace_id=NEW.workspace_id
       AND receipt.source_kind='knowledge_query' AND receipt.source_id=NEW.source_id
       AND receipt.idempotency_key='knowledge.query_cost:'||NEW.source_id
       AND receipt.quantity=amount;
     attribution:=coalesce(attribution,'{"kind":"unknown"}'::jsonb);
   ELSIF NEW.source_type='scheduled_task_run' THEN
-    SELECT receipt.attribution INTO attribution FROM usage_allowance_attribution_receipts receipt
+    SELECT receipt.attribution INTO attribution FROM opengeni_private.usage_allowance_attribution_receipts receipt
       WHERE receipt.account_id=NEW.account_id AND receipt.workspace_id=NEW.workspace_id
         AND receipt.source_kind='schedule' AND receipt.source_id=NEW.source_id;
     attribution:=coalesce(attribution,'{"kind":"unknown"}'::jsonb);
@@ -1004,17 +1072,17 @@ BEGIN
     ELSE NEW.metadata->>'turnId' END;
   IF human IS NULL AND candidate ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
     SELECT receipt.attribution->>'initiatingHumanSubjectId' INTO human
-    FROM usage_allowance_attribution_receipts receipt
+    FROM opengeni_private.usage_allowance_attribution_receipts receipt
       WHERE receipt.source_kind='turn' AND receipt.source_id=candidate::uuid::text
         AND receipt.workspace_id=NEW.workspace_id AND receipt.account_id=NEW.account_id;
   END IF;
   IF human IS NOT NULL THEN
-    INSERT INTO workspace_allowance_counters (workspace_id,account_id,period_key,subject_id,used)
+    INSERT INTO opengeni_private.workspace_allowance_counters (workspace_id,account_id,period_key,subject_id,used)
       VALUES (NEW.workspace_id,NEW.account_id,p.period_key,human,amount)
-    ON CONFLICT (workspace_id,period_key,subject_id) DO UPDATE SET used=workspace_allowance_counters.used+excluded.used;
+    ON CONFLICT (workspace_id,period_key,subject_id) DO UPDATE SET used=opengeni_private.workspace_allowance_counters.used+excluded.used;
   END IF;
   PERFORM capture_usage_allowance_period(NEW.account_id,NEW.workspace_id,cfg,clock_timestamp());
-  UPDATE workspace_usage_allowances SET maintenance_next_at=least(maintenance_next_at,clock_timestamp())
+  UPDATE opengeni_private.workspace_usage_allowances SET maintenance_next_at=least(maintenance_next_at,clock_timestamp())
     WHERE workspace_id=NEW.workspace_id;
   IF opened=1 THEN
     DELETE FROM opengeni_private.usage_allowance_capabilities WHERE backend_pid=pg_backend_pid()
@@ -1059,10 +1127,10 @@ BEGIN
   END LOOP;
   FOR object_name IN SELECT c.oid::regclass::text FROM pg_class c
     JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE (n.nspname=current_schema() AND c.relname IN ('workspace_usage_allowances',
-      'workspace_member_allowances','workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods'))
-      OR (n.nspname=current_schema() AND c.relname='usage_allowance_attribution_receipts')
-      OR (n.nspname='opengeni_private' AND c.relname='usage_allowance_capabilities')
+    WHERE n.nspname='opengeni_private' AND c.relname IN ('workspace_usage_allowances',
+      'workspace_member_allowances','workspace_allowance_grants','workspace_allowance_counters',
+      'workspace_allowance_notifications','workspace_allowance_periods','workspace_allowance_clear_receipts',
+      'usage_allowance_attribution_receipts','usage_allowance_capabilities')
   LOOP
     FOR role_name IN SELECT DISTINCT r.rolname FROM pg_class c,
       LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl

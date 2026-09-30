@@ -103,7 +103,7 @@ test("video refund reverses exact original member/included/FEFO allocation, not 
   });
   const [allocation] = await shared.admin`
     SELECT amount,included_used,grants_used,grant_allocations,human_subject_id,period_key
-    FROM workspace_video_allowance_allocations WHERE operation_id=${operationId}`;
+    FROM opengeni_private.workspace_video_allowance_allocations WHERE operation_id=${operationId}`;
   expect(Number(allocation?.amount)).toBe(130);
   expect(Number(allocation?.included_used)).toBe(100);
   expect(Number(allocation?.grants_used)).toBe(30);
@@ -131,7 +131,7 @@ test("video refund reverses exact original member/included/FEFO allocation, not 
   await applyCreditLedgerEntry(client.db, refund);
   await applyCreditLedgerEntry(client.db, refund);
   const originalCounters = await shared.admin`
-    SELECT subject_id,used,included_used,grants_used FROM workspace_allowance_counters
+    SELECT subject_id,used,included_used,grants_used FROM opengeni_private.workspace_allowance_counters
     WHERE workspace_id=${scope.workspaceId} AND period_key=${allocation!.period_key}`;
   expect(originalCounters).toHaveLength(2);
   for (const counter of originalCounters) {
@@ -140,7 +140,7 @@ test("video refund reverses exact original member/included/FEFO allocation, not 
     expect(Number(counter.grants_used)).toBe(0);
   }
   const grants = await shared.admin`
-    SELECT operation_id,remaining::integer FROM workspace_allowance_grants
+    SELECT operation_id,remaining::integer FROM opengeni_private.workspace_allowance_grants
     WHERE workspace_id=${scope.workspaceId} ORDER BY operation_id`;
   expect([...grants]).toEqual([
     { operation_id: "early", remaining: 20 },

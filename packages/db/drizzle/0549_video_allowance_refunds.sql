@@ -4,13 +4,13 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
-ALTER TABLE workspace_video_allowance_allocations
+ALTER TABLE opengeni_private.workspace_video_allowance_allocations
   ADD CONSTRAINT workspace_video_allowance_allocations_debit_fk
     FOREIGN KEY (ledger_id) REFERENCES credit_ledger_entries(id) ON DELETE CASCADE,
   ADD CONSTRAINT workspace_video_allowance_allocations_refund_fk
     FOREIGN KEY (reversed_by_ledger_id) REFERENCES credit_ledger_entries(id);
 CREATE UNIQUE INDEX workspace_video_allowance_allocations_refund_idx
-  ON workspace_video_allowance_allocations(reversed_by_ledger_id)
+  ON opengeni_private.workspace_video_allowance_allocations(reversed_by_ledger_id)
   WHERE reversed_by_ledger_id IS NOT NULL;
 
 -- Read the exact original ledger through the existing owner capability. This
@@ -26,7 +26,7 @@ END $video_ledger_policy$;
 CREATE OR REPLACE FUNCTION reverse_video_allowance_refund() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
-  allocation workspace_video_allowance_allocations%ROWTYPE;
+  allocation opengeni_private.workspace_video_allowance_allocations%ROWTYPE;
   debit credit_ledger_entries%ROWTYPE;
   grant_allocation jsonb;
   restored bigint:=0;
@@ -51,7 +51,7 @@ BEGIN
     (pg_backend_pid(),pg_current_xact_id(),TG_TABLE_SCHEMA,NEW.account_id,NEW.workspace_id)
     ON CONFLICT DO NOTHING;
   GET DIAGNOSTICS opened=ROW_COUNT;
-  SELECT * INTO allocation FROM workspace_video_allowance_allocations
+  SELECT * INTO allocation FROM opengeni_private.workspace_video_allowance_allocations
     WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
       AND operation_id::text=NEW.source_id FOR UPDATE;
   IF FOUND THEN
@@ -72,7 +72,7 @@ BEGIN
       END IF;
       -- Same committed ledger replay has no second accounting effect.
     ELSE
-      UPDATE workspace_allowance_counters SET used=used-allocation.amount,
+      UPDATE opengeni_private.workspace_allowance_counters SET used=used-allocation.amount,
         included_used=included_used-allocation.included_used,
         grants_used=grants_used-allocation.grants_used
       WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
@@ -82,7 +82,7 @@ BEGIN
         RAISE EXCEPTION 'Video allowance refund counter unavailable' USING ERRCODE='23514';
       END IF;
       IF allocation.human_subject_id IS NOT NULL THEN
-        UPDATE workspace_allowance_counters SET used=used-allocation.amount
+        UPDATE opengeni_private.workspace_allowance_counters SET used=used-allocation.amount
         WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
           AND period_key=allocation.period_key AND subject_id=allocation.human_subject_id;
         GET DIAGNOSTICS affected=ROW_COUNT;
@@ -90,10 +90,10 @@ BEGIN
           RAISE EXCEPTION 'Video allowance refund member counter unavailable' USING ERRCODE='23514';
         END IF;
       END IF;
-      SELECT coalesce(end_at,updated_at) INTO snapshot_boundary FROM workspace_allowance_periods
+      SELECT coalesce(end_at,updated_at) INTO snapshot_boundary FROM opengeni_private.workspace_allowance_periods
         WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id AND period_key=allocation.period_key;
       FOR grant_allocation IN SELECT value FROM jsonb_array_elements(allocation.grant_allocations) LOOP
-        UPDATE workspace_allowance_grants SET remaining=remaining+(grant_allocation->>'credits')::bigint
+        UPDATE opengeni_private.workspace_allowance_grants SET remaining=remaining+(grant_allocation->>'credits')::bigint
           WHERE account_id=NEW.account_id AND workspace_id=NEW.workspace_id
             AND operation_id=grant_allocation->>'operationId'
           RETURNING expires_at INTO grant_expiry;
@@ -106,7 +106,7 @@ BEGIN
         -- Append just this restored portion using the original period's
         -- historical expiry boundary, without changing its policy/member facts.
         IF snapshot_boundary IS NOT NULL THEN
-          UPDATE workspace_allowance_periods SET
+          UPDATE opengeni_private.workspace_allowance_periods SET
             grants_remaining=grants_remaining+CASE WHEN grant_expiry IS NULL
               OR grant_expiry>snapshot_boundary THEN (grant_allocation->>'credits')::bigint ELSE 0 END,
             grants_snapshot=grants_snapshot||jsonb_build_array(jsonb_build_object(
@@ -117,11 +117,11 @@ BEGIN
       IF restored<>allocation.grants_used THEN
         RAISE EXCEPTION 'Video allowance refund allocation mismatch' USING ERRCODE='23514';
       END IF;
-      UPDATE workspace_video_allowance_allocations SET reversed_by_ledger_id=NEW.id
+      UPDATE opengeni_private.workspace_video_allowance_allocations SET reversed_by_ledger_id=NEW.id
         WHERE ledger_id=allocation.ledger_id;
       -- Current admission excludes expired grants even after their remaining
       -- balance is restored. Original-period counters are never moved forward.
-      SELECT config INTO cfg FROM workspace_usage_allowances WHERE workspace_id=NEW.workspace_id;
+      SELECT config INTO cfg FROM opengeni_private.workspace_usage_allowances WHERE workspace_id=NEW.workspace_id;
       PERFORM capture_usage_allowance_period(NEW.account_id,NEW.workspace_id,cfg,clock_timestamp());
     END IF;
   END IF;

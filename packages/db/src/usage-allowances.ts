@@ -12,6 +12,7 @@ export type WorkspaceAllowanceConfig = {
   thresholds?: { workspace?: number[]; member?: number[] };
 };
 export type WorkspaceAllowance = WorkspaceAllowanceConfig & { version: number };
+export type WorkspaceAllowanceState = { version: number; config: WorkspaceAllowance | null };
 export type AllowanceStatus = "ok" | "warning" | "exhausted";
 export type AllowanceUsage = {
   limit: number | null;
@@ -116,16 +117,31 @@ async function command<T>(db: Database, input: Scope & Record<string, unknown>):
     throw new Error("Agent attempts cannot change usage allowances");
   }
   try {
-    return await withRlsContext(db, input, async (scoped) => {
-      if (typeof input.actorSubjectId === "string")
-        await setSubjectRlsContext(scoped, input.actorSubjectId);
-      const [row] = await rawRows<{ result: T }>(
-        scoped,
-        sql`select usage_allowance_command(${JSON.stringify(input)}::jsonb) as result`,
-      );
-      if (!row) throw new Error("Usage allowance command returned no result");
-      return row.result;
-    });
+    const mutation = ["set", "clear", "member", "grant"].includes(String(input.action));
+    return await withRlsContext(
+      db,
+      input,
+      async (scoped) => {
+        if (mutation) {
+          // The organization lifecycle can hold this fence while waiting for
+          // exclusive tenancy. Never acquire shared tenancy ahead of it.
+          await scoped.execute(sql`select pg_advisory_xact_lock(
+          hashtextextended(${`organization-membership:${input.accountId}`},0))`);
+          await scoped.execute(sql`select pg_advisory_xact_lock_shared(
+          hashtextextended(${`session-tenancy:${input.workspaceId}`},0))`);
+        }
+        if (typeof input.actorSubjectId === "string")
+          await setSubjectRlsContext(scoped, input.actorSubjectId);
+        const [row] = await rawRows<{ result: T }>(
+          scoped,
+          sql`select usage_allowance_command(${JSON.stringify(input)}::jsonb) as result`,
+        );
+        if (!row) throw new Error("Usage allowance command returned no result");
+        return row.result;
+      },
+      undefined,
+      mutation ? "none" : "shared",
+    );
   } catch (error) {
     const cause = error as { code?: string; cause?: { code?: string } };
     if ((cause.code ?? cause.cause?.code) === "40001")
@@ -146,6 +162,14 @@ export async function getWorkspaceAllowance(
   input: Scope,
 ): Promise<WorkspaceAllowance | null> {
   return await command(db, { ...input, action: "get" });
+}
+
+/** Includes the lifecycle revision even when no configuration exists. */
+export async function getWorkspaceAllowanceState(
+  db: Database,
+  input: Scope,
+): Promise<WorkspaceAllowanceState> {
+  return await command(db, { ...input, action: "state" });
 }
 
 export async function setWorkspaceAllowance(
@@ -174,10 +198,15 @@ export async function setWorkspaceAllowance(
 
 export async function clearWorkspaceAllowance(
   db: Database,
-  input: Scope & Actor & { expectedVersion: number },
+  input: Scope & Actor & { expectedVersion: number; operationId?: string },
 ): Promise<{ version: number }> {
   version(input.expectedVersion);
   if (input.expectedVersion === 0) throw new UsageAllowanceVersionConflictError();
+  if (
+    input.operationId !== undefined &&
+    (!input.operationId.trim() || new TextEncoder().encode(input.operationId).length > 256)
+  )
+    throw new Error("operationId must be non-empty and at most 256 bytes");
   return await command(db, { ...input, ...actor(input), action: "clear" });
 }
 

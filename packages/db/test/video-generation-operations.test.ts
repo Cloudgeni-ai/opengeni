@@ -155,7 +155,7 @@ async function managedFixture(creditMicros: number) {
 
 async function workspaceVideoAllowanceUsed(workspaceId: string): Promise<number> {
   const [row] = await shared!.admin`
-    SELECT coalesce(sum(used),0)::bigint AS used FROM workspace_allowance_counters
+    SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
     WHERE workspace_id=${workspaceId} AND subject_id=''`;
   return Number(row?.used ?? 0);
 }

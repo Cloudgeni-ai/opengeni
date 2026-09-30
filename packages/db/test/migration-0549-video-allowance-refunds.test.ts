@@ -35,7 +35,9 @@ test("video refund correction binds original ledger, keeps exact allocations and
   expect(source).toStartWith("-- deployment-mode: rolling");
   expect(source).not.toMatch(/CREATE (?:TABLE|TRIGGER)/u);
   expect(source).toContain("FOREIGN KEY (ledger_id) REFERENCES credit_ledger_entries(id)");
-  expect(source).toContain("ON workspace_video_allowance_allocations(reversed_by_ledger_id)");
+  expect(source).toContain(
+    "ON opengeni_private.workspace_video_allowance_allocations(reversed_by_ledger_id)",
+  );
   expect(source).toContain("FOR SELECT USING(current_user=%L");
   expect(source).toContain("usage_allowance_capability_active(account_id,workspace_id)");
   expect(source).toContain(

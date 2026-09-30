@@ -68,7 +68,7 @@ describe("usage allowance projections and validation", () => {
     expect(source).not.toMatch(/sum\([^)]*(amount_micros|quantity)/);
     expect(source).toContain("transaction_id=pg_current_xact_id_if_assigned()");
     expect(source).toContain("period_row.period_key:=p_input->>'period';");
-    expect(source).toContain("CREATE TABLE usage_allowance_attribution_receipts");
+    expect(source).toContain("CREATE TABLE opengeni_private.usage_allowance_attribution_receipts");
     expect(source).toContain("source_kind='schedule'");
     expect(source).not.toMatch(/(?:ALTER|DROP|CREATE) POLICY session_visibility/iu);
     const usageBranch = source.slice(

@@ -12500,7 +12500,7 @@ export const creditLedgerEntries = pgTable(
 );
 
 /** Content-free immutable accepted billing facts; no runtime table privileges. */
-export const usageAllowanceAttributionReceipts = pgTable(
+export const usageAllowanceAttributionReceipts = opengeniPrivateSchema.table(
   "usage_allowance_attribution_receipts",
   {
     accountId: uuid("account_id").notNull(),
@@ -12526,7 +12526,25 @@ export const usageAllowanceAttributionReceipts = pgTable(
 );
 
 /** EXECUTE-only lifecycle/counter storage; migration 0547 owns FORCE-RLS policy. */
-export const workspaceUsageAllowances = pgTable(
+export const workspaceAllowanceClearReceipts = opengeniPrivateSchema.table(
+  "workspace_allowance_clear_receipts",
+  {
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<{ version: number }>().notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+  }),
+);
+
+export const workspaceUsageAllowances = opengeniPrivateSchema.table(
   "workspace_usage_allowances",
   {
     workspaceId: uuid("workspace_id").primaryKey(),
@@ -12555,7 +12573,7 @@ export const workspaceUsageAllowances = pgTable(
     }).onDelete("cascade"),
   }),
 );
-export const workspaceMemberAllowances = pgTable(
+export const workspaceMemberAllowances = opengeniPrivateSchema.table(
   "workspace_member_allowances",
   {
     workspaceId: uuid("workspace_id").notNull(),
@@ -12575,7 +12593,7 @@ export const workspaceMemberAllowances = pgTable(
     }).onDelete("cascade"),
   }),
 );
-export const workspaceAllowanceGrants = pgTable(
+export const workspaceAllowanceGrants = opengeniPrivateSchema.table(
   "workspace_allowance_grants",
   {
     workspaceId: uuid("workspace_id").notNull(),
@@ -12599,7 +12617,7 @@ export const workspaceAllowanceGrants = pgTable(
       .where(sql`${table.remaining} > 0`),
   }),
 );
-export const workspaceAllowanceCounters = pgTable(
+export const workspaceAllowanceCounters = opengeniPrivateSchema.table(
   "workspace_allowance_counters",
   {
     workspaceId: uuid("workspace_id").notNull(),
@@ -12618,7 +12636,7 @@ export const workspaceAllowanceCounters = pgTable(
     }).onDelete("cascade"),
   }),
 );
-export const workspaceAllowanceNotifications = pgTable(
+export const workspaceAllowanceNotifications = opengeniPrivateSchema.table(
   "workspace_allowance_notifications",
   {
     id: uuid("id").primaryKey().defaultRandom(),
@@ -12643,7 +12661,7 @@ export const workspaceAllowanceNotifications = pgTable(
     }).onDelete("cascade"),
   }),
 );
-export const workspaceAllowancePeriods = pgTable(
+export const workspaceAllowancePeriods = opengeniPrivateSchema.table(
   "workspace_allowance_periods",
   {
     workspaceId: uuid("workspace_id").notNull(),
@@ -12668,7 +12686,7 @@ export const workspaceAllowancePeriods = pgTable(
   }),
 );
 
-export const workspaceVideoAllowanceAllocations = pgTable(
+export const workspaceVideoAllowanceAllocations = opengeniPrivateSchema.table(
   "workspace_video_allowance_allocations",
   {
     ledgerId: uuid("ledger_id")

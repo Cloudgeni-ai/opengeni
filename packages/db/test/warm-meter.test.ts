@@ -238,11 +238,11 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       WHERE idempotency_key=${`debit:sandbox.warm_cost:${ws.groupId}:${epoch}:1`}`;
     expect(debit?.metadata).toEqual({ initiatingHumanSubjectId: "human:initiator" });
     const [memberUsage] = await admin`
-      SELECT coalesce(sum(used),0)::bigint AS used FROM workspace_allowance_counters
+      SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
       WHERE workspace_id=${ws.workspaceId} AND subject_id='human:initiator'`;
     expect(Number(memberUsage?.used)).toBe(result.costMicros);
     const [observerUsage] = await admin`
-      SELECT coalesce(sum(used),0)::bigint AS used FROM workspace_allowance_counters
+      SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
       WHERE workspace_id=${ws.workspaceId} AND subject_id='human:later-observer'`;
     expect(Number(observerUsage?.used)).toBe(0);
     await expect(
