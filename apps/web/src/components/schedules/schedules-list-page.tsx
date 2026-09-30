@@ -27,7 +27,6 @@ import { scheduledTaskDriftDismissal } from "@/lib/scheduled-task-drift-dismissa
 import {
   loadSessionSchedules,
   scheduledTaskPolicyDriftLines,
-  scheduledTaskStateLabel,
   visibleScheduledTaskPolicyDrift,
 } from "@/lib/scheduled-tasks";
 import type { ScheduledTask, ScheduledTaskAccessAttention, ScheduledTaskRun } from "@/types";
@@ -107,6 +106,26 @@ const TEMPLATE_ICONS: Record<string, ReactNode> = {
   "dependency-pr": <GitPullRequestIcon />,
   "cost-check": <TrendingUpIcon />,
 };
+
+/**
+ * True on phone widths. Rows keep one height there, so the paused row's
+ * Resume stays in its ⋯ menu instead of dropping onto a line of its own.
+ */
+function useNarrow(): boolean {
+  const query = "(max-width: 639px)";
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia?.(query).matches === true,
+  );
+  useEffect(() => {
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
 
 const COLUMNS: RowListColumn[] = [
   { id: "next", label: "Next run", width: 128 },
@@ -232,6 +251,7 @@ export function SchedulesListPage({
   const canCreate = access.canManage;
   const canAsk = useCanCreateScheduleWithAgent(workspaceId);
   const ask = useCreateWithOpenGeni(workspaceId);
+  const narrow = useNarrow();
 
   return (
     <>
@@ -272,7 +292,7 @@ export function SchedulesListPage({
       ) : null}
       <div className="mt-6 min-w-0">
         {viewState === "loading" ? (
-          <RowList label="Schedules" columns={columns} busy>
+          <RowList label="Schedules" columns={columns} flush busy>
             <ListRowSkeleton count={4} />
           </RowList>
         ) : viewState === "error" ? (
@@ -304,26 +324,24 @@ export function SchedulesListPage({
             onTemplate={(template) => go.create({ template })}
           />
         ) : (
-          <RowList label="Schedules" columns={columns}>
+          <RowList label="Schedules" columns={columns} flush>
             {sorted.map((task) => {
               const perms = schedulePermissions(task, access);
               const paused = task.status === "paused";
               const busy = actions.busyTaskId === task.id;
-              const muted = !scheduledTaskStateLabel(task).active;
               const href = schedulePath(workspaceId, task.id);
               return (
                 <ListRow
                   key={task.id}
                   leading={<ScheduleTile task={task} />}
-                  title={muted ? <span className="text-fg-muted">{task.name}</span> : task.name}
-                  titleAddon={
-                    <AccessBadge
-                      task={task}
-                      attention={list.attention[task.id] ?? null}
-                      own={perms.own}
-                      workspaceId={workspaceId}
-                    />
-                  }
+                  // Titles stay in fg; a paused schedule says so in its tile and Next run.
+                  title={task.name}
+                  status={accessBadge({
+                    task,
+                    attention: list.attention[task.id] ?? null,
+                    own: perms.own,
+                    workspaceId,
+                  })}
                   description={scheduleWords(task.schedule, clock).short}
                   cells={{
                     next: <NextRunValue task={task} now={clock} />,
@@ -337,7 +355,7 @@ export function SchedulesListPage({
                       : {}),
                   }}
                   control={
-                    paused && perms.canPauseOrDelete ? (
+                    paused && perms.canPauseOrDelete && !narrow ? (
                       <Button
                         type="button"
                         variant="outline"
@@ -386,7 +404,7 @@ export function SchedulesListPage({
  * One quiet badge per row; the schedule's own page says what happened and
  * offers the refresh. Drift is shown only to the owner, who can act on it.
  */
-function AccessBadge({
+function accessBadge({
   task,
   attention,
   own,
@@ -396,7 +414,7 @@ function AccessBadge({
   attention: ScheduledTaskAccessAttention | null;
   own: boolean;
   workspaceId: string;
-}) {
+}): ReactNode {
   const attentionText = scheduledTaskAttentionText(attention);
   if (attentionText) {
     return (
@@ -405,14 +423,14 @@ function AccessBadge({
       </StatusBadge>
     );
   }
-  if (!own) return null;
+  if (!own) return undefined;
   const drift = visibleScheduledTaskPolicyDrift(
     task.policyDrift,
     scheduledTaskDriftDismissal(workspaceId, task),
     task.executionDigest,
   );
   const lines = scheduledTaskPolicyDriftLines(drift);
-  if (lines.length === 0) return null;
+  if (lines.length === 0) return undefined;
   return (
     <StatusBadge variant="dot" tone="attention" reason={lines.join(" ")}>
       Access out of date

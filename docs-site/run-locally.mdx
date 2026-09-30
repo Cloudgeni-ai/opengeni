@@ -67,6 +67,8 @@ Wait for `OpenGeni dev stack ready` before opening the printed web URL. Infrastr
 | `OPENGENI_SANDBOX_BACKEND`              | Where sessions run: `local` (default), `docker`, `modal`, `none`, or a cloud provider     |
 | `OPENGENI_SANDBOX_PREPARATION_PROFILES` | Opt-in profiles such as `azure` or `github` that pre-authenticate CLIs inside the sandbox |
 
+Connect Anthropic API keys from workspace or organization **Settings → Models**. Claude subscription sign-in is separately available when the operator enables `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true` (default off). Choose **Sign in to Claude**, approve access on Claude's page, then paste the authorization code. This enables usage checks, reset times and automatic token renewal. **Use a setup token** is an optional fallback with usage readings after model calls and manual token replacement. Subscriptions use your Claude plan limits; Anthropic API keys use API billing. Connecting makes no model calls.
+
 Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
 
 ## Stop and clean up

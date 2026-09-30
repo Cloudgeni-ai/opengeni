@@ -1,9 +1,15 @@
+import { measureMcpPhase } from "@opengeni/observability";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
+import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
+import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
+export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
@@ -1058,13 +1064,20 @@ export async function generateSessionTitle(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
-  const response = binding
-    ? await new CompactionResponsesModel(
-        binding.client,
-        binding.modelId,
-        binding.provider,
-      ).fetchResponse(request)
-    : await options.model!.getResponse(request);
+  const response =
+    binding?.provider.api === "anthropic-messages"
+      ? await new AnthropicMessagesModel(
+          binding.provider,
+          binding.modelId,
+          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
+        ).getResponse(request)
+      : binding
+        ? await new CompactionResponsesModel(
+            binding.client,
+            binding.modelId,
+            binding.provider,
+          ).fetchResponse(request)
+        : await options.model!.getResponse(request);
   return {
     title: normalizeGeneratedSessionTitle(
       extractResponseOutputText(response),
@@ -1121,7 +1134,10 @@ async function generateChatSessionTitle(
  */
 function responseStoppedAtOutputLimit(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
-  return (response as { status?: unknown }).status === "incomplete";
+  return (
+    (response as { status?: unknown }).status === "incomplete" ||
+    (response as ModelResponse).providerData?.anthropic?.stopReason === "max_tokens"
+  );
 }
 
 const INLINE_REASONING_CLOSE_TAG = /<\/(?:think|thinking|reasoning)>/giu;
@@ -1298,7 +1314,14 @@ export async function summarizeForCompaction(
       };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+    response =
+      provider.api === "anthropic-messages"
+        ? await new AnthropicMessagesModel(
+            provider,
+            model,
+            instrumentedModelFetch(provider.id, globalThis.fetch),
+          ).getResponse(request)
+        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1306,7 +1329,10 @@ export async function summarizeForCompaction(
   if (usage) {
     await options.onUsage?.(usage);
   }
-  if (isFailedCompactionProviderResponse(response)) {
+  if (
+    (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
+    isFailedCompactionProviderResponse(response)
+  ) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
   }
   const summary = extractResponseOutputText(response).trim();
@@ -4080,9 +4106,13 @@ export type PrepareToolsOptions = {
   // Immutable human authority used only for subject-owned connection lookup.
   // This is intentionally separate from the worker's first-party MCP identity.
   credentialSubjectId?: string;
-  // The turn's frozen causal human, advertised to MCP servers in the
-  // `_meta.opengeni` identity of every tools/call. Informational, never authority.
+  // The turn's frozen causal human. Informational, never authority.
   initiatingHumanSubjectId?: string | null;
+  initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
+  /** Trusted selected session-attached remote identities, never workspace defaults. */
+  sessionAttachedRemoteMcpTargets?: readonly { id: string; url: string }[];
+  /** Renewable, attempt-local headers; never copied into the MCP registry. */
+  runMcpCredentials?: RunMcpCredentials;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -4431,6 +4461,23 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  const identityTargets = selectedSessionRemoteMcpTargets(
+    settings,
+    options.sessionAttachedRemoteMcpTargets ?? [],
+    tools,
+    options.localMcpServers,
+  );
+  options = { ...options, sessionAttachedRemoteMcpTargets: identityTargets };
+  options.runMcpCredentials?.assertRemoteTargets(
+    settings.mcpServers.filter(
+      (config) =>
+        tools.some((tool) => tool.id === config.id) &&
+        !config.connectionRef &&
+        !localRegistry.has(config.id) &&
+        !isFirstPartyMcpServer(settings, config) &&
+        !isCodexAppsMcpServer(config),
+    ),
+  );
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // Codex Apps retains its sanitizer-specific Bun fetch path. Ordinary MCP
   // traffic uses @opengeni/network's explicit undici.request() adapter under
@@ -4501,7 +4548,7 @@ export async function prepareAgentTools(
         const baseFetch = isCodexAppsMcpServer(config)
           ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
           : mcpFetchImpl;
-        const guardedFetch = guardedMcpFetch(
+        const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
@@ -4513,6 +4560,34 @@ export async function prepareAgentTools(
                 : {}),
           },
         );
+        const guardedFetch: typeof guardedTransport = async (input, init) => {
+          const requestInit = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          let response: Response;
+          try {
+            response = await guardedTransport(input, requestInit);
+          } catch (error) {
+            if (!options.runMcpCredentials?.has(config.id)) throw error;
+            // Transport failures may echo request headers in their message or
+            // cause chain. This exception can reach required-tool history.
+            // eslint-disable-next-line preserve-caught-error -- the raw cause can expose credentials
+            throw new Error("MCP credentialed transport request failed");
+          }
+          if (!response.ok && options.runMcpCredentials?.has(config.id)) {
+            await response.body?.cancel().catch(() => undefined);
+            return new Response("MCP credentialed transport request failed", {
+              status: response.status,
+              // Keep only the structural denial. Provider-controlled scope,
+              // resource, realm and descriptions may echo request secrets,
+              // and the broker publishes scope/resource in auth-needed events.
+              headers:
+                parseWwwAuthenticate(response.headers.get("www-authenticate")).error ===
+                "insufficient_scope"
+                  ? { "www-authenticate": 'Bearer error="insufficient_scope"' }
+                  : {},
+            });
+          }
+          return response;
+        };
         const optional = tool.optional === true;
         const fetchImpl = isCodexAppsMcpServer(config)
           ? codexAppsAuthFetch(guardedFetch, settings, options)
@@ -4605,6 +4680,7 @@ export async function prepareAgentTools(
                 }
               : {}),
           });
+        if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
           new PrefixedMcpServer(
             innerServer,
@@ -4625,6 +4701,7 @@ export async function prepareAgentTools(
               ? options.refreshOwnedCommand
               : undefined,
             options.mcpAccountLabels?.get(config.id),
+            options.runMcpCredentials,
           ),
           config,
           options,
@@ -4997,6 +5074,58 @@ function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null
   };
 }
 
+/** Narrow trusted attachments to exact selected remote routes, never ID aliases. */
+export function selectedSessionRemoteMcpTargets(
+  settings: Settings,
+  attachments: readonly { id: string; url: string }[],
+  tools: readonly ToolRef[],
+  localServers: readonly Pick<LocalMcpServerRegistration, "id">[] = [],
+): { id: string; url: string }[] {
+  return attachments.flatMap((target) => {
+    const url = normalizedCredentialTargetUrl(target.url);
+    if (
+      !url ||
+      !tools.some((tool) => tool.kind === "mcp" && tool.id === target.id) ||
+      localServers.some((server) => server.id === target.id)
+    ) {
+      return [];
+    }
+    const configs = settings.mcpServers.filter(
+      (config) => config.id === target.id && normalizedCredentialTargetUrl(config.url) === url,
+    );
+    if (configs.length !== 1) return [];
+    const config = configs[0]!;
+    if (
+      config.connectionRef ||
+      isFirstPartyMcpServer(settings, config) ||
+      isCodexAppsMcpServer(config) ||
+      BUILT_IN_MCP_BRIDGE_ADAPTERS.some((adapter) =>
+        adapter.matches({
+          url: config.url,
+          ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
+        }),
+      )
+    ) {
+      return [];
+    }
+    if (
+      attachments.filter((candidate) => normalizedCredentialTargetUrl(candidate.url) === url)
+        .length !== 1
+    ) {
+      return [];
+    }
+    return [{ id: target.id, url }];
+  });
+}
+
+function normalizedCredentialTargetUrl(value: string): string | null {
+  try {
+    return normalizeCredentialProviderMcpUrl(value);
+  } catch {
+    return null;
+  }
+}
+
 async function prepareAttemptToolEnvironment(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
@@ -5005,13 +5134,20 @@ async function prepareAttemptToolEnvironment(
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
-  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry, {
-    workspaceId: scope.workspaceId,
-    sessionId: scope.sessionId,
-    turnId: scope.turnId,
-    attemptId: scope.attemptId,
-    initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
-  });
+  const prepared = await prepareToolGatewayDefinitionsFromServers(
+    servers,
+    registry,
+    {
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      attemptId: scope.attemptId,
+      initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
+      initiatingHumanExternalIdentity: options.initiatingHumanExternalIdentity ?? null,
+    },
+    options.sessionAttachedRemoteMcpTargets,
+    options.runMcpCredentials,
+  );
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
       ...prepared.definitions.map((definition) => ({
@@ -5263,12 +5399,15 @@ export type McpCallIdentity = {
   turnId: string;
   attemptId: string;
   initiatingHumanSubjectId: string | null;
+  initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
 };
 
 async function prepareToolGatewayDefinitionsFromServers(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   callIdentity?: McpCallIdentity,
+  externalIdentityTargets: readonly { id: string; url: string }[] = [],
+  runMcpCredentials?: RunMcpCredentials,
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: ToolGatewayDefinition[];
@@ -5287,6 +5426,29 @@ async function prepareToolGatewayDefinitionsFromServers(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
     async ({ server, config }): Promise<ToolGatewayDefinition[]> => {
+      const internalIdentity = callIdentity ? { ...callIdentity } : undefined;
+      if (internalIdentity) delete internalIdentity.initiatingHumanExternalIdentity;
+      const serverIdentity = callIdentity
+        ? {
+            workspaceId: callIdentity.workspaceId,
+            sessionId: callIdentity.sessionId,
+            turnId: callIdentity.turnId,
+            attemptId: callIdentity.attemptId,
+            initiatingHumanSubjectId: callIdentity.initiatingHumanSubjectId,
+            ...internalIdentity,
+            ...(externalIdentityTargets.some(
+              (target) =>
+                target.id === config.id &&
+                normalizedCredentialTargetUrl(target.url) ===
+                  normalizedCredentialTargetUrl(config.url),
+            )
+              ? {
+                  initiatingHumanExternalIdentity:
+                    callIdentity.initiatingHumanExternalIdentity ?? null,
+                }
+              : {}),
+          }
+        : undefined;
       const listed = await server.freezeTools();
       return listed.map((tool) => {
         const toolName = server.unprefixedToolName(tool.name);
@@ -5323,11 +5485,20 @@ async function prepareToolGatewayDefinitionsFromServers(
               }
             : {}),
           execute: async (args, context) => {
+            try {
+              runMcpCredentials?.assertAvailable(config.id);
+            } catch (error) {
+              if (!isRunMcpCredentialError(error)) throw error;
+              return {
+                isError: true,
+                content: [{ type: "text", text: error.message }],
+              };
+            }
             const execute = async () =>
               await server.executeCatalogTool(
                 toolName,
                 args,
-                attemptToolCallMeta(server.registryId, context, callIdentity),
+                attemptToolCallMeta(server.registryId, context, serverIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                 },
@@ -5384,7 +5555,13 @@ export function attemptToolCallMeta(
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
-    ...(callIdentity ? { opengeni: { ...callIdentity } } : {}),
+    ...(callIdentity
+      ? {
+          opengeni: Object.fromEntries(
+            Object.entries(callIdentity).filter(([, value]) => value !== undefined),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -5656,7 +5833,11 @@ async function authorizeResolvedProviderRequest(
   result: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
 ): Promise<boolean> {
   try {
-    return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+    return await measureMcpPhase(
+      "provider_authorization",
+      () => (result.authorizeProviderRequest ? result.authorizeProviderRequest() : true),
+      (allowed) => (allowed ? "completed" : "rejected"),
+    );
   } catch {
     return false;
   }
@@ -5749,7 +5930,11 @@ async function resolveConnectionForRequest(
     ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
-    return await options.resolveCredential(request);
+    return await measureMcpPhase(
+      "credential_resolution",
+      () => options.resolveCredential!(request),
+      (result) => (result.status === "ok" ? "completed" : "rejected"),
+    );
   } catch {
     return {
       status: "auth_needed",
@@ -7285,6 +7470,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
     private readonly accountLabel?: string,
+    private readonly runMcpCredentials?: RunMcpCredentials,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -7320,7 +7506,7 @@ export class PrefixedMcpServer implements MCPServer {
       if (this.inner instanceof PrefixedMcpServer) {
         await this.inner.connectWithLifecycleMetric(false);
       } else {
-        await this.inner.connect();
+        await measureMcpPhase("client_setup", () => this.inner.connect());
       }
       delete this.lifecycleFailures.connect;
     } catch (error) {
@@ -7612,6 +7798,7 @@ export class PrefixedMcpServer implements MCPServer {
     const completeWait =
       unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
     try {
+      this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         const projected = this.inner.callToolResult
           ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
@@ -7664,6 +7851,13 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      if (isRunMcpCredentialError(error)) {
+        recordOutcome("auth_needed");
+        return boundedMcpToolResult({
+          isError: true,
+          content: [{ type: "text", text: error.message }],
+        });
+      }
       // A brokered tools/call that receives 401 may already have changed provider
       // state. The broker refreshed credentials for future requests but did not
       // replay this call. Preserve that ambiguity as an explicit model-visible
@@ -10200,6 +10394,9 @@ export function repositoryUsesSandboxClone(
     return false;
   }
   return (
+    // Unbound repositories must wait until run credentials have been delivered.
+    // Manifest Git entries materialize before that helper is available.
+    !repositoryHasExplicitGitConnection(resource) ||
     // A best-effort repository must go through the clone hook: the SDK's
     // manifest materialization has no per-entry failure tolerance.
     resource.optional === true ||
@@ -10207,6 +10404,18 @@ export function repositoryUsesSandboxClone(
     Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
     Boolean(resource.provider)
+  );
+}
+
+/** An explicit platform selection never falls back to product Git credentials. */
+export function repositoryHasExplicitGitConnection(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): boolean {
+  return (
+    resource.connectionId !== undefined ||
+    resource.credentialBindingId !== undefined ||
+    resource.connectionType !== undefined ||
+    resource.githubInstallationId !== undefined
   );
 }
 
@@ -10551,6 +10760,11 @@ function gitCredentialHelperBindingCaseLines(
   bindings: GitCredentialBindingSeed[],
 ): string[] {
   const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  const providerStoreRemotes = new Set(
+    resources
+      .filter((resource) => !repositoryHasExplicitGitConnection(resource))
+      .map((resource) => resource.uri),
+  );
   return runtimeGitBindingDescriptors(resources)
     .filter(
       (descriptor) =>
@@ -10562,7 +10776,7 @@ function gitCredentialHelperBindingCaseLines(
       const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
-          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) ${providerStoreRemotes.has(descriptor.uri) ? '[ -z "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ] || exit 0; ' : ""}username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
       );
     });
 }
@@ -10780,6 +10994,14 @@ function gitCredentialHelperCommandLines(
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );
   });
+  const providerStoreOriginHosts = runtimeGitBindingDescriptors(
+    resources.filter((resource) => !repositoryHasExplicitGitConnection(resource)),
+  ).flatMap((item) =>
+    gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
+      (uri) =>
+        `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.host)}; return 0 ;;`,
+    ),
+  );
   const soleWrapperHashes = [...bindingProviders.entries()].flatMap(([provider, ids]) => {
     if (ids.size !== 1) return [];
     const descriptor = wrapperDescriptors.find((item) => item.provider === provider);
@@ -10966,6 +11188,12 @@ function gitCredentialHelperCommandLines(
     "    *) return 1 ;;",
     "  esac",
     "}",
+    "provider_store_host_for_origin() {",
+    '  case "$provider|$1" in',
+    ...providerStoreOriginHosts,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
     `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
     'if [ -n "$provider" ]; then',
@@ -10994,8 +11222,19 @@ function gitCredentialHelperCommandLines(
     '      *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
     "    esac",
     "  fi",
-    '  if [ -f "$token_file" ]; then',
+    "  token=",
+    '  provider_store_host="$(provider_store_host_for_origin "${origin:-}" 2>/dev/null || true)"',
+    '  if [ -z "${OPENGENI_GIT_BINDING:-}" ] && [ -n "$provider_store_host" ] && [ -r "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+    '    provider_credential="$(printf \'protocol=https\\nhost=%s\\n\\n\' "$provider_store_host" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get)"',
+    '    while IFS="=" read -r key value; do',
+    '      if [ "$key" = password ]; then token="$value"; fi',
+    "    done <<PROVIDER_CREDENTIAL_EOF",
+    "$provider_credential",
+    "PROVIDER_CREDENTIAL_EOF",
+    "    unset provider_credential",
+    '  elif [ -f "$token_file" ]; then',
     '    token="$(cat "$token_file" 2>/dev/null || true)"',
+    "  fi",
     '    if [ -n "$token" ]; then',
     '      case "$token_env" in',
     '        GH_TOKEN) export GH_TOKEN="$token" ;;',
@@ -11008,7 +11247,6 @@ function gitCredentialHelperCommandLines(
     '        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
     "      esac",
     "    fi",
-    "  fi",
     "fi",
     'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
     'old_ifs="$IFS"',
@@ -11146,6 +11384,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  ref="$3"',
   '  subpath="$4"',
   '  expected_commit="${5:-}"',
+  // Command-only helper selection: neither the credential nor its helper is
+  // persisted in .git/config. The run-credential wrapper supplies the current
+  // provider store path before this command starts; Git performs exact-host
+  // matching in that store. No matching entry means an anonymous fetch.
+  '  repository_credential_source="${6:-connection}"',
+  "  repository_git() {",
+  '    if [ "$repository_credential_source" = provider ]; then',
+  '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
+  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+  // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
+  // leaving its platform binding, broker route and askpass behavior intact.
+  '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',
+  "    else",
+  '      command git "$@"',
+  "    fi",
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
@@ -11154,8 +11408,8 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
   // the mount path before the repo exists). Subpath extracts are not git repos —
   // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
   '        echo "Repository resource already present at $target"',
   "        return 0",
   "      fi",
@@ -11169,7 +11423,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  rm -rf "$tmp"',
   // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
   // (set -eu would exit before any cleanup).
-  '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
@@ -11180,15 +11434,15 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // remote set-head` only accepts a branch that the fetch materialized under
   // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
   // must not turn a successful fetch into a failed clone.
-  '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-  '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+  '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+  '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
   "  fi",
-  '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   "    exit 1",
   "  fi",
-  '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+  '  if [ -n "$expected_commit" ] && [ "$(repository_git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
   '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
   '    rm -rf "$tmp"',
   "    exit 1",
@@ -11215,7 +11469,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // accept it; a non-empty non-repo survivor here is a mount point the manifest
   // re-filled — install into it by content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
   '        rm -rf "$tmp"',
   '        echo "Repository resource already present at $target"',
   "        return 0",
@@ -11225,7 +11479,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   "    else",
   '      mv "$tmp" "$target"',
   "    fi",
-  '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+  '    repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
   "  fi",
   '  if [ ! -e "$target" ]; then',
   '    echo "Repository resource was not materialized at $target" >&2',
@@ -11328,7 +11582,7 @@ export function repositoryCloneCommand(
     "start_optional_repository_clone() {",
     "  (",
     "    set +e",
-    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5"',
+    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5" "$7"',
     "    clone_status=$?",
     '    if [ "$clone_status" -eq 124 ] || [ "$clone_status" -eq 137 ]; then',
     `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone did not finish in time); the session continues without it" >&2`,
@@ -11363,6 +11617,7 @@ export function repositoryCloneCommand(
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
         shellQuote(resource.expectedCommitSha ?? ""),
         ...(optional ? [shellQuote(mountPath)] : []),
+        shellQuote(repositoryHasExplicitGitConnection(resource) ? "connection" : "provider"),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
@@ -12082,3 +12337,4 @@ function sortJson(value: unknown): unknown {
 }
 
 export { createFirstPartyAttemptClient } from "./first-party-client";
+export { withClaudeUsageObserver } from "./claude-subscription-usage";

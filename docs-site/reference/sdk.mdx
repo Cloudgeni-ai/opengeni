@@ -18,6 +18,7 @@ bun add @opengeni/sdk
 | `@opengeni/sdk/next`                            | `createSessionProxyRoute` and `toNextRouteHandlers` for the App Router                        |
 | `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                      |
 | `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                      |
+| `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                 |
 | `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                   |
 | `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                     |
 | `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                     |
@@ -81,6 +82,8 @@ The complete method list is in [packages/sdk/README.md](https://github.com/Cloud
 | `beforeForwardMessage` | Runs before each forwarded message. Returns `modelContext` and `mcpCredentialUpdates`, or a `Response` to reject           |
 | `modelSelection`       | `false` removes per-message model choices and hides the model picker                                                       |
 | `files`                | `false` disables attachment routes                                                                                         |
+| `sandboxFiles`         | Explicit `true` enables bounded, no-symlink reads inside the session working directory. Off by default                     |
+| `artifacts`            | Explicit `true` enables the shared artifact viewer and Site previews with exact session authorization. Off by default      |
 | `sessionList`          | Chat list for `OpenGeniChat`: `"mine"` (default), `"visible"`, or `false`                                                  |
 | `archive`              | `false` disables archiving chats                                                                                           |
 | `maxBodyBytes`         | Request body limit. Defaults to 1 MiB                                                                                      |

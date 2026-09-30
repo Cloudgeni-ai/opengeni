@@ -1,27 +1,49 @@
-import type { SVGProps } from "react";
+import type { ComponentProps, SVGProps } from "react";
+
+import { cn } from "@/lib/utils";
+
+/*
+ * The Opengeni brand: the iconmark and the wordmark. This file is the one
+ * place to swap either; every surface (rails, mobile header, sign-in, credits
+ * row) renders these components. The favicon and app icons in `public/` use
+ * the same mark.
+ */
 
 /**
- * The OpenGeni brand mark — the geometric glyph from the marketing site
- * (Cloudgeni-ai/agent-heartbeat-03, landing Nav + favicon), rendered with
- * currentColor so it inherits whatever brand tint its container sets.
+ * The Opengeni iconmark: two stacked filled chevrons, wider than tall
+ * (176:138.73). Filled with currentColor, so it takes the surrounding text
+ * color (`fg`, never a brand tint). Size it by width (`w-5`); the height
+ * follows the aspect ratio.
  */
 export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
-      viewBox="0 0 140 133"
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.2}
-      strokeLinejoin="round"
+      viewBox="0 0 176 138.73"
+      fill="currentColor"
       aria-hidden="true"
+      className={cn("h-auto shrink-0", className)}
       {...props}
     >
-      <g transform="translate(-17.5,-20.999893188476562) scale(1.75)">
-        <g transform="translate(0,-952.36218)">
-          <path d="m 60.7828,964.36215 27.1809,0.8834 -27.1809,25.9958 z m -1.9745,1.4513 0,26.7845 -25.2681,0 c 8.6166,-8.7334 16.8796,-17.8103 25.2681,-26.7845 z m 27.7053,3.628 3.4864,1.1989 -12.5877,7.4768 z m -68.1835,2.9656 5.5226,0 12.8654,14.0705 -5.9854,6.1204 -12.4026,0 c 9e-4,-6.7347 0,-13.4597 0,-20.1909 z m -1.9746,1.2304 0,5.8364 -6.3555,0 z m 3.363,20.9796 38.627,0 -10.7675,29.43465 z m 39.0898,4.54286 0,41.20229 -12.5878,-6.8775 c 4.1972,-11.443 8.3886,-22.879 12.5878,-34.32479 z" />
-        </g>
-      </g>
+      <path
+        transform="translate(-75 -39.5966)"
+        d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"
+      />
     </svg>
+  );
+}
+
+/**
+ * The "Opengeni" wordmark: DM Sans at weight 550, -0.055em tracking, line
+ * height 1. Set the size for the context with a text utility; pair it with a
+ * BrandMark about 1.35x the font size wide.
+ */
+export function Wordmark({ className, ...props }: ComponentProps<"span">) {
+  return (
+    <span
+      className={cn("font-display leading-none font-[550] tracking-[-0.055em]", className)}
+      {...props}
+    >
+      Opengeni
+    </span>
   );
 }

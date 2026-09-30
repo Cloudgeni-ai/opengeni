@@ -46,6 +46,15 @@ describe("session browse preferences", () => {
     ).toBe(true);
   });
 
+  test("remembers the Needs you view and treats it as a customized one", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");
+    const view = { ...DEFAULT_SESSION_BROWSE_PREFERENCES, status: "needs-you" } as const;
+    writeSessionBrowsePreferences(id, view, storage);
+    expect(readSessionBrowsePreferences(id, storage).status).toBe("needs-you");
+    expect(sessionBrowsePreferencesCustomized(view)).toBe(true);
+  });
+
   test("persists the complete view independently for each workspace and subject", () => {
     const storage = memoryStorage();
     const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");

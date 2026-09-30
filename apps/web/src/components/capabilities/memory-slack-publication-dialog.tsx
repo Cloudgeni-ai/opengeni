@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -149,7 +150,7 @@ function MemorySlackPublicationSettings({
       applyConfiguration(config.current);
       setPublications(history.publications);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
+      setError(`Couldn't load Slack publication settings. ${userErrorText(loadError)}`);
     } finally {
       setLoading(false);
     }
@@ -186,8 +187,7 @@ function MemorySlackPublicationSettings({
         if (!cancelled) {
           setChannels([]);
           toast.error("Could not load eligible Slack channels", {
-            description:
-              channelError instanceof Error ? channelError.message : String(channelError),
+            description: userErrorText(channelError),
           });
         }
       })
@@ -221,7 +221,7 @@ function MemorySlackPublicationSettings({
       await refresh();
     } catch (saveError) {
       toast.error("Could not save Slack publication settings", {
-        description: saveError instanceof Error ? saveError.message : String(saveError),
+        description: userErrorText(saveError),
       });
     } finally {
       setSaving(false);
@@ -244,8 +244,8 @@ function MemorySlackPublicationSettings({
       );
       await refresh();
     } catch (actionError) {
-      toast.error("Publication state changed before the action completed", {
-        description: actionError instanceof Error ? actionError.message : String(actionError),
+      toast.error(`Couldn't ${action} this publication`, {
+        description: userErrorText(actionError),
       });
       await refresh();
     } finally {
@@ -341,7 +341,7 @@ function MemorySlackPublicationSettings({
             ))}
           </Select>
           <span className="mt-1 block font-normal text-fg-subtle">
-            Archived and shared Slack Connect conversations are excluded. OpenGeni never auto-joins.
+            Archived and shared Slack Connect conversations are excluded. Opengeni never auto-joins.
           </span>
         </label>
       </div>
@@ -452,7 +452,7 @@ function PublicationRow({
           <div className="flex items-center gap-2">
             {stateIcon(publication.state)}
             <p className="text-xs font-semibold text-fg">{publication.sourceLabel}</p>
-            <span className="rounded bg-bg-muted px-1.5 py-0.5 text-2xs capitalize text-fg-muted">
+            <span className="rounded bg-surface-2 px-1.5 py-0.5 text-2xs capitalize text-fg-muted">
               {publication.importance}
             </span>
           </div>
@@ -473,6 +473,7 @@ function PublicationRow({
             {publication.state === "review_pending" ? (
               <>
                 <Button
+                  variant="outline"
                   type="button"
                   size="sm"
                   disabled={acting}
@@ -493,6 +494,7 @@ function PublicationRow({
             ) : null}
             {publication.state === "failed" ? (
               <Button
+                variant="outline"
                 type="button"
                 size="sm"
                 disabled={acting}

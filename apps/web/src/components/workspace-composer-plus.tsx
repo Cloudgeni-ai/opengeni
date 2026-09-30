@@ -6,11 +6,43 @@ import {
   type ComposerPlusProps,
 } from "@/components/composer-mobile-plus";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import { composerConnectorOptions } from "@/lib/composer-connectors";
 import { capabilityReconnectPlan, connectionHealth } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+
+type ConnectorCatalog = {
+  items: CapabilityCatalogItem[];
+  connections: ConnectionMetadata[] | null;
+};
+
+/**
+ * The last connectors and connection statuses per caller and workspace. A
+ * composer that mounts again (a new chat, another session) opens + > Connectors
+ * with these rows at once and refreshes them in place, instead of loading
+ * inside the menu.
+ */
+const connectorCatalogCache = new WeakMap<object, Map<string, ConnectorCatalog>>();
+
+function cachedConnectorCatalog(client: object, workspaceId: string) {
+  return connectorCatalogCache.get(client)?.get(workspaceId) ?? null;
+}
+
+function cacheConnectorCatalog(
+  client: object,
+  workspaceId: string,
+  value: ConnectorCatalog | null,
+) {
+  let byWorkspace = connectorCatalogCache.get(client);
+  if (!byWorkspace) {
+    byWorkspace = new Map();
+    connectorCatalogCache.set(client, byWorkspace);
+  }
+  if (value) byWorkspace.set(workspaceId, value);
+  else byWorkspace.delete(workspaceId);
+}
 
 export function WorkspaceComposerPlus(
   props: ComposerPlusProps & {
@@ -40,6 +72,8 @@ export function WorkspaceComposerPlus(
     generation: 0,
     successfulConnectionsRevision: 0,
     deniedConnectionsRevision: 0,
+    /** Set once this composer has seen another caller or grant: no cache then. */
+    identityChanged: false,
   }).current;
   const scope = useRef({ client, workspaceId, canReadConnections });
   // Fence cached rows on the first render of a new identity, including A -> B -> A.
@@ -52,6 +86,7 @@ export function WorkspaceComposerPlus(
     lifecycle.generation++;
     lifecycle.successfulConnectionsRevision = 0;
     lifecycle.deniedConnectionsRevision = 0;
+    lifecycle.identityChanged = true;
     scope.current = { client, workspaceId, canReadConnections };
   }
   const refreshRuntime = useRef(context.refreshWorkspaceMcpServers);
@@ -62,7 +97,11 @@ export function WorkspaceComposerPlus(
     canReadConnections === true &&
     catalog.epoch === lifecycle.generation
       ? catalog
-      : null;
+      : // Only a freshly mounted composer reuses the cache; a caller or grant
+        // change inside one stays masked until its own read returns.
+        canReadConnections === true && !lifecycle.identityChanged
+        ? cachedConnectorCatalog(client, workspaceId)
+        : null;
   const deniedMessage =
     "Your workspace access doesn't allow connection discovery. Ask a workspace admin for connection access.";
   const reload = useCallback(async () => {
@@ -95,6 +134,7 @@ export function WorkspaceComposerPlus(
         ) {
           lifecycle.deniedConnectionsRevision = request;
           denied = true;
+          cacheConnectorCatalog(client, workspaceId, null);
           // A failed catalog refresh must not leave the prior account rows visible.
           setCatalog((previous) =>
             previous?.client === client &&
@@ -129,20 +169,30 @@ export function WorkspaceComposerPlus(
       if (!live()) return;
       const accessDenied =
         lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision;
-      setCatalog((previous) => ({
-        client,
-        workspaceId,
-        epoch: generation,
-        items: result.items,
-        connections: accessDenied
-          ? null
-          : (connectionResult.connections ??
-            (previous?.client === client &&
-            previous.workspaceId === workspaceId &&
-            previous.epoch === generation
-              ? previous.connections
-              : null)),
-      }));
+      setCatalog((previous) => {
+        const next = {
+          client,
+          workspaceId,
+          epoch: generation,
+          items: result.items,
+          connections: accessDenied
+            ? null
+            : (connectionResult.connections ??
+              (previous?.client === client &&
+              previous.workspaceId === workspaceId &&
+              previous.epoch === generation
+                ? previous.connections
+                : null)),
+        };
+        cacheConnectorCatalog(
+          client,
+          workspaceId,
+          accessDenied || canReadConnections !== true
+            ? null
+            : { items: next.items, connections: next.connections },
+        );
+        return next;
+      });
       setError(
         accessDenied
           ? deniedMessage
@@ -157,9 +207,7 @@ export function WorkspaceComposerPlus(
         setError(
           denied || lifecycle.deniedConnectionsRevision > lifecycle.successfulConnectionsRevision
             ? deniedMessage
-            : failure instanceof Error
-              ? failure.message
-              : "Couldn't load connectors.",
+            : `Couldn't load connectors. ${userErrorText(failure, "Try again.")}`,
         );
     } finally {
       if (live()) setLoading(false);
@@ -269,7 +317,7 @@ export function WorkspaceComposerPlus(
         scope.current.canReadConnections === true &&
         lifecycle.generation === generation
       )
-        setError(failure instanceof Error ? failure.message : "Couldn't reconnect.");
+        setError(`Couldn't reconnect. ${userErrorText(failure, "Try again.")}`);
     } finally {
       if (
         scope.current.client === client &&
@@ -297,7 +345,8 @@ export function WorkspaceComposerPlus(
       connectorActions={{
         ...props.connectorActions,
         onReconnect: (id) => void reconnect(id),
-        loading,
+        // Rows already on screen refresh in place; only a first load shows rows loading.
+        loading: loading && !current,
         error: canReadConnections === false ? deniedMessage : current ? error : null,
         busyId: current ? busyId : null,
       }}

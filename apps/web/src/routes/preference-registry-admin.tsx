@@ -29,6 +29,7 @@ import { type FormEvent, useEffect, useState } from "react";
 import { EmptyState, LoadErrorState } from "@/components/common";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
 import {
@@ -60,7 +61,7 @@ const fieldClass =
 const secondaryButtonClass =
   "rounded-md border border-border px-3 py-2 text-sm font-medium text-fg hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60";
 const primaryButtonClass =
-  "rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60";
+  "rounded-md border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50";
 
 function formatDate(value: string | null): string {
   if (!value) return "None";
@@ -129,11 +130,9 @@ function registryErrorMessage(error: unknown): string {
     if (error.code === "PREFERENCE_REGISTRY_CONFLICT") {
       return "The preference changed in another request. Refresh the registry and selected detail before trying again.";
     }
-    if (error.status === 422) {
-      return error.message;
-    }
   }
-  return error instanceof Error ? error.message : String(error);
+  // A short validation sentence is kept; anything else becomes what to do next.
+  return userErrorText(error);
 }
 
 function ScopeOption({ scope, enabled }: { scope: PreferenceRegistryScope; enabled: boolean }) {
@@ -273,7 +272,7 @@ function PreferenceProposalComposer({
             revisionId: revision.id,
             expectedCurrentRevisionId: null,
             expectedScopeVersion: preference.scopeVersion,
-            reason: "Saved by a user from Agent Knowledge",
+            reason: "Saved by a user from Knowledge",
           },
         );
         preference = activated.preference;
@@ -598,7 +597,7 @@ function PendingSkillActivation({
         revisionId: revision.id,
         expectedCurrentRevisionId: null,
         expectedScopeVersion: preference.scopeVersion,
-        reason: "Finished saving from Agent Knowledge",
+        reason: "Finished saving from Knowledge",
       });
       await onActivated();
     } catch (caught) {
@@ -1442,7 +1441,7 @@ export function PreferenceRegistryAdministration({
         <div className="min-w-0">
           {compact ? null : (
             <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg">
                 Authorized registry records
               </h3>
               <span className="text-2xs text-fg-subtle">Up to 100 records</span>
@@ -1472,7 +1471,7 @@ export function PreferenceRegistryAdministration({
           ) : null}
           {compact && pendingSkills.length > 0 ? (
             <div className="mb-5 grid gap-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg">
                 Finish saving
               </h3>
               {pendingSkills.map((preference) => (
@@ -1493,7 +1492,7 @@ export function PreferenceRegistryAdministration({
               personalWorkspace ? (
                 <div className="grid gap-5">
                   <div>
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg">
                       Your personal Skills
                     </h3>
                     {personalSkills.length > 0 ? (
@@ -1511,7 +1510,7 @@ export function PreferenceRegistryAdministration({
                   </div>
                   {inheritedSkills.length > 0 ? (
                     <div>
-                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg">
                         Company and workspace Skills available here
                       </h3>
                       <div className="grid gap-3 sm:grid-cols-2">
@@ -1544,14 +1543,14 @@ export function PreferenceRegistryAdministration({
           ) : null}
           {inventory.error && inventory.response ? (
             <p className="mt-2 text-xs text-status-error">
-              Refresh failed: {inventory.error.message}
+              Couldn't refresh the registry. {userErrorText(inventory.error)}
             </p>
           ) : null}
         </div>
 
         {compact ? null : (
           <div className="min-w-0">
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg">
               Selected preference
             </h3>
             {!selectedId ? <EmptyState>Select a registry record to inspect it.</EmptyState> : null}
@@ -1580,7 +1579,7 @@ export function PreferenceRegistryAdministration({
             ) : null}
             {detail.error && detail.response ? (
               <p className="mt-2 text-xs text-status-error">
-                Refresh failed: {detail.error.message}
+                Couldn't refresh this preference. {userErrorText(detail.error)}
               </p>
             ) : null}
           </div>

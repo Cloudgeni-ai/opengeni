@@ -55,6 +55,7 @@ import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
 } from "./editable-artifact-websocket";
+import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
@@ -449,7 +450,10 @@ export async function startApi(
       behavior: "http_and_websocket_fail_closed",
     });
   }
-  const artifactWebSockets = new EditableArtifactWebSocketTransport(routeDeps.editableArtifacts);
+  const artifactWebSockets = new EditableArtifactWebSocketTransport(
+    routeDeps.editableArtifacts,
+    editableArtifactSourceSessionAuthorizer(routeDeps),
+  );
   const interactionFrameProxies = new InteractionFrameProxyTransport(
     resolveFirstPartyDelegationSecret(settings),
   );

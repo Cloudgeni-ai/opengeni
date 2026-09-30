@@ -15,6 +15,7 @@ export default defineConfig({
   entry: [
     "src/chat/index.ts",
     "src/tenant-workspaces.ts",
+    "src/session-proxy.ts",
     "src/adapters/next.ts",
     "src/adapters/express.ts",
     "src/adapters/hono.ts",
@@ -27,6 +28,7 @@ export default defineConfig({
     "src/github-repositories.ts",
     "src/document-authority.ts",
     "src/knowledge.ts",
+    "src/workspace-integrations.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",

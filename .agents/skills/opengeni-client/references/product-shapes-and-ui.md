@@ -18,6 +18,46 @@ Inspect the installed OpenGeni React package before creating replacement compone
 
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
 
+## Links, downloads, artifacts, and Sites
+
+Agent replies link OpenGeni objects as `artifact:<file uuid>`,
+`sandbox:<path>[:line]`, `/workspaces/<ws>/artifacts/editable/<id>` (live
+document, workbook, or presentation), and `/workspaces/<ws>/artifacts/<uuid>`
+(Site). None is navigable inside the product: the `/workspaces/...` forms are
+console routes and 404 on the product origin. Never pass them to a raw `<a>`.
+
+- `SessionConversation`/`OpenGeniChat` behind `createSessionProxyHandler`
+  download `artifact:` files by default. `sandbox:` reads require deliberate
+  proxy `sandboxFiles: true` (default off) plus `files:read`; they are confined
+  to the selected working directory, including on Connected Machines, and
+  refuse symlinked paths. Disabled sandbox links render unavailable.
+- Artifacts and Sites: reuse the OpenGeni surfaces, do not rebuild them.
+  `opengeni-site` fences render the inline Site preview automatically. Mount
+  `SessionArtifactViewer` (`@opengeni/react/artifacts`) in a host container
+  (for example the main area beside an assistant panel, a full-screen sheet on
+  phones) and pass `onOpenArtifact` to `SessionConversation` (or
+  `viewerLinkResolver` to `MessageTimeline`). Enable the proxy's
+  `artifacts: true`; editors also need the document, spreadsheet, and
+  presentation runtimes (`@opengeni/artifact-kernel-wasm-document`,
+  `@opengeni/artifact-kernel-wasm-spreadsheet`,
+  `@opengeni/artifact-kernel-wasm-presentation`) plus the SDK Worker URL
+  (`editableRuntimes`). A custom host proxy reports the viewer capability with
+  `artifactViewerCapability` from `@opengeni/sdk`. Close the viewer when the session changes.
+  Translate its copy with `labels` (partial `ArtifactLabels`) or
+  `ArtifactLabelsProvider`.
+- Other routing: `resolveLink={(target) => ... ({ href } | { open } | null)}`
+  on `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
+  subtree; it also covers `Markdown` inside a custom `renderMessageText`.
+  Unresolved targets render as unavailable text, not broken links.
+- `MessageTimeline` alone has no defaults; add
+  `sessionLinkResolver({ client, workspaceId, sessionId })` for downloads.
+- Non-React or custom renderers: classify each href with
+  `parseOpenGeniLink(href)` from `@opengeni/sdk`, then use
+  `createFileDownloadUrl` / `fsRead`, or the product's artifact page.
+- Editable artifact export serves only the formats the export tool lists
+  (today spreadsheet XLSX). Do not build a "Download PDF" flow on it; open the
+  live artifact instead.
+
 ## Optional artifact library
 
 Use `client.listArtifactCatalog(workspaceId, options)` for a workspace output

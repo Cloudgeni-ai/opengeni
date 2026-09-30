@@ -4,6 +4,7 @@ import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { SkillReviewReference } from "@opengeni/contracts";
 import type { AppContextValue } from "@/context";
 import { Button } from "@/components/ui/button";
+import { userErrorText } from "@/lib/api-error";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { sessionSkillReviews } from "@/lib/session-skill-reviews";
 
@@ -196,11 +197,10 @@ function SkillReview({
           : {}),
         reason: "Approve exact Skill revision from its session",
       });
-      if (receipt.outcome !== "applied")
-        throw new Error("The Skill was not approved. Reload its review before trying again.");
+      if (receipt.outcome !== "applied") throw new Error("Reload its review, then try again.");
       setSettled(true);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not approve this Skill.");
+      setError(`Couldn't approve this Skill. ${userErrorText(reason)}`);
     } finally {
       setBusy(false);
     }

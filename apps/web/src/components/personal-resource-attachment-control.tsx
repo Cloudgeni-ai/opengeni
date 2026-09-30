@@ -57,7 +57,7 @@ export function PersonalResourceAttachmentControl(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={disabled}
             onClick={() => void controller.refresh()}
           >

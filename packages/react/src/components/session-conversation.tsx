@@ -1,5 +1,15 @@
-import type { SendMessageInput } from "@opengeni/sdk";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { SESSION_SCOPE_HEADER, type SendMessageInput } from "@opengeni/sdk";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
+import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
 import { ModelPolicyPicker } from "./model-policy-picker";
@@ -16,6 +26,14 @@ import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import { SessionChrome } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import {
+  chainLinkResolvers,
+  sessionLinkResolver,
+  useOpenGeniLinkResolver,
+  viewerLinkResolver,
+  type OpenGeniLinkResolver,
+  type OpenGeniViewerTarget,
+} from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
@@ -24,6 +42,25 @@ export type SessionConversationProps = ClientOverride & {
   sessionId: string;
   /** Host-owned artifact links, previews and other message presentation. */
   renderMessageText?: MessageTimelineProps["renderMessageText"];
+  /**
+   * Open OpenGeni object links in agent replies (`artifact:`, `sandbox:`,
+   * editable artifacts, Sites). Asked first; by default retained files and
+   * sandbox files download only when the proxy explicitly enables them, while
+   * editable artifacts and Sites stay unavailable until the host resolves them.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Open agent links to editable artifacts and Sites in a host viewer, for
+   * example `SessionArtifactViewer` mounted beside the conversation. Asked
+   * after `resolveLink`.
+   */
+  onOpenArtifact?: ((target: OpenGeniViewerTarget) => void) | undefined;
+  /**
+   * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
+   * Defaults to the OpenGeni preview (Site reads need the proxy's
+   * `artifacts` option); `false` shows the fence as code.
+   */
+  renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
   /** Product-specific tool-call renderers; defaults to the built-in registry. */
   toolRegistry?: MessageTimelineProps["toolRegistry"];
   /**
@@ -58,6 +95,9 @@ export function SessionConversation(props: SessionConversationProps) {
 function Conversation({
   sessionId,
   renderMessageText,
+  resolveLink,
+  onOpenArtifact,
+  renderInteractiveBlock,
   toolRegistry,
   attachments: attachmentsRequested = true,
   modelPicker,
@@ -115,6 +155,39 @@ function Conversation({
       : {}),
   });
   const region = useRef<HTMLDivElement>(null);
+  const defaultInteractiveBlock = useDefaultInteractiveBlock(
+    context.client,
+    context.workspaceId,
+    sessionId,
+  );
+  const inheritedLinks = useOpenGeniLinkResolver();
+  const defaultLinks = useMemo(
+    () =>
+      sessionLinkResolver({
+        client: context.client,
+        workspaceId: context.workspaceId,
+        sessionId,
+        sandboxFiles: config.sandboxFiles,
+      }),
+    [context.client, context.workspaceId, sessionId, config.sandboxFiles],
+  );
+  const onOpenArtifactRef = useRef(onOpenArtifact);
+  onOpenArtifactRef.current = onOpenArtifact;
+  const opensArtifacts = onOpenArtifact !== undefined;
+  const viewerLinks = useMemo(
+    () =>
+      opensArtifacts
+        ? viewerLinkResolver({
+            workspaceId: context.workspaceId,
+            open: (target) => onOpenArtifactRef.current?.(target),
+          })
+        : null,
+    [context.workspaceId, opensArtifacts],
+  );
+  const links = useMemo(
+    () => chainLinkResolvers(resolveLink, viewerLinks, inheritedLinks, defaultLinks) ?? undefined,
+    [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
+  );
   const error = detail.error ?? feed.error ?? human.error;
   return (
     <div
@@ -129,6 +202,12 @@ function Conversation({
       {error && <p role="alert">{error.message}</p>}
       <MessageTimeline
         renderMessageText={renderMessageText}
+        resolveLink={links}
+        renderInteractiveBlock={
+          renderInteractiveBlock === false
+            ? undefined
+            : (renderInteractiveBlock ?? defaultInteractiveBlock)
+        }
         userMessageDisclosureLabels={userMessageDisclosureLabels}
         className="min-h-0 flex-1"
         {...(toolRegistry ? { toolRegistry } : {})}
@@ -245,14 +324,63 @@ function Conversation({
   );
 }
 
+const LazyChatInteractiveBlock = lazy(() =>
+  import("./artifacts/chat-interactive-block").then((module) => ({
+    default: module.ChatInteractiveBlock,
+  })),
+);
+
+type ScopableClient = SiteSnapshotClient & {
+  withHeaders?: (headers: Readonly<Record<string, string>>) => SiteSnapshotClient;
+};
+
+/** Inline Site/HTML preview reading through this conversation's session scope. */
+function useDefaultInteractiveBlock(
+  client: unknown,
+  workspaceId: string,
+  sessionId: string,
+): NonNullable<MessageTimelineProps["renderInteractiveBlock"]> {
+  // Scope lazily: only a rendered preview reads, and some clients (a Site's
+  // own client) cannot add headers.
+  const scoped = useMemo((): SiteSnapshotClient => {
+    let resolved: SiteSnapshotClient | null = null;
+    const get = () => {
+      const candidate = client as ScopableClient;
+      resolved ??=
+        typeof candidate.withHeaders === "function"
+          ? candidate.withHeaders({ [SESSION_SCOPE_HEADER]: sessionId })
+          : candidate;
+      return resolved;
+    };
+    return {
+      getWorkspaceArtifact: (...args) => get().getWorkspaceArtifact(...args),
+      getWorkspaceArtifactHtml: (...args) => get().getWorkspaceArtifactHtml(...args),
+      getWorkspaceArtifactContent: (...args) => {
+        const target = get();
+        if (!target.getWorkspaceArtifactContent) throw new Error("Site version unavailable");
+        return target.getWorkspaceArtifactContent(...args);
+      },
+    };
+  }, [client, sessionId]);
+  return useCallback(
+    (block) => (
+      <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <LazyChatInteractiveBlock workspaceId={workspaceId} client={scoped} {...block} />
+      </Suspense>
+    ),
+    [scoped, workspaceId],
+  );
+}
+
 /** Deployment/proxy flags from the client config: uploads, and whether model choice is open. */
 function useClientConfigFlags(client: {
   getClientConfig: () => Promise<{
     fileUploads?: { enabled?: boolean };
     modelSelection?: boolean | undefined;
+    sandboxFiles?: boolean | undefined;
   }>;
-}): { uploads: boolean; modelSelection: boolean } {
-  const [flags, setFlags] = useState({ uploads: false, modelSelection: true });
+}): { uploads: boolean; modelSelection: boolean; sandboxFiles: boolean } {
+  const [flags, setFlags] = useState({ uploads: false, modelSelection: true, sandboxFiles: false });
   useEffect(() => {
     let live = true;
     client.getClientConfig().then(
@@ -261,6 +389,7 @@ function useClientConfigFlags(client: {
           setFlags({
             uploads: config.fileUploads?.enabled === true,
             modelSelection: config.modelSelection !== false,
+            sandboxFiles: config.sandboxFiles !== false,
           });
         }
       },

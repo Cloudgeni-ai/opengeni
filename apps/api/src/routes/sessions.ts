@@ -4362,6 +4362,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(out);
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read", "fs.read");
+    const req = await parseChannelABody(c, FsReadRequest);
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.fsRead({ ...req, workspaceOnly: true }),
+    );
+    return c.json(out);
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/publish", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -5007,10 +5016,16 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix.startsWith("/viewers/") && ["POST", "DELETE"].includes(verb)) {
     return "session.viewer.control";
   }
-  if (suffix === "/fs/list" || suffix === "/fs/list-batch" || suffix === "/fs/read") {
+  if (
+    suffix === "/fs/list" ||
+    suffix === "/fs/list-batch" ||
+    suffix === "/fs/read" ||
+    suffix === "/fs/read-workspace"
+  ) {
     return verb === "POST" ? "session.files.read" : null;
   }
   if (suffix === "/artifacts/publish" && verb === "POST") return "session.files.write";
+  if (suffix.startsWith("/artifact-associations/") && verb === "GET") return "session.read";
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
     return verb === "POST" ? "session.files.write" : null;
   }

@@ -34,6 +34,23 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Workspace configs read shared provider metadata at module load.
+              // Keep this pure data outside mutually importing settings routes.
+              name: "model-provider-metadata",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-metadata\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // Registration runs when lazy routes evaluate. Keep the loader's
+              // state and registration entry point together, outside route
+              // chunks that can import one another before state initializes.
+              name: "pierre-diffs-loader",
+              test: /packages[\\/]react[\\/]src[\\/](?:diffs\.ts|lib[\\/]pierre-diffs-loader\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Questions and command controls mount only when their session
               // surface is active. Keep their implementations behind those
               // lazy imports instead of recursively merging them into chat.
@@ -139,6 +156,42 @@ export default defineConfig({
               priority: 4,
             },
             {
+              // The router is startup code that every route reads through a
+              // few hooks. Entry-aware splitting otherwise scatters it over
+              // four or five startup requests by whichever lazy routes use
+              // which hook; keep it one runtime like React itself.
+              name: "router-runtime",
+              test: /(?:node_modules|\.bun)[\\/](?:@tanstack[\\/](?:react-router|router-core|history|store|react-store)|use-sync-external-store)[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 15,
+            },
+            {
+              // The app context, its startup helpers and the shared load-error
+              // state are always loaded. Entry-aware splitting otherwise cuts
+              // this one startup unit into several requests along whichever
+              // lazy routes happen to import part of it (a new import of the
+              // error helpers or a toast was enough to add a startup file).
+              // The icons are the ones the load-error state and toasts draw.
+              // Session creation resolves the agent's capabilities, so their
+              // helpers are startup code too.
+              name: "startup-context",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
+              // The SDK's error and wire-type runtime, and the attribution and
+              // analytics helpers beside them, load at startup for every route.
+              // Entry-aware splitting otherwise cuts this one unit in two as
+              // soon as a lazy route imports only part of it (an extra startup
+              // request for a few kilobytes). Vite's preload helper joins them
+              // for the same reason.
+              name: "startup-sdk-runtime",
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer)\.ts|vite[\\/]preload-helper\.js)$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
               // The hierarchy rail is substantial and belongs to the lazy
               // workspace shell. Keep the component itself route-only: a
               // recursive entry-aware group can merge it into the direct
@@ -146,7 +199,17 @@ export default defineConfig({
               // Its shared helpers remain available for normal consumer-aware
               // splitting without pulling the full rail implementation in.
               name: "session-rail",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|workspace-switcher|workspace-name-dialog)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|switcher-block|workspace-switcher|workspace-name-dialog)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
+              // These artifact kind glyphs are drawn by conversation cards on a
+              // direct session load and by the lazy editor. Left to entry-aware
+              // grouping they land in the editor chunk, and one icon import drags
+              // the whole editor into the direct session graph.
+              name: "artifact-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:file|image|panels-top-left)\.mjs$/,
               includeDependenciesRecursively: false,
               priority: 3,
             },
@@ -178,7 +241,7 @@ export default defineConfig({
               // management surface reachable from an active session. The shared
               // settings drawer and runtime controls belong behind this boundary too.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:workspace-settings-shell|settings-sidebar|organization-settings-switcher)\.tsx|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

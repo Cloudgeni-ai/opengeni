@@ -38,6 +38,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { MetaChip } from "@/components/ui/meta-chip";
+import { failedLoadParts, type FailedLoad } from "@/components/ui/diff-view";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { InlineDisabledReason } from "@/components/ui/select-menu";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -119,7 +120,7 @@ export interface AccessListProps<R extends string = string> {
   /** Skeleton rows while loading. Default 4. */
   loadingRows?: number;
   /** What happened, what to do next, and an optional retry. Replaces the list. */
-  error?: { message: string; detail?: ReactNode; onRetry?: () => void };
+  error?: FailedLoad;
   /** Members whose role is being saved elsewhere, shown with a spinner. */
   savingIds?: readonly string[];
   /** Shown when only you have access. */
@@ -381,9 +382,11 @@ function LoadingRows({ rows, variant }: { rows: number; variant: AccessListVaria
 }
 
 function ErrorState({ error }: { error: NonNullable<AccessListProps["error"]> }) {
+  const failure = failedLoadParts(error);
   return (
     <ErrorMessage
       title={error.message}
+      details={failure.details}
       align="center"
       announce
       action={
@@ -394,7 +397,7 @@ function ErrorState({ error }: { error: NonNullable<AccessListProps["error"]> })
         ) : undefined
       }
     >
-      {error.detail}
+      {failure.detail}
     </ErrorMessage>
   );
 }
@@ -522,7 +525,7 @@ function ListVariant({ props }: { props: AccessListProps<string> }) {
       ) : null}
       {services.length > 0 ? (
         <div className="border-t border-border pt-4">
-          <h3 id={servicesId} className="px-3 text-xs leading-4.5 font-medium text-fg-subtle">
+          <h3 id={servicesId} className="px-3 text-xs leading-4.5 font-medium text-fg">
             Service accounts
           </h3>
           <ul aria-labelledby={servicesId} className={cn(listClass, "mt-1")}>

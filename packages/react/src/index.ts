@@ -552,6 +552,25 @@ export type {
   MarkdownInteractiveBlock,
   SandboxFileLocation,
 } from "./components/markdown";
+export {
+  OpenGeniLinkProvider,
+  chainLinkResolvers,
+  sessionLinkResolver,
+  useOpenGeniLinkResolver,
+  viewerLinkResolver,
+} from "./components/open-geni-links";
+export type {
+  OpenGeniLinkResolution,
+  OpenGeniLinkResolver,
+  OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
+} from "./components/open-geni-links";
+export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
@@ -653,3 +672,8 @@ export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 
 export { StartupTimings } from "./timeline/startup-timings";
 export { setStartupDetails, useStartupDetails } from "./timeline/startup-preference";
+
+export { ClaudeMark } from "./components/claude-mark";
+export { AnthropicMark } from "./components/anthropic-mark";
+export { OpenRouterMark } from "./components/openrouter-mark";
+export { GrokMark } from "./components/grok-mark";

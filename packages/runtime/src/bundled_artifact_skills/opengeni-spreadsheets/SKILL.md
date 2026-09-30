@@ -47,10 +47,12 @@ Skill was installed or explicitly checked out to the filesystem.
 5. Inspect the affected viewport after mutation and reconcile key totals and
    formula errors. If concurrent work invalidates an assumption, re-inspect and
    recompute; never force a stale range rewrite.
-6. Export only when the user needs XLSX/PDF/image delivery or visual QA.
-   `opengeni__editable_artifact_export_status` returns a durable workspace
-   `fileId`; it does not write into the sandbox. Download only when local bytes
-   are actually needed.
+6. Share the result as the live artifact's `artifactReference` link. Export
+   only when the user needs a file, and only formats the
+   `opengeni__editable_artifact_export` tool description lists (currently XLSX;
+   no PDF or image export). `opengeni__editable_artifact_export_status` returns
+   a durable workspace `fileId`; it does not write into the sandbox. Download
+   only when local bytes are actually needed.
 
 ## Fidelity and safety
 

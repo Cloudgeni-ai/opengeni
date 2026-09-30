@@ -245,23 +245,20 @@ function IntegrationPolicyEditor({ client, identity }: Props) {
   return (
     <section aria-label="Integration policy" className="min-w-0">
       <SectionStack>
-        <Section
-          title="Allowed integrations"
-          description="Applies to every workspace in the organization. Connections that already exist keep working."
-        >
+        <Section title="Allowed integrations">
           <SettingRowGroup>
             <SettingRow
-              label="Workspaces can connect"
+              label="Available to workspaces"
               description={
                 mode === "unrestricted"
-                  ? "Any integration, including custom MCP, OpenAPI and GraphQL connections."
-                  : "Only the integrations switched on below."
+                  ? "Includes custom MCP, OpenAPI and GraphQL connections. Connections that already exist keep working."
+                  : "Only the integrations switched on below. Connections that already exist keep working."
               }
               controlWidth="auto"
               control={
                 <SegmentedControl<OrganizationIntegrationPolicy["mode"]>
                   size="sm"
-                  aria-label="Allowed integrations"
+                  aria-label="Available to workspaces"
                   disabled={locked}
                   value={mode}
                   onValueChange={(value) => {

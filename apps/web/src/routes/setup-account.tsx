@@ -175,8 +175,8 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
     normalizeEmail(authSession.user.email) === normalizeEmail(preview.targetEmail);
 
   return (
-    <section className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4 sm:items-center">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
+    <section className="og-page-glow flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4 sm:items-center">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
         <div className="mb-4 flex items-center gap-3">
           <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <KeyRoundIcon className="size-4" />
@@ -192,7 +192,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
                 ? signedInAsInvitedAccount
                   ? `Signed in as ${authSession.user.email}.`
                   : "Sign in or create an account to accept this invitation."
-                : "Use your existing OpenGeni account or create a new one."}
+                : "Use your existing Opengeni account or create a new one."}
             </p>
           </div>
         </div>
@@ -210,7 +210,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <Button asChild className="mt-4 w-full">
               <Link to="/">
                 <CheckIcon className="size-4" />
-                {completion === "joined" ? "Open OpenGeni" : "Sign in"}
+                {completion === "joined" ? "Open Opengeni" : "Sign in"}
               </Link>
             </Button>
           </>
@@ -219,7 +219,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <Notice tone="failed" title="This link is incomplete">
               Ask your organization administrator for a new invitation.
             </Notice>
-            <Button asChild variant="secondary" className="mt-4 w-full">
+            <Button asChild variant="outline" className="mt-4 w-full">
               <Link to="/">Return to sign in</Link>
             </Button>
           </>
@@ -244,7 +244,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
           <div>
             <InvitationSummary preview={preview} />
             <Notice tone="info" title={`Signed in as ${authSession.user.email}`}>
-              Accept this invitation with your current OpenGeni account. No new account or password
+              Accept this invitation with your current Opengeni account. No new account or password
               is needed.
             </Notice>
             {error ? (
@@ -280,14 +280,14 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
           >
             <InvitationSummary preview={preview} />
             <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
-              <p className="text-sm font-medium">Already have an OpenGeni account?</p>
+              <p className="text-sm font-medium">Already have an Opengeni account?</p>
               <p className="mt-1 text-xs leading-5 text-fg-subtle">
                 This invitation is for {preview.targetEmail}. Sign in with that account and
                 we&apos;ll bring you directly back here.
               </p>
               <Button
                 asChild
-                variant="secondary"
+                variant="outline"
                 size="sm"
                 className="mt-3 h-auto min-h-9 w-full whitespace-normal"
               >
@@ -308,7 +308,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             </div>
             <div className="mb-4 flex items-center gap-3 text-xs text-fg-subtle">
               <span className="h-px flex-1 bg-border" />
-              New to OpenGeni?
+              New to Opengeni?
               <span className="h-px flex-1 bg-border" />
             </div>
             <p className="mb-4 text-xs leading-5 text-fg-subtle">
@@ -396,7 +396,7 @@ function UnavailableSetupState({
       <Notice tone={state === "completed" ? "success" : "failed"} title={copy.title}>
         {copy.body}
       </Notice>
-      <Button asChild variant="secondary" className="mt-4 w-full">
+      <Button asChild variant="outline" className="mt-4 w-full">
         <Link to="/">Return to sign in</Link>
       </Button>
     </>

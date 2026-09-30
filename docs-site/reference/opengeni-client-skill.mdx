@@ -278,6 +278,10 @@ before choosing; it also covers `chats`, the admission switch and error codes.
   sandbox credentials, including Git) and recognize the calling turn from the
   informational `_meta.opengeni` on MCP calls. See
   `docs/workspace-integrations.md`.
+- Organization integration administration, webhook reads and signing-secret
+  rotation use functions imported from `@opengeni/sdk/workspace-integrations`,
+  with `client` as the first argument. They are not eager client methods; see
+  [Data tools and credentials](references/data-tools-and-credentials.md).
 
 ## Choose The Credential
 
@@ -484,6 +488,29 @@ Tool schemas are prompt cost: one run with 23 MCP tools spent about 35k input
 tokens per turn. Trim with `allowedTools` on each server, and set
 `eager: true` in `tools` only for a server the first request needs.
 
+## Product-owned background job
+
+Attribute automation to a service, not a fabricated human:
+
+```ts
+const job = og.asService("acme:reports", { jobId: jobRecord.id });
+await job.createSession(workspaceId, {
+  initialMessage: "Summarize the latest product report.",
+  idempotencyKey: `reports:${jobRecord.id}`,
+  skills: productSkills,
+  tools: selectedProductTools,
+  firstPartyMcpTools: [],
+  bundledSkillIds: [],
+});
+```
+
+The original `og` client remains unchanged. `asService` cannot chain with
+`asUser` or `asLinkedUser`; it records non-secret attribution without granting
+permissions or borrowing personal resources. Use a workspace-owned Connection
+for background API/MCP access, or the product's signed workspace credential
+provider for short-lived managed-sandbox Git/cloud material. See
+[Data tools and credentials](data-tools-and-credentials.md).
+
 ## Per-user tool tokens
 
 When the product's MCP server should act as the signed-in user, give each
@@ -535,6 +562,8 @@ Choose one credential deliberately:
 Only add `x-opengeni-access-key` when the operator says the deployment
 shared-key boundary is enabled. It is not a replacement for organization API
 keys in managed SaaS.
+
+A full organization API key can provision workspaces, members and asUser sessions; /v1/access/me reports this as credential.effectiveWorkspacePermissions.
 
 ## Minimal Server-Side Session Client
 
@@ -603,6 +632,25 @@ workspace defaults. On deployments without agent settings, send an explicit
 minimal `firstPartyMcpTools` instead. Removing
 cross-session tools from a shared workspace is defense in depth, not a hard
 tenant boundary.
+
+## Automated work
+
+Use the server-side `client.asService(name, context?)` for product jobs, bots,
+and webhooks under an organization or workspace API key. It returns the same
+client class without mutating the original and sends
+`x-opengeni-service-initiator` plus optional `x-opengeni-service-context`.
+Names match `^[a-z0-9][a-z0-9:._-]{0,63}$`; context is a non-secret flat JSON
+object of strings, finite numbers, and booleans, at most 2 KiB of serialized
+header bytes. Reapplying replaces the name and context.
+
+Attribution grants no authority and cannot borrow a human's Personal workspace,
+personal Connections, Knowledge, or Variable Sets. Do not create a synthetic
+user for automation. `asService` and `asUser` / `asLinkedUser` are mutually
+exclusive; start from the unscoped client for each lane. The key's ordinary
+workspace permissions and the provider's own authorization remain required.
+See `docs/product-integration.md`'s Automated work section when source is
+available, and [Data tools and credentials](data-tools-and-credentials.md)
+for product-owned repository credentials.
 
 ## Existing APIs As Agent Tools
 
@@ -1245,7 +1293,7 @@ key, an empty `workspaceGrants` array in `/v1/access/me` is expected;
 
 ## `references/data-tools-and-credentials.md`
 
-```markdown
+````markdown
 # Data tools and credentials
 
 ## Existing customer APIs can become agent tools
@@ -1309,6 +1357,74 @@ For session-specific MCP credentials, createSession stores header values encrypt
 
 Prefer short-lived, audience-bound tokens when the customer can issue them. Let the customer's authenticated backend mint or refresh a token for the exact product subject and data boundary. A workspace-wide credential is appropriate only when every session in that workspace may exercise the same provider authority.
 
+## Product-owned repository credentials
+
+For an automated job, use `client.asService(name, context?)` under a server-held
+organization or workspace key, not a synthetic `asUser` identity. Service
+attribution is not permission and grants no human/personal-resource authority.
+
+Configure `putWorkspaceCredentialProvider` once during provisioning and store
+the returned signing secret. The product's HTTPS endpoint verifies the exact
+raw body with `verifyCredentialProviderRequest`, authorizes the signed
+workspace/session scope independently of service labels, and returns short-lived
+`git` credentials with an `expiresAt`. The provider, not a human's personal
+Connection, owns those credentials.
+
+Organization registration and secret rotation are focused server-side helpers,
+not eager client methods:
+
+```ts
+import {
+  putOrganizationCredentialProvider,
+  createOrganizationWebhook,
+  rotateOrganizationCredentialProviderSecret,
+} from "@opengeni/sdk/workspace-integrations";
+
+const { secret } = await putOrganizationCredentialProvider(client, organizationId, {
+  url: "https://product.example/credentials",
+  workspaceFilter: { externalSource: "product:production" },
+});
+await createOrganizationWebhook(client, organizationId, {
+  url: "https://product.example/events",
+  eventTypes: ["turn.completed"],
+  workspaceFilter: { externalSource: "product:production" },
+});
+// Rotate explicitly when needed; store the new once-returned secret.
+// await rotateOrganizationCredentialProviderSecret(client, organizationId);
+```
+
+All functions in `@opengeni/sdk/workspace-integrations` take `client` first.
+This also covers organization reads/updates/deletes, webhook delivery listing
+and redelivery, `getWorkspaceWebhook`, and both scopes' secret-rotation helpers.
+Keep them on the product backend, never import them into the browser to expose
+an organization key.
+
+```ts
+await client.asService("acme:reports", { jobId: jobRecord.id }).createSession(workspaceId, {
+  initialMessage: "Summarize the latest report changes.",
+  idempotencyKey: `reports:${jobRecord.id}`,
+  resources: [{
+    kind: "repository",
+    uri: "https://gitlab.com/acme/reports.git",
+    ref: "main",
+    provider: "gitlab",
+    access: "read",
+  }],
+  skills: productSkills,
+  tools: [],
+  firstPartyMcpTools: [],
+  bundledSkillIds: [],
+});
+```
+
+The credential-provider response supplies the `gitlab.com` host credential;
+never put a token in the repository URI, Skill, context, or prompt. Repository
+cloning requires managed compute. A Connected Machine owns its existing
+checkout and Git authentication; OpenGeni neither clones repositories nor
+injects Git tokens there. When source is available, see
+`docs/workspace-integrations.md` for the signed protocol and
+`docs/product-integration.md` for the full provisioning example.
+
 ## Where credentials are visible
 
 For brokered API Integrations and MCP connections:
@@ -1349,7 +1465,7 @@ Design rotation before launch:
 - revoke the old provider credential after the new path is verified.
 
 Test expiry, revocation, insufficient scope, wrong audience, wrong tenant, provider timeout, schema drift, and an ambiguous write outcome. A successful happy-path query does not prove a safe data integration.
-```
+````
 
 ## `references/discovery-and-autonomy.md`
 
@@ -2277,6 +2393,46 @@ Default to the full conversation component. Deviate only when the product needs 
 Inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Prefer, in order: `SessionConversation` customized through `composerProps` and `renderMessageText`; `MessageTimeline`, `ChatComposer`, and the session hooks composed into product layout; then a fully custom SDK-driven UI. Do not force a packaged component when the product needs a materially different interaction model.
 
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
+
+## Links, downloads, artifacts, and Sites
+
+Agent replies link OpenGeni objects as `artifact:<file uuid>`,
+`sandbox:<path>[:line]`, `/workspaces/<ws>/artifacts/editable/<id>` (live
+document, workbook, or presentation), and `/workspaces/<ws>/artifacts/<uuid>`
+(Site). None is navigable inside the product: the `/workspaces/...` forms are
+console routes and 404 on the product origin. Never pass them to a raw `<a>`.
+
+- `SessionConversation`/`OpenGeniChat` behind `createSessionProxyHandler`
+  download `artifact:` files by default. `sandbox:` reads require deliberate
+  proxy `sandboxFiles: true` (default off) plus `files:read`; they are confined
+  to the selected working directory, including on Connected Machines, and
+  refuse symlinked paths. Disabled sandbox links render unavailable.
+- Artifacts and Sites: reuse the OpenGeni surfaces, do not rebuild them.
+  `opengeni-site` fences render the inline Site preview automatically. Mount
+  `SessionArtifactViewer` (`@opengeni/react/artifacts`) in a host container
+  (for example the main area beside an assistant panel, a full-screen sheet on
+  phones) and pass `onOpenArtifact` to `SessionConversation` (or
+  `viewerLinkResolver` to `MessageTimeline`). Enable the proxy's
+  `artifacts: true`; editors also need the document, spreadsheet, and
+  presentation runtimes (`@opengeni/artifact-kernel-wasm-document`,
+  `@opengeni/artifact-kernel-wasm-spreadsheet`,
+  `@opengeni/artifact-kernel-wasm-presentation`) plus the SDK Worker URL
+  (`editableRuntimes`). A custom host proxy reports the viewer capability with
+  `artifactViewerCapability` from `@opengeni/sdk`. Close the viewer when the session changes.
+  Translate its copy with `labels` (partial `ArtifactLabels`) or
+  `ArtifactLabelsProvider`.
+- Other routing: `resolveLink={(target) => ... ({ href } | { open } | null)}`
+  on `SessionConversation` or `MessageTimeline`, or `OpenGeniLinkProvider` for a
+  subtree; it also covers `Markdown` inside a custom `renderMessageText`.
+  Unresolved targets render as unavailable text, not broken links.
+- `MessageTimeline` alone has no defaults; add
+  `sessionLinkResolver({ client, workspaceId, sessionId })` for downloads.
+- Non-React or custom renderers: classify each href with
+  `parseOpenGeniLink(href)` from `@opengeni/sdk`, then use
+  `createFileDownloadUrl` / `fsRead`, or the product's artifact page.
+- Editable artifact export serves only the formats the export tool lists
+  (today spreadsheet XLSX). Do not build a "Download PDF" flow on it; open the
+  live artifact instead.
 
 ## Optional artifact library
 

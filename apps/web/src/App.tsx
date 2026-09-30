@@ -3,10 +3,9 @@
 //   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
+//   /workspaces/:id/priority, /agents        → sessions redirect (retired "For you" and Agents pages)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
-//   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets (?view=new)
 //   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
@@ -29,7 +28,6 @@
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
-//   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 import {
@@ -92,11 +90,6 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "IntegrationsReturnRoute",
 );
-const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
-const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
-  () => import("@/routes/agents"),
-  "AgentTopologyPreviewRoute",
-);
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
@@ -104,7 +97,6 @@ const LazyVariableSetsRoute = lazyRouteComponent(
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
-const LazyPriorityRoute = lazyRouteComponent(() => import("@/routes/priority"), "PriorityRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -279,11 +271,6 @@ const composerChromeGalleryRoute = createRoute({
   path: "dev/composer-chrome",
   component: ComposerChromeGallery,
 });
-const agentTopologyPreviewRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "dev/agent-topology",
-  component: AgentTopologyPreview,
-});
 const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
@@ -314,6 +301,18 @@ const workspaceAgentRoute = createRoute({
   path: "agent",
   component: WorkspaceIndexRedirect,
 });
+// The "For you" feed and the Agents page were retired. Attention now lives in
+// the sessions rail ("Needs you" view), so their old links land on sessions.
+const workspaceRetiredPriorityRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "priority",
+  component: WorkspaceIndexRedirect,
+});
+const workspaceRetiredAgentsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents",
+  component: WorkspaceIndexRedirect,
+});
 const workspaceSessionsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions",
@@ -329,11 +328,6 @@ const workspaceSessionRoute = createRoute({
     ...parseSessionSearchRoute(search),
   }),
   component: SessionView,
-});
-const workspaceAgentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "agents",
-  component: Agents,
 });
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -383,12 +377,9 @@ const workspaceMachinesRoute = createRoute({
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
+  // Opened from Organization settings > Billing & usage: back returns there.
+  validateSearch: (search: Record<string, unknown>): ReturnToSearch => parseReturnTo(search),
   component: Insights,
-});
-const workspacePriorityRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "priority",
-  component: Priority,
 });
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -621,16 +612,15 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
-  ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
-    : []),
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, onboardingPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
+    workspaceRetiredPriorityRoute,
+    workspaceRetiredAgentsRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
-    workspaceAgentsRoute,
     workspaceVariableSetsRoute.addChildren([
       workspaceVariableSetsIndexRoute,
       workspaceVariableSetDetailRoute,
@@ -640,7 +630,6 @@ const routeTree = rootRoute.addChildren([
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
-    workspacePriorityRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -748,11 +737,6 @@ function SessionView() {
   );
 }
 
-function Agents() {
-  const { workspaceId } = workspaceAgentsRoute.useParams();
-  return <LazyAgentsRoute workspaceId={workspaceId} />;
-}
-
 function SessionDeepLink() {
   const { sessionId } = sessionDeepLinkRoute.useParams();
   return <LazySessionDeepLinkRoute sessionId={sessionId} />;
@@ -791,12 +775,8 @@ function Machines() {
 
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
-  return <LazyInsightsRoute workspaceId={workspaceId} />;
-}
-
-function Priority() {
-  const { workspaceId } = workspacePriorityRoute.useParams();
-  return <LazyPriorityRoute workspaceId={workspaceId} />;
+  const search = workspaceInsightsRoute.useSearch();
+  return <LazyInsightsRoute workspaceId={workspaceId} returnTo={returnToOf(search)} />;
 }
 
 function CapabilitiesLegacyRedirect() {
@@ -1001,10 +981,6 @@ function AccountAuth() {
 
 function ComposerChromeGallery() {
   return <LazyComposerChromeGalleryRoute />;
-}
-
-function AgentTopologyPreview() {
-  return <LazyAgentTopologyPreviewRoute />;
 }
 
 function BillingReturnRoute() {

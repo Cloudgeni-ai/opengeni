@@ -425,6 +425,16 @@ retaining its full projection in the new audit receipt. Never clear public state
 alone, erase permanent consent receipts, or reuse completed consent for automatic
 recovery after a later loss.
 
+System continuity after definitive managed-provider loss (0526/0548) decides for
+the complete quiescent sandbox group: its latest verified checkpoint, or else a
+new EMPTY workspace. Both write a permanent warning receipt for every member before
+any box exists; the empty lane hydrates nothing, not even a per-session legacy
+archive, and keeps the lost archive evidence. Loss needs durable evidence from a
+loss transition; a failed replacement box is `replacement_failed`, never loss.
+Never bypass a complete archive, abandon a checkpoint for a non-definitive restore
+failure, or go empty before the lost box's provider lifetime ends. Keep consent
+singleton-only and never replay unknown outcomes. See `docs/run-lifecycle.md`.
+
 Sandbox acquisition and workspace mutation waits honor the first observed
 capture's durable remaining timeout once, within the lifecycle ceiling.
 Expired or replacement captures never replenish a caller's wait. Budget expiry
@@ -500,6 +510,16 @@ unit corpus in one shared test process. Prepared-runtime tests, including native
 report delivery, remain separate package-contract checks with their required
 runtime configuration.
 
+PostgreSQL tests using `acquireSharedTestDatabase` can use a prestarted disposable
+native PostgreSQL with pgvector via `OPENGENI_TEST_PG_NATIVE=1`. It must listen on
+`127.0.0.1:61440` with the fixture's `postgres` login/password `x`; the harness
+creates its non-superuser app role and isolated migrated database clones. This
+opt-in never starts, stops, or removes the server through Docker.
+For native PostgreSQL test fixtures, set `OPENGENI_REQUIRE_REAL_DB=1` and
+`OPENGENI_TEST_PG_URL` to an isolated pgvector-enabled test cluster's superuser
+maintenance URL. The shared harness retains full migrations, restricted app
+roles and FORCE-RLS checks; it never starts or stops that external server.
+
 Bun services launched by the test harness ignore implicit checkout `.env` files.
 Supply fixture settings through the service environment, or use an explicit
 `--env-file` argument when testing dotenv behavior itself.
@@ -540,3 +560,13 @@ Keep provider resource inventories, cleanup notes, cloud account identifiers, pr
 Use official upstream charts/operators or managed services for production platform services. OpenGeni's chart should own OpenGeni API, web, worker, migrations, and integration resources. Built-in Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local, CI, and smoke verification only; do not present them as lightweight production alternatives.
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. Agent guidance resumes only when the user asks to continue or the agent's own pause blocker clears, never because the user asked a question. See `docs/goals.md`.
+
+Claude Messages changes: read `docs/model-providers.md#native-claude-messages`
+and `packages/runtime/src/anthropic-messages.ts`. Run the native adapter tests
+(including its Agents SDK tool cycle), model admission tests, and real PostgreSQL
+lifecycle tests when changing connection kinds. Keep subscription and API-key
+credentials distinct; never copy captured credentials into fixtures or source.
+Subscription wire identity is pinned in `packages/runtime/src/claude-code-identity.ts`.
+Its tests use fake credentials and local transports; no live subscription probes
+without explicit user approval. Account/device identity belongs in the encrypted
+connection bundle, never in source or model-admission metadata.

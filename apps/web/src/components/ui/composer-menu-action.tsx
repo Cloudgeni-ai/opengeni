@@ -72,7 +72,7 @@ export function ConnectorAction(props: {
         aria-disabled={props.disabled || undefined}
         disabled={props.disabled}
         className={cn(
-          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
           props.className,
         )}
         onClick={props.onAction}

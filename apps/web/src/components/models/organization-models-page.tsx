@@ -16,7 +16,6 @@ import {
   ProviderConnectionPage,
   ProviderConnectionRow,
   providerListed,
-  type ProviderConnection,
 } from "@/components/ai-gateway-connection";
 import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
 import {
@@ -92,7 +91,8 @@ export function OrganizationModelsPage({
   /** Where a cross-scope link came from (a workspace's Models); Back returns there. */
   returnTo?: ReturnTo | undefined;
 }) {
-  const client = useAppContext().client;
+  const { client, clientConfig } = useAppContext();
+  const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
   const nav = useModelsNavigation(
     useMemo(() => ({ kind: "organization" as const, workspaceId }), [workspaceId]),
     { account, view, returnTo },
@@ -109,7 +109,18 @@ export function OrganizationModelsPage({
     organizationId,
     providerKind: "openrouter",
   });
-  const gateways: Record<"vercel" | "openrouter", ProviderConnection> = { vercel, openrouter };
+  const anthropic = useOrganizationProviderConnection({
+    client,
+    organizationId,
+    providerKind: "anthropic",
+  });
+  const claude_subscription = useOrganizationProviderConnection({
+    client,
+    organizationId,
+    providerKind: "claude_subscription",
+    enabled: claudeEnabled,
+  });
+  const gateways = { vercel, openrouter, anthropic, claude_subscription };
 
   const backToList = () => nav.openAccount(undefined);
   const codexPlaces: OrgCodexPlaces = {
@@ -133,7 +144,13 @@ export function OrganizationModelsPage({
 
   const key = accountKeyOf(account);
   let page: ReactNode;
-  if (view === "connect") {
+  if (
+    !claudeEnabled &&
+    (view === "connect:claude_subscription" ||
+      (key?.provider === "gateway" && key.id === "claude_subscription"))
+  ) {
+    page = <Notice>Claude subscriptions are not enabled on this deployment.</Notice>;
+  } else if (view === "connect") {
     page = (
       <ConnectPickerPage
         codexAvailable
@@ -149,12 +166,18 @@ export function OrganizationModelsPage({
     page = <OrgCodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} />;
   } else if (view === "connect:supergrok") {
     page = <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} />;
-  } else if (view === "connect:vercel" || view === "connect:openrouter") {
-    const id = view === "connect:vercel" ? "vercel" : "openrouter";
+  } else if (
+    view === "connect:vercel" ||
+    view === "connect:openrouter" ||
+    view === "connect:anthropic" ||
+    view === "connect:claude_subscription"
+  ) {
+    const id = view.slice("connect:".length) as keyof typeof gateways;
     page = (
       <ProviderConnectPage
+        key={id}
         state={gateways[id]}
-        onClose={backToList}
+        onClose={() => (gateways[id].connected ? nav.openAccount(`gateway:${id}`) : backToList())}
         onConnected={() => nav.openAccount(`gateway:${id}`)}
       />
     );
@@ -188,14 +211,18 @@ export function OrganizationModelsPage({
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
-      (["openrouter", "vercel"] as const).some((id) => !gateways[id].settled);
+      (["openrouter", "vercel", "anthropic", "claude_subscription"] as const).some(
+        (id) => !gateways[id].settled,
+      );
     const listed =
       (codex.loading ? 0 : codex.loadError || codex.pending ? 1 : codex.accounts.length) +
       superGrokListedCount(grok) +
-      (["openrouter", "vercel"] as const).filter((id) => providerListed(gateways[id])).length;
+      (["openrouter", "vercel", "anthropic", "claude_subscription"] as const).filter((id) =>
+        providerListed(gateways[id]),
+      ).length;
     const empty = !loadingAccounts && listed === 0;
     const connect = (
-      <RowButton onClick={() => nav.openView("connect")}>
+      <RowButton variant="default" onClick={() => nav.openView("connect")}>
         <PlusIcon aria-hidden="true" />
         Connect account
       </RowButton>
@@ -220,7 +247,7 @@ export function OrganizationModelsPage({
             <RowList label="Shared accounts" columns={ACCOUNT_COLUMNS} flush>
               <OrgCodexRows codex={codex} places={codexPlaces} />
               <SuperGrokAccountRows grok={grok} places={grokPlaces} />
-              {(["openrouter", "vercel"] as const)
+              {(["openrouter", "vercel", "anthropic", "claude_subscription"] as const)
                 .filter((id) => providerListed(gateways[id]))
                 .map((id) => (
                   <ProviderConnectionRow
@@ -465,7 +492,7 @@ function OrgCodexAccountDetail({
                 <Button
                   type="button"
                   size="sm"
-                  variant="outline"
+                  variant="default"
                   onClick={places.openConnect}
                   className="rounded-[10px] pointer-coarse:h-11"
                 >
@@ -617,7 +644,7 @@ function OrgCodexConnectPage({
     >
       <FieldStack>
         <p className="text-sm text-fg-muted">
-          ChatGPT opens in a new tab and asks for a code, which shows here. OpenGeni never sees your
+          ChatGPT opens in a new tab and asks for a code, which shows here. Opengeni never sees your
           password. Every shared workspace can use the account until you limit it.
         </p>
         {codex.pending ? (

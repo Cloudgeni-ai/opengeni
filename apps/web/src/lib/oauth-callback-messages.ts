@@ -38,6 +38,19 @@ export function oauthCallbackReasonMessage(reason: string | null): string | null
   }
 }
 
+/**
+ * A failed OAuth callback with no flow-specific copy. A reason we have no
+ * words for stays visible (as support needs it) after the generic line.
+ */
+export function oauthCallbackFailureMessage(reason: string | null): string {
+  const shared = oauthCallbackReasonMessage(reason);
+  if (shared) return shared;
+  const code = reason?.trim().slice(0, 120);
+  return code
+    ? `Couldn't connect. Please try again. Reason: ${code}.`
+    : "Couldn't connect. Please try again.";
+}
+
 export function mcpOAuthCallbackFailureMessage(
   stage: string | null,
   reason: string | null,
@@ -56,7 +69,7 @@ export function mcpOAuthCallbackFailureMessage(
   if (stage === "persist") {
     return reason === "timeout"
       ? "Authorization succeeded, but saving the connection timed out. Nothing was committed; try again."
-      : "Authorization succeeded, but OpenGeni couldn't save the connection. Try again.";
+      : "Authorization succeeded, but Opengeni couldn't save the connection. Try again.";
   }
   if (reason === "timeout") {
     const label = stage ? CALLBACK_STAGE_LABELS[stage] : null;

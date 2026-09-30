@@ -105,6 +105,7 @@ function turn(): SessionTurn {
 
 async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
   return await bindRunCredentialResolver({
+    effectiveTools: [],
     db: client.db,
     settings,
     initiatingHumanSubjectId: "user:owner",
@@ -113,7 +114,7 @@ async function bind(options: { hostPort?: RunCredentialsResolution } = {}) {
       : null,
     ...scope,
     session,
-    turn: turn(),
+    turn: { ...turn(), initiatingHumanSubjectId: "user:owner" },
     attemptId: crypto.randomUUID(),
     effectiveSandboxBackend: "docker",
     variableSet: null,
@@ -134,10 +135,17 @@ describe("workspace credential provider", () => {
     const material = await resolver!.resolve({ purpose: "provision", forceRefresh: false });
     expect(requests.at(-1)).toMatchObject({
       type: "credentials.request",
+      lane: "workspace",
+      mcpServers: [],
       purpose: "provision",
       workspaceId: scope.workspaceId,
       sessionId: session.id,
       initiatingHumanSubjectId: "user:owner",
+      initiatorContext: {
+        kind: "human",
+        initiator: { kind: "subject", subjectId: "user:owner" },
+        context: {},
+      },
       sandboxBackend: "docker",
     });
     expect(material!.environment).toMatchObject({
@@ -208,7 +216,7 @@ describe("workspace credential provider", () => {
     expect(await resolver!.resolve({ purpose: "provision", forceRefresh: false })).toBeNull();
   });
 
-  test("a disabled provider falls back to the deployment's host port", async () => {
+  test("a disabled provider pauses credentials without deployment fallback", async () => {
     await upsertWorkspaceCredentialProvider(client.db, {
       ...scope,
       url: `http://127.0.0.1:${receiver.port}/credentials`,
@@ -226,8 +234,10 @@ describe("workspace credential provider", () => {
       },
     });
     const material = await resolver!.resolve({ purpose: "provision", forceRefresh: false });
-    expect(material!.environment).toEqual({ FROM_HOST: "1" });
+    expect(material).toBeNull();
     expect(requests.length).toBe(before);
-    expect(await bind()).toBeNull();
+    const paused = await bind();
+    expect(paused).not.toBeNull();
+    expect(await paused!.resolve({ purpose: "provision", forceRefresh: false })).toBeNull();
   });
 });

@@ -12,7 +12,7 @@ import {
   getSession,
 } from "../src/index";
 
-// Migration 0542: sessions.agent_config is one frozen, nullable agent
+// Migration 0551: sessions.agent_config is one frozen, nullable agent
 // configuration. NULL keeps a legacy session; the mid-session update shares the
 // tool-policy version CAS.
 
@@ -76,7 +76,7 @@ async function storedConfig(sessionId: string): Promise<unknown> {
   return row?.agent_config ?? null;
 }
 
-describe("sessions.agent_config (0542)", () => {
+describe("sessions.agent_config (0551)", () => {
   test("an omitted configuration stores NULL and reads as a legacy session", async () => {
     const grant = await workspace();
     const session = await createSession(client.db, sessionInput(grant));

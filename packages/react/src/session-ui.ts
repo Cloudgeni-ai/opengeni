@@ -13,6 +13,25 @@ export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export {
+  OpenGeniLinkProvider,
+  chainLinkResolvers,
+  sessionLinkResolver,
+  useOpenGeniLinkResolver,
+  viewerLinkResolver,
+} from "./components/open-geni-links";
+export type {
+  OpenGeniLinkResolution,
+  OpenGeniLinkResolver,
+  OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
+} from "./components/open-geni-links";
+export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export type { TimelineSearchTarget } from "./components/timeline-search";
 export { createOlderHistoryLoadReceipt } from "./older-history";
 export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";

@@ -424,6 +424,7 @@ export class ModalCommandControl {
           expected: structuredClone(command),
           chunks,
           exitCode: next.streams.stdout.eof && next.streams.stderr.eof ? exit : null,
+          providerExited: exit !== null,
           streamFidelity: command.pty ? "merged" : "separate",
         };
       });

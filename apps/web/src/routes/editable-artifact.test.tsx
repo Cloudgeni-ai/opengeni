@@ -33,8 +33,15 @@ mock.module("@/lib/editable-artifact-client", () => ({
   },
 }));
 mock.module("@opengeni/sdk/editable-artifacts/worker?worker&url", () => ({ default: "worker.js" }));
-mock.module("@opengeni/react/artifacts", () => ({
-  BrowserEditableArtifactWorkbench: ({
+// The shared view owns loading/error states; only the live editor is replaced.
+const workbenchModule = new URL(
+  "../../../../packages/react/src/components/artifacts/editable-artifact-workbench.tsx",
+  import.meta.url,
+).pathname;
+const actualWorkbench = await import(workbenchModule);
+mock.module(workbenchModule, () => ({
+  ...actualWorkbench,
+  EditableArtifactWorkbenchHost: ({
     document,
     spreadsheet,
     presentation,

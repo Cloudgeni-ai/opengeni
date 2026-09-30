@@ -229,11 +229,16 @@ function subscribeClock(listener: () => void) {
 }
 
 function getClockMinute() {
-  return clockMinute;
+  return Math.floor(Date.now() / MINUTE);
 }
 
 function noSubscription() {
   return () => {};
+}
+
+/** Shared clock for quota expiry and the accompanying time labels. */
+export function useMinuteNow(): number {
+  return useSyncExternalStore(subscribeClock, getClockMinute, getClockMinute) * MINUTE;
 }
 
 /**

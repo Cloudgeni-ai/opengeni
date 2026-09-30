@@ -28,6 +28,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 import type { SessionVariableSetPickerSharedState } from "@/lib/use-session-variable-set-picker-state";
@@ -180,9 +181,10 @@ export function SessionVariableSetPicker(props: {
         await props.onReloadSession();
       } catch (cause) {
         if (activeScope.current !== scope) return;
-        const message = cause instanceof Error ? cause.message : String(cause);
-        const refreshMessage = `The Variable Sets were updated, but the session could not be refreshed: ${message}`;
-        setError(refreshMessage);
+        const message = userErrorText(cause);
+        setError(
+          `The Variable Sets were updated, but the session couldn't be refreshed. ${message}`,
+        );
         setOpen(false);
         toast.warning("Variable Sets updated; refresh required", { description: message });
         return;
@@ -194,8 +196,8 @@ export function SessionVariableSetPicker(props: {
       });
     } catch (cause) {
       if (activeScope.current !== scope) return;
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(message);
+      const message = userErrorText(cause);
+      setError(`Couldn't update the Variable Sets. ${message}`);
       toast.error("Variable Sets were not updated", { description: message });
     } finally {
       if (activeScope.current === scope)
@@ -212,10 +214,8 @@ export function SessionVariableSetPicker(props: {
       toast.success("Session refreshed");
     } catch (cause) {
       if (activeScope.current !== scope) return;
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setError(
-        `The Variable Sets were updated, but the session could not be refreshed: ${message}`,
-      );
+      const message = userErrorText(cause);
+      setError(`The Variable Sets were updated, but the session couldn't be refreshed. ${message}`);
       toast.warning("Session refresh failed", { description: message });
     } finally {
       if (activeScope.current === scope)
@@ -259,7 +259,7 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={saving}
             onClick={() => setDraftRows((rows) => rows.map((row) => ({ ...row, enabled: false })))}
           >
@@ -281,7 +281,7 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={variableSets.loading}
             onClick={() => void variableSets.refresh()}
           >
@@ -319,7 +319,7 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            variant="secondary"
+            variant="outline"
             disabled={saving}
             onClick={() => void refreshCommittedSession()}
           >

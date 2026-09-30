@@ -4,9 +4,24 @@
   "name": "OpenGeni",
   "description": "Add agents that finish real work to your product. OpenGeni is the open, self-hostable runtime for long-running AI agents.",
   "colors": {
-    "primary": "#026fd7",
-    "light": "#5fa7ff",
-    "dark": "#004bb7"
+    "primary": "#1f8a74",
+    "light": "#9fe3d3",
+    "dark": "#1f8a74"
+  },
+  "background": {
+    "color": {
+      "light": "#fbfbf8",
+      "dark": "#0f1115"
+    }
+  },
+  "fonts": {
+    "heading": {
+      "family": "DM Sans",
+      "weight": 500
+    },
+    "body": {
+      "family": "DM Sans"
+    }
   },
   "favicon": "/favicon.svg",
   "logo": {

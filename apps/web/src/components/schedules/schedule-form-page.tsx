@@ -25,6 +25,13 @@ import { Notice } from "@/components/ui/notice";
 import { SegmentedControl, type SegmentedControlProps } from "@/components/ui/segmented-control";
 import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import { useAppContext } from "@/context";
+import {
+  apiErrorAdvice,
+  apiErrorDetails,
+  apiErrorFacts,
+  isPermissionDenied,
+  userErrorText,
+} from "@/lib/api-error";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
@@ -62,7 +69,6 @@ import {
   newScheduleDraft,
   ownsSchedule,
   runTimeLabel,
-  scheduleErrorText,
   scheduleName,
   templateById,
   updateRequestFromDraft,
@@ -140,22 +146,28 @@ export function ScheduleFormPage({
         submitDisabled
       >
         {source.status === "error" ? (
-          <ErrorMessage
-            title="Couldn't load the schedule"
-            details={[{ label: "Error", value: source.error.message }]}
-            action={
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setAttempt((value) => value + 1)}
-              >
-                Try again
-              </Button>
-            }
-          >
-            It may have been deleted. Go back to Schedules to see the rest.
-          </ErrorMessage>
+          isPermissionDenied(source.error) ? (
+            <Notice title="You can't open this schedule.">Ask a workspace admin for access.</Notice>
+          ) : (
+            <ErrorMessage
+              title="Couldn't load the schedule"
+              {...apiErrorDetails(source.error)}
+              action={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setAttempt((value) => value + 1)}
+                >
+                  Try again
+                </Button>
+              }
+            >
+              {apiErrorFacts(source.error).status === 404
+                ? "It may have been deleted. Go back to Schedules to see the rest."
+                : apiErrorAdvice(source.error)}
+            </ErrorMessage>
+          )
         ) : null}
       </FormPage>
     );
@@ -458,7 +470,7 @@ function AgentScheduleForm({
   const baselineDestinationKey = scheduledLearningDestinationKey(initial);
   const taskId = editing && task ? task.id : undefined;
   const [learningLoading, setLearningLoading] = useState(Boolean(taskId));
-  const [learningError, setLearningError] = useState<string | null>(null);
+  const [learningError, setLearningError] = useState<unknown>(null);
   const [learningRetry, setLearningRetry] = useState(0);
   useEffect(() => {
     if (!taskId) return;
@@ -480,8 +492,8 @@ function AgentScheduleForm({
             agentLearningDirty: false,
           }));
       })
-      .catch((reason) => {
-        if (current) setLearningError(reason instanceof Error ? reason.message : String(reason));
+      .catch((reason: unknown) => {
+        if (current) setLearningError(reason);
       })
       .finally(() => {
         if (current) setLearningLoading(false);
@@ -516,7 +528,7 @@ function AgentScheduleForm({
       description: "A fresh cloud sandbox for each run.",
       leading: <ServerIcon className="size-4 text-fg-subtle" />,
       disabled: machineOnly,
-      disabledReason: "This OpenGeni server doesn't run managed sandboxes.",
+      disabledReason: "This Opengeni server doesn't run managed sandboxes.",
     },
     ...scheduledMachines.map((machine) => ({
       value: machine.sandboxId,
@@ -526,7 +538,7 @@ function AgentScheduleForm({
       description: "Runs on this computer, in its code folder.",
       leading: <LaptopIcon className="size-4 text-fg-subtle" />,
       disabled: !isMachineComputeSelectable(machine.state),
-      disabledReason: "It's offline. Start OpenGeni on it to pick it.",
+      disabledReason: "It's offline. Start Opengeni on it to pick it.",
     })),
     ...(draft.machineSandboxId &&
     !scheduledMachines.some((machine) => machine.sandboxId === draft.machineSandboxId)
@@ -589,7 +601,7 @@ function AgentScheduleForm({
       machineOnly &&
       computeChanged
     ) {
-      next.machine = "This OpenGeni server needs a connected machine for schedules.";
+      next.machine = "This Opengeni server needs a connected machine for schedules.";
     }
     return next;
   };
@@ -656,7 +668,7 @@ function AgentScheduleForm({
                   .then(() => toast.success(`Started ${created.name}`))
                   .catch((error: unknown) =>
                     toast.error("Couldn't start a run", {
-                      description: error instanceof Error ? error.message : String(error),
+                      description: userErrorText(error),
                     }),
                   ),
             }
@@ -685,7 +697,7 @@ function AgentScheduleForm({
       ? "Only the schedule's owner can change it. Duplicate it to make your own."
       : "You need permission to manage schedules in this workspace."
     : cantRunHere && computeChanged
-      ? "Connect a machine first. This OpenGeni server can't run schedules without one."
+      ? "Connect a machine first. This Opengeni server can't run schedules without one."
       : connectionAccounts.requiresAccountChoice
         ? (connectionAccounts.accountChoiceMessage ?? "Pick an account for each tool.")
         : learningLoading || connectionAccounts.loading
@@ -723,7 +735,7 @@ function AgentScheduleForm({
             task?.name
           ) : offerAgent ? (
             <>
-              Rather describe it? <HelpLink onClick={ask.open}>Create with OpenGeni</HelpLink>
+              Rather describe it? <HelpLink onClick={ask.open}>Create with Opengeni</HelpLink>
             </>
           ) : undefined
         }
@@ -748,14 +760,14 @@ function AgentScheduleForm({
               }
               actionLayout="responsive"
               action={
-                <Button asChild variant="outline" size="sm" className="pointer-coarse:h-11">
+                <Button asChild size="sm" className="pointer-coarse:h-11">
                   <Link to="/workspaces/$workspaceId/machines" params={{ workspaceId }}>
                     Connect a machine
                   </Link>
                 </Button>
               }
             >
-              This OpenGeni server doesn't run managed sandboxes, and no machine that can run is
+              This Opengeni server doesn't run managed sandboxes, and no machine that can run is
               connected to this workspace yet.
             </Notice>
           ) : null}
@@ -976,11 +988,16 @@ function AgentScheduleForm({
                 <p role="status" className="m-0 text-sm text-fg-muted">
                   Loading this schedule's agent learning settings…
                 </p>
+              ) : learningError && isPermissionDenied(learningError) ? (
+                <p className="m-0 text-sm text-fg-muted">
+                  You can't see this schedule's agent learning settings. You can still save other
+                  changes.
+                </p>
               ) : learningError ? (
                 <ErrorMessage
                   variant="inline"
                   title="Agent learning settings couldn't load. You can still save other changes."
-                  details={[{ label: "Error", value: learningError }]}
+                  {...apiErrorDetails(learningError)}
                   action={
                     <Button
                       type="button"
@@ -1015,12 +1032,15 @@ function AgentScheduleForm({
   );
 }
 
-/** Server errors read as a sentence inside the form, never "OpenGeni API 422: …". */
+/**
+ * Server errors read as what happened and what to do inside the form, never
+ * "OpenGeni API 422: …". A short validation sentence from the server is kept.
+ */
 async function withFriendlyError<T>(lead: string, request: Promise<T>): Promise<T> {
   try {
     return await request;
   } catch (error) {
-    throw new Error(`${lead} ${scheduleErrorText(error)}`, { cause: error });
+    throw new Error(`${lead} ${userErrorText(error)}`, { cause: error });
   }
 }
 

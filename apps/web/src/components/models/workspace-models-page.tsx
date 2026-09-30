@@ -93,7 +93,7 @@ export function WorkspaceModelsPage({
   view: ModelsView | undefined;
   onConnectionChange: () => void;
 }) {
-  const client = useAppContext().client;
+  const { client, clientConfig } = useAppContext();
   const scope = useMemo(() => ({ kind: "workspace" as const, workspaceId }), [workspaceId]);
   const nav = useModelsNavigation(scope, { account, view });
   const organizationNav = useModelsNavigation(
@@ -129,7 +129,27 @@ export function WorkspaceModelsPage({
     canManageCustomModels: canManageSettings,
     onConnectionChange: connectionChanged,
   });
-  const gateways: Record<"vercel" | "openrouter", ProviderConnection> = { vercel, openrouter };
+  const anthropic = useProviderConnection({
+    client,
+    config: PROVIDER_CONNECTION_CONFIGS.anthropic,
+    workspaceId,
+    canManageConnection: canManageConnections,
+    canManageCustomModels: canManageSettings,
+    onConnectionChange: connectionChanged,
+  });
+  const claude_subscription = useProviderConnection({
+    client,
+    config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
+    workspaceId,
+    canManageConnection: canManageConnections,
+    canManageCustomModels: canManageSettings,
+    onConnectionChange: connectionChanged,
+    enabled: clientConfig.claudeSubscriptionEnabled === true,
+  });
+  const gateways: Record<
+    "vercel" | "openrouter" | "anthropic" | "claude_subscription",
+    ProviderConnection
+  > = { vercel, openrouter, anthropic, claude_subscription };
   const credits = useOpenGeniCredits(organizationId);
 
   const backToList = () => nav.openAccount(undefined);
@@ -165,7 +185,20 @@ export function WorkspaceModelsPage({
   });
 
   let page: ReactNode;
-  if (view === "connect") {
+  if (
+    !clientConfig.claudeSubscriptionEnabled &&
+    (view === "connect:claude_subscription" ||
+      (key?.provider === "gateway" && key.id === "claude_subscription"))
+  ) {
+    page = (
+      <DetailPage
+        back={{ label: "Models", onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader title="Claude subscriptions are not enabled" />
+      </DetailPage>
+    );
+  } else if (view === "connect") {
     page = (
       <ConnectPickerPage
         codexAvailable={canManageConnections}
@@ -181,12 +214,22 @@ export function WorkspaceModelsPage({
     page = <CodexConnectPage codex={codex} places={codexPlaces} onClose={backToList} />;
   } else if (view === "connect:supergrok") {
     page = <SuperGrokConnectPage grok={grok} places={grokPlaces} onClose={backToList} />;
-  } else if (view === "connect:vercel" || view === "connect:openrouter") {
-    const id = view === "connect:vercel" ? "vercel" : "openrouter";
+  } else if (
+    view === "connect:vercel" ||
+    view === "connect:openrouter" ||
+    view === "connect:anthropic" ||
+    view === "connect:claude_subscription"
+  ) {
+    const id = view.slice("connect:".length) as keyof typeof gateways;
     page = (
       <ProviderConnectPage
+        key={id}
         state={gateways[id]}
-        onClose={backToList}
+        onClose={
+          id === "claude_subscription" && gateways[id].connected
+            ? () => nav.openAccount(`gateway:${id}`)
+            : backToList
+        }
         onConnected={() => nav.openAccount(`gateway:${id}`)}
       />
     );
@@ -207,7 +250,7 @@ export function WorkspaceModelsPage({
       ) : key.provider === "supergrok" ? (
         <SuperGrokAccessPage grok={grok} accountId={key.id} client={client} onClose={back} />
       ) : (
-        <ProviderAccessPage state={gateways[key.id as "vercel" | "openrouter"]} onClose={back} />
+        <ProviderAccessPage state={gateways[key.id as keyof typeof gateways]} onClose={back} />
       );
   } else if (key?.provider === "codex") {
     page = <CodexAccountPage codex={codex} accountId={key.id} places={codexPlaces} />;
@@ -231,12 +274,14 @@ export function WorkspaceModelsPage({
       credits.visible ? 1 : 0,
       codexListedCount(codex, setAsideOrganization),
       superGrokListedCount(grok),
-      ...(["openrouter", "vercel"] as const).map((id) => (providerListed(gateways[id]) ? 1 : 0)),
+      ...(["claude_subscription", "anthropic", "openrouter", "vercel"] as const).map((id) =>
+        providerListed(gateways[id]) ? 1 : 0,
+      ),
     ];
     const loadingAccounts =
       codex.loading ||
       (!grok.unavailable && grok.loading) ||
-      (["openrouter", "vercel"] as const).some(
+      (["claude_subscription", "anthropic", "openrouter", "vercel"] as const).some(
         (id) => !gateways[id].hidden && !gateways[id].settled,
       );
     page = (
@@ -268,7 +313,7 @@ export function WorkspaceModelsPage({
               organizationAccounts={setAsideOrganization}
             />
             <SuperGrokAccountRows grok={grok} places={grokPlaces} />
-            {(["openrouter", "vercel"] as const)
+            {(["claude_subscription", "anthropic", "openrouter", "vercel"] as const)
               .filter((id) => providerListed(gateways[id]))
               .map((id) => (
                 <ProviderConnectionRow
@@ -361,7 +406,7 @@ function ModelsList({
         description="Subscriptions and API keys that pay for models here."
         action={
           canManageConnections && !empty ? (
-            <RowButton onClick={onConnect}>
+            <RowButton variant="default" onClick={onConnect}>
               <PlusIcon aria-hidden="true" />
               Connect account
             </RowButton>
@@ -380,7 +425,7 @@ function ModelsList({
             }
             action={
               canManageConnections ? (
-                <RowButton onClick={onConnect}>
+                <RowButton variant="default" onClick={onConnect}>
                   <PlusIcon aria-hidden="true" />
                   Connect account
                 </RowButton>
@@ -400,7 +445,13 @@ function ModelsList({
   );
 }
 
-type ConnectChoice = "codex" | "supergrok" | "vercel" | "openrouter";
+type ConnectChoice =
+  | "anthropic"
+  | "claude_subscription"
+  | "codex"
+  | "supergrok"
+  | "vercel"
+  | "openrouter";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -420,13 +471,19 @@ export function ConnectPickerPage({
   codexAvailable: boolean;
   /** "not_enabled": this server has SuperGrok off. "hidden": the viewer can't connect it. */
   grok: "available" | "not_enabled" | "hidden";
-  gateways?: Record<"vercel" | "openrouter", ProviderConnection> | undefined;
+  gateways?:
+    | Partial<
+        Record<"vercel" | "openrouter" | "anthropic" | "claude_subscription", ProviderConnection>
+      >
+    | undefined;
   /** Where the account pays: the workspace's name, or the organization's shared workspaces. */
   scopeName: string;
   onClose: () => void;
   onPick: (provider: ConnectChoice) => void;
   /** Opens a provider that is already connected. */
-  onOpenConnected?: ((provider: "vercel" | "openrouter") => void) | undefined;
+  onOpenConnected?:
+    | ((provider: "vercel" | "openrouter" | "anthropic" | "claude_subscription") => void)
+    | undefined;
 }) {
   const choices: {
     id: ConnectChoice;
@@ -449,16 +506,16 @@ export function ConnectPickerPage({
         ]
       : []),
     ...(gateways
-      ? (["openrouter", "vercel"] as const)
-          .filter((id) => gateways[id].canManageConnection)
+      ? (["claude_subscription", "anthropic", "openrouter", "vercel"] as const)
+          .filter((id) => gateways[id]?.canManageConnection)
           .map((id) => ({
             id,
-            title: gateways[id].config.title,
+            title: gateways[id]!.config.title,
             summary:
-              id === "openrouter"
-                ? "Pay per token through OpenRouter"
-                : "Pay per token through Vercel",
-            connected: gateways[id].connected,
+              id === "anthropic" || id === "claude_subscription"
+                ? gateways[id]!.config.summary
+                : `Pay per token through ${gateways[id]!.config.title}`,
+            connected: gateways[id]!.connected,
           }))
       : []),
   ];
@@ -494,10 +551,14 @@ export function ConnectPickerPage({
                   key={choice.id}
                   leading={<ProviderTile provider={choice.id} size="lg" />}
                   title={choice.title}
-                  meta={[choice.connected ? "Connected" : choice.summary]}
+                  meta={[choice.summary, choice.connected ? "Already connected" : null]}
                   indicator="open"
                   onOpen={() =>
-                    choice.connected && (choice.id === "vercel" || choice.id === "openrouter")
+                    choice.connected &&
+                    (choice.id === "vercel" ||
+                      choice.id === "openrouter" ||
+                      choice.id === "anthropic" ||
+                      choice.id === "claude_subscription")
                       ? onOpenConnected?.(choice.id)
                       : onPick(choice.id)
                   }

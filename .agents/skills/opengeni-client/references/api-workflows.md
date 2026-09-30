@@ -25,6 +25,8 @@ Only add `x-opengeni-access-key` when the operator says the deployment
 shared-key boundary is enabled. It is not a replacement for organization API
 keys in managed SaaS.
 
+A full organization API key can provision workspaces, members and asUser sessions; /v1/access/me reports this as credential.effectiveWorkspacePermissions.
+
 ## Minimal Server-Side Session Client
 
 ```ts
@@ -92,6 +94,25 @@ workspace defaults. On deployments without agent settings, send an explicit
 minimal `firstPartyMcpTools` instead. Removing
 cross-session tools from a shared workspace is defense in depth, not a hard
 tenant boundary.
+
+## Automated work
+
+Use the server-side `client.asService(name, context?)` for product jobs, bots,
+and webhooks under an organization or workspace API key. It returns the same
+client class without mutating the original and sends
+`x-opengeni-service-initiator` plus optional `x-opengeni-service-context`.
+Names match `^[a-z0-9][a-z0-9:._-]{0,63}$`; context is a non-secret flat JSON
+object of strings, finite numbers, and booleans, at most 2 KiB of serialized
+header bytes. Reapplying replaces the name and context.
+
+Attribution grants no authority and cannot borrow a human's Personal workspace,
+personal Connections, Knowledge, or Variable Sets. Do not create a synthetic
+user for automation. `asService` and `asUser` / `asLinkedUser` are mutually
+exclusive; start from the unscoped client for each lane. The key's ordinary
+workspace permissions and the provider's own authorization remain required.
+See `docs/product-integration.md`'s Automated work section when source is
+available, and [Data tools and credentials](data-tools-and-credentials.md)
+for product-owned repository credentials.
 
 ## Existing APIs As Agent Tools
 

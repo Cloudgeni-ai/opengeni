@@ -4,10 +4,7 @@
 
 ## Navigation
 
-1. Read §2–4; skim §6.
-2. **Subsystem changes:** §13 links canonical sources.
-3. **Behavior:** follow source links.
-4. **Stale boundaries:** update per §14.
+Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
@@ -19,26 +16,36 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is self-hostable: Postgres persists state, Temporal coordinates execution,
-and NATS transports reconstructible events. The API authorizes clients; workers
-use sandboxes or Connected Machines.
+Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
+NATS transports reconstructible events. The API authorizes; workers execute.
 
-External users require live membership. `asUser()` supplies canonical
-identity; an end-user label does not. Private/shared visibility differs from
-cross-tree `agentAccess`. Personal Knowledge follows the verified active-turn
-user; task notes cover temporary tree coordination. Linking never merges users.
-See [product integration](product-integration.md),
+External users require live membership; `asUser()` supplies identity, labels do
+not. Visibility differs from `agentAccess`; Personal Knowledge follows the
+verified active-turn user. Task notes coordinate; linking never merges users.
+[Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
-[Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal physically deletes the scoped registry head and revisions,
-requiring exact approval and Learning enforcement through the Skill lifecycle.
-Accepted conversation context remains unchanged.
+[Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
+Skill removal deletes scoped heads/revisions with exact approval and Learning
+enforcement, preserving conversation context.
 
-Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
-inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
+Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
+retain catalog floors but grant no capabilities or credentials.
 
-Account isolation/rebinding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
+Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+
+[`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
+owns effective turn refs: ordinary work uses session policy; scheduled work
+retains its frozen selection. Credential-provider targeting and MCP preparation
+consume those execution refs, never the queue's omitted-tools empty array.
+Connection-backed MCPs remain exclusively native-authenticated and are excluded
+from provider targeting and header application, even for historical work.
+Signed credential-provider callbacks also carry the exact accepted turn's
+informational initiator context. Children inherit bounded agent lineage;
+internal continuations freeze their exact causal turn's provenance at claim,
+without replacing their service authorization principal. Provider renewals
+retain that turn snapshot, never mutable session state. See
+[`workspace-integrations.md`](workspace-integrations.md).
 
 ---
 
@@ -77,6 +84,8 @@ Raw-isolation rollback:
 validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
+
+Task-tree [locking invariants](run-lifecycle.md).
 
 Heartbeats refresh desktop availability without reconnecting or granting consent;
 see `docs/connected-machines.md`.
@@ -345,15 +354,14 @@ membership comes from `code` or an operator-owned database singleton. Workspace
 policy, connection readiness and model permissions, organization workspace assignments, and
 provider health determine selectability; deployment cost policy sets `free`/`credits`
 independently of upstream settlement. Workspace custom
-Gateway and OpenRouter rows are provider-qualified workspace overlays, never
+Gateway, OpenRouter, Anthropic API and Claude subscription rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
-identities even when they name the same upstream slug.
+identities for identical slugs. Claude setup: `apps/api/src/routes/workspace-model-providers.ts`; transport: `packages/runtime/src/anthropic-messages.ts`.
 Accepted turns freeze provider identity, not cost policy. Drain or fence them
 before changing `free`/`credits`. Database `codexModels` overrides membership,
 not credentials; retirement preserves only exact accepted execution.
 
-Documentation explains contracts without duplicating drift-prone lists.
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
 
@@ -440,10 +448,10 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Modal recovery: human consent (`packages/core/src/application/sandbox-recovery.ts`)
-or proved provider loss (`packages/db/src/index.ts`). Both require a verified
-CURRENT checkpoint, singleton, quiescence and durable warning; no command
-replay/empty reset. See migrations 0495/0526 and [run lifecycle](run-lifecycle.md).
+Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
+or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
+verified checkpoint, else continues empty, warning every member; never replays.
+See migrations 0495/0526/0548, [run lifecycle](run-lifecycle.md).
 Operator reauthorization supersedes verified public recovery;
 [provenance and gaps persist](run-lifecycle.md#explicit-same-session-historical-checkpoint-consent).
 
@@ -547,8 +555,9 @@ Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, `packages/sdk/test/contract-parity.test.ts`,
 `scripts/public-api/`, and `apps/api/src/http/deprecation.ts`.
 
-The root client in `packages/sdk/src/embedding-client.ts` adds server-side
-administration; `/browser` and `/artifacts` keep narrower dependency boundaries.
+`embedding-client.ts` adds administration; `/browser` and `/artifacts` stay
+narrow. `/session-proxy` adds grants, transactional source authorization, session-bound
+tickets, bounded streaming ([embedding](embedding.md)).
 
 ### 3.11 Work discovery remains advisory and permission-first
 
@@ -716,7 +725,9 @@ metered separately. Normal completion joins it before atomic settlement;
 exceptional/cancelled exits abort and join. Generic title writes lose to human
 renames. Runtimes without this seam retain serialized `set_session_title`.
 
-`packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
+`packages/db/src/session-execution-policy.ts` projects defaults;
+`packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
+execution. [Semantics](mcp-surfaces.md).
 
 Active-source message-point forks preserve the current active model-history
 prefix through the selected boundary, including authenticated compaction summaries.
@@ -1007,7 +1018,10 @@ quota refusals, not backpressure or newer refusals. Capped admission and waits
 use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
 durations, never primary/secondary position. Headers lacking both durations cannot
 update labeled cache; absent reset timing does not clear an exhausted window.
-The account picker refreshes live usage on open rather than trusting stale labels.
+Opening the account picker refreshes usage.
+
+Claude setup and quota observations:
+[`model-providers.md`](model-providers.md#claude-subscription-usage).
 
 Codex turns require durable credential leases. `rotation_enabled` off waits on
 capped accounts; on permits same-turn failover. First allocation freezes source,
@@ -1241,19 +1255,9 @@ pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
 and path/identity re-resolution without retrying an existing or ambiguous
 operation. Deterministic submission conflicts are never reconciled to an
 existing row; ambiguous submission failures may adopt a row only after exact
-attempt scope, catalog, identity, and canonical-argument comparison. Once an
-exact operation has been admitted, a later deterministic wake failure
-reconciles through that exact journal row; if the recovery read is unavailable,
-the client returns a typed outcome-unknown error carrying the same operation id.
-While an admitted operation remains queued or running, the client periodically
-re-notifies the owning dispatcher with that same id. This does not replay the
-tool: a live claim answers already-running, an expired pre-execution claim may
-be reclaimed, and an expired post-execution claim settles outcome-unknown with
-its visible `agent.toolCall.output` in the same PostgreSQL commit as the
-terminal journal state.
-Concurrent first submissions serialize on the caller-owned operation id and
-converge to one creation plus one replay. Client abort is observer-only; server
-cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
+attempt scope, catalog, identity, and canonical-argument comparison.
+Admitted-operation recovery never replays the tool; see
+[run lifecycle](run-lifecycle.md#codemode-recovery). The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
@@ -1512,7 +1516,8 @@ Modal commands use authenticated task-router byte offsets owned by the retained
 process. Output and cursor commit atomically under an expected-cursor fence;
 losing readers reread without duplicating output or settling uncaptured tails.
 Router credentials remain in memory. Legacy batch readers only drain existing
-commands; their locators are never reinterpreted as offsets.
+commands; their locators are never reinterpreted as offsets. The reaper drains
+progressing output within a bounded claim, since exit requires both streams at EOF.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
@@ -1589,6 +1594,8 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
 - **Human, service, API-key, and agent identities are distinct.** Provenance is
   not authority. Personal-resource execution requires the exact permitted
   human snapshot; worker identity never substitutes for it.
+- Personal workspaces exclude organization callbacks; disabled providers
+  pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
   Conversation, source, tool, and error text is not centrally regex-redacted.
@@ -1694,7 +1701,8 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, provider identity, or OpenAI-compatible inference routes | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
+| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
+| Claude sign-in, renewal or quota | apps/api/src/claude-subscription-oauth.ts, packages/db/src/claude-subscription-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
@@ -1725,6 +1733,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
+| Organization/workspace callbacks | `packages/db/src/workspace-integrations.ts`, `apps/api/src/routes/workspace-integrations.ts`, `apps/api/src/routes/organization-integrations.ts`, `apps/api/src/workspace-webhook-dispatch.ts`, `apps/worker/src/activities/workspace-credential-provider.ts` | [`workspace-integrations.md`](workspace-integrations.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

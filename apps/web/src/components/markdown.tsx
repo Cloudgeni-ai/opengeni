@@ -1,4 +1,5 @@
 import { Markdown, type MarkdownProps } from "@opengeni/react";
+import { consoleLinkResolver } from "@/lib/session-artifact-navigation";
 import { cn } from "@/lib/utils";
 
 /**
@@ -30,6 +31,7 @@ export function MarkdownText({
   return (
     <Markdown
       artifactHref={artifactHref}
+      resolveLink={consoleLinkResolver}
       searchTarget={searchTarget}
       streaming={streaming}
       renderImage={renderImage}

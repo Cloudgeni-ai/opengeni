@@ -46,16 +46,7 @@ import {
   type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  BoxIcon,
-  CheckIcon,
-  ChevronDownIcon,
-  FolderIcon,
-  MonitorOffIcon,
-  PlusIcon,
-  ServerCogIcon,
-  ServerIcon,
-} from "lucide-react";
+import { ChevronDownIcon, FolderIcon, LockIcon, PlusIcon, ServerCogIcon } from "lucide-react";
 import {
   createElement,
   lazy,
@@ -76,7 +67,16 @@ import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
 import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
-import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
+import {
+  RunsOnMenuBody,
+  RunsOnNotice,
+  VisibilityMenuBody,
+  hasRunsOnChoices,
+  runsOnAttention,
+  hasVisibilityChoice,
+  runsOnSummary,
+  visibilitySummary,
+} from "@/components/session/new-session-settings-menu";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
@@ -87,13 +87,12 @@ import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
+  DropdownMenuCheck,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
@@ -161,11 +160,9 @@ import {
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
   rememberedMachineFolder,
-  selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
   workspaceDefaultRigOptionLabel,
-  type ConnectedMachineTarget,
   type SessionDraft,
 } from "@/lib/session-create";
 import {
@@ -178,6 +175,7 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
+import { userErrorText } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 import {
   newSessionCreateSnapshot,
@@ -597,6 +595,20 @@ function SessionsIndexRouteContent({
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
+  // "+" > Runs on: where the new chat runs and on which environment or folder.
+  const runsOnChoices = {
+    draft,
+    machines,
+    rigs: selectableRigs,
+    workspaceDefaultRigId: workspace?.defaultRigId ?? null,
+    selfhostedPrimary: defaultSandboxBackend === "selfhosted",
+    // A 404 means Connected Machines are off here, not a failure.
+    fleetLoadFailed:
+      fleet.error != null &&
+      !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404),
+    selectedChannelId,
+    selectionHistory,
+  };
   const fleetEmpty = machines.length === 0;
   const fleetLoadFailed =
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
@@ -1162,7 +1174,7 @@ function SessionsIndexRouteContent({
       if (realtimeModel && personalMachineSelected) {
         toast.error("Voice can't start on a personal Connected Machine", {
           description:
-            "Start the session with a message first so OpenGeni can attach the machine to an accepted turn.",
+            "Start the session with a message first so Opengeni can attach the machine to an accepted turn.",
         });
         return false;
       }
@@ -1211,9 +1223,7 @@ function SessionsIndexRouteContent({
                 const flushed = await newSessionDraft.flush();
                 if (!flushed) {
                   toast.error("Couldn't save the draft", {
-                    description:
-                      (newSessionDraft.conflict ? null : newSessionDraft.error?.message) ??
-                      "Your message is still here. Try again.",
+                    description: draftSaveFailureText(newSessionDraft),
                   });
                   return null;
                 }
@@ -1280,9 +1290,7 @@ function SessionsIndexRouteContent({
               const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
                 toast.error("Couldn't save the draft", {
-                  description:
-                    (newSessionDraft.conflict ? null : newSessionDraft.error?.message) ??
-                    "Your message is still here. Try again.",
+                  description: draftSaveFailureText(newSessionDraft),
                 });
                 return null;
               }
@@ -1672,6 +1680,43 @@ function SessionsIndexRouteContent({
                   onToolSelectionChange={(selection) => {
                     changeConnectorSelection(selection);
                   }}
+                  {...(hasRunsOnChoices(runsOnChoices)
+                    ? {
+                        runsOn: {
+                          summary: runsOnSummary(runsOnChoices),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <RunsOnMenuBody
+                              {...runsOnChoices}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={setDraft}
+                              onComputeChange={setExplicitComputeDraft}
+                              onRetryMachines={() => void fleet.refresh()}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(hasVisibilityChoice({
+                    personalWorkspace,
+                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+                  })
+                    ? {
+                        visibility: {
+                          summary: visibilitySummary(draft.visibility),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <VisibilityMenuBody
+                              value={draft.visibility}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={(visibility) =>
+                                setDraft((current) => ({ ...current, visibility }))
+                              }
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
                   {...(draft.compute.kind === "sandbox"
                     ? {
                         repositories: {
@@ -1799,18 +1844,19 @@ function SessionsIndexRouteContent({
             }
           />
 
+          {personalWorkspace ? <PrivateWorkspaceNote /> : null}
           {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
-          {connectionAccounts.loading ||
-          connectionAccounts.error ||
-          connectionAccounts.accountChoiceMessage ? (
-            <div role={connectionAccounts.loading ? "status" : "alert"} className="mt-3">
+          {/* Accounts load quietly with the composer: only a problem shows here,
+              never a loading line behind an open menu. */}
+          {connectionAccounts.error || connectionAccounts.accountChoiceMessage ? (
+            <div role="alert" className="mt-3">
               <Notice
-                tone={connectionAccounts.loading ? "muted" : "waiting"}
+                tone="waiting"
                 action={
                   connectionAccounts.error && !connectionAccounts.accessDenied ? (
                     <Button
-                      variant="secondary"
+                      variant="outline"
                       size="sm"
                       onClick={() => void connectionAccounts.refresh()}
                     >
@@ -1819,25 +1865,14 @@ function SessionsIndexRouteContent({
                   ) : undefined
                 }
               >
-                {connectionAccounts.loading
-                  ? "Checking connected accounts…"
-                  : connectionAccounts.error
-                    ? connectionAccounts.accessDenied
-                      ? connectionAccounts.error
-                      : "Couldn't check connected accounts. Retry to send your message."
-                    : connectionAccounts.accountChoiceMessage}
+                {connectionAccounts.error
+                  ? connectionAccounts.accessDenied
+                    ? connectionAccounts.error
+                    : "Couldn't check connected accounts. Retry to send your message."
+                  : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
           ) : null}
-
-          <SessionVisibilityPicker
-            id="new-session"
-            personalWorkspace={personalWorkspace}
-            value={personalWorkspace ? "private" : draft.visibility}
-            capabilities={tenancyCapabilities}
-            disabled={busy || newSessionDraft.loading}
-            onChange={(visibility) => setDraft((current) => ({ ...current, visibility }))}
-          />
 
           <ComputeTargetControl
             workspaceId={workspaceId}
@@ -1889,6 +1924,12 @@ function SessionsIndexRouteContent({
   );
 }
 
+/** A draft that didn't save: the message is kept, then what to do. */
+function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
+  if (draft.conflict || !draft.error) return "Your message is still here. Try again.";
+  return `Your message is still here. ${userErrorText(draft.error)}`;
+}
+
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
 // A calm section below the composer: the most recent sessions as compact rows
 // (status, title, provider mark + catalog model label, relative time). Reuses
@@ -1915,7 +1956,7 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 
   return (
     <section className="mt-12">
-      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Recent sessions
       </h2>
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
@@ -1990,7 +2031,7 @@ function RecentSessionRow({
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: session.id }}
-        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-surface-2/50"
+        className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
       >
         <StatusDot
           tone={hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status]}
@@ -2124,23 +2165,22 @@ function SessionFolderPicker({
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-56">
+      <DropdownMenuContent align="start" side="bottom" sideOffset={8} className="w-60">
         <DropdownMenuLabel>Save new session in</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onChange(null)}>
-          <FolderIcon className="size-4" />
+          <FolderIcon />
           <span className="min-w-0 flex-1 truncate">Default</span>
-          {selectedChannelId === null ? <CheckIcon className="size-4" /> : null}
+          <DropdownMenuCheck checked={selectedChannelId === null} />
         </DropdownMenuItem>
         {channels.map((channel) => (
           <DropdownMenuItem key={channel.id} onSelect={() => onChange(channel.id)}>
-            <FolderIcon className="size-4" />
+            <FolderIcon />
             <span className="min-w-0 flex-1 truncate">{channel.name}</span>
-            {channel.id === selectedChannelId ? <CheckIcon className="size-4" /> : null}
+            <DropdownMenuCheck checked={channel.id === selectedChannelId} />
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onCreateProject}>
-          <PlusIcon className="size-4" />
+          <PlusIcon />
           New project
         </DropdownMenuItem>
       </DropdownMenuContent>
@@ -2394,11 +2434,6 @@ function ComputeTargetControl(props: {
   const { fleet, machines } = props;
   const fleetEmpty = machines.length === 0;
   const selfhostedPrimary = props.defaultSandboxBackend === "selfhosted";
-  // A 404 is the expected "self-hosted machines are disabled here" signal, not a
-  // failure — only a genuine load error (network/5xx) is surfaced, so the machine
-  // option isn't silently swallowed by a transient outage (states #4).
-  const fleetLoadFailed =
-    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
   // Managed-primary deployments keep Connected Machine opt-in and hide the
   // chooser when the fleet is empty. Selfhosted-primary deployments always show
   // the required machine path, including its honest unavailable state.
@@ -2510,199 +2545,67 @@ function ComputeTargetControl(props: {
     props.selectionHistory,
   ]);
 
-  const selectKind = (kind: ComputeKind) => {
-    if (kind === draft.compute.kind) {
-      return;
-    }
-    if (kind === "sandbox") {
-      // Composer no longer exposes a managed-backend override — always the
-      // deployment default (empty wire field).
-      props.onComputeChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
-      return;
-    }
-    // Auto-pick the first selectable machine so the common single-machine case is
-    // submit-ready immediately; otherwise leave it unpicked (submit stays blocked).
-    const project = props.selectionHistory.projects.find(
-      (candidate) => candidate.channelId === props.selectedChannelId,
-    );
-    const rememberedMachine = project?.machines.find((remembered) =>
-      machines.some(
-        (machine) =>
-          machine.sandboxId === remembered.sandboxId && isMachineComputeSelectable(machine.state),
-      ),
-    );
-    const firstSelectable =
-      (rememberedMachine
-        ? machines.find((machine) => machine.sandboxId === rememberedMachine.sandboxId)
-        : null) ??
-      machines.find((machine) => isMachineComputeSelectable(machine.state)) ??
-      null;
-    props.onComputeChange({
-      ...draft,
-      compute: {
-        kind: "machine",
-        sandboxId: firstSelectable?.sandboxId ?? null,
-        folder: firstSelectable
-          ? rememberedMachineFolder(
-              props.selectionHistory,
-              props.selectedChannelId,
-              firstSelectable.sandboxId,
-            )
-          : { kind: "root" },
-      },
-    });
-  };
+  // A 404 means Connected Machines are off here, not a failure.
+  const fleetLoadFailed =
+    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
+  const attention = runsOnAttention({
+    draft,
+    machines,
+    fleetLoadFailed,
+    fleetLoading: fleet.loading,
+  });
 
-  // Clean sandbox-only default: no "Where should this run?" header, no segmented
-  // control, no machine clutter — just the managed sandbox fields, plus a subtle
-  // opt-in link to reveal the Connected Machine path. The sandbox compute is
-  // narrowed defensively (the normalization effect keeps the draft in sync).
-  if (!showComputeTarget) {
-    // No machines → no compute chooser. Rig/variable-set card only when needed;
-    // ManagedSandboxFields returns null when empty so we don't leave a blank gap.
-    if (fleetLoadFailed) {
-      return (
-        <section className="mt-5 grid gap-2">
-          <ManagedSandboxFields
-            draft={draft}
-            onChange={onChange}
-            disabled={props.disabled}
-            personalResourceAccess={props.personalResourceAccess}
-            variableSets={props.variableSets}
-            rigs={props.rigs}
-            workspaceDefaultRigId={props.workspaceDefaultRigId}
-            catalogRecovery={props.catalogRecovery}
-          />
-          <FleetErrorNotice onRetry={() => void fleet.refresh()} />
-        </section>
-      );
-    }
-    return (
-      <ManagedSandboxFields
-        draft={draft}
-        onChange={onChange}
-        disabled={props.disabled}
-        personalResourceAccess={props.personalResourceAccess}
-        variableSets={props.variableSets}
-        rigs={props.rigs}
-        workspaceDefaultRigId={props.workspaceDefaultRigId}
-        catalogRecovery={props.catalogRecovery}
-      />
-    );
-  }
-
+  // Where it runs is chosen under "+" > Runs on. Only what needs attention
+  // shows under the composer: why Send waits on where it runs (with a retry
+  // for a failed machine load), a catalog that couldn't be verified, and the
+  // personal resources this chat will use.
   return (
-    <section className="mt-5 grid gap-3">
-      <p className="px-0.5 text-2xs font-medium uppercase tracking-[0.08em] text-fg-subtle">
-        Where should this run?
-      </p>
-      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-        {selfhostedPrimary ? null : (
-          <ComputeKindButton
-            selected={draft.compute.kind === "sandbox"}
+    <>
+      {attention ? (
+        <div className="mt-3">
+          <RunsOnNotice
+            attention={attention}
+            machines={machines}
             disabled={props.disabled}
-            icon={<BoxIcon className="size-4 shrink-0" />}
-            title="Managed sandbox"
-            subtitle="A fresh sandbox, set up for you"
-            onClick={() => selectKind("sandbox")}
+            onRetryMachines={() => void fleet.refresh()}
+            connectAction={
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  to="/workspaces/$workspaceId/machines"
+                  params={{ workspaceId: props.workspaceId }}
+                >
+                  Connect a machine
+                </Link>
+              </Button>
+            }
           />
-        )}
-        <ComputeKindButton
-          selected={draft.compute.kind === "machine"}
-          disabled={props.disabled || fleetEmpty}
-          icon={<ServerIcon className="size-4 shrink-0" />}
-          title="Connected machine"
-          subtitle={
-            fleetLoadFailed
-              ? "Couldn't load machines"
-              : fleetEmpty
-                ? "Connect one to use it"
-                : "Run on your own machine"
-          }
-          onClick={() => selectKind("machine")}
-        />
-      </div>
-
-      {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
-
-      {draft.compute.kind === "sandbox" ? (
-        <ManagedSandboxFields
-          draft={draft}
-          onChange={onChange}
-          disabled={props.disabled}
-          personalResourceAccess={props.personalResourceAccess}
-          variableSets={props.variableSets}
-          rigs={props.rigs}
-          workspaceDefaultRigId={props.workspaceDefaultRigId}
-          catalogRecovery={props.catalogRecovery}
-        />
-      ) : (
-        <ConnectedMachineFields
-          draft={draft}
-          compute={draft.compute}
-          machines={machines}
-          onChange={props.onComputeChange}
-          disabled={props.disabled}
-          selectedChannelId={props.selectedChannelId}
-          selectionHistory={props.selectionHistory}
-        />
-      )}
-      {draft.compute.kind === "machine" ? (
-        <PersonalResourceAccessInline access={props.personalResourceAccess} />
+        </div>
       ) : null}
-    </section>
-  );
-}
-
-type ComputeKind = SessionDraft["compute"]["kind"];
-
-function ComputeKindButton(props: {
-  selected: boolean;
-  disabled: boolean;
-  icon: ReactNode;
-  title: string;
-  subtitle: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={props.selected}
-      disabled={props.disabled}
-      onClick={props.onClick}
-      className={cn(
-        "group flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-[color,background-color,border-color,box-shadow]",
-        "disabled:cursor-not-allowed disabled:opacity-50",
-        props.selected
-          ? "border-brand/60 bg-brand/[0.08] ring-1 ring-inset ring-brand/20"
-          : "border-border bg-surface/40 hover:border-border-strong hover:bg-surface-2/60",
-      )}
-    >
-      <span
-        className={cn(
-          "mt-0.5 transition-colors",
-          props.selected ? "text-brand" : "text-fg-subtle group-hover:text-fg-muted",
-        )}
-      >
-        {props.icon}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium text-fg">{props.title}</span>
-        <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{props.subtitle}</span>
-      </span>
-      <span
-        aria-hidden
-        className={cn(
-          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full transition-all",
-          props.selected
-            ? "scale-100 bg-brand text-brand-fg"
-            : "scale-90 border border-border-strong opacity-0 group-hover:opacity-60",
-        )}
-      >
-        <CheckIcon className="size-2.5" strokeWidth={3} />
-      </span>
-    </button>
+      {props.catalogRecovery.error ? (
+        <div role="alert" className="mt-3">
+          <Notice
+            tone="failed"
+            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
+            action={
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={props.disabled || props.catalogRecovery.refreshing}
+                onClick={props.catalogRecovery.onRetry}
+              >
+                Try again
+              </Button>
+            }
+          >
+            Try again to reload your available resources before starting this session.
+          </Notice>
+        </div>
+      ) : null}
+      <div className="mt-3">
+        <PersonalResourceAccessInline access={props.personalResourceAccess} />
+      </div>
+    </>
   );
 }
 
@@ -2762,7 +2665,7 @@ function ManagedSandboxFields(props: {
               <Button
                 type="button"
                 size="sm"
-                variant="secondary"
+                variant="outline"
                 disabled={props.disabled || props.catalogRecovery.refreshing}
                 onClick={props.catalogRecovery.onRetry}
               >
@@ -2861,215 +2764,12 @@ function PersonalResourceAccessInline(props: {
   );
 }
 
-// ── Connected Machine kind: machine picker, folder, env note ──────────────────
-
-function ConnectedMachineFields(props: {
-  draft: SessionDraft;
-  compute: ConnectedMachineTarget;
-  machines: MachineView[];
-  onChange: (draft: SessionDraft) => void;
-  disabled: boolean;
-  selectedChannelId: string | null;
-  selectionHistory: NewSessionSelectionHistory;
-}) {
-  const { draft, compute, onChange, machines } = props;
-  const setCompute = (next: ConnectedMachineTarget) => onChange({ ...draft, compute: next });
-  const pickedMachine = compute.sandboxId
-    ? (machines.find((machine) => machine.sandboxId === compute.sandboxId) ?? null)
-    : null;
-  const customPath = compute.folder.kind === "path" ? compute.folder.path : "";
-  const capabilityChips = selfhostedCapabilityChips(pickedMachine);
-
+/** One quiet line on the new-chat page of a Personal workspace: its chats are private. */
+function PrivateWorkspaceNote() {
   return (
-    <div className="grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
-      <div className="grid gap-2">
-        <Label className="flex items-center gap-1.5 text-xs">
-          <ServerIcon className="size-3 shrink-0 text-fg-subtle" />
-          Machine
-        </Label>
-        <Select
-          value={compute.sandboxId ?? ""}
-          disabled={props.disabled}
-          onChange={(event) => {
-            const sandboxId = event.target.value || null;
-            setCompute({
-              ...compute,
-              sandboxId,
-              folder: sandboxId
-                ? rememberedMachineFolder(
-                    props.selectionHistory,
-                    props.selectedChannelId,
-                    sandboxId,
-                  )
-                : { kind: "root" },
-            });
-          }}
-        >
-          <option value="" disabled>
-            Choose a machine…
-          </option>
-          {machines.map((machine) => (
-            <option
-              key={machine.sandboxId}
-              value={machine.sandboxId}
-              disabled={!isMachineComputeSelectable(machine.state)}
-            >
-              {machine.name}
-              {machine.os ? ` · ${machine.os}/${machine.arch}` : ""}
-              {machine.state !== "online" ? ` (${machine.state})` : ""}
-            </option>
-          ))}
-        </Select>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {capabilityChips.map((chip) => (
-            <CapabilityChip key={chip}>{chip}</CapabilityChip>
-          ))}
-          {pickedMachine && !pickedMachine.hasDisplay ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-border-strong px-1.5 py-0.5 text-2xs font-medium text-fg-subtle">
-              <MonitorOffIcon className="size-3 shrink-0" />
-              No display
-            </span>
-          ) : null}
-        </div>
-        {compute.sandboxId === null ? (
-          <p className="text-2xs text-fg-muted">Pick a machine to run on.</p>
-        ) : null}
-      </div>
-
-      {/* Project / folder — the agent's working directory on the machine (D4/D5,
-          functional via Stage A's workingDir for root + custom path). */}
-      <div className="grid gap-2.5 border-t border-border pt-4">
-        <Label className="flex items-center gap-1.5 text-xs">
-          <FolderIcon className="size-3 shrink-0 text-fg-subtle" />
-          Project / folder
-        </Label>
-        <div className="grid gap-2">
-          <FolderRadio
-            checked={compute.folder.kind === "root"}
-            disabled={props.disabled}
-            onSelect={() => setCompute({ ...compute, folder: { kind: "root" } })}
-            label="Machine root"
-            hint="the agent's launch directory"
-          />
-          <FolderRadio
-            checked={false}
-            disabled
-            onSelect={() => {}}
-            label="Project"
-            hint="a named path"
-            badge="Soon"
-          />
-          <FolderRadio
-            checked={compute.folder.kind === "path"}
-            disabled={props.disabled}
-            onSelect={() =>
-              setCompute({
-                ...compute,
-                folder: { kind: "path", path: customPath },
-              })
-            }
-            label="Custom path"
-            hint="absolute, or relative to the launch root"
-          />
-          {compute.folder.kind === "path" ? (
-            <Input
-              value={customPath}
-              disabled={props.disabled}
-              onChange={(event) =>
-                setCompute({
-                  ...compute,
-                  folder: { kind: "path", path: event.target.value },
-                })
-              }
-              placeholder="e.g. /home/me/repos/project or packages/runtime"
-              aria-label="Custom working directory"
-              className="ml-[1.375rem] h-9 w-[calc(100%_-_1.375rem)] text-sm"
-            />
-          ) : null}
-        </div>
-        <p className="text-2xs text-fg-subtle">
-          Where the agent, terminal, and file dock open. Defaults to the machine&apos;s workspace
-          root.
-        </p>
-      </div>
-
-      {/* Variable set injection — hidden on a connected machine (D2). Repos live
-          in the composer pills for managed sandboxes only (not cloned here). */}
-      <div className="grid gap-1 border-t border-border pt-4">
-        <p className="flex items-center gap-1.5 text-xs text-fg-subtle">
-          <BoxIcon className="size-3 shrink-0" />
-          Uses this machine&apos;s checkout, git auth, and environment
-        </p>
-        <p className="text-2xs text-fg-subtle">
-          Workspace repositories and variable sets aren&apos;t injected onto a connected machine.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function CapabilityChip({ children }: { children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-md border border-border bg-surface-2/60 px-1.5 py-0.5 text-2xs font-medium text-fg-muted">
-      {children}
-    </span>
-  );
-}
-
-// A genuine fleet-load failure (not the expected selfhosted-disabled 404): a
-// calm, retryable note so the machine option is never silently swallowed.
-function FleetErrorNotice({ onRetry }: { onRetry: () => void }) {
-  return (
-    <Notice
-      tone="muted"
-      className="p-2.5 text-xs"
-      action={
-        <button
-          type="button"
-          onClick={onRetry}
-          className="text-xs font-medium text-fg-muted underline underline-offset-2 hover:text-fg"
-        >
-          Retry
-        </button>
-      }
-    >
-      Couldn&apos;t load your connected machines.
-    </Notice>
-  );
-}
-
-function FolderRadio(props: {
-  checked: boolean;
-  disabled: boolean;
-  onSelect: () => void;
-  label: string;
-  hint: string;
-  badge?: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={props.checked}
-      disabled={props.disabled}
-      onClick={props.onSelect}
-      className="group flex items-center gap-2 rounded-md text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-55"
-    >
-      <span
-        className={cn(
-          "flex size-3.5 shrink-0 items-center justify-center rounded-full border transition-colors",
-          props.checked ? "border-brand" : "border-border-strong group-hover:border-fg-subtle",
-        )}
-      >
-        {props.checked ? <span className="size-1.5 rounded-full bg-brand-strong" /> : null}
-      </span>
-      <span className="font-medium text-fg">{props.label}</span>
-      {props.badge ? (
-        <span className="rounded border border-border px-1 py-px text-2xs font-medium uppercase tracking-wide text-fg-subtle">
-          {props.badge}
-        </span>
-      ) : null}
-      <span className="text-2xs text-fg-subtle">— {props.hint}</span>
-    </button>
+    <p className="mt-3 flex items-center gap-1.5 px-0.5 text-xs text-fg-muted">
+      <LockIcon aria-hidden="true" className="size-3.5 shrink-0" />
+      Private: only you can see chats here.
+    </p>
   );
 }

@@ -1,7 +1,7 @@
 // One predictable entry to the workspace management shell. Operational
 // destinations live in that shell as clearly marked workspace-page links.
 import { Link, useRouterState } from "@tanstack/react-router";
-import { SlidersHorizontalIcon } from "lucide-react";
+import { SettingsIcon } from "lucide-react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { isWorkspaceConfigPath } from "@/components/rail/workspace-nav-data";
@@ -44,9 +44,9 @@ export function WorkspaceNav({ compact = false }: { compact?: boolean }) {
             aria-label="Settings"
             onClick={() => rail.setDrawerOpen(false)}
             className={cn(
-              "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted outline-none transition-colors pointer-coarse:h-10",
-              "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
-              active && "bg-surface-2 text-fg",
+              "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
+              "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
+              active && "bg-selection text-fg hover:bg-selection",
               rail.collapsed || compact
                 ? "w-8 justify-center pointer-coarse:w-10"
                 : "gap-2.5 px-2.5",
@@ -59,7 +59,7 @@ export function WorkspaceNav({ compact = false }: { compact?: boolean }) {
                 active ? "opacity-100" : "opacity-0",
               )}
             />
-            <SlidersHorizontalIcon className="size-4 shrink-0" />
+            <SettingsIcon className="size-4 shrink-0" />
             {rail.collapsed || compact ? null : <span className="min-w-0 truncate">Settings</span>}
           </Link>
         </TooltipTrigger>

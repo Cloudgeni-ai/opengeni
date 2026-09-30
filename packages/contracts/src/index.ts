@@ -1,4 +1,6 @@
 export * from "./artifact-catalog";
+export * from "./claude-subscription-usage";
+export * from "./claude-subscription-oauth";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
@@ -896,6 +898,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "rig_promote",
   "sessions_list",
   "session_get",
+  "session_set_model",
   "session_events",
   "session_wait",
   "command_wait",
@@ -2686,7 +2689,12 @@ export type OrganizationProviderCustomModelsResponse = z.infer<
   typeof OrganizationProviderCustomModelsResponse
 >;
 
-export const OrganizationModelProviderKind = z.enum(["vercel_gateway", "openrouter"]);
+export const OrganizationModelProviderKind = z.enum([
+  "vercel_gateway",
+  "openrouter",
+  "anthropic",
+  "claude_subscription",
+]);
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = z.object({
   providerKind: OrganizationModelProviderKind,
@@ -2703,6 +2711,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = z
     operationId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative().optional(),
     apiKey: z.string().trim().min(1).max(8192),
+    claudeIdentity: z
+      .object({
+        accountUuid: z.string().uuid(),
+        deviceId: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
@@ -2826,6 +2841,35 @@ export const AccessGrant = z.object({
 });
 export type AccessGrant = z.infer<typeof AccessGrant>;
 
+/**
+ * Organization API key access tier. `full` keys administer the organization
+ * (create workspaces, mint keys, run sessions in every shared workspace);
+ * `read` keys only inventory shared workspaces and read their sessions, events,
+ * and files. The tier is derived from the key's stored permissions, never
+ * stored separately: a key whose permissions omit `workspace:admin` is `read`.
+ */
+export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
+
+/** Informational projection of direct API-key authority, not an authorization grant. */
+export const AccessCredential = z.object({
+  kind: z.enum(["organization_api_key", "workspace_api_key"]),
+  /** Organization access tier; workspace keys instead carry explicit permissions. */
+  access: OrganizationApiKeyAccess.optional(),
+  accountId: z.string().uuid(),
+  /** Null for organization keys: authority applies to all same-organization shared workspaces. */
+  workspaceId: z.string().uuid().nullable(),
+  /**
+   * Workspace permissions resolved by authorization, including wildcard expansion.
+   * A full organization key can provision workspaces, members and asUser sessions;
+   * user requests still require user authority. Personal workspaces are excluded
+   * from organization-key authority. Account permissions remain in accountGrants.
+   */
+  effectiveWorkspacePermissions: z.array(Permission),
+  note: z.string(),
+});
+export type AccessCredential = z.infer<typeof AccessCredential>;
+
 export const AccessContext = z.object({
   mode: ProductAccessMode,
   subjectId: z.string().min(1),
@@ -2834,6 +2878,8 @@ export const AccessContext = z.object({
   workspaceGrants: z.array(AccessGrant),
   defaultAccountId: z.string().uuid().nullable(),
   defaultWorkspaceId: z.string().uuid().nullable(),
+  /** Direct API-key authority only; omitted for human, delegated and asUser contexts. */
+  credential: AccessCredential.optional(),
 });
 export type AccessContext = z.infer<typeof AccessContext>;
 
@@ -3399,16 +3445,6 @@ export const UpdateWorkspaceRequest = z
   })
   .strict();
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
-
-/**
- * Organization API key access tier. `full` keys administer the organization
- * (create workspaces, mint keys, run sessions in every shared workspace);
- * `read` keys only inventory shared workspaces and read their sessions, events,
- * and files. The tier is derived from the key's stored permissions, never
- * stored separately: a key whose permissions omit `workspace:admin` is `read`.
- */
-export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
-export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
 
 export const ApiKey = z.object({
   id: z.string().uuid(),
@@ -4256,6 +4292,8 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
+      /** Secret, turn-local request headers for session-attached remote MCP servers. */
+      mcp?: import("./workspace-integrations").CredentialProviderMcpHeaders[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */
@@ -6560,6 +6598,16 @@ export const UpdateSessionRequest = z.object({
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
+/** Explicit future defaults, not a message, wake, or queued-turn edit. */
+export const SetSessionModelRequest = z
+  .object({
+    model: z.string().min(1).max(512),
+    reasoningEffort: ReasoningEffort,
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
+
 export const UpdateSessionVariableSetsRequest = z
   .object({
     variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS),
@@ -7096,6 +7144,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.model.write",
   "session.channel.write",
   "session.variable_sets.write",
   "session.mcp.approval_policy.write",
@@ -10520,6 +10569,18 @@ export const UpdateScheduledTaskRequest =
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
+      // Narrow, lossless update: never reconstruct agentConfig from its
+      // bounded MCP projection. Full agentConfig retains replacement semantics.
+      agentConfigPatch: z
+        .object({
+          model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
+          reasoningEffort: ReasoningEffort.optional(),
+        })
+        .strict()
+        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
+          message: "agentConfigPatch requires model or reasoningEffort",
+        })
+        .optional(),
       status: ScheduledTaskStatus.optional(),
       variableSetId: z.string().uuid().nullable().optional(),
       environmentId: z.string().uuid().nullable().optional(),
@@ -10530,6 +10591,13 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.agentConfig && value.agentConfigPatch) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfigPatch"],
+        message: "agentConfigPatch cannot be combined with agentConfig replacement",
+      });
+    }
     if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
       context.addIssue({
         code: "custom",
@@ -12997,7 +13065,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Exact model-visible OpenGeni selection. The default omits connector-wide
     // tools; [] intentionally selects none.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName),
-    // Frozen agent configuration (migration 0542). null = a legacy session
+    // Frozen agent configuration (migration 0551). null = a legacy session
     // with byte-identical historical behavior.
     agent: ResolvedAgentConfig.nullable().default(null),
     // Capability-level projection of what a configured session can use.
@@ -13351,6 +13419,7 @@ export const SessionEventType = z.enum([
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
+  "session.model_settings.updated",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
@@ -13589,6 +13658,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
     "session.agent.updated",
+    "session.model_settings.updated",
   ],
   terminal: [
     "turn.completed",
@@ -14063,6 +14133,8 @@ export const FsEncoding = z.enum(["utf8", "base64"]);
 export type FsEncoding = z.infer<typeof FsEncoding>;
 export const FsReadRequest = z.object({
   path: z.string(),
+  /** Narrow this read to the selected working directory without following symlinks. */
+  workspaceOnly: z.boolean().optional(),
   encoding: FsEncoding.default("utf8"),
   maxBytes: z
     .number()
@@ -17368,7 +17440,7 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       latencyModeSource: TurnExecutionLatencyModeSourceV1.default("deployment"),
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
-      wireApi: z.enum(["responses", "chat"]),
+      wireApi: z.enum(["responses", "chat", "anthropic-messages"]),
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
@@ -17597,7 +17669,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     shortLabel: z.string().min(1).max(64).optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
-    api: z.enum(["responses", "chat"]),
+    api: z.enum(["responses", "chat", "anthropic-messages"]),
     source: z
       .enum(["opengeni", "codex", "supergrok", "workspace_gateway", "openrouter"])
       .optional(),
@@ -17609,7 +17681,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     deployment: z
       .object({
         upstreamModelId: z.string().min(1),
-        wireApi: z.enum(["responses", "chat"]),
+        wireApi: z.enum(["responses", "chat", "anthropic-messages"]),
       })
       .optional(),
     executionLimits: z
@@ -17780,6 +17852,7 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // compatibility policy lives in docs/architecture.md — clients within the
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
+    claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
     allowedModels: z.array(z.string()).min(1),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for
@@ -17811,6 +17884,26 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
     }),
+    /** Session proxy capability; absent on native deployments. */
+    sandboxFiles: z.boolean().optional(),
+    /**
+     * Session proxy capability for the embedded artifact viewer; absent on
+     * native deployments. The live socket is ticket-authenticated and reached
+     * directly; the cache partition identifies the proxied user.
+     */
+    artifacts: z
+      .object({
+        editableLiveUrl: z.string().url().max(2_048),
+        cachePartition: z
+          .object({
+            accountId: z.string().min(1).max(256),
+            principalId: z.string().min(1).max(256),
+            authorizationEpoch: z.string().min(1).max(256),
+          })
+          .strict(),
+      })
+      .strict()
+      .optional(),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({

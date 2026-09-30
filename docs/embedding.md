@@ -74,6 +74,26 @@ default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
 children. The SDK scrolls the timeline internally and keeps the composer at
 the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
 
+Agent replies link files, sandbox paths, editable artifacts, and Sites with
+`artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
+host origin. `SessionConversation` downloads retained files by default;
+sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+session working directory without following symlinks.
+`opengeni-site` fences render the console's inline Site preview, and
+`onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
+open editable artifacts and Sites in a host container through the proxy's
+opt-in `artifacts: true`. The proxy checks exact session associations on every
+request and refreshes effective workspace grants for the browser cache
+partition. Live source authority is rechecked in the mutation commit transaction;
+lease expiry runs independently of pending authorization. Older APIs omit only
+artifact capability, leaving conversation bootstrap available.
+Its Site HTML delivery streams with cancellation and a 25 MiB
+actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+Other routing uses `resolveLink` (also on
+`MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
+`@opengeni/sdk` outside React. See
+[links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
+
 A host that mounts the styled React surfaces
 can import `@opengeni/react/compiled.css` once. That package-owned artifact is
 already compiled from the component source with Tailwind v4, contains no global

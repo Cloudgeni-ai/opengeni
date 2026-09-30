@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 import type { SessionEvent } from "@/types";
 
 const PAGE_SIZE = 30;
@@ -151,7 +152,7 @@ export function ModelContextInspectorPane(props: {
           setError(null);
         }
       } catch (caught) {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
+        if (!cancelled) setError(userErrorText(caught));
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -269,7 +270,7 @@ export function ModelContextInspectorPane(props: {
         {pending ? (
           <Button
             size="xs"
-            variant="secondary"
+            variant="outline"
             className="h-auto whitespace-normal"
             onClick={() => {
               currentCapture.current = pending.snapshot
@@ -386,7 +387,7 @@ export function ModelContextInspectorPane(props: {
                   </h4>
                   <span className="text-xs text-fg-subtle">{tokenLabel(selectedRow.tokens)}</span>
                 </div>
-                <Button size="xs" variant="secondary" onClick={() => setRawItem(!rawItem)}>
+                <Button size="xs" variant="outline" onClick={() => setRawItem(!rawItem)}>
                   {rawItem ? "Read content" : "View item JSON"}
                 </Button>
                 <ContextTextReader
@@ -414,7 +415,7 @@ export function ModelContextInspectorPane(props: {
                       key={row.index}
                       type="button"
                       data-context-row
-                      className="group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-bg-muted focus-visible:outline focus-visible:outline-2"
+                      className="group flex w-full min-w-0 items-center gap-3 border-b border-border py-3 text-left hover:bg-surface-2 focus-visible:outline focus-visible:outline-2"
                       onClick={() => {
                         setSelected(row.index);
                         setRawItem(false);

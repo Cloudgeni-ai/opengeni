@@ -8,6 +8,8 @@ import {
   ListWorkspaceWebhooksResponse,
   PutWorkspaceCredentialProviderRequest,
   PutWorkspaceCredentialProviderResponse,
+  RotateWorkspaceCredentialProviderSecretResponse,
+  RotateWorkspaceWebhookSecretResponse,
   resolveWorkspaceDefaultSandboxImage,
   UpdateWorkspaceWebhookRequest,
   WorkspaceCredentialProvider,
@@ -15,7 +17,11 @@ import {
   WorkspaceWebhookDelivery,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   createWorkspaceWebhook,
   deleteWorkspaceCredentialProvider,
@@ -27,8 +33,11 @@ import {
   listWorkspaceWebhookDeliveries,
   listWorkspaceWebhooks,
   redeliverWorkspaceWebhookDelivery,
+  rotateWorkspaceCredentialProviderSecret,
+  rotateWorkspaceWebhookSecret,
   updateWorkspaceWebhook,
   upsertWorkspaceCredentialProvider,
+  withCredentialProviderConfigurationLock,
   WorkspaceWebhookLimitError,
   type WorkspaceCredentialProviderRow,
   type WorkspaceWebhookDeliveryRow,
@@ -39,7 +48,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-function newSecret(prefix: string): string {
+export function newIntegrationSecret(prefix: string): string {
   return `${prefix}_${randomBytes(32).toString("base64url")}`;
 }
 
@@ -47,20 +56,25 @@ function iso(value: Date | null): string | null {
   return value ? value.toISOString() : null;
 }
 
-function webhookProjection(row: WorkspaceWebhookRow): WorkspaceWebhook {
-  return WorkspaceWebhook.parse({
+export function integrationWebhookFields(row: Omit<WorkspaceWebhookRow, "workspaceId">) {
+  return {
     id: row.id,
-    workspaceId: row.workspaceId,
     url: row.url,
     eventTypes: row.eventTypes,
     enabled: row.enabled,
     description: row.description,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-  });
+  };
 }
 
-function deliveryProjection(row: WorkspaceWebhookDeliveryRow): WorkspaceWebhookDelivery {
+function webhookProjection(row: WorkspaceWebhookRow): WorkspaceWebhook {
+  return WorkspaceWebhook.parse({ ...integrationWebhookFields(row), workspaceId: row.workspaceId });
+}
+
+export function integrationDeliveryProjection(
+  row: WorkspaceWebhookDeliveryRow,
+): WorkspaceWebhookDelivery {
   return WorkspaceWebhookDelivery.parse({
     id: row.id,
     webhookId: row.webhookId,
@@ -77,55 +91,84 @@ function deliveryProjection(row: WorkspaceWebhookDeliveryRow): WorkspaceWebhookD
   });
 }
 
-function providerProjection(row: WorkspaceCredentialProviderRow): WorkspaceCredentialProvider {
-  return WorkspaceCredentialProvider.parse({
-    workspaceId: row.workspaceId,
+export function integrationProviderFields(
+  row: Omit<WorkspaceCredentialProviderRow, "workspaceId">,
+) {
+  return {
     url: row.url,
     enabled: row.enabled,
     timeoutMs: row.timeoutMs,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function providerProjection(row: WorkspaceCredentialProviderRow): WorkspaceCredentialProvider {
+  return WorkspaceCredentialProvider.parse({
+    ...integrationProviderFields(row),
+    workspaceId: row.workspaceId,
   });
 }
 
-async function body<T extends z.ZodTypeAny>(c: Context, schema: T): Promise<z.output<T>> {
+export async function integrationBody<T extends z.ZodTypeAny>(
+  c: Context,
+  schema: T,
+  invalidStatus: 400 | 422 = 400,
+): Promise<z.output<T>> {
   const parsed = schema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
-    throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "Invalid request" });
+    throw new HTTPException(invalidStatus, {
+      message: parsed.error.issues[0]?.message ?? "Invalid request",
+    });
   }
   return parsed.data;
+}
+
+export function integrationRouteConfiguration(
+  deps: ApiRouteDeps,
+  scope: "workspace" | "organization",
+) {
+  return {
+    requireKey(): Uint8Array {
+      const key = environmentsEncryptionKeyBytes(deps.settings);
+      if (!key) {
+        throw new HTTPException(503, {
+          message: `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for ${scope} integrations`,
+        });
+      }
+      return key;
+    },
+    requireDeployableUrl(url: string): void {
+      if (!isLocalTestEnvironment(deps.settings.environment) && !url.startsWith("https://")) {
+        throw new HTTPException(422, { message: "URL must use https" });
+      }
+    },
+  };
+}
+
+export function isIntegrationAgent(
+  grant: Pick<AccessGrant, "principalKind" | "metadata">,
+): boolean {
+  return (
+    grant.principalKind === "agent_attempt" ||
+    grant.metadata?.["turnId"] !== undefined ||
+    grant.metadata?.["attemptId"] !== undefined
+  );
 }
 
 export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Configuring where credentials come from or where events go is a human or
   // host decision; an agent may never redirect its own credential source.
   const requireIntegrationAdmin = async (c: Context, workspaceId: string): Promise<AccessGrant> => {
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    if (
-      grant.principalKind === "agent_attempt" ||
-      grant.metadata?.["turnId"] !== undefined ||
-      grant.metadata?.["attemptId"] !== undefined
-    ) {
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    if (isIntegrationAgent(grant)) {
       throw new HTTPException(403, {
         message: "Agent attempts cannot manage workspace integrations",
       });
     }
     return grant;
   };
-  const requireKey = (): Uint8Array => {
-    const key = environmentsEncryptionKeyBytes(deps.settings);
-    if (!key) {
-      throw new HTTPException(503, {
-        message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for workspace integrations",
-      });
-    }
-    return key;
-  };
-  const requireDeployableUrl = (url: string): void => {
-    if (!isLocalTestEnvironment(deps.settings.environment) && !url.startsWith("https://")) {
-      throw new HTTPException(422, { message: "URL must use https" });
-    }
-  };
+  const { requireKey, requireDeployableUrl } = integrationRouteConfiguration(deps, "workspace");
 
   app.get("/v1/workspaces/:workspaceId/credential-provider", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -145,26 +188,33 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
   app.put("/v1/workspaces/:workspaceId/credential-provider", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireIntegrationAdmin(c, workspaceId);
-    const request = await body(c, PutWorkspaceCredentialProviderRequest);
+    const request = await integrationBody(c, PutWorkspaceCredentialProviderRequest);
     requireDeployableUrl(request.url);
     const scope = { accountId: grant.accountId, workspaceId };
-    const existing = await getWorkspaceCredentialProvider(deps.db, scope);
-    const secret = existing ? undefined : newSecret("ogcp");
-    const row = await upsertWorkspaceCredentialProvider(deps.db, {
-      ...scope,
-      url: request.url,
-      enabled: request.enabled ?? existing?.enabled ?? true,
-      timeoutMs: request.timeoutMs ?? existing?.timeoutMs ?? 10_000,
-      createdBySubjectId: grant.subjectId,
-      ...(secret ? { secretEncrypted: encryptEnvironmentValue(requireKey(), secret) } : {}),
+    const {
+      row: providerRow,
+      secret: signingSecret,
+      created,
+    } = await withCredentialProviderConfigurationLock(deps.db, scope, async (tx) => {
+      const existing = await getWorkspaceCredentialProvider(tx, scope);
+      const secret = existing ? undefined : newIntegrationSecret("ogcp");
+      const row = await upsertWorkspaceCredentialProvider(tx, {
+        ...scope,
+        url: request.url,
+        enabled: request.enabled ?? true,
+        timeoutMs: request.timeoutMs ?? 10_000,
+        createdBySubjectId: grant.subjectId,
+        ...(secret ? { secretEncrypted: encryptEnvironmentValue(requireKey(), secret) } : {}),
+      });
+      return { row, secret, created: !existing };
     });
     c.header("cache-control", "private, no-store");
     return c.json(
       PutWorkspaceCredentialProviderResponse.parse({
-        provider: providerProjection(row),
-        ...(secret ? { secret } : {}),
+        provider: providerProjection(providerRow),
+        ...(signingSecret ? { secret: signingSecret } : {}),
       }),
-      existing ? 200 : 201,
+      created ? 201 : 200,
     );
   });
 
@@ -173,6 +223,24 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     const grant = await requireIntegrationAdmin(c, workspaceId);
     await deleteWorkspaceCredentialProvider(deps.db, { accountId: grant.accountId, workspaceId });
     return c.body(null, 204);
+  });
+  app.post("/v1/workspaces/:workspaceId/credential-provider/rotate-secret", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const secret = newIntegrationSecret("ogcp");
+    const row = await rotateWorkspaceCredentialProviderSecret(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      secretEncrypted: encryptEnvironmentValue(requireKey(), secret),
+    });
+    if (!row) throw new HTTPException(404, { message: "Credential provider not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      RotateWorkspaceCredentialProviderSecretResponse.parse({
+        provider: providerProjection(row),
+        secret,
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/webhooks", async (c) => {
@@ -186,9 +254,9 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
   app.post("/v1/workspaces/:workspaceId/webhooks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireIntegrationAdmin(c, workspaceId);
-    const request = await body(c, CreateWorkspaceWebhookRequest);
+    const request = await integrationBody(c, CreateWorkspaceWebhookRequest);
     requireDeployableUrl(request.url);
-    const secret = newSecret("whsec");
+    const secret = newIntegrationSecret("whsec");
     try {
       const row = await createWorkspaceWebhook(deps.db, {
         accountId: grant.accountId,
@@ -213,12 +281,27 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/webhooks/:webhookId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const webhookId = z.string().uuid().safeParse(c.req.param("webhookId"));
+    if (!webhookId.success) throw new HTTPException(404, { message: "Webhook not found" });
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const row = await getWorkspaceWebhook(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      webhookId: webhookId.data,
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(webhookProjection(row));
+  });
+
   app.patch("/v1/workspaces/:workspaceId/webhooks/:webhookId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const webhookId = z.string().uuid().safeParse(c.req.param("webhookId"));
     if (!webhookId.success) throw new HTTPException(404, { message: "Webhook not found" });
     const grant = await requireIntegrationAdmin(c, workspaceId);
-    const request = await body(c, UpdateWorkspaceWebhookRequest);
+    const request = await integrationBody(c, UpdateWorkspaceWebhookRequest);
     if (request.url) requireDeployableUrl(request.url);
     const row = await updateWorkspaceWebhook(deps.db, {
       accountId: grant.accountId,
@@ -246,6 +329,27 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     if (!deleted) throw new HTTPException(404, { message: "Webhook not found" });
     return c.body(null, 204);
   });
+  app.post("/v1/workspaces/:workspaceId/webhooks/:webhookId/rotate-secret", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const id = z.string().uuid().safeParse(c.req.param("webhookId"));
+    if (!id.success) throw new HTTPException(404, { message: "Webhook not found" });
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const secret = newIntegrationSecret("whsec");
+    const row = await rotateWorkspaceWebhookSecret(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      webhookId: id.data,
+      secretEncrypted: encryptEnvironmentValue(requireKey(), secret),
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      RotateWorkspaceWebhookSecretResponse.parse({
+        webhook: webhookProjection(row),
+        secret,
+      }),
+    );
+  });
 
   app.get("/v1/workspaces/:workspaceId/webhooks/:webhookId/deliveries", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -260,7 +364,9 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     const rows = await listWorkspaceWebhookDeliveries(deps.db, { ...scope, limit });
     c.header("cache-control", "private, no-store");
     return c.json(
-      ListWorkspaceWebhookDeliveriesResponse.parse({ deliveries: rows.map(deliveryProjection) }),
+      ListWorkspaceWebhookDeliveriesResponse.parse({
+        deliveries: rows.map(integrationDeliveryProjection),
+      }),
     );
   });
 
@@ -283,7 +389,7 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
           message: "Only a delivered or failed delivery can be redelivered",
         });
       }
-      return c.json(deliveryProjection(row));
+      return c.json(integrationDeliveryProjection(row));
     },
   );
 

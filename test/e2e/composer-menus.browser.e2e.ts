@@ -46,7 +46,7 @@ describe("consistent production composer menus", () => {
     await page.route("**/src/context.tsx", (route) =>
       route.fulfill({
         contentType: "application/javascript",
-        body: `let settings={};const context={accessContext:{subjectId:"fixture-user"},client:{getAgentLearningSettings:async(_w,_s,source)=>({version:1,settings:source?settings:{knowledge:"automatic",instructions:"review_first",skills:"off"}}),saveAgentLearningSettings:async(_w,input)=>{for(const [key,value] of Object.entries(input.settings)){if(value==="inherit")delete settings[key];else settings[key]=value;}return {version:2,settings};}},captureWorkspaceInvocation:()=>({}),ownsWorkspaceInvocation:()=>true};export function useAppContext(){return context;}`,
+        body: `let settings={};const context={accessContext:{subjectId:"fixture-user"},client:{getAgentLearningSettings:async(_w,_s,source)=>({version:1,settings:source?settings:{knowledge:"automatic",instructions:"review_first",skills:"off"}}),saveAgentLearningSettings:async(_w,input)=>{for(const [key,value] of Object.entries(input.settings)){if(value==="inherit")delete settings[key];else settings[key]=value;}return {version:2,settings};}},captureWorkspaceInvocation:()=>({}),ownsWorkspaceInvocation:()=>true};export function useAppContext(){return context;}export function useOptionalAppContext(){return context;}`,
       }),
     );
   }, 60_000);

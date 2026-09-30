@@ -28,7 +28,7 @@ function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): 
     case "subscription":
       return "Picked from your connected subscription until you choose one.";
     case "credits":
-      return "Picked for your OpenGeni credits until you choose one.";
+      return "Picked for your Opengeni credits until you choose one.";
     default:
       return "The deployment's default until you choose one.";
   }

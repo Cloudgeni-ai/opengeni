@@ -13,6 +13,7 @@ export type {
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export type { Chats } from "./chats";
+export type { ServiceContext } from "./embedding-client";
 export {
   OPENGENI_WEBHOOK_HEADERS,
   OpenGeniSignatureError,
@@ -23,9 +24,29 @@ export {
   verifyWebhookEvent,
 } from "./workspace-integrations";
 export type {
+  CreateOrganizationWebhookRequest,
+  CreateOrganizationWebhookResponse,
+  CredentialProviderMcpHeaders,
+  CredentialProviderMcpMaterial,
+  GetOrganizationCredentialProviderResponse,
+  InitiatingHuman,
+  IntegrationWorkspaceFilter,
+  ListOrganizationWebhookDeliveriesResponse,
+  ListOrganizationWebhooksResponse,
+  OrganizationCredentialProvider,
+  OrganizationWebhook,
+  OrganizationWebhookDelivery,
+  PutOrganizationCredentialProviderRequest,
+  PutOrganizationCredentialProviderResponse,
+  RotateWorkspaceCredentialProviderSecretResponse,
+  RotateOrganizationCredentialProviderSecretResponse,
+  RotateWorkspaceWebhookSecretResponse,
+  RotateOrganizationWebhookSecretResponse,
+  UpdateOrganizationWebhookRequest,
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   CredentialProviderRequest,
+  CredentialProviderInitiatorContext,
   CredentialProviderResponse,
   GetWorkspaceCredentialProviderResponse,
   ListWorkspaceWebhookDeliveriesResponse,
@@ -181,7 +202,7 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
-export { createSessionProxyHandler } from "./session-proxy";
+export { artifactViewerCapability, createSessionProxyHandler } from "./session-proxy";
 export type {
   SessionProxyContext,
   SessionProxyCreateInput,
@@ -191,6 +212,16 @@ export type {
   SessionProxyResolution,
   SessionProxyResolve,
 } from "./session-proxy";
+export {
+  openGeniConsolePath,
+  parseOpenGeniLink,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
+  parseRetainedFileReference,
+  parseSandboxLink,
+  SESSION_SCOPE_HEADER,
+} from "./message-links";
+export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
@@ -516,6 +547,7 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  AccessCredential,
   ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
@@ -646,6 +678,11 @@ export type {
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
+  ClaudeSubscriptionUsage,
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
+  ClaudeUsageWindow,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,

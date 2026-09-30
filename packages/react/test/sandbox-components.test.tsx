@@ -400,8 +400,8 @@ describe("SandboxFiles guarded-file routing", () => {
       button.textContent?.includes("Open live file"),
     );
     expect(openLive).toBeDefined();
-    expect(openLive?.classList.contains("bg-og-accent-deep")).toBe(true);
-    expect(openLive?.classList.contains("text-og-accent-fg")).toBe(true);
+    expect(openLive?.classList.contains("bg-og-primary")).toBe(true);
+    expect(openLive?.classList.contains("text-og-primary-fg")).toBe(true);
     await actRun(() => openLive!.click());
     expect(wakeCalls).toBe(1);
     expect(r.container.textContent).toContain("Waking workspace");

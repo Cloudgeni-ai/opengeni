@@ -20,7 +20,7 @@ function Preview() {
     <main className="min-h-screen bg-bg px-4 py-8 text-fg sm:px-8">
       <div className="mx-auto max-w-4xl space-y-6">
         <div>
-          <p className="text-xs font-medium uppercase tracking-wider text-fg-subtle">Agent Knowledge · Files</p>
+          <p className="text-xs font-medium uppercase tracking-wider text-fg-subtle">Knowledge · Files</p>
           <h1 className="mt-2 text-2xl font-semibold">Your files</h1>
           <p className="mt-1 text-sm text-fg-muted">Sample data · actual Files status and card components</p>
         </div>

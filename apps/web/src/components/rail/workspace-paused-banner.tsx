@@ -55,7 +55,6 @@ function PausedBanner({ workspaceId }: { workspaceId: string }) {
         canManage ? (
           <Button
             type="button"
-            variant="outline"
             size="sm"
             disabled={busy}
             onClick={() => void resume()}

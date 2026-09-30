@@ -11,37 +11,32 @@ import { Link } from "@tanstack/react-router";
 import { CheckIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useState } from "react";
 
-import { resetPassword } from "@/api";
+import { AuthApiError, resetPassword } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { apiErrorAdvice } from "@/lib/api-error";
 
 // Minimum matches the sign-up form's `password.length < 8` rule so the two
 // screens agree on what a valid password is.
 const MIN_PASSWORD_LENGTH = 8;
 
-// `authRequest` throws `Error("Auth <status>: <body>")` where the body is the
-// Better Auth JSON error. Pull out a human-readable line; an invalid or expired
-// token is the overwhelmingly common failure, so say so plainly.
+// `authRequest` throws `AuthApiError` with the status, Better Auth's code and
+// its sentence. An invalid or expired token is the overwhelmingly common
+// failure, so say so plainly; a short validation sentence (a password that is
+// too long) is kept; anything else says what to do instead of echoing the
+// server.
 function friendlyResetError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const body = raw.replace(/^Auth\s+\d+:\s*/, "");
-  let message = body;
-  try {
-    const parsed = JSON.parse(body) as { message?: unknown; code?: unknown };
-    if (typeof parsed.message === "string" && parsed.message.trim()) {
-      message = parsed.message;
-    } else if (typeof parsed.code === "string" && parsed.code.trim()) {
-      message = parsed.code;
+  if (error instanceof AuthApiError) {
+    if (/token|expire|invalid/i.test(`${error.code ?? ""} ${error.message}`)) {
+      return "This reset link is invalid or has expired. Request a new one from the sign-in screen.";
     }
-  } catch {
-    // Body was not JSON — fall back to the raw text.
+    if (error.status === 429) return "Too many attempts. Wait a moment and try again.";
+    if (error.status === 400 || error.status === 422) return apiErrorAdvice(error);
   }
-  if (/token|expire|invalid/i.test(message)) {
-    return "This reset link is invalid or has expired. Request a new one from the sign-in screen.";
-  }
-  return message.trim() || "We couldn't reset your password. Please try again.";
+  if (error instanceof TypeError) return apiErrorAdvice(error);
+  return "We couldn't reset your password. Please try again.";
 }
 
 export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
@@ -78,8 +73,8 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
+      <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
         <div className="mb-4 flex items-center gap-3">
           <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <KeyRoundIcon className="size-4" />
@@ -87,7 +82,7 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
           <div>
             <h1 className="text-base font-semibold">Reset password</h1>
             <p className="text-sm text-fg-subtle">
-              Choose a new password for your OpenGeni account.
+              Choose a new password for your Opengeni account.
             </p>
           </div>
         </div>
@@ -110,7 +105,7 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
               The reset link is missing its token, so we can't verify the request. Request a new
               reset email and open the link from your inbox.
             </Notice>
-            <Button asChild variant="secondary" className="mt-4 w-full">
+            <Button asChild variant="outline" className="mt-4 w-full">
               <Link to="/">Return to sign in</Link>
             </Button>
           </>

@@ -11,6 +11,7 @@ const { createRoot } = await import("react-dom/client");
 const { ChoiceCard, ChoiceCards, ChoiceCardsSkeleton, selectableSurface } =
   await import("./choice-cards");
 const { Field } = await import("./field");
+const { SectionCardContext, SectionFrameReset } = await import("./section-variant");
 
 afterAll(() => GlobalRegistrator.unregister());
 
@@ -132,6 +133,38 @@ describe("ChoiceCards", () => {
     await act(async () => root.render(<InviteRole variant="list" />));
     expect(container.querySelectorAll(".lucide-check")).toHaveLength(0);
     expect(container.querySelector('[data-variant="list"]')).not.toBeNull();
+  });
+
+  test("inside a settings card the options are flat radio rows, never cards in a card", async () => {
+    await act(async () =>
+      root.render(
+        <SectionCardContext.Provider value={true}>
+          <InviteRole variant="ring" />
+        </SectionCardContext.Provider>,
+      ),
+    );
+    const group = container.querySelector('[role="radiogroup"]')!;
+    expect(group.getAttribute("data-variant")).toBe("list");
+    expect(group.hasAttribute("data-rows")).toBe(true);
+    expect(container.querySelectorAll(".lucide-check")).toHaveLength(0);
+    for (const card of container.querySelectorAll('[data-slot="choice-card"]')) {
+      expect(card.className).not.toMatch(/\bborder\b|rounded-/);
+    }
+  });
+
+  test("a dialog opened from a card starts fresh and keeps its own cards", async () => {
+    await act(async () =>
+      root.render(
+        <SectionCardContext.Provider value={true}>
+          <SectionFrameReset>
+            <InviteRole variant="ring" />
+          </SectionFrameReset>
+        </SectionCardContext.Provider>,
+      ),
+    );
+    const group = container.querySelector('[role="radiogroup"]')!;
+    expect(group.getAttribute("data-variant")).toBe("ring");
+    expect(group.hasAttribute("data-rows")).toBe(false);
   });
 
   test("the skeleton keeps the question visible and says it is loading", async () => {

@@ -20,6 +20,7 @@ const demoInputs = {
   transcription: resolve(__dirname, "transcription.html"),
   realtime: resolve(__dirname, "realtime.html"),
   editableArtifacts: resolve(__dirname, "editable-artifacts.html"),
+  artifactViewer: resolve(__dirname, "artifact-viewer.html"),
   browser: resolve(__dirname, "browser.html"),
   computer: resolve(__dirname, "computer.html"),
   composerResponsive: resolve(__dirname, "composer-responsive.html"),

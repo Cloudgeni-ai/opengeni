@@ -965,6 +965,23 @@ remain visible but disabled with the instruction to assign another active owner
 first. The setup screen renders the frozen invitation preview and states that
 no Personal workspace is shared.
 
+Organization usage (`GET /v1/billing/usage-summary`, Organization settings >
+Billing & usage) is the one place billing readers see Personal workspaces, and
+only as amounts. Period totals always counted Personal usage; migration 0543
+adds `personalWorkspaces`: one row per member whose Personal workspace had
+visible usage in the period, keyed by that member's organization membership
+id, carrying the same metric totals as a shared workspace row. The rows never
+carry the Personal workspace id, its name, a session, or any content, zero-use
+Personal workspaces are absent, and the list is the 50 that spent the most
+with `personalWorkspaceCount` saying how many had usage. The same actor-visible
+session rule as the totals applies, so another member's Only me chats do not
+count in a reader's view. The console names each row from the People roster the
+reader can already see, and a Personal row never links anywhere: seeing its
+cost grants no access to the workspace, its sessions or its Insights. The
+aggregate reads the canonical Personal pointers through the membership
+lifecycle read scope inside the existing SECURITY DEFINER function and restores
+the caller's scope before it reads any usage fact.
+
 Migration `0331_managed_organization_creation.sql` introduced the
 managed-cookie-only `POST /v1/organizations` factory with a provisional initial
 shared-workspace graph. Migration 0348 replaces the same database function in

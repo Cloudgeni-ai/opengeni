@@ -99,7 +99,7 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
         action={
           <button
             type="button"
-            className="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm font-medium hover:bg-surface-3"
+            className="rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-fg hover:bg-surface-2"
             onClick={() => setAttempt((value) => value + 1)}
           >
             Try again
@@ -116,7 +116,7 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
         action={
           <button
             type="button"
-            className="min-h-11 rounded-md border border-border bg-surface-2 px-3 py-2 text-sm font-medium hover:bg-surface-3 forced-colors:border-[CanvasText]"
+            className="min-h-11 rounded-md border border-primary-border bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary-hover forced-colors:border-[CanvasText]"
             onClick={() => {
               setState({ kind: "loading" });
               const slot = state.slot;

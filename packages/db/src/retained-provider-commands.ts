@@ -202,6 +202,34 @@ export function validateRouterOutputAdvance(page: RetainedRouterOutputPage): voi
   }
 }
 
+/** Output past this many bytes of one stream is still read, so the command's
+ * exit stays observable, but its middle is not recorded: a command that prints
+ * without bound would otherwise grow the session event log without limit. The
+ * final page is always recorded, so a trailing error or summary survives.
+ * Live output returned to the agent is not affected. */
+export const RECORDED_COMMAND_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
+
+export function recordedCommandOutput(
+  stream: "stdout" | "stderr",
+  startOffset: number,
+  endOffset: number,
+  eof: boolean,
+  text: string,
+): string {
+  const limit = RECORDED_COMMAND_OUTPUT_LIMIT_BYTES;
+  const mib = limit / (1024 * 1024);
+  if (endOffset <= limit) return text;
+  if (eof)
+    return startOffset <= limit
+      ? text
+      : `[OpenGeni did not record part of this ${stream} after ${mib} MiB; its final ${endOffset - startOffset} bytes follow.]\n${text}`;
+  // Pages are contiguous and fenced by the cursor, so exactly one page per
+  // stream crosses or starts at the limit and carries the marker.
+  const marker = `[OpenGeni stopped recording ${stream} after ${mib} MiB; the final part will still be recorded.]\n`;
+  if (startOffset < limit) return `${text}${text.endsWith("\n") ? "" : "\n"}${marker}`;
+  return startOffset === limit ? marker : "";
+}
+
 /** Capture and offsets commit atomically. The session lock is acquired before
  * the process lock, matching the event-write lock order. A concurrent reader
  * with a stale cursor discards its page and reloads; it never appends overlapping
@@ -237,7 +265,14 @@ export async function captureRetainedRouterOutput(
     for (const stream of ["stdout", "stderr"] as const) {
       const before = current.streams[stream],
         after = page.command.streams[stream];
-      if (page[stream])
+      const chunk = recordedCommandOutput(
+        stream,
+        before.byteOffset,
+        after.byteOffset,
+        after.eof,
+        page[stream],
+      );
+      if (chunk)
         events.push(
           ...(await appendSessionCommandOutput(tx, {
             ...scope,
@@ -245,7 +280,7 @@ export async function captureRetainedRouterOutput(
             stream,
             streamFidelity: current.pty ? "merged" : "separate",
             chunkId: `modal-router:${current.execId}:${stream}:${before.byteOffset}:${after.byteOffset}:${after.eof ? 1 : 0}`,
-            chunk: page[stream],
+            chunk,
           })),
         );
     }

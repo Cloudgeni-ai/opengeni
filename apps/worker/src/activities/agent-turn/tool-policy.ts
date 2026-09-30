@@ -260,7 +260,10 @@ export function modelAttachmentInputPolicyForTurn(
     };
   } | null,
 ): ModelAttachmentInputPolicy {
-  const typedTransport = resolvedModel === null || resolvedModel.provider.api === "responses";
+  const typedTransport =
+    resolvedModel === null ||
+    resolvedModel.provider.api === "responses" ||
+    resolvedModel.provider.api === "anthropic-messages";
   return {
     supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
     inputFileMediaTypes: [],

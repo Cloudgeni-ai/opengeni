@@ -3,7 +3,7 @@ import { Children, isValidElement, type ReactNode } from "react";
 import { LogoTileSizeProvider } from "@/components/ui/logo-tile";
 import { cn } from "@/lib/utils";
 
-export { DetailPage, type DetailBackLink } from "@/components/ui/detail-sheet";
+export { BackLink, DetailPage, type DetailBackLink } from "@/components/ui/detail-sheet";
 
 /* ----------------------------------------------------------------------------
    The detail page anatomy (the decided detail pick, B). Anything you open -

@@ -98,6 +98,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   rig_promote: { allOf: ["rigs:manage"] },
   sessions_list: { allOf: ["sessions:read"] },
   session_get: { allOf: ["sessions:read"] },
+  session_set_model: { allOf: ["sessions:control"] },
   session_events: { allOf: ["sessions:read"] },
   // Blocking wait inside a running turn: the live attempt's own session is the
   // self target, so the tool exists only for session-scoped grants.

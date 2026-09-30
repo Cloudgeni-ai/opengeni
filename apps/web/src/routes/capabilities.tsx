@@ -2,7 +2,11 @@ import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
+import {
+  ConnectionCatalog,
+  McpConnectionCard,
+  type ConnectionCatalogService,
+} from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { CapabilityMark } from "@/components/capabilities/capability-page";
 import { CatalogItemPage } from "@/components/capabilities/catalog-item-page";
@@ -54,10 +58,15 @@ import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  LineTabs,
+  LineTabsContent,
+  LineTabsList,
+  LineTabsTrigger,
+} from "@/components/ui/line-tabs";
+import { Toolbar, ToolbarSearch } from "@/components/ui/toolbar";
 import { SkillsPanel } from "./skills-panel";
 import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
-import { PluginSearch } from "@/components/capabilities/capability-catalog-sections";
 import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
 import { type ConnectAction } from "@/components/capabilities/capability-detail-sheet";
 import {
@@ -85,7 +94,11 @@ import {
   canManageSlackReactionSummon,
   useSlackIntegration,
 } from "@/components/capabilities/use-slack-integration";
-import { PageHeader } from "@/components/common";
+import { ListRow, RowList } from "@/components/ui/list-row";
+import { LogoTile } from "@/components/ui/logo-tile";
+import { PageHeader } from "@/components/ui/page-header";
+import { SECTION_TITLE_CLASS } from "@/components/ui/section";
+import { cn } from "@/lib/utils";
 import { PrReviewSetupCard } from "@/components/capabilities/pr-review-setup-card";
 import { Button } from "@/components/ui/button";
 import { DetailPage } from "@/components/ui/detail-page";
@@ -115,6 +128,7 @@ import {
 } from "@/lib/capabilities";
 import {
   mcpOAuthCallbackFailureMessage,
+  oauthCallbackFailureMessage,
   oauthCallbackReasonMessage,
 } from "@/lib/oauth-callback-messages";
 import {
@@ -123,6 +137,8 @@ import {
 } from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { request } from "@/api";
+import { LoadErrorState } from "@/components/common";
+import { userErrorText } from "@/lib/api-error";
 
 // Custom API creation is a fundamentally different "define a new connector
 // from a spec" flow (paste a URL, preview, pick tools, authenticate, create),
@@ -163,7 +179,7 @@ const INTEGRATION_ROW_COPY: Record<string, string> = {
 
 /** One row per provider: the outcome sentence for providers with several modes. */
 const SERVICE_ROW_COPY: Record<string, string> = {
-  slack: "Chat with OpenGeni in Slack, or let it read and send messages as you.",
+  slack: "Chat with Opengeni in Slack, or let it read and send messages as you.",
   atlassian: "Read and update the issues and pages you can already see.",
 };
 
@@ -173,10 +189,10 @@ function providerModeCopy(
   optionName: string,
 ): { title: string; description: string } | null {
   if (serviceId === "slack") {
-    return optionName === "OpenGeni bot"
+    return optionName === "Opengeni bot"
       ? {
-          title: "Add OpenGeni to Slack",
-          description: "Everyone can mention or message OpenGeni in your Slack workspace.",
+          title: "Add Opengeni to Slack",
+          description: "Everyone can mention or message Opengeni in your Slack workspace.",
         }
       : {
           title: "Connect your own Slack",
@@ -546,7 +562,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     captureCatalogScroll();
   };
-  const slackBotMode = slack.catalogName === "OpenGeni bot";
+  const slackBotMode = slack.catalogName === "Opengeni bot";
   const allConnectionServices = mergeConnectionServices([
     ...integrations.map(({ model }) => ({
       id: model.id,
@@ -773,12 +789,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     )
       .then(() => {
         toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke OpenGeni again.",
+          description: "You can return to Slack and invoke Opengeni again.",
         });
       })
       .catch((error) => {
         toast.error("Couldn't link your Slack identity", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         });
       });
   }, [slackLinkToken, workspaceId, clearReturnParams]);
@@ -849,7 +865,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     } catch (error) {
       dispatchCustomApi({
         type: "preview_error",
-        message: error instanceof Error ? error.message : String(error),
+        message: userErrorText(error),
         authenticationMayBeRequired: false,
       });
       return;
@@ -866,7 +882,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     } catch (error) {
       dispatchCustomApi({
         type: "preview_error",
-        message: error instanceof Error ? error.message : String(error),
+        message: `Couldn't read this API. ${userErrorText(error)}`,
         authenticationMayBeRequired: customApiAuthenticationMayBeRequired(source, error),
       });
     }
@@ -901,7 +917,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       dispatchCustomApi({
         type: "phase",
         phase: "auth",
-        error: error instanceof Error ? error.message : String(error),
+        error: `Couldn't connect your account. ${userErrorText(error)}`,
       });
     }
   }
@@ -949,7 +965,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       dispatchCustomApi({
         type: "phase",
         phase: "review",
-        error: error instanceof Error ? error.message : String(error),
+        error: `Couldn't ${editing ? "update" : "install"} this API. ${userErrorText(error)}`,
       });
     }
   }
@@ -980,7 +996,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setCustomApiRemoveTarget({ instance, removesDefinition: preview.removesDefinition });
     } catch (error) {
       toast.error("Couldn't inspect removal impact", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setCustomApiBusyKey(null);
@@ -1010,7 +1026,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       return true;
     } catch (error) {
       toast.error("Couldn't remove this instance", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -1127,9 +1143,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     const reason = params.get("reason");
     const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
-    const message =
-      oauthCallbackReasonMessage(reason) ??
-      (reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
+    const message = oauthCallbackFailureMessage(reason);
     if (item) {
       setSheetError(message);
       setSelected(
@@ -1407,8 +1421,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     } catch (error) {
       setRegistryResults([]);
       setRegistrySearched(null);
-      toast.error("Registry search failed", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't search the registry", {
+        description: userErrorText(error),
       });
     } finally {
       setRegistryBusy(false);
@@ -1459,7 +1473,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         setupLabel={
           openIntegrationModel.id === "slack"
             ? slackBotMode
-              ? "Add OpenGeni to Slack"
+              ? "Add Opengeni to Slack"
               : "Connect your Slack"
             : undefined
         }
@@ -1586,361 +1600,384 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       <CapabilityPageSlotContext.Provider value={pageSlot}>
         {pageOpen ? detailPage : null}
         <div ref={setPageSlotTarget} data-capability-page-slot="" />
-        <div hidden={pageOpen} className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-          <PageHeader
-            icon={<PlugIcon className="size-4" />}
-            title="Capabilities"
-            description="Tools, skills, and plugins your agents can use."
-          />
+        {/*
+          The same frame as every resource page, at the wide catalog width: a
+          header with the tab's add action on the right and the tabs under it,
+          then the search in a toolbar.
+        */}
+        <div
+          hidden={pageOpen}
+          className="mx-auto w-full max-w-[1200px] px-4 pt-6 pb-[max(1.25rem,env(safe-area-inset-bottom))] sm:px-6 lg:px-8"
+        >
+          <LineTabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
+            <PageHeader
+              icon={<PlugIcon />}
+              title="Capabilities"
+              description="Tools, skills, and plugins your agents can use"
+              actions={
+                <div
+                  ref={setCatalogActionTarget}
+                  className="flex items-center gap-2 empty:hidden"
+                />
+              }
+              tabs={
+                <LineTabsList aria-label="Capability types">
+                  <LineTabsTrigger value="all">All</LineTabsTrigger>
+                  <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
+                  <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+                  <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
+                </LineTabsList>
+              }
+            />
+            {(connectionsAccessDenied ||
+              (context.accessContext?.workspaceGrants.some(
+                (grant) => grant.workspaceId === workspaceId,
+              ) &&
+                !hasWorkspacePermission(
+                  context.accessContext,
+                  workspaceId,
+                  "connections:read",
+                ))) && <ConnectionAccessNotice />}
 
-          {(connectionsAccessDenied ||
-            (context.accessContext?.workspaceGrants.some(
-              (grant) => grant.workspaceId === workspaceId,
-            ) &&
-              !hasWorkspacePermission(context.accessContext, workspaceId, "connections:read"))) && (
-            <ConnectionAccessNotice />
-          )}
+            {callbackNotice ? (
+              <Notice tone="failed" title="Couldn't finish connecting" className="mt-4">
+                <p role="alert">{callbackNotice}</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setCallbackNotice(null);
+                      setQuery("");
+                      setActiveTab("connections");
+                    }}
+                  >
+                    Show connections
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setCallbackNotice(null)}
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              </Notice>
+            ) : null}
 
-          {callbackNotice ? (
-            <Notice tone="failed" title="Couldn't finish connecting" className="mt-4">
-              <p role="alert">{callbackNotice}</p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setCallbackNotice(null);
-                    setQuery("");
-                    setActiveTab("connections");
-                  }}
-                >
-                  Show connections
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setCallbackNotice(null)}
-                >
-                  Dismiss
-                </Button>
-              </div>
-            </Notice>
-          ) : null}
+            <Toolbar className="mt-6">
+              <ToolbarSearch
+                value={query}
+                onValueChange={setQuery}
+                placeholder={
+                  activeTab === "all"
+                    ? "Search connections, skills, and plugins"
+                    : `Search ${activeTab}`
+                }
+              />
+            </Toolbar>
+            <CatalogActionContext.Provider value={catalogToolbar}>
+              <div className="min-w-0">
+                <LineTabsContent value={activeTab} forceMount>
+                  <div hidden={!searchingAll && activeTab !== "connections"}>
+                    {!searchingAll ? (
+                      <CatalogHeader
+                        title="Connections"
+                        action={
+                          <Button type="button" onClick={() => setAddOpen(true)}>
+                            <PlusIcon />
+                            Add connection
+                          </Button>
+                        }
+                      />
+                    ) : null}
 
-          <PluginSearch query={query} onQueryChange={setQuery} scope={activeTab} />
-          <CatalogActionContext.Provider value={catalogToolbar}>
-            <Tabs
-              className="capabilities-tabs"
-              value={activeTab}
-              onValueChange={(value) => {
-                setActiveTab(value);
-              }}
-            >
-              <div className="capabilities-tab-bar">
-                <TabsList variant="line" aria-label="Capability types">
-                  <TabsTrigger value="all">All</TabsTrigger>
-                  <TabsTrigger value="connections">Connections</TabsTrigger>
-                  <TabsTrigger value="skills">Skills</TabsTrigger>
-                  <TabsTrigger value="plugins">Plugins</TabsTrigger>
-                </TabsList>
-                <div ref={setCatalogActionTarget} className="capabilities-tab-action" />
-              </div>
-
-              <TabsContent value={activeTab} forceMount>
-                <div hidden={!searchingAll && activeTab !== "connections"}>
-                  {!searchingAll ? (
-                    <CatalogHeader
-                      title="Connections"
-                      action={
-                        <Button type="button" onClick={() => setAddOpen(true)}>
-                          <PlusIcon />
-                          Add connection
-                        </Button>
-                      }
-                    />
-                  ) : null}
-
-                  {loading && items.length === 0 ? (
-                    <p role="status" className="mt-6 text-sm text-fg-muted">
-                      Loading connections…
-                    </p>
-                  ) : hasQuery ? (
-                    <>
-                      {searchReviewed.length > 0 ? (
-                        <section aria-label="Connections" className="mt-6">
-                          <h2 className="mb-2 text-sm font-semibold">Connections</h2>
-                          <ConnectionCatalog
-                            grouped={false}
-                            columns={2}
-                            {...(searchingAll
-                              ? { resultLimit: 6, onShowMore: () => setActiveTab("connections") }
-                              : {})}
-                            services={
-                              searchingAll
-                                ? [...searchReviewed, ...searchCommunity]
-                                : searchReviewed
-                            }
-                          />
-                        </section>
-                      ) : null}
-                      {!searchingAll && searchCommunity.length > 0 ? (
-                        <section aria-label="Community" className="mt-6">
-                          <h2 className="text-sm font-semibold">Community</h2>
-                          <p className="mt-1 mb-2 text-xs leading-4.5 text-fg-muted">
-                            From the public registry. Not reviewed by OpenGeni.
-                          </p>
-                          <ConnectionCatalog
-                            grouped={false}
-                            columns={2}
-                            services={searchCommunity}
-                          />
-                        </section>
-                      ) : null}
-                      {searchReviewed.length === 0 &&
-                      (searchingAll || searchCommunity.length === 0) ? (
-                        searchingAll && searchCommunity.length > 0 ? (
+                    {loading && items.length === 0 ? (
+                      <p role="status" className="mt-6 text-sm text-fg-muted">
+                        Loading connections…
+                      </p>
+                    ) : hasQuery ? (
+                      <>
+                        {searchReviewed.length > 0 ? (
                           <section aria-label="Connections" className="mt-6">
-                            <h2 className="mb-2 text-sm font-semibold">Connections</h2>
+                            <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connections</h2>
                             <ConnectionCatalog
                               grouped={false}
                               columns={2}
-                              resultLimit={6}
-                              onShowMore={() => setActiveTab("connections")}
+                              {...(searchingAll
+                                ? { resultLimit: 6, onShowMore: () => setActiveTab("connections") }
+                                : {})}
+                              services={
+                                searchingAll
+                                  ? [...searchReviewed, ...searchCommunity]
+                                  : searchReviewed
+                              }
+                            />
+                          </section>
+                        ) : null}
+                        {!searchingAll && searchCommunity.length > 0 ? (
+                          <section aria-label="Community" className="mt-6">
+                            <h2 className={SECTION_TITLE_CLASS}>Community</h2>
+                            <p className="mt-1 mb-2 text-xs leading-4.5 text-fg-muted">
+                              From the public registry. Not reviewed by Opengeni.
+                            </p>
+                            <ConnectionCatalog
+                              grouped={false}
+                              columns={2}
                               services={searchCommunity}
                             />
                           </section>
-                        ) : (
-                          <p role="status" className="mt-6 text-sm leading-5 text-fg-muted">
-                            {`No connections match "${query.trim()}". `}
-                            <button
-                              type="button"
-                              className="font-medium text-brand hover:underline"
-                              onClick={() => setQuery("")}
-                            >
-                              Clear search
-                            </button>
-                          </p>
-                        )
-                      ) : null}
-                    </>
-                  ) : searchingAll ? (
-                    <section aria-label="Connections" className="mt-6">
-                      <h2 className="mb-2 text-sm font-semibold">Connections</h2>
-                      <ConnectionCatalog
-                        grouped={false}
-                        columns={2}
-                        resultLimit={6}
-                        onShowMore={() => setActiveTab("connections")}
-                        services={[...connectedServices, ...popularServices]}
-                      />
-                    </section>
-                  ) : (
-                    <>
-                      {connectedServices.length > 0 ? (
-                        <section aria-label="Connected" className="mt-6">
-                          <h2 className="mb-2 text-sm font-semibold">Connected</h2>
+                        ) : null}
+                        {searchReviewed.length === 0 &&
+                        (searchingAll || searchCommunity.length === 0) ? (
+                          searchingAll && searchCommunity.length > 0 ? (
+                            <section aria-label="Connections" className="mt-6">
+                              <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connections</h2>
+                              <ConnectionCatalog
+                                grouped={false}
+                                columns={2}
+                                resultLimit={6}
+                                onShowMore={() => setActiveTab("connections")}
+                                services={searchCommunity}
+                              />
+                            </section>
+                          ) : (
+                            <p role="status" className="mt-6 text-sm leading-5 text-fg-muted">
+                              {`No connections match "${query.trim()}". `}
+                              <button
+                                type="button"
+                                className="font-medium text-brand hover:underline"
+                                onClick={() => setQuery("")}
+                              >
+                                Clear search
+                              </button>
+                            </p>
+                          )
+                        ) : null}
+                      </>
+                    ) : searchingAll ? (
+                      <section aria-label="Connections" className="mt-6">
+                        <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connections</h2>
+                        <ConnectionCatalog
+                          grouped={false}
+                          columns={2}
+                          resultLimit={6}
+                          onShowMore={() => setActiveTab("connections")}
+                          services={[...connectedServices, ...popularServices]}
+                        />
+                      </section>
+                    ) : (
+                      <>
+                        {connectedServices.length > 0 ? (
+                          // What you have is a resource list (64px rows, one
+                          // column); what you can add below is the catalog.
+                          <section aria-label="Connected" className="mt-6">
+                            <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Connected</h2>
+                            <ConnectedServiceList services={connectedServices} />
+                          </section>
+                        ) : null}
+                        <section aria-label="Popular" className="mt-6">
+                          <h2 className={cn(SECTION_TITLE_CLASS, "mb-2")}>Popular</h2>
                           <ConnectionCatalog
                             grouped={false}
                             columns={2}
-                            services={connectedServices}
+                            services={popularServices}
                           />
+                          {communityServices.length > 0 ? (
+                            <p className="mt-4 text-xs leading-4.5 text-fg-muted">
+                              {`Search to find ${communityServices.length} more community connections from the public registry.`}
+                            </p>
+                          ) : null}
                         </section>
-                      ) : null}
-                      <section aria-label="Popular" className="mt-6">
-                        <h2 className="mb-2 text-sm font-semibold">Popular</h2>
-                        <ConnectionCatalog grouped={false} columns={2} services={popularServices} />
-                        {communityServices.length > 0 ? (
-                          <p className="mt-4 text-xs leading-4.5 text-fg-muted">
-                            {`Search to find ${communityServices.length} more community connections from the public registry.`}
-                          </p>
-                        ) : null}
-                      </section>
-                    </>
-                  )}
+                      </>
+                    )}
 
-                  {/*
+                    {/*
           One <section> per top-level surface. Featured, the discovery controls,
           Enabled, Custom APIs, and Browse are all Connectors, so they live
           inside this element rather than beside it: otherwise the accessibility
           tree says they belong to no section at all.
         */}
-                  {!searchingAll &&
-                  (filter === "all" || filter === "api") &&
-                  visibleCustomApiInstances.length > 0 ? (
-                    <CustomApiSection
-                      instances={visibleCustomApiInstances}
-                      connections={connections}
-                      canManage={canManageApiIntegrationInstances}
-                      busyKey={customApiBusyKey}
-                      onConnect={openCustomApi}
-                      onUpdate={(instance) => editCustomApi(instance, "update")}
-                      onReconnect={(instance) => editCustomApi(instance, "reconnect")}
-                      onRemove={(instance) => void previewRemoveCustomApi(instance)}
-                    />
-                  ) : null}
-
-                  {hasQuery && !searchingAll ? (
-                    <div className="mt-4">
-                      <p className="mb-3 text-xs leading-5 text-fg-muted">
-                        Still can’t find it?{" "}
-                        <button
-                          type="button"
-                          className="rounded-sm font-medium text-fg underline decoration-current/30 underline-offset-4 hover:decoration-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-60"
-                          disabled={registryBusy}
-                          onClick={() => void searchRegistry()}
-                        >
-                          {registryBusy ? "Searching…" : "Search the whole public registry"}
-                        </button>
-                      </p>
-                      {visibleRegistry.length ? (
-                        <ConnectionCatalog
-                          grouped={false}
-                          columns={2}
-                          services={visibleRegistry.map((item) => ({
-                            id: item.id,
-                            name: item.name,
-                            logo: <CapabilityMark src={logoUrl(item)} name={item.name} />,
-                            options: [
-                              {
-                                id: item.id,
-                                name: "Community",
-                                description: item.description ?? undefined,
-                                status: "Available",
-                                connected: false,
-                                state: "available",
-                                onOpen: () => openItem(item, true),
-                              },
-                            ],
-                          }))}
-                        />
-                      ) : registrySearched === query.trim() ? (
-                        <p className="text-sm text-fg-muted">
-                          Nothing else found. Connections that need a local install aren’t included.
-                        </p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {loadError ? (
-                    <p role="alert">
-                      {loadError.message}
-                      <button type="button" onClick={() => void refresh()}>
-                        Retry
-                      </button>
-                    </p>
-                  ) : null}
-                </div>
-                <div
-                  className={searchingAll ? "capability-search-section" : undefined}
-                  hidden={activeTab !== "skills"}
-                >
-                  <SkillsPanel
-                    refreshRevision={skillsRevision}
-                    onSkillsChange={setCanonicalSkills}
-                    onRemoved={() => {
-                      setSkillsRevision((value) => value + 1);
-                      void refresh();
-                      onRuntimeChanged();
-                    }}
-                    openSkillRef={openSkillRef}
-                    key={workspaceId}
-                    workspaceId={workspaceId}
-                    query={query}
-                    onImportSkill={() => importSkillRef.current?.()}
-                    onFindSkill={() => {
-                      const search =
-                        capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
-                          'input[type="search"]',
-                        );
-                      search?.scrollIntoView({ block: "center", behavior: "smooth" });
-                      search?.focus({ preventScroll: true });
-                    }}
-                  />
-                </div>
-                <div
-                  ref={bundlesRef}
-                  className={searchingAll ? "capability-search-section" : undefined}
-                  hidden={!searchingAll && activeTab === "connections"}
-                >
-                  <BundlesSection
-                    refreshRevision={skillsRevision}
-                    overviewSkills={canonicalSkills
-                      .filter((skill) =>
-                        `${skill.title} ${skill.stableKey} ${skill.description ?? ""}`
-                          .toLowerCase()
-                          .includes(query.trim().toLowerCase()),
-                      )
-                      .map((skill) => ({
-                        id: skill.id,
-                        name: skill.title || humanizeName(skill.stableKey),
-                        status: skill.pendingRevisionIds.length
-                          ? "attention"
-                          : skill.status === "active"
-                            ? "added"
-                            : "unavailable",
-                        statusLabel: skill.pendingRevisionIds.length
-                          ? "Pending changes"
-                          : skill.status === "active"
-                            ? "Installed"
-                            : "Inactive",
-                        ...(skill.description ? { description: skill.description } : {}),
-                        onOpen: () => {
-                          openSkillRef.current?.(skill.id);
-                        },
-                      }))}
-                    discoveryEnabled={activeTab !== "connections"}
-                    {...(searchingAll
-                      ? {
-                          onShowCategory: (category: "skills" | "plugins") =>
-                            setActiveTab(category),
-                        }
-                      : {})}
-                    onSearchSkills={() => {
-                      const search =
-                        capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
-                          'input[type="search"]',
-                        );
-                      search?.scrollIntoView({ block: "center", behavior: "smooth" });
-                      search?.focus({ preventScroll: true });
-                    }}
-                    importSkillRef={importSkillRef}
-                    section={searchingAll ? "all" : activeTab === "skills" ? "skills" : "plugins"}
-                    query={query}
-                    client={client}
-                    workspaceId={workspaceId}
-                    connections={connections}
-                    canManage={canManageSkills}
-                    items={items}
-                    logoUrl={logoUrl}
-                    busyCatalogId={busyId}
-                    onOpenCatalogItem={(item) => openItem(item, false, true)}
-                    onChanged={async () => {
-                      setSkillsRevision((value) => value + 1);
-                      await refresh();
-                      onRuntimeChanged();
-                    }}
-                  />
-                  {activeTab === "plugins" ? (
-                    <div className="mt-6">
-                      <PrReviewSetupCard
-                        client={client}
-                        workspaceId={workspaceId}
-                        canManage={
-                          canManageApiIntegrationInstances &&
-                          hasWorkspacePermission(
-                            context.accessContext,
-                            workspaceId,
-                            "secrets:write",
-                          )
-                        }
+                    {!searchingAll &&
+                    (filter === "all" || filter === "api") &&
+                    visibleCustomApiInstances.length > 0 ? (
+                      <CustomApiSection
+                        instances={visibleCustomApiInstances}
+                        connections={connections}
+                        canManage={canManageApiIntegrationInstances}
+                        busyKey={customApiBusyKey}
+                        onConnect={openCustomApi}
+                        onUpdate={(instance) => editCustomApi(instance, "update")}
+                        onReconnect={(instance) => editCustomApi(instance, "reconnect")}
+                        onRemove={(instance) => void previewRemoveCustomApi(instance)}
                       />
-                    </div>
-                  ) : null}
-                </div>
-              </TabsContent>
-            </Tabs>
-          </CatalogActionContext.Provider>
+                    ) : null}
+
+                    {hasQuery && !searchingAll ? (
+                      <div className="mt-4">
+                        <p className="mb-3 text-xs leading-5 text-fg-muted">
+                          Still can’t find it?{" "}
+                          <button
+                            type="button"
+                            className="rounded-sm font-medium text-fg underline decoration-current/30 underline-offset-4 hover:decoration-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-60"
+                            disabled={registryBusy}
+                            onClick={() => void searchRegistry()}
+                          >
+                            {registryBusy ? "Searching…" : "Search the whole public registry"}
+                          </button>
+                        </p>
+                        {visibleRegistry.length ? (
+                          <ConnectionCatalog
+                            grouped={false}
+                            columns={2}
+                            services={visibleRegistry.map((item) => ({
+                              id: item.id,
+                              name: item.name,
+                              logo: <CapabilityMark src={logoUrl(item)} name={item.name} />,
+                              options: [
+                                {
+                                  id: item.id,
+                                  name: "Community",
+                                  description: item.description ?? undefined,
+                                  status: "Available",
+                                  connected: false,
+                                  state: "available",
+                                  onOpen: () => openItem(item, true),
+                                },
+                              ],
+                            }))}
+                          />
+                        ) : registrySearched === query.trim() ? (
+                          <p className="text-sm text-fg-muted">
+                            Nothing else found. Connections that need a local install aren’t
+                            included.
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {loadError ? (
+                      <div className="mt-6">
+                        <LoadErrorState
+                          title="Couldn't load connections"
+                          error={loadError}
+                          onRetry={() => void refresh()}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                  <div
+                    className={searchingAll ? "capability-search-section" : "pt-6"}
+                    hidden={activeTab !== "skills"}
+                  >
+                    <SkillsPanel
+                      refreshRevision={skillsRevision}
+                      onSkillsChange={setCanonicalSkills}
+                      onRemoved={() => {
+                        setSkillsRevision((value) => value + 1);
+                        void refresh();
+                        onRuntimeChanged();
+                      }}
+                      openSkillRef={openSkillRef}
+                      key={workspaceId}
+                      workspaceId={workspaceId}
+                      query={query}
+                      onImportSkill={() => importSkillRef.current?.()}
+                      onFindSkill={() => {
+                        const search =
+                          capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                            'input[type="search"]',
+                          );
+                        search?.scrollIntoView({ block: "center", behavior: "smooth" });
+                        search?.focus({ preventScroll: true });
+                      }}
+                    />
+                  </div>
+                  <div
+                    ref={bundlesRef}
+                    className={searchingAll ? "capability-search-section" : "pt-6"}
+                    hidden={!searchingAll && activeTab === "connections"}
+                  >
+                    <BundlesSection
+                      refreshRevision={skillsRevision}
+                      overviewSkills={canonicalSkills
+                        .filter((skill) =>
+                          `${skill.title} ${skill.stableKey} ${skill.description ?? ""}`
+                            .toLowerCase()
+                            .includes(query.trim().toLowerCase()),
+                        )
+                        .map((skill) => ({
+                          id: skill.id,
+                          name: skill.title || humanizeName(skill.stableKey),
+                          status: skill.pendingRevisionIds.length
+                            ? "attention"
+                            : skill.status === "active"
+                              ? "added"
+                              : "unavailable",
+                          statusLabel: skill.pendingRevisionIds.length
+                            ? "Pending changes"
+                            : skill.status === "active"
+                              ? "Installed"
+                              : "Inactive",
+                          ...(skill.description ? { description: skill.description } : {}),
+                          onOpen: () => {
+                            openSkillRef.current?.(skill.id);
+                          },
+                        }))}
+                      discoveryEnabled={activeTab !== "connections"}
+                      {...(searchingAll
+                        ? {
+                            onShowCategory: (category: "skills" | "plugins") =>
+                              setActiveTab(category),
+                          }
+                        : {})}
+                      onSearchSkills={() => {
+                        const search =
+                          capabilityFocusFallbackRef.current?.querySelector<HTMLInputElement>(
+                            'input[type="search"]',
+                          );
+                        search?.scrollIntoView({ block: "center", behavior: "smooth" });
+                        search?.focus({ preventScroll: true });
+                      }}
+                      importSkillRef={importSkillRef}
+                      section={searchingAll ? "all" : activeTab === "skills" ? "skills" : "plugins"}
+                      query={query}
+                      client={client}
+                      workspaceId={workspaceId}
+                      connections={connections}
+                      canManage={canManageSkills}
+                      items={items}
+                      logoUrl={logoUrl}
+                      busyCatalogId={busyId}
+                      onOpenCatalogItem={(item) => openItem(item, false, true)}
+                      onChanged={async () => {
+                        setSkillsRevision((value) => value + 1);
+                        await refresh();
+                        onRuntimeChanged();
+                      }}
+                    />
+                    {activeTab === "plugins" ? (
+                      <div className="mt-6">
+                        <PrReviewSetupCard
+                          client={client}
+                          workspaceId={workspaceId}
+                          canManage={
+                            canManageApiIntegrationInstances &&
+                            hasWorkspacePermission(
+                              context.accessContext,
+                              workspaceId,
+                              "secrets:write",
+                            )
+                          }
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                </LineTabsContent>
+              </div>
+            </CatalogActionContext.Provider>
+          </LineTabs>
         </div>
 
         {integrations.map((adapter) => (
@@ -2068,4 +2105,39 @@ export function integrationQuickConnect(
   if (chip.tone !== "idle" || footer.kind !== "setup") return undefined;
   if (footer.disabled === true || footer.busy === true) return undefined;
   return footer.onSetup;
+}
+
+/** Connections you have, as resource rows: logo, name, one line, and a chevron or what needs you. */
+function ConnectedServiceList({ services }: { services: ConnectionCatalogService[] }) {
+  const rows = services.flatMap((service) =>
+    service.options.map((option) => ({
+      key: `${service.id}/${option.id}`,
+      name:
+        service.options.length > 1 && option.name !== service.name
+          ? `${service.name} · ${option.name}`
+          : service.name,
+      logo: service.logo,
+      option,
+    })),
+  );
+  return (
+    <RowList label="Connected">
+      {rows.map(({ key, name, logo, option }) => (
+        <ListRow
+          key={key}
+          leading={logo ?? <LogoTile name={name} />}
+          title={name}
+          description={option.description}
+          indicator={
+            option.state === "attention" || option.state === "unavailable"
+              ? { kind: option.state, label: option.status }
+              : option.state === "loading"
+                ? "loading"
+                : "open"
+          }
+          onOpen={option.onOpen}
+        />
+      ))}
+    </RowList>
+  );
 }

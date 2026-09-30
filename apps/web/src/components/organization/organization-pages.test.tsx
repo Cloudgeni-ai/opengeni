@@ -668,3 +668,76 @@ describe("Workspace page", () => {
     await view.unmount();
   });
 });
+
+describe("New workspace page", () => {
+  async function createNamed(container: HTMLElement, name: string) {
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, name);
+      const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+      (
+        input as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[key]!.onChange({ target: input });
+    });
+    await act(async () => {
+      container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+  }
+
+  test("from the Workspaces list, a created workspace opens as its page there", async () => {
+    const client = makeClient();
+    const entered = mock((_workspaceId: string) => undefined);
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage
+          workspaceId="workspace-a"
+          view="new-workspace"
+          onEnterWorkspace={entered}
+        />
+      </Provider>,
+    );
+    await flush();
+    expect(view.container.textContent).toContain("Workspaces");
+    await createNamed(view.container, "Research");
+    expect(entered).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/workspaces/$workspaceId/organization",
+      params: { workspaceId: "workspace-a" },
+      search: { section: "workspaces", workspace: "ws-new" },
+    });
+    await view.unmount();
+  });
+
+  test("from the workspace picker, Back returns there and a created workspace opens itself", async () => {
+    const client = makeClient();
+    const entered = mock((_workspaceId: string) => undefined);
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage
+          workspaceId="workspace-a"
+          view="new-workspace"
+          returnTo={{ path: "/workspaces/workspace-a/sessions", label: "Design preview" }}
+          onEnterWorkspace={entered}
+        />
+      </Provider>,
+    );
+    await flush();
+    expect(view.container.textContent).toContain("New workspace");
+    expect(view.container.textContent).toContain("Design preview");
+    expect(view.container.textContent).toContain("A shared space for a team in Acme Robotics");
+    await createNamed(view.container, "Research");
+    expect(entered).toHaveBeenCalledWith("ws-new");
+    expect(navigate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ search: { section: "workspaces", workspace: "ws-new" } }),
+    );
+    await view.unmount();
+  });
+});

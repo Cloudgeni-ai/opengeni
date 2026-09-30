@@ -175,7 +175,7 @@ export function sessionCapabilityGroupsFor(
   if (unmatched.size > 0) {
     groups.push({
       id: "other",
-      name: "Other OpenGeni actions",
+      name: "Other Opengeni actions",
       description: "Additional workspace actions enabled by this deployment.",
       kind: "opengeni",
       toolIds: [...unmatched],

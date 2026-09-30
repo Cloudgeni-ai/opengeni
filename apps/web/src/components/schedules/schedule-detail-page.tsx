@@ -524,6 +524,7 @@ export function ScheduleDetailPage({
    Header chip.
    -------------------------------------------------------------------------- */
 
+/** Only a state worth noticing: running, paused or a failed last run. A healthy schedule has no chip. */
 function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledTaskRun }) {
   const state = scheduledTaskStateLabel(task);
   if (latest?.status === "dispatched") return <StatusBadge status="running" />;
@@ -533,7 +534,7 @@ function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledT
   if (latest?.status === "failed") {
     return <StatusBadge status="failed">Last run failed</StatusBadge>;
   }
-  return <StatusBadge status="active" />;
+  return null;
 }
 
 /* ----------------------------------------------------------------------------

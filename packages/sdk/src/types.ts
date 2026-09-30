@@ -1,5 +1,10 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 export type {
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
+} from "@opengeni/contracts";
+export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,
@@ -2076,6 +2081,7 @@ export const SESSION_EVENT_TYPES = [
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   "session.agent.updated",
+  "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "codex.account.selection.changed",
@@ -2545,6 +2551,8 @@ export type FsListBatchRequest = { requests: FsListRequest[] };
 export type FsListBatchResponse = { results: FsListResponse[] };
 export type FsReadRequest = {
   path: string;
+  /** Confine this read to the session's working directory, refusing symlinks. */
+  workspaceOnly?: boolean;
   encoding?: FsEncoding;
   maxBytes?: number;
   route?: FileSystemRouteIdentity;
@@ -3306,6 +3314,7 @@ export type FirstPartyMcpToolName =
   | "rig_promote"
   | "sessions_list"
   | "session_get"
+  | "session_set_model"
   | "session_events"
   | "session_wait"
   | "command_read"
@@ -3508,7 +3517,7 @@ export type ClientModel = {
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;
-  api: "responses" | "chat";
+  api: "responses" | "chat" | "anthropic-messages";
   source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | "openrouter" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
@@ -3516,7 +3525,7 @@ export type ClientModel = {
   deployment?:
     | {
         upstreamModelId: string;
-        wireApi: "responses" | "chat";
+        wireApi: "responses" | "chat" | "anthropic-messages";
       }
     | undefined;
   executionLimits?:
@@ -3624,7 +3633,34 @@ export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGateway
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
-export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+export type OrganizationModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
+
+export type ClaudeUsageWindow = {
+  id:
+    | "five_hour"
+    | "seven_day"
+    | "seven_day_opus"
+    | "seven_day_sonnet"
+    | "seven_day_overage_included"
+    | "overage";
+  usedPercent: number | null;
+  resetsAt: string | null;
+  status: "allowed" | "allowed_warning" | "rejected" | null;
+  observedAt: string;
+};
+export type ClaudeSubscriptionUsage = {
+  connected: boolean;
+  credentialVersion: number | null;
+  windows: ClaudeUsageWindow[];
+  observedAt: string | null;
+  source: "response_headers" | "provider" | null;
+  refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
+  refreshCheckedAt: string | null;
+};
 
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
@@ -3638,6 +3674,7 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 
 export type RevokeOrganizationModelProviderConnectionRequest = {
@@ -4087,6 +4124,7 @@ export type ClientConfig = {
    */
   apiContractRevision: string;
   serverVersion?: string | undefined;
+  claudeSubscriptionEnabled?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -4108,6 +4146,19 @@ export type ClientConfig = {
    * model picker. OpenGeni itself omits it.
    */
   modelSelection?: boolean | undefined;
+  /** Session proxy sandbox-path download opt-in; absent on native deployments. */
+  sandboxFiles?: boolean | undefined;
+  /**
+   * Session proxy capability for the embedded artifact viewer; absent on
+   * native deployments. The live socket is ticket-authenticated and reached
+   * directly; the cache partition identifies the proxied user.
+   */
+  artifacts?:
+    | {
+        editableLiveUrl: string;
+        cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
+      }
+    | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**
@@ -4283,6 +4334,33 @@ export type AccessGrant = {
   serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;
 };
 
+/**
+ * Authority of a directly used organization or workspace API key, separate
+ * from the caller's account and workspace grants. Full organization keys can
+ * provision shared workspaces, external members, and sessions through `asUser`;
+ * those user requests additionally need the user's live membership.
+ * Organization-key scope excludes Personal workspaces. Neither key kind bypasses
+ * session visibility or the explicit `secrets:read` permission requirement.
+ */
+export type AccessCredential = {
+  kind: "organization_api_key" | "workspace_api_key";
+  /** Organization keys only; omitted for workspace keys. */
+  access?: OrganizationApiKeyAccess | undefined;
+  /** The key's organization id. */
+  accountId: string;
+  /** Null for an organization key: all shared workspaces in that organization, never Personal. */
+  workspaceId: string | null;
+  /**
+   * Workspace permissions after `workspace:admin` expansion. Excludes
+   * account-only permissions and includes `secrets:read` only when explicitly
+   * granted. Full organization keys include `sessions:create` and `members:manage`.
+   */
+  effectiveWorkspacePermissions: Permission[];
+  /** Plain-language explanation of the key's scope and limits. */
+  note: string;
+};
+
+/** Caller identity, grants, defaults, and optional direct API-key authority. */
 export type AccessContext = {
   mode: ProductAccessMode;
   subjectId: string;
@@ -4291,6 +4369,15 @@ export type AccessContext = {
   workspaceGrants: AccessGrant[];
   defaultAccountId: string | null;
   defaultWorkspaceId: string | null;
+  /**
+   * Direct API-key authority; omitted for `asUser`/external actors, humans,
+   * delegated tokens, other caller contexts, and older servers. Existing grants
+   * are unchanged. Full organization keys can provision shared workspaces,
+   * external members, and `asUser` sessions; user requests still need live
+   * membership. Organization-key scope excludes Personal workspaces. Neither key
+   * kind bypasses session visibility or the explicit `secrets:read` requirement.
+   */
+  credential?: AccessCredential | undefined;
 };
 
 export type ManagedOrganizationMembership = {
@@ -4902,8 +4989,11 @@ export type UpdateWorkspaceRequest = {
 
 /**
  * Organization API key access tier, derived by the server from the key's
- * permissions: `full` administers the organization, `read` only inventories
- * shared workspaces and reads their sessions, events, and files.
+ * permissions: `full` can provision shared workspaces, external members, and
+ * `asUser` sessions (user requests additionally need live membership);
+ * `read` only inventories shared workspaces and reads their sessions, events,
+ * and files. Organization-key scope excludes Personal workspaces and bypasses neither
+ * session visibility nor the explicit `secrets:read` permission requirement.
  */
 export type OrganizationApiKeyAccess = "full" | "read";
 
@@ -5451,6 +5541,12 @@ export type SandboxRecoveryProjection = {
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
   automaticAvailable?: boolean;
+  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
+   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  automaticLane?: "checkpoint" | "fresh_workspace";
+  /** For a timed recovery wait: the earliest time a Retry or a new message can
+   * let OpenGeni decide again. Nothing proceeds by itself before then. */
+  availableAt?: string;
 };
 export type SandboxRecoveryRequest = {
   operationId: string;
@@ -5682,6 +5778,11 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
+  /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
+   * Existing target/reusable sessions retain their own model and reasoning. */
+  agentConfigPatch?:
+    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */

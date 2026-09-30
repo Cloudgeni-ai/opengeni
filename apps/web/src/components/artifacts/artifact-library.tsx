@@ -30,7 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -46,6 +46,7 @@ import {
   type ToolbarFilterValue,
 } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
+import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import {
   artifactKey,
   artifactKindLabel,
@@ -62,7 +63,7 @@ import {
   type ArtifactView,
 } from "@/lib/artifact-library-view";
 import { cn } from "@/lib/utils";
-import { ArtifactTypeIcon } from "./artifact-page-chrome";
+import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
   import("./inline-chat-image").then((module) => ({ default: module.InlineChatImage })),
@@ -109,8 +110,11 @@ export function ArtifactThumbnail({
 /** An image's own pixels in the 32px row tile, loaded only near the viewport. */
 function ImageTile({ workspaceId, item }: { workspaceId: string; item: ArtifactCatalogItem }) {
   return (
-    <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] bg-surface-2 [&_img]:size-full [&_img]:object-cover">
-      <ArtifactThumbnail>
+    // The image's own pixels; while it loads or when it can't, the image glyph
+    // (the words stay for screen readers, never squeezed into 32px).
+    <span className="relative flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] bg-surface-2 [&_[role=status]]:sr-only [&_img]:relative [&_img]:size-full [&_img]:bg-surface-2 [&_img]:object-cover">
+      <ImageIcon aria-hidden className="absolute size-4 text-fg-subtle" />
+      <ArtifactThumbnail placeholder={null}>
         <Suspense fallback={<ImageIcon className="size-4 text-fg-subtle" aria-hidden />}>
           <InlineChatImage
             workspaceId={workspaceId}
@@ -241,6 +245,11 @@ function updatedMeta(item: ArtifactCatalogItem) {
   );
 }
 
+/** The date column every artifact list ends with, before the ⋯ menu. */
+const ARTIFACT_COLUMNS: RowListColumn[] = [
+  { id: "updated", label: "Updated", width: 112, align: "end", hideLabel: true },
+];
+
 export function ArtifactRow({
   workspaceId,
   item,
@@ -256,21 +265,29 @@ export function ArtifactRow({
   const archived = item.status === "archived";
   return (
     <ListRow
-      // Types are words; only an image shows its own pixels.
-      leading={item.kind === "image" ? <ImageTile workspaceId={workspaceId} item={item} /> : null}
+      // A tile for the kind of artifact; an image shows its own pixels.
+      leading={
+        item.kind === "image" ? (
+          <ImageTile workspaceId={workspaceId} item={item} />
+        ) : (
+          <ArtifactKindTile kind={item.kind} />
+        )
+      }
       title={item.title}
       meta={[
         artifactKindLabel[item.kind],
-        updatedMeta(item),
         item.kind === "file" && item.filename && item.filename !== item.title
           ? item.filename
           : null,
+      ].filter((part): part is string => Boolean(part))}
+      status={
         archived ? (
-          <StatusBadge key="status" variant="dot" tone="neutral">
+          <StatusBadge variant="dot" tone="neutral">
             Archived
           </StatusBadge>
-        ) : null,
-      ].filter(Boolean)}
+        ) : undefined
+      }
+      cells={{ updated: <RelativeTime date={item.updatedAt} /> }}
       {...(link ? { href: link.href, onOpen: link.onClick } : { onOpen: open })}
       menu={menu}
       menuLabel={`More actions for ${item.title}`}
@@ -588,7 +605,9 @@ export function ArtifactLibrary({
       : (artifactKinds.find(([kind]) => kind === filters.kind)?.[1] ?? "").toLocaleLowerCase();
 
   let body: ReactNode;
-  if (error && items.length === 0) {
+  if (error && items.length === 0 && isPermissionDenied(error)) {
+    body = <Notice title="You can't see artifacts here.">Ask a workspace admin for access.</Notice>;
+  } else if (error && items.length === 0) {
     body = (
       <Notice
         tone="failed"
@@ -600,7 +619,7 @@ export function ArtifactLibrary({
         }
         actionLayout="responsive"
       >
-        {error.message}
+        {apiErrorAdvice(error)}
       </Notice>
     );
   } else if (loading && items.length === 0) {
@@ -609,7 +628,7 @@ export function ArtifactLibrary({
         {view === "gallery" ? (
           <GallerySkeleton />
         ) : (
-          <RowList label="Artifacts" busy>
+          <RowList label="Artifacts" columns={ARTIFACT_COLUMNS} flush={!compact} busy>
             <ListRowSkeleton count={4} />
           </RowList>
         )}
@@ -621,7 +640,7 @@ export function ArtifactLibrary({
         variant={compact ? "inline" : "page"}
         icon={<PanelsTopLeftIcon />}
         title="No artifacts yet"
-        description="Sites, images, documents, spreadsheets and presentations Geni makes show up here."
+        description="Sites, images, documents, spreadsheets and presentations Opengeni makes show up here."
         action={emptyAction}
       />
     );
@@ -678,7 +697,12 @@ export function ArtifactLibrary({
             ))}
           </ul>
         ) : (
-          <RowList label={searching ? "Search results" : "Artifacts"} busy={loading}>
+          <RowList
+            label={searching ? "Search results" : "Artifacts"}
+            columns={ARTIFACT_COLUMNS}
+            flush={!compact}
+            busy={loading}
+          >
             {items.map((item) => (
               <ArtifactRow
                 key={artifactKey(item)}
@@ -692,7 +716,7 @@ export function ArtifactLibrary({
         )}
         {error ? (
           <p role="alert" className="text-sm text-danger">
-            {error.message}
+            Couldn't load the latest artifacts. {userErrorText(error)}
           </p>
         ) : null}
         {nextCursor && onLoadMore ? (

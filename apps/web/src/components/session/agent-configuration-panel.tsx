@@ -9,7 +9,6 @@ import {
   AGENT_IDENTITY_MAX_CHARACTERS,
   legacyEffectiveAgentCapabilities,
 } from "@opengeni/contracts";
-import { OpenGeniApiError } from "@opengeni/sdk";
 import { PencilIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -39,6 +38,7 @@ import {
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
+import { apiErrorFacts } from "@/lib/api-error";
 
 export function AgentConfigurationPanel(props: {
   session: Session;
@@ -117,7 +117,8 @@ export function AgentConfigurationPanel(props: {
         agentConfigErrorText(failure, "Couldn't save the agent settings. Nothing was changed."),
       );
       scrollRegion.current?.scrollTo({ top: 0 });
-      if (failure instanceof OpenGeniApiError && failure.status === 409) {
+      // A version conflict: someone changed the chat meanwhile; show theirs.
+      if (apiErrorFacts(failure).status === 409) {
         await props.onReloadSession();
       }
     } finally {

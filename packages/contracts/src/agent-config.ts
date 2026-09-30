@@ -297,6 +297,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   session_steer: "subagents",
   session_human_input_respond: "subagents",
   set_other_session_title: "subagents",
+  session_set_model: "subagents",
 
   interaction_discover: "browser",
   browser_open: "browser",

@@ -43,7 +43,7 @@ beforeAll(async () => {
       );
     const manifest = JSON.parse(
       await readFile(`${repo}/apps/web/dist/.vite/manifest.json`, "utf8"),
-    ) as Record<string, { file: string; name?: string }>;
+    ) as Record<string, { file: string; name?: string; imports?: string[]; isEntry?: boolean }>;
     const questionEntry = Object.entries(manifest).find(
       ([key, entry]) =>
         key.endsWith("/hooks/latest-question.ts") || entry.name === "session-question-navigation",
@@ -52,6 +52,19 @@ beforeAll(async () => {
     questionAsset = questionEntry[1].file;
     composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
     assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
+    const eager = new Set<string>();
+    const visit = (key: string) => {
+      if (eager.has(key)) return;
+      eager.add(key);
+      for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
+    };
+    for (const [key, entry] of Object.entries(manifest))
+      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+    assert.equal(
+      eager.has("src/components/composer-mobile-plus-panel.tsx"),
+      false,
+      "Composer menu must remain outside the eager production graph",
+    );
     workspaceFilesAsset = manifest["../../packages/react/src/components/sandbox-files.tsx"]!.file;
     assert.ok(workspaceFilesAsset, "Files must retain its optional production chunk");
     const port = await freePort();
@@ -92,6 +105,28 @@ beforeAll(async () => {
   }
 }, 210_000);
 afterAll(cleanup);
+
+async function controlIdlePreloads(page: Page) {
+  // DESIGN warms menus during browser idle time. Control that scheduling so the
+  // cold boundary and idle preload are both asserted rather than raced against
+  // the browser's first idle period. Interaction-triggered preloads stay real.
+  await page.addInitScript(() => {
+    let nextId = 0;
+    const pending = new Map<number, IdleRequestCallback>();
+    window.requestIdleCallback = (callback) => {
+      pending.set(++nextId, callback);
+      return nextId;
+    };
+    window.cancelIdleCallback = (id) => {
+      pending.delete(id);
+    };
+    window.addEventListener("test:run-idle-preloads", () => {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      for (const callback of callbacks) callback({ didTimeout: false, timeRemaining: () => 50 });
+    });
+  });
+}
 
 function gate() {
   let release!: () => void;
@@ -682,6 +717,9 @@ for (const width of [1280, 390]) {
       for (const phase of ["config", "access", "detail", "history"] as const) {
         await state.gates[phase].entered;
         await page.locator("[data-page-loading]").waitFor();
+        // Compare the same font metrics across staged API transitions. A cold
+        // font swap can otherwise move the first anchor before any transition.
+        if (anchor === null) await page.evaluate(() => document.fonts.ready.then(() => {}));
         const loading = page.locator("[data-page-loading]");
         const box = await loading.boundingBox();
         assert(box);
@@ -1130,6 +1168,7 @@ for (const width of [1280, 390]) {
     let questionAssetRequested = false;
     let composerMenuRequested = false;
     const menuLoad = gate();
+    await controlIdlePreloads(page);
     await page.route(`**/${composerMenuAsset}`, async (route) => {
       composerMenuRequested = true;
       await menuLoad.wait();
@@ -1164,14 +1203,24 @@ for (const width of [1280, 390]) {
       await row.waitFor();
       await collapseQueue();
       await latest.waitFor();
-      assert.equal(composerMenuRequested, false, "optional composer menu must not load with chat");
+      assert.equal(
+        composerMenuRequested,
+        false,
+        "optional composer menu must wait for idle or interaction",
+      );
       const composerActions = page.getByRole("button", {
         name: "More composer actions",
         exact: true,
       });
-      await composerActions.click();
+      await page.evaluate(() => window.dispatchEvent(new Event("test:run-idle-preloads")));
       await menuLoad.entered;
-      await page.getByRole("status").filter({ hasText: "Loading actions…" }).waitFor();
+      assert.equal(await composerActions.getAttribute("aria-expanded"), "false");
+      assert.equal(await latest.isVisible(), true, "idle preload must not replace the chat");
+      await composerActions.click();
+      const loading = page.getByRole("status", { name: "Loading composer actions", exact: true });
+      await loading.waitFor();
+      assert.equal(await loading.locator(':scope > [aria-hidden="true"]').count(), 4);
+      assert.equal(await loading.innerText(), "", "the cold menu uses skeletons, not loading copy");
       await capture("composer-menu-loading");
       menuLoad.release();
       await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
@@ -1317,6 +1366,7 @@ for (const width of [1280, 390]) {
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
+    await controlIdlePreloads(page);
     const state = fixtures();
     for (const name of ["config", "access", "detail", "history"] as const)
       state.gates[name].release();

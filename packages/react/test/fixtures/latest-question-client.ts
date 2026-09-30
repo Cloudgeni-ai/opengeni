@@ -28,7 +28,12 @@ export function latestQuestionClient(mode: "pending" | "started" | "withdrawn" |
       ? event(3000, "turn.started", { triggerEventId: question.id }, turn.id)
       : event(3000, "agent.toolCall.created", { id: "legacy-tool", name: "exec_command", arguments: { cmd: "verify" } }, turn.id)] : []),
     ...Array.from({ length: 40 }, (_, index) => event(3001 + index, "agent.message.completed", { text: `Progress ${index + 1}. **Readable work** for the current request.\n\nDetails remain in the conversation.`, messageId: `progress-${index}` }, started ? turn.id : "previous-turn")),
-    ...(mode === "legacy-settled" ? [event(3041, "turn.completed", { output: "Verified" }, turn.id)] : []),
+    // Settled progress is folded. Keep a genuinely long final response so the
+    // navigation regression still starts away from its newest question.
+    ...(mode === "legacy-settled" ? [
+      event(3041, "agent.message.completed", { messageId: "verified-answer", phase: "final_answer", text: Array.from({ length: 30 }, (_, index) => `Verified source ${index + 1}. The source totals match the ledger and contain no duplicates.`).join("\n\n") }, turn.id),
+      event(3042, "turn.completed", { output: "Verified" }, turn.id),
+    ] : []),
   ];
   const reads: Array<{ includeTypes?: string[] }> = [];
   const client = fakeClient({

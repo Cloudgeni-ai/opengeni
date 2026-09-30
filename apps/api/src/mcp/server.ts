@@ -262,6 +262,7 @@ import {
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
+  setSessionModel,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyDefaultServerIds,
@@ -1519,7 +1520,8 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_update",
       {
-        description: "Update a scheduled task.",
+        description:
+          "Update a scheduled task. For model/reasoning-only edits use agentConfigPatch: { model?, reasoningEffort? }; all omitted configuration is preserved. agentConfig is a complete replacement, and scheduled_tasks_get is a bounded projection, not replacement input. Task model settings apply to newly created sessions; existing-session targets and already-created reusable sessions keep their own model/reasoning.",
         inputSchema: {
           id: z4.string().uuid(),
           name: z4.string().optional(),
@@ -1528,6 +1530,10 @@ export function buildOpenGeniMcpServer(
           targetSessionId: z4.string().uuid().nullable().optional(),
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
+          agentConfigPatch: z4
+            .object({ model: z4.string().optional(), reasoningEffort: z4.string().optional() })
+            .strict()
+            .optional(),
           status: z4.string().optional(),
           // Omitted preserves the frozen selections, [] clears them, and an
           // array replaces them; declared so MCP validation doesn't strip it.
@@ -1546,6 +1552,13 @@ export function buildOpenGeniMcpServer(
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
         requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
+        const patchWarnings = (task: ScheduledTask) =>
+          payload.agentConfigPatch &&
+          (task.runMode === "existing_session" || task.reusableSessionId)
+            ? [
+                "The task uses an existing session, whose model and reasoning are unchanged. Change that session separately if intended.",
+              ]
+            : [];
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         const update = await validatedScheduledTaskUpdate({
           settings: deps.settings,
@@ -1559,7 +1572,11 @@ export function buildOpenGeniMcpServer(
           authorizationSurface: "first_party_mcp",
         });
         if (!scheduledTaskUpdateChangesState(existing, update)) {
-          return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
+          return json(
+            scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false, {
+              warnings: patchWarnings(existing),
+            }),
+          );
         }
         const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
@@ -1568,7 +1585,11 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true));
+        return json(
+          scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true, {
+            warnings: patchWarnings(task),
+          }),
+        );
       },
     );
 
@@ -5737,6 +5758,45 @@ function registerWorkspaceOrchestrationTools(
           updated: result.updated,
           title: result.title ?? title,
         });
+      },
+    );
+
+    server.registerTool(
+      "session_set_model",
+      {
+        description:
+          "Set an existing session's model and reasoning defaults for future turns. Use a model from list_models and specify the intended reasoning effort. Does not send a message, resume a paused session, wake an idle session, change latency mode, or rewrite already accepted turns/scheduled occurrences. Older queued turns keep their settings but cannot undo this choice when they start. Reuse the exact idempotencyKey for retries; session_get detail=full reads current effective defaults. Requires sessions:control and ordinary target-session authorization.",
+        inputSchema: {
+          sessionId: z4.string().uuid(),
+          model: z4.string().min(1).max(512),
+          reasoningEffort: z4.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+          idempotencyKey: z4.string().uuid(),
+        },
+      },
+      async ({ sessionId, ...request }) => {
+        const result = await setSessionModel(deps, grant, sessionId, request, "first_party_mcp");
+        return json(
+          mcpMutationReceipt({
+            operation: "session_set_model",
+            committed: true,
+            outcome: result.replay ? "replayed" : "updated",
+            changed: !result.replay,
+            resource: { type: "session", id: sessionId },
+            relatedResources: [
+              { type: "session_command_receipt", id: result.receiptId },
+              { type: "session_event", id: result.eventId },
+            ],
+            timestamp: result.timestamp,
+            idempotency: { status: result.replay ? "replayed" : "applied" },
+            facts: {
+              model: result.model,
+              reasoningEffort: result.reasoningEffort,
+              latencyMode: result.latencyMode,
+              effectiveFrom: result.effectiveFrom,
+            },
+            nextAction: { tool: "session_get", arguments: { sessionId, detail: "full" } },
+          }),
+        );
       },
     );
   }

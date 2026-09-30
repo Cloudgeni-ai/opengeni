@@ -102,6 +102,14 @@ createSessionProxyHandler(og, {
 });
 ```
 
+## Links, artifacts, and Sites
+
+Retained-file links download by file ID by default. Sandbox-path links render unavailable unless the proxy enables `sandboxFiles: true`; enabled reads stay inside the session working directory and refuse symlink components.
+
+Use `resolveLink` on `SessionConversation` or an outer `OpenGeniLinkProvider` to route editable artifacts and Sites to your product's own authenticated pages. Or use `onOpenArtifact` with `SessionArtifactViewer` from `@opengeni/react/artifacts` and enable the proxy's `artifacts: true`. The proxy resolves fresh user grants and checks the exact source session on every read; Site HTML streams with a 25 MiB ceiling (`site_html_too_large` on overflow). Server-only proxy read helpers live on `@opengeni/sdk/session-proxy`.
+
+For non-React renderers, use `parseOpenGeniLink` with `isReservedOpenGeniLink`; an invalid reserved reference must stay unavailable, never become a link on your own origin.
+
 ## Other UI shapes
 
 - **Headless hooks** from `@opengeni/react/session` when you need a materially different interaction model but want the same event, queue, composer, and approval behavior.

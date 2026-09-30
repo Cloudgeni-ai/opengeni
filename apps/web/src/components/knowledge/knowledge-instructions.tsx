@@ -15,22 +15,24 @@ import {
   ScrollTextIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { DetailSection } from "@/components/ui/detail-sheet";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import { Field, TextArea } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { InAppHelpLink } from "@/components/in-app-help-link";
 import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
+import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
+import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
-import { Section, SectionStack } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { canManageWorkspaceSettings } from "@/lib/permissions";
@@ -44,62 +46,16 @@ import {
 } from "@/routes/workspace-state-loader";
 
 import { errorText } from "./knowledge-data";
+import { Markdown } from "./knowledge-markdown";
 
 /* ----------------------------------------------------------------------------
-   Instructions: what is always in every agent's prompt. Organization identity
-   (read-only here) and the workspace instructions, rendered as they read,
-   with Edit, Ask OpenGeni and History. Edit and History are their own pages.
+   Instructions: what is always in every agent's prompt. The tab lists the
+   workspace instructions and the organization identity as rows; each opens
+   its own page where the text reads as it is, with Edit, Ask Opengeni and
+   History. Edit and History are their own pages too.
    -------------------------------------------------------------------------- */
 
-/** Headings, bullets and paragraphs, as they read. Enough for instructions. */
-export function Markdown({ text, className }: { text: string; className?: string }) {
-  const blocks: ReactNode[] = [];
-  let bullets: string[] = [];
-  const flush = () => {
-    if (bullets.length === 0) return;
-    const items = bullets;
-    blocks.push(
-      <ul
-        key={`list-${blocks.length}`}
-        className="flex list-disc flex-col gap-1 pl-5 marker:text-fg-subtle"
-      >
-        {items.map((item, index) => (
-          // oxlint-disable-next-line react/no-array-index-key -- lines of one static text
-          <li key={index}>{item}</li>
-        ))}
-      </ul>,
-    );
-    bullets = [];
-  };
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    const bullet = /^[-*+]\s+(.*)$/.exec(line);
-    if (bullet) {
-      bullets.push(bullet[1] ?? "");
-      continue;
-    }
-    flush();
-    if (!line) continue;
-    const heading = /^#{1,6}\s+(.*)$/.exec(line);
-    blocks.push(
-      heading ? (
-        <p key={`h-${blocks.length}`} className="font-semibold text-fg">
-          {heading[1]}
-        </p>
-      ) : (
-        <p key={`p-${blocks.length}`}>{line}</p>
-      ),
-    );
-  }
-  flush();
-  return (
-    <div
-      className={`flex min-w-0 flex-col gap-2 text-sm leading-6 break-words text-fg ${className ?? ""}`}
-    >
-      {blocks}
-    </div>
-  );
-}
+export { Markdown } from "./knowledge-markdown";
 
 /* ------------------------------------------------------------------ data */
 
@@ -222,251 +178,222 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
 
 /* ------------------------------------------------------------------- tab */
 
-function BlockHeader({
-  icon,
-  title,
-  meta,
-  actions,
-}: {
-  icon: ReactNode;
-  title: ReactNode;
-  meta?: ReactNode;
-  actions?: ReactNode;
-}) {
-  return (
-    <div className="flex min-w-0 flex-wrap items-start gap-x-4 gap-y-3">
-      <div className="flex min-w-0 flex-1 basis-64 items-start gap-3">
-        <LogoTile size="md" icon={icon} />
-        <div className="min-w-0 pt-px">
-          <h3 className="text-sm leading-5 font-medium text-fg">{title}</h3>
-          {meta ? <p className="text-xs leading-4.5 text-fg-muted">{meta}</p> : null}
-        </div>
-      </div>
-      {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
-    </div>
-  );
+/** The first line of a text as a one-line preview, without markdown markers. */
+function firstLine(text: string): string {
+  const line = text
+    .split("\n")
+    .map((each) => each.trim())
+    .find(Boolean);
+  return (line ?? "").replace(/^(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/, "");
 }
+
+const INSTRUCTION_COLUMNS: RowListColumn[] = [
+  { id: "updated", label: "Changed", width: 112, align: "end", hideLabel: true },
+];
 
 export interface InstructionsTabProps {
   workspaceId: string;
   workspaceName: string;
   personal: boolean;
-  canEdit: boolean;
-  canManageOrganization: boolean;
   instructions: WorkspaceInstructions;
-  onEdit: () => void;
-  onOpenHistory: () => void;
+  onOpenInstructions: () => void;
+  onOpenIdentity: () => void;
   onGoToLibrary: () => void;
 }
 
+/**
+ * What is always in every agent's prompt, as rows like every other list: the
+ * workspace instructions and the organization identity. Each opens its page.
+ */
 export function InstructionsTab({
   workspaceId,
   workspaceName,
   personal,
-  canEdit,
-  canManageOrganization,
   instructions,
-  onEdit,
-  onOpenHistory,
+  onOpenInstructions,
+  onOpenIdentity,
   onGoToLibrary,
 }: InstructionsTabProps) {
   const { client, clientConfig } = useAppContext();
   const agentSettings = clientConfig.agentConfig?.enabled === true;
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
-  const [askOpen, setAskOpen] = useState(false);
-  const { loading, error, content, configured } = instructions;
-  const head = instructions.head;
+  const { loading, error, content, configured, head } = instructions;
+  const identityText = profile ? firstLine(profile.identity || profile.mission || "") : "";
 
   return (
-    <div className="flex min-w-0 flex-col gap-6 pt-6">
-      <SectionStack>
-        <Section
-          title="Always applied to every agent"
-          description={`Added to every chat and schedule in ${workspaceName}, before anything agents look up.`}
-          contentClassName="divide-y divide-border"
-        >
-          {agentSettings ? <AgentIdentityBlock workspaceId={workspaceId} /> : null}
-          <div className="flex min-w-0 flex-col gap-3 py-4">
-            <BlockHeader
-              icon={<Building2Icon />}
-              title="Organization identity"
-              meta={
-                identity.response?.current
-                  ? "Who your organization is and why it exists"
-                  : undefined
-              }
-              actions={
-                canManageOrganization ? (
-                  <InAppHelpLink
-                    href={`/workspaces/${workspaceId}/organization?section=knowledge`}
-                    className="text-sm leading-5"
-                  >
-                    Edit in organization settings
-                    <ArrowUpRightIcon
-                      aria-hidden="true"
-                      className="ml-0.5 inline size-3.5 align-[-2px]"
-                    />
-                  </InAppHelpLink>
-                ) : undefined
-              }
-            />
-            <div className="flex min-w-0 flex-col gap-1 pl-11 text-sm leading-6 text-fg max-sm:pl-0">
-              {identity.loading && !identity.response ? (
-                <Skeleton className="h-10 w-full" />
-              ) : identity.error && !identity.response ? (
-                <p className="text-fg-muted">
-                  Couldn't load it.{" "}
-                  <HelpLink onClick={() => void identity.reload()}>Try again</HelpLink>
-                </p>
-              ) : profile && (profile.identity || profile.mission) ? (
-                <>
-                  {profile.identity ? <p>{profile.identity}</p> : null}
-                  {profile.mission ? (
-                    <p className="text-fg-muted">
-                      <span className="font-medium text-fg">Mission. </span>
-                      {profile.mission}
-                    </p>
-                  ) : null}
-                </>
-              ) : (
-                <p className="text-fg-muted">
-                  {canManageOrganization
-                    ? "Say who your organization is in organization settings, and every agent starts with it."
-                    : "Your organization's owners haven't described it yet."}
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="flex min-w-0 flex-col gap-3 py-4">
-            <BlockHeader
-              icon={<ScrollTextIcon />}
-              title={
-                personal ? "Instructions for your Personal workspace" : "Workspace instructions"
-              }
-              meta={
-                loading ? undefined : configured && head ? (
-                  <>
-                    Last changed <RelativeTime date={head.activatedAt} inSentence />
-                  </>
-                ) : configured ? (
-                  "Set in earlier settings"
-                ) : undefined
-              }
-              actions={
-                canEdit ? (
-                  <>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setAskOpen(true)}
-                      disabled={loading}
-                      className="pointer-coarse:h-11"
-                    >
-                      <SparklesIcon aria-hidden="true" />
-                      Ask OpenGeni…
-                    </Button>
-                    {head ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={onOpenHistory}
-                        disabled={loading}
-                        className="pointer-coarse:h-11"
-                      >
-                        <HistoryIcon aria-hidden="true" />
-                        History
-                      </Button>
-                    ) : null}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={onEdit}
-                      disabled={loading || Boolean(error && !content)}
-                      className="pointer-coarse:h-11"
-                    >
-                      <PencilIcon aria-hidden="true" />
-                      {configured ? "Edit" : "Write instructions"}
-                    </Button>
-                  </>
-                ) : head ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={onOpenHistory}
-                    className="pointer-coarse:h-11"
-                  >
-                    <HistoryIcon aria-hidden="true" />
-                    History
-                  </Button>
-                ) : undefined
-              }
-            />
-            {loading ? (
-              <div
-                role="status"
-                aria-label="Loading the instructions"
-                className="ml-11 flex flex-col gap-2 max-sm:ml-0"
-              >
-                <Skeleton className="h-4 w-32" />
-                <Skeleton className="h-3.5 w-3/5" />
-                <Skeleton className="h-3.5 w-2/5" />
-              </div>
-            ) : error && !content ? (
-              <div className="pl-11 max-sm:pl-0">
-                <Notice
-                  tone="failed"
-                  title="Couldn't load the instructions"
-                  action={
-                    <Button type="button" size="sm" variant="outline" onClick={instructions.reload}>
-                      Try again
-                    </Button>
-                  }
-                  actionLayout="responsive"
-                >
-                  {error}
-                </Notice>
-              </div>
-            ) : content.trim() ? (
-              <Markdown text={content} className="pl-11 max-sm:pl-0" />
-            ) : (
-              <p className="pl-11 text-sm text-fg-muted max-sm:pl-0">
-                {canEdit
-                  ? "No instructions yet. Write how agents should work here, like review rules or the tone for pull requests."
-                  : personal
-                    ? "No personal instructions yet. Editing them here isn't available yet."
-                    : "No workspace instructions yet. A workspace admin can add them."}
-              </p>
-            )}
-            {!canEdit && !loading && (content.trim() || configured) ? (
-              <p className="pl-11 text-xs leading-4.5 text-fg-muted max-sm:pl-0">
-                {personal
-                  ? "Editing personal instructions isn't available yet."
-                  : "Only workspace admins can change these."}
-              </p>
-            ) : null}
-          </div>
-        </Section>
-      </SectionStack>
+    <div className="flex min-w-0 flex-col gap-4 pt-6">
+      <RowList label="Always applied to every agent" columns={INSTRUCTION_COLUMNS} flush>
+        {agentSettings ? <AgentIdentityRow workspaceId={workspaceId} /> : null}
+        <ListRow
+          leading={<LogoTile icon={<ScrollTextIcon />} />}
+          title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
+          meta={[
+            loading
+              ? "Loading…"
+              : error && !content
+                ? "Couldn't load them"
+                : content.trim()
+                  ? firstLine(content)
+                  : configured
+                    ? "Set in earlier settings"
+                    : "Not written yet",
+          ]}
+          cells={head ? { updated: <RelativeTime date={head.activatedAt} /> } : {}}
+          indicator="open"
+          onOpen={onOpenInstructions}
+        />
+        <ListRow
+          leading={<LogoTile icon={<Building2Icon />} />}
+          title="Organization identity"
+          meta={[
+            identity.loading && !identity.response
+              ? "Loading…"
+              : identity.error && !identity.response
+                ? "Couldn't load it"
+                : identityText || "Not described yet",
+          ]}
+          indicator="open"
+          onOpen={onOpenIdentity}
+        />
+      </RowList>
       {agentSettings ? (
-        <InlineHelp icon>
-          Every prompt starts with who the agent is, then your organization, then these
-          instructions, then anything set for one chat. Instructions take priority over OpenGeni's
-          default way of working, but never over its safety rules or how it runs tools.
+        <InlineHelp>
+          Every prompt in {workspaceName} starts with who the agent is, then your organization, then
+          these instructions, then anything set for one chat. Instructions take priority over
+          OpenGeni's default way of working, but never over its safety rules or how it runs tools.
         </InlineHelp>
       ) : null}
-      <InlineHelp icon>
-        Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>. Step-by-step
-        procedures go in Skills, in{" "}
+      <InlineHelp>
+        {agentSettings ? "These are" : "Both are"} added to every chat and schedule in{" "}
+        {workspaceName}, before anything agents look up. Facts go in the{" "}
+        <HelpLink onClick={onGoToLibrary}>Library</HelpLink>, and step-by-step procedures in Skills,
+        in{" "}
         <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
           Capabilities
         </InAppHelpLink>
         .
       </InlineHelp>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------ instructions page */
+
+export function InstructionsPage({
+  workspaceId,
+  workspaceName,
+  personal,
+  canEdit,
+  instructions,
+  onBack,
+  onEdit,
+  onOpenHistory,
+}: {
+  workspaceId: string;
+  workspaceName: string;
+  personal: boolean;
+  canEdit: boolean;
+  instructions: WorkspaceInstructions;
+  onBack: () => void;
+  onEdit: () => void;
+  onOpenHistory: () => void;
+}) {
+  const [askOpen, setAskOpen] = useState(false);
+  const { loading, error, content, configured, head } = instructions;
+  const unreadable = Boolean(error && !content);
+  return (
+    <DetailPage back={{ label: "Instructions", onClick: onBack }}>
+      <DetailPageHeader
+        leading={<LogoTile icon={<ScrollTextIcon />} />}
+        title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
+        meta={[
+          `Added to every chat and schedule in ${workspaceName}`,
+          loading ? null : head ? (
+            <span key="changed">
+              changed <RelativeTime date={head.activatedAt} inSentence />
+            </span>
+          ) : configured ? (
+            "set in earlier settings"
+          ) : null,
+          !canEdit
+            ? personal
+              ? "Editing isn't available yet"
+              : "Only workspace admins can change these"
+            : null,
+        ]}
+        actions={
+          canEdit ? (
+            <>
+              <RowButton onClick={() => setAskOpen(true)} disabled={loading}>
+                <SparklesIcon aria-hidden="true" />
+                Ask Opengeni
+              </RowButton>
+              <Button
+                type="button"
+                size="sm"
+                onClick={onEdit}
+                disabled={loading || unreadable}
+                className="rounded-[10px] pointer-coarse:h-11"
+              >
+                <PencilIcon aria-hidden="true" />
+                {configured ? "Edit" : "Write instructions"}
+              </Button>
+              {head ? (
+                <MoreMenu label="More actions for the instructions">
+                  <DropdownMenuItem onSelect={onOpenHistory}>
+                    <HistoryIcon />
+                    History
+                  </DropdownMenuItem>
+                </MoreMenu>
+              ) : null}
+            </>
+          ) : head ? (
+            <RowButton onClick={onOpenHistory}>
+              <HistoryIcon aria-hidden="true" />
+              History
+            </RowButton>
+          ) : null
+        }
+      />
+      <DetailPageBody>
+        <DetailSection>
+          {loading ? (
+            <div
+              role="status"
+              aria-label="Loading the instructions"
+              className="flex flex-col gap-2"
+            >
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-3.5 w-3/5" />
+              <Skeleton className="h-3.5 w-2/5" />
+            </div>
+          ) : unreadable ? (
+            <Notice
+              tone="failed"
+              title="Couldn't load the instructions"
+              action={
+                <Button type="button" size="sm" variant="outline" onClick={instructions.reload}>
+                  Try again
+                </Button>
+              }
+              actionLayout="responsive"
+            >
+              {error}
+            </Notice>
+          ) : content.trim() ? (
+            <Markdown text={content} />
+          ) : (
+            <p className="text-sm leading-6 text-fg-muted">
+              {canEdit
+                ? "No instructions yet. Write how agents should work here, like review rules or the tone for pull requests."
+                : personal
+                  ? "No personal instructions yet."
+                  : "No workspace instructions yet. A workspace admin can add them."}
+            </p>
+          )}
+        </DetailSection>
+      </DetailPageBody>
       {canEdit ? (
         <AskOpenGeniDialog
           open={askOpen}
@@ -475,17 +402,102 @@ export function InstructionsTab({
           personal={personal}
         />
       ) : null}
-    </div>
+    </DetailPage>
+  );
+}
+
+/* ---------------------------------------------------------- identity page */
+
+export function IdentityPage({
+  workspaceId,
+  canManageOrganization,
+  onBack,
+}: {
+  workspaceId: string;
+  canManageOrganization: boolean;
+  onBack: () => void;
+}) {
+  const { client } = useAppContext();
+  const navigate = useNavigate();
+  const identity = useCompanyProfileInventory(client, workspaceId);
+  const profile = identity.response?.activeRevision?.profile ?? null;
+  const settings = `/workspaces/${workspaceId}/organization?section=knowledge`;
+  return (
+    <DetailPage back={{ label: "Instructions", onClick: onBack }}>
+      <DetailPageHeader
+        leading={<LogoTile icon={<Building2Icon />} />}
+        title="Organization identity"
+        meta={[
+          "Who your organization is and why it exists",
+          canManageOrganization ? null : "Managed by your organization's owners",
+        ]}
+        actions={
+          canManageOrganization ? (
+            <RowButton onClick={() => void navigate({ href: settings })}>
+              Edit in organization settings
+              <ArrowUpRightIcon aria-hidden="true" />
+            </RowButton>
+          ) : null
+        }
+      />
+      <DetailPageBody>
+        {identity.loading && !identity.response ? (
+          <DetailSection>
+            <Skeleton className="h-10 w-full" />
+          </DetailSection>
+        ) : identity.error && !identity.response ? (
+          <DetailSection>
+            <Notice
+              tone="failed"
+              title="Couldn't load the organization identity"
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void identity.reload()}
+                >
+                  Try again
+                </Button>
+              }
+              actionLayout="responsive"
+            />
+          </DetailSection>
+        ) : profile && (profile.identity || profile.mission) ? (
+          <>
+            {profile.identity ? (
+              <DetailSection title="Identity">
+                <p className="text-sm leading-6 text-fg">{profile.identity}</p>
+              </DetailSection>
+            ) : null}
+            {profile.mission ? (
+              <DetailSection title="Mission">
+                <p className="text-sm leading-6 text-fg">{profile.mission}</p>
+              </DetailSection>
+            ) : null}
+          </>
+        ) : (
+          <DetailSection>
+            <p className="text-sm leading-6 text-fg-muted">
+              {canManageOrganization
+                ? "Say who your organization is in organization settings, and every agent starts with it."
+                : "Your organization's owners haven't described it yet."}
+            </p>
+          </DetailSection>
+        )}
+      </DetailPageBody>
+    </DetailPage>
   );
 }
 
 /**
  * "Who the agent is": the workspace's default agent identity for new chats.
  * It is edited with the rest of the agent defaults, in workspace settings, so
- * this block shows it and links there.
+ * the row opens that page for the admins who can change it.
  */
-function AgentIdentityBlock({ workspaceId }: { workspaceId: string }) {
+function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const canManage = canManageWorkspaceSettings(
     context.accessContext,
@@ -497,50 +509,30 @@ function AgentIdentityBlock({ workspaceId }: { workspaceId: string }) {
     workspace?.agentInstructions,
   );
   return (
-    <div className="flex min-w-0 flex-col gap-3 py-4" data-testid="agent-identity-block">
-      <BlockHeader
-        icon={<BotIcon />}
-        title="Who the agent is"
-        meta={
-          resolved.source === "legacy_agent_instructions"
-            ? "From this workspace's earlier custom persona"
-            : resolved.source === "explicit"
-              ? "Set for new chats in this workspace"
-              : "OpenGeni's default"
-        }
-        actions={
-          canManage ? (
-            // Edited with the other agent defaults, like organization identity
-            // is edited in organization settings.
-            <InAppHelpLink
-              href={`/workspaces/${workspaceId}/settings?section=general&view=agent-defaults`}
-              className="text-sm leading-5"
-            >
-              Edit in workspace settings
-              <ArrowUpRightIcon
-                aria-hidden="true"
-                className="ml-0.5 inline size-3.5 align-[-2px]"
-              />
-            </InAppHelpLink>
-          ) : undefined
-        }
-      />
-      <div className="flex min-w-0 flex-col gap-1 pl-11 text-sm leading-6 max-sm:pl-0">
-        {resolved.identity ? (
-          <p className="break-words whitespace-pre-wrap text-fg">{resolved.identity}</p>
-        ) : (
-          <p className="text-fg-muted">
-            OpenGeni's general assistant for questions, writing, research, analysis and technical
-            work. Replace it to give agents your product's name, role and tone.
-          </p>
-        )}
-        {!canManage ? (
-          <p className="text-xs leading-4.5 text-fg-muted">
-            Only workspace admins can change this.
-          </p>
-        ) : null}
-      </div>
-    </div>
+    <ListRow
+      leading={<LogoTile icon={<BotIcon />} />}
+      title="Who the agent is"
+      meta={[
+        resolved.identity
+          ? firstLine(resolved.identity)
+          : "OpenGeni's general assistant (the default)",
+        resolved.source === "legacy_agent_instructions"
+          ? "from this workspace's earlier custom persona"
+          : null,
+        canManage ? null : "Only workspace admins can change this",
+      ]}
+      {...(canManage
+        ? {
+            indicator: "open" as const,
+            onOpen: () =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "general", view: "agent-defaults" },
+              }),
+          }
+        : {})}
+    />
   );
 }
 
@@ -592,7 +584,7 @@ function AskOpenGeniDialog({
         }
       }}
       size="sm"
-      title="Ask OpenGeni to change the instructions"
+      title="Ask Opengeni to change the instructions"
       description="It starts a chat that proposes the change. Your Learning setting decides whether it applies right away or waits in Review."
       submitLabel="Start chat"
       pendingLabel="Starting…"
@@ -742,7 +734,7 @@ export function instructionRevisions(
         event.actorSubjectId === me
           ? "You"
           : event.actorSubjectId.startsWith("service:") || agent
-            ? "OpenGeni"
+            ? "Opengeni"
             : revision.provenance.source === "onboarding"
               ? "Workspace setup"
               : "A workspace admin";
