@@ -1045,7 +1045,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               "This browser engine does not render page screenshots; use semantic observation",
             );
           }
-          return await sessionClient.capture(targetId, captureOptions);
+          try {
+            return await sessionClient.capture(targetId, captureOptions);
+          } catch (error) {
+            throw browserScreenshotError(error);
+          }
         },
       );
       return browserScreenshotResponse(frame);
@@ -4445,6 +4449,22 @@ export function parseBrowserScreenshotOptions(
     ...(format === null ? {} : { format }),
     ...(parsedQuality === null ? {} : { quality: parsedQuality }),
   };
+}
+
+/** Keep a definite read timeout useful without publishing driver diagnostics. */
+export function browserScreenshotError(error: unknown): unknown {
+  if (error instanceof BrowserControlRequestError && error.error.code === "timeout") {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message:
+        "This tab did not produce a screenshot in time. Other browser operations may still work.",
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
+  return error;
 }
 
 export function browserScreenshotResponse(
