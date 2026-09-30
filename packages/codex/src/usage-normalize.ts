@@ -7,7 +7,8 @@
 // (rotationStrategy:"most_remaining" ranks by max(min(fiveHour, weekly).remaining)).
 //
 // Windows are identified by `limit_window_seconds` (18000 ⇒ 5h, 604800 ⇒ weekly),
-// NEVER by position. A 200 may carry `limit_reached:true`; a 404 carries a
+// NEVER by position. Unidentified windows cannot be given a duration label.
+// A 200 may carry `limit_reached:true`; a 404 carries a
 // limit-reached body. The parser is zod over rate_limit.{primary,secondary}_window.
 
 import * as z from "zod/v4";
@@ -38,6 +39,8 @@ export type CodexAdditionalLimit = {
   meteredFeature: string;
   fiveHour: CodexUsageWindow | null;
   weekly: CodexUsageWindow | null;
+  /** Unknown-duration feature caps still block repair of a prior quota refusal. */
+  unknownWindowExhausted: boolean;
 };
 
 export type CodexUsageStatus = "ok" | "limit_reached" | "error" | "no-data";
@@ -46,8 +49,8 @@ export type CodexUsageStatus = "ok" | "limit_reached" | "error" | "no-data";
 export type CodexUsagePayload = {
   status: CodexUsageStatus;
   planType: string | null; // "pro" | "plus" | ... (rate row label)
-  fiveHour: CodexUsageWindow | null; // ← rate_limit.primary_window  (limitWindowSeconds === 18000)
-  weekly: CodexUsageWindow | null; // ← rate_limit.secondary_window (604800)
+  fiveHour: CodexUsageWindow | null; // window with limitWindowSeconds === 18000
+  weekly: CodexUsageWindow | null; // window with limitWindowSeconds === 604800
   limitReached: boolean; // rate_limit.limit_reached || !rate_limit.allowed
   fetchedAt: string; // ISO; server stamp
   /**
@@ -178,9 +181,9 @@ function normalizeWindow(w: RawWindow): CodexUsageWindow | null {
 }
 
 /**
- * Map the two named windows to fiveHour/weekly by `limit_window_seconds`
- * (18000 vs 604800), NEVER by position; fall back to position (primary ⇒ 5h,
- * secondary ⇒ weekly) only for a window whose limit_window_seconds is absent.
+ * Map provider windows by their explicit duration. Primary/secondary are ordering
+ * slots, not duration labels: a weekly-only account can report its weekly quota
+ * in primary_window. Unknown durations must not be displayed as 5h or weekly.
  */
 function pickWindows(
   primary: RawWindow,
@@ -188,32 +191,14 @@ function pickWindows(
 ): { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } {
   let fiveHour: CodexUsageWindow | null = null;
   let weekly: CodexUsageWindow | null = null;
-  // Track each unplaced window with the slot it came from, so the positional
-  // fallback can place it (re-normalizing produces a fresh object that would
-  // never match by reference — the bug this replaces).
-  const unplaced: Array<{
-    slot: "primary" | "secondary";
-    window: CodexUsageWindow;
-  }> = [];
-  for (const [slot, raw] of [
-    ["primary", primary],
-    ["secondary", secondary],
-  ] as const) {
+  for (const raw of [primary, secondary]) {
     const nw = normalizeWindow(raw);
     if (!nw) continue;
     if (nw.limitWindowSeconds === CODEX_WEEKLY_WINDOW_SECONDS) {
       weekly = nw;
     } else if (nw.limitWindowSeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS) {
       fiveHour = nw;
-    } else {
-      unplaced.push({ slot, window: nw });
     }
-  }
-  // Positional fallback for windows whose limit_window_seconds was absent/unknown
-  // (primary ⇒ 5h, secondary ⇒ weekly).
-  for (const { slot, window } of unplaced) {
-    if (slot === "primary" && !fiveHour) fiveHour = window;
-    else if (slot === "secondary" && !weekly) weekly = window;
   }
   return { fiveHour, weekly };
 }
@@ -251,8 +236,9 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
   );
   const limitReached =
     !!(rate?.limit_reached || rate?.allowed === false) ||
-    (fiveHour?.percent ?? 0) >= 100 ||
-    (weekly?.percent ?? 0) >= 100;
+    [rate?.primary_window, rate?.secondary_window].some(
+      (window) => (window?.used_percent ?? 0) >= 100,
+    );
 
   const additionalLimits: CodexAdditionalLimit[] | undefined = body.additional_limits
     ? body.additional_limits.map((al) => {
@@ -262,6 +248,13 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
           meteredFeature: al.metered_feature ?? "",
           fiveHour: windows.fiveHour,
           weekly: windows.weekly,
+          unknownWindowExhausted: [al.primary_window, al.secondary_window].some(
+            (window) =>
+              window != null &&
+              window.limit_window_seconds !== CODEX_FIVE_HOUR_WINDOW_SECONDS &&
+              window.limit_window_seconds !== CODEX_WEEKLY_WINDOW_SECONDS &&
+              (window.used_percent ?? 0) >= 100,
+          ),
         };
       })
     : undefined;
@@ -307,6 +300,9 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
 export function codexUsageConfirmsQuotaAvailable(payload: CodexUsagePayload): boolean {
   if (payload.status !== "ok" || payload.limitReached) return false;
   return !payload.additionalLimits?.some(
-    (limit) => (limit.fiveHour?.percent ?? 0) >= 100 || (limit.weekly?.percent ?? 0) >= 100,
+    (limit) =>
+      (limit.fiveHour?.percent ?? 0) >= 100 ||
+      (limit.weekly?.percent ?? 0) >= 100 ||
+      limit.unknownWindowExhausted,
   );
 }

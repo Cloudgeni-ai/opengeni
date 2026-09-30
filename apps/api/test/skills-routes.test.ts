@@ -133,6 +133,68 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("human removal rejects stale versions and replays after deleting saved Skills", async () => {
+    if (!available || !shared) throw new Error("PostgreSQL required for removal verification");
+    const skillId = crypto.randomUUID();
+    const created = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        skillId,
+        operationId: crypto.randomUUID(),
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+        stableKey: `remove-direct-${skillId}`,
+        files: [{ path: "SKILL.md", content: skillMarkdown }],
+        reason: "Removal fixture",
+      }),
+    });
+    expect(created.status).toBe(200);
+    const saved = await created.json();
+    const body = {
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Remove saved skill",
+    };
+    const remove = (input: unknown, headers?: HeadersInit) =>
+      request(`/skills/content/${skillId}/remove`, {
+        method: "POST",
+        body: JSON.stringify(input),
+        headers,
+      });
+    expect((await remove({ ...body, expectedScopeVersion: 2 })).status).toBe(409);
+    const limited = await signDelegatedAccessToken(delegationSecret, {
+      accountId,
+      workspaceId,
+      subjectId,
+      permissions: ["workspace:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    expect((await remove(body, { authorization: `Bearer ${limited}` })).status).toBe(403);
+    const service = await signDelegatedAccessToken(delegationSecret, {
+      accountId,
+      workspaceId,
+      subjectId,
+      permissions: ["workspace:read", "workspace:admin"],
+      principalKind: "service",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    expect((await remove(body, { authorization: `Bearer ${service}` })).status).toBe(403);
+    const response = await remove(body);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      removed: true,
+      outcome: "applied",
+      replayed: false,
+    });
+    expect((await request(`/skills/content/${skillId}`)).status).toBe(404);
+    const replay = await remove(body);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ removed: true, replayed: true });
+    expect((await remove({ ...body, reason: "Changed payload" })).status).toBe(409);
+    expect((await remove({ ...body, operationId: crypto.randomUUID() })).status).toBe(404);
+  });
   test("permanent deletion approval replays through HTTP after the Skill is gone", async () => {
     if (!available || !shared) return;
     const skillId = crypto.randomUUID();

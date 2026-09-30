@@ -78,19 +78,49 @@ describe("normalizeCodexUsage", () => {
     expect(out.weekly?.percent).toBe(5); // the 604800 window
   });
 
-  test("positional fallback places windows whose limit_window_seconds is absent (primary=>5h, secondary=>weekly)", () => {
-    // No limit_window_seconds on either window — must fall back to position.
+  test("weekly-only primary window reports 34% weekly remaining, with no invented 5h limit", () => {
     const body = liveBody({
       rate_limit: {
         allowed: true,
         limit_reached: false,
-        primary_window: { used_percent: 33, reset_at: 1_700_000_000 },
-        secondary_window: { used_percent: 9, reset_at: 1_700_600_000 },
+        primary_window: {
+          used_percent: 66,
+          reset_at: 1_700_600_000,
+          limit_window_seconds: 604800,
+        },
+        secondary_window: null,
       },
     });
     const out = normalizeCodexUsage(200, body);
-    expect(out.fiveHour?.percent).toBe(33); // primary => 5h
-    expect(out.weekly?.percent).toBe(9); // secondary => weekly
+    expect(out.status).toBe("ok");
+    expect(out.fiveHour).toBeNull();
+    expect(out.weekly?.remaining).toBe(34);
+  });
+
+  test("does not invent duration labels for windows with absent or unknown seconds", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        rate_limit: {
+          primary_window: { used_percent: 66, reset_at: 1_700_600_000 },
+          secondary_window: { used_percent: 0, limit_window_seconds: 12345 },
+        },
+      }),
+    );
+    expect(out.status).toBe("no-data");
+    expect(out.fiveHour).toBeNull();
+    expect(out.weekly).toBeNull();
+  });
+
+  test("an unidentified exhausted window still marks the provider limit reached", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        rate_limit: { primary_window: { used_percent: 100 } },
+      }),
+    );
+    expect(out.status).toBe("limit_reached");
+    expect(out.limitReached).toBe(true);
   });
 
   test("a 200 carrying limit_reached:true is a limit_reached state (not assumed 404-only)", () => {
@@ -237,5 +267,25 @@ describe("codexUsageConfirmsQuotaAvailable", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  test("does not clear a quota refusal when an unidentified feature window is exhausted", () => {
+    const usage = normalizeCodexUsage(
+      200,
+      liveBody({
+        additional_limits: [
+          {
+            limit_name: "special-model",
+            metered_feature: "codex_special",
+            primary_window: { used_percent: 100 },
+            secondary_window: null,
+          },
+        ],
+      }),
+    );
+    expect(usage.status).toBe("ok");
+    expect(usage.additionalLimits?.[0]?.fiveHour).toBeNull();
+    expect(usage.additionalLimits?.[0]?.unknownWindowExhausted).toBe(true);
+    expect(codexUsageConfirmsQuotaAvailable(usage)).toBe(false);
   });
 });
