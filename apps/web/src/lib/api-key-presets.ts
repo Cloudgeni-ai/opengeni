@@ -10,7 +10,12 @@
 import { apiKeyStatus as apiKeyStatusAt, type ApiKeyStatus } from "@/lib/api-key-status";
 import { defaultApiKeyPermissions } from "@/lib/permissions";
 
-export type ApiKeyPresetId = "read_only" | "run_sessions" | "full_automation" | "custom";
+export type ApiKeyPresetId =
+  | "read_only"
+  | "run_sessions"
+  | "full_automation"
+  | "all_permissions"
+  | "custom";
 
 export type { ApiKeyStatus };
 
@@ -216,6 +221,13 @@ export function apiKeyPresets(): ApiKeyPreset[] {
       permissions: workspaceKeyPermissions().filter(
         (permission) => !FULL_AUTOMATION_EXCLUDED.has(permission),
       ),
+    },
+    {
+      id: "all_permissions",
+      label: "All permissions",
+      description:
+        "Full workspace access, including managing people and API keys and reading secret values.",
+      permissions: workspaceKeyPermissions(),
     },
     {
       id: "custom",
