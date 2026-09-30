@@ -83,7 +83,16 @@ describe("workspace integration contracts", () => {
         eventTypes: ["turn.completed"],
         workspaceFilter: {},
       }).success,
-    ).toBe(true);
+    ).toBe(false);
+    expect(PutOrganizationCredentialProviderRequest.safeParse({ url: request.url }).success).toBe(
+      false,
+    );
+    expect(
+      CreateOrganizationWebhookRequest.safeParse({
+        url: request.url,
+        eventTypes: ["turn.completed"],
+      }).success,
+    ).toBe(false);
     for (const workspaceFilter of [
       { externalSource: "" },
       { externalId: "tenant" },
@@ -112,7 +121,7 @@ describe("workspace integration contracts", () => {
 
   test("MCP headers validate targets, dates, bounds, token names, duplicates and unsafe headers", () => {
     const entry = {
-      server: "capability",
+      url: "https://product.example/mcp",
       headers: { Authorization: "Bearer test-only" },
       expiresAt: "2026-09-30T12:00:00+00:00",
     };
@@ -125,6 +134,10 @@ describe("workspace integration contracts", () => {
       { "Transfer-Encoding": "chunked" },
       { "Proxy-Authorization": "test-only" },
       { "content-length": "1" },
+      { "MCP-Session-ID": "session" },
+      { "mcp-protocol-version": "2025-03-26" },
+      { "content-type": "application/json" },
+      { Accept: "application/json" },
       { "bad name": "value" },
       { "Authorization\n": "value" },
       { Authorization: "one", authorization: "two" },
@@ -138,10 +151,33 @@ describe("workspace integration contracts", () => {
       expect(parse([{ ...entry, headers }]).success).toBe(false);
     }
     expect(parse([{ ...entry, expiresAt: "not-a-date" }]).success).toBe(false);
-    expect(parse([{ ...entry, server: "" }]).success).toBe(false);
-    expect(parse([entry, entry]).success).toBe(false);
+    expect(parse([{ ...entry, url: "" }]).success).toBe(false);
+    expect(parse([{ server: "product-capabilities", headers: entry.headers }]).success).toBe(false);
+    for (const url of [
+      "product-capabilities",
+      "file:///tmp/mcp",
+      "https://user:secret@product.example/mcp",
+      "https://product.example/mcp#fragment",
+    ]) {
+      expect(parse([{ ...entry, url }]).success).toBe(false);
+    }
     expect(
-      parse(Array.from({ length: 33 }, (_, i) => ({ ...entry, server: `s-${i}` }))).success,
+      CredentialProviderResponse.parse({
+        status: "ok",
+        mcp: [{ ...entry, url: "HTTPS://PRODUCT.EXAMPLE:443/mcp" }],
+      }),
+    ).toMatchObject({ mcp: [{ url: entry.url }] });
+    expect(parse([entry, entry]).success).toBe(false);
+    expect(parse([entry, { ...entry, url: "https://PRODUCT.EXAMPLE:443/mcp" }]).success).toBe(
+      false,
+    );
+    expect(
+      parse(
+        Array.from({ length: 33 }, (_, i) => ({
+          ...entry,
+          url: `https://product.example/mcp/${i}`,
+        })),
+      ).success,
     ).toBe(false);
   });
 

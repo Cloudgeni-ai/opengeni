@@ -107,6 +107,7 @@ test("signature helpers retain routing and embedder identity additions", async (
     externalIdentity: { source: "product", externalId: "customer-user-7" },
   };
   const event = {
+    lane: "organization" as const,
     id: "event",
     type: "turn.completed",
     workspaceId: "workspace",
@@ -131,6 +132,8 @@ test("signature helpers retain routing and embedder identity additions", async (
   ).toEqual(event);
   const request = {
     type: "credentials.request" as const,
+    lane: "organization" as const,
+    mcpServers: [{ id: "product-capabilities", url: "https://product.example/mcp" }],
     purpose: "provision" as const,
     forceRefresh: false,
     accountId: "organization",
@@ -154,4 +157,29 @@ test("signature helpers retain routing and embedder identity additions", async (
       secret,
     }),
   ).toEqual(request);
+});
+
+test("secret rotation helpers use exact scoped POSTs and return the new secret once", async () => {
+  const calls: { path: string; method: string | undefined }[] = [];
+  const client = new OpenGeniClient({
+    baseUrl: "https://fixture.invalid",
+    fetch: async (url, init) => {
+      calls.push({ path: new URL(String(url)).pathname, method: init?.method });
+      return Response.json({ secret: "new-once", provider: {}, webhook: {} });
+    },
+  });
+  expect((await client.rotateOrganizationCredentialProviderSecret("org/one")).secret).toBe(
+    "new-once",
+  );
+  expect((await client.rotateOrganizationWebhookSecret("org/one", "hook/one")).secret).toBe(
+    "new-once",
+  );
+  expect((await client.rotateWorkspaceCredentialProviderSecret("ws/one")).secret).toBe("new-once");
+  expect((await client.rotateWorkspaceWebhookSecret("ws/one", "hook/one")).secret).toBe("new-once");
+  expect(calls).toEqual([
+    { method: "POST", path: "/v1/organizations/org%2Fone/credential-provider/rotate-secret" },
+    { method: "POST", path: "/v1/organizations/org%2Fone/webhooks/hook%2Fone/rotate-secret" },
+    { method: "POST", path: "/v1/workspaces/ws%2Fone/credential-provider/rotate-secret" },
+    { method: "POST", path: "/v1/workspaces/ws%2Fone/webhooks/hook%2Fone/rotate-secret" },
+  ]);
 });

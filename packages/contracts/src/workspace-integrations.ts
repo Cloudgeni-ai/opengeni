@@ -17,7 +17,7 @@ export type WorkspaceWebhookEventType = z.infer<typeof WorkspaceWebhookEventType
 export const WORKSPACE_WEBHOOK_LIMIT_PER_WORKSPACE = 10;
 export const ORGANIZATION_WEBHOOK_LIMIT_PER_ORGANIZATION = 10;
 
-/** Exact external-source match; absent/null means every workspace in the organization. */
+/** Scoping convenience, never authority. Null means all non-personal workspaces. */
 export const IntegrationWorkspaceFilter = z
   .object({
     externalSource: z
@@ -30,8 +30,7 @@ export const IntegrationWorkspaceFilter = z
           !/[\uD800-\uDFFF]/u.test(value) &&
           new TextEncoder().encode(value).byteLength <= 200,
         "External source must be valid PostgreSQL text of at most 200 UTF-8 bytes",
-      )
-      .optional(),
+      ),
   })
   .strict();
 export type IntegrationWorkspaceFilter = z.infer<typeof IntegrationWorkspaceFilter>;
@@ -109,13 +108,13 @@ export const OrganizationWebhook = WorkspaceWebhook.omit({ workspaceId: true }).
 export type OrganizationWebhook = z.infer<typeof OrganizationWebhook>;
 
 export const CreateOrganizationWebhookRequest = CreateWorkspaceWebhookRequest.extend({
-  workspaceFilter: IntegrationWorkspaceFilter.nullable().optional(),
+  workspaceFilter: IntegrationWorkspaceFilter.nullable(),
 });
 export type CreateOrganizationWebhookRequest = z.input<typeof CreateOrganizationWebhookRequest>;
 
 export const UpdateOrganizationWebhookRequest = UpdateWorkspaceWebhookRequest.extend({
-  /** Omit to preserve; null clears the filter. */
-  workspaceFilter: IntegrationWorkspaceFilter.nullable().optional(),
+  /** Explicit on every update: null covers all non-personal workspaces. */
+  workspaceFilter: IntegrationWorkspaceFilter.nullable(),
 });
 export type UpdateOrganizationWebhookRequest = z.input<typeof UpdateOrganizationWebhookRequest>;
 
@@ -169,6 +168,7 @@ export type ListOrganizationWebhookDeliveriesResponse = z.infer<
  * receivers read details through the authenticated API.
  */
 export const WorkspaceWebhookEvent = z.object({
+  lane: z.enum(["organization", "workspace"]),
   id: z.string().uuid(),
   type: z.string(),
   workspaceId: z.string().uuid(),
@@ -237,8 +237,8 @@ export type OrganizationCredentialProvider = z.infer<typeof OrganizationCredenti
 
 export const PutOrganizationCredentialProviderRequest =
   PutWorkspaceCredentialProviderRequest.extend({
-    /** Omit to preserve an existing filter; null covers all organization workspaces. */
-    workspaceFilter: IntegrationWorkspaceFilter.nullable().optional(),
+    /** Required; null explicitly covers all non-personal workspaces. PUT replaces configuration. */
+    workspaceFilter: IntegrationWorkspaceFilter.nullable(),
   });
 export type PutOrganizationCredentialProviderRequest = z.input<
   typeof PutOrganizationCredentialProviderRequest
@@ -261,6 +261,9 @@ export type GetOrganizationCredentialProviderResponse = z.infer<
 /** The body OpenGeni POSTs to a workspace credential provider. */
 export type CredentialProviderRequest = {
   type: "credentials.request";
+  lane: "organization" | "workspace";
+  /** Selected session-attached remote targets; providers must authorize each exact URL. */
+  mcpServers: { id: string; url: string }[];
   purpose: "provision" | "renewal";
   forceRefresh: boolean;
   accountId: string;
@@ -315,12 +318,39 @@ const FORBIDDEN_MCP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
   "content-length",
+  "mcp-session-id",
+  "mcp-protocol-version",
+  "content-type",
+  "accept",
 ]);
 
-/** Secret, turn-local headers for one session-attached remote MCP, by id or exact URL. */
+/** Exact WHATWG normalization; IDs, URL credentials and fragments are never targets. */
+export function normalizeCredentialProviderMcpUrl(value: string): string {
+  const url = new URL(value);
+  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.hash) {
+    throw new Error("MCP credential URL must be an HTTP endpoint without credentials or fragment");
+  }
+  return url.href;
+}
+
+const ProviderMcpUrl = z
+  .string()
+  .min(8)
+  .max(2048)
+  .refine((value) => {
+    try {
+      normalizeCredentialProviderMcpUrl(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }, "MCP credential url must be an HTTP endpoint without credentials or fragment")
+  .transform(normalizeCredentialProviderMcpUrl);
+
+/** Secret, turn-local headers for one session-attached remote MCP, by normalized URL only. */
 export const CredentialProviderMcpHeaders = z
   .object({
-    server: z.string().min(1).max(2048),
+    url: ProviderMcpUrl,
     headers: z.record(z.string(), z.string()),
     expiresAt: z.iso.datetime({ offset: true }).optional(),
   })
@@ -360,7 +390,7 @@ export const CredentialProviderMcpMaterial = z
   .array(CredentialProviderMcpHeaders)
   .max(32)
   .superRefine((entries, context) => {
-    if (new Set(entries.map((entry) => entry.server)).size !== entries.length) {
+    if (new Set(entries.map((entry) => entry.url)).size !== entries.length) {
       context.addIssue({ code: "custom", message: "Duplicate MCP server target" });
     }
   });
@@ -390,3 +420,25 @@ export const CredentialProviderResponse = z.discriminatedUnion("status", [
   z.object({ status: z.literal("auth_needed"), authNeeded: z.array(ProviderAuthNeeded).min(1) }),
 ]);
 export type CredentialProviderResponse = z.infer<typeof CredentialProviderResponse>;
+
+/** Immediate signing-secret rotation; the new secret is returned once. */
+export const RotateWorkspaceCredentialProviderSecretResponse = z
+  .object({ provider: WorkspaceCredentialProvider, secret: z.string() })
+  .strict();
+export type RotateWorkspaceCredentialProviderSecretResponse = z.infer<
+  typeof RotateWorkspaceCredentialProviderSecretResponse
+>;
+export const RotateOrganizationCredentialProviderSecretResponse = z
+  .object({ provider: OrganizationCredentialProvider, secret: z.string() })
+  .strict();
+export type RotateOrganizationCredentialProviderSecretResponse = z.infer<
+  typeof RotateOrganizationCredentialProviderSecretResponse
+>;
+export const RotateWorkspaceWebhookSecretResponse = CreateWorkspaceWebhookResponse;
+export type RotateWorkspaceWebhookSecretResponse = z.infer<
+  typeof RotateWorkspaceWebhookSecretResponse
+>;
+export const RotateOrganizationWebhookSecretResponse = CreateOrganizationWebhookResponse;
+export type RotateOrganizationWebhookSecretResponse = z.infer<
+  typeof RotateOrganizationWebhookSecretResponse
+>;

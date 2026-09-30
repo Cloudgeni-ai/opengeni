@@ -44,6 +44,10 @@ import type {
   OrganizationWebhookDelivery,
   PutOrganizationCredentialProviderRequest,
   PutOrganizationCredentialProviderResponse,
+  RotateWorkspaceCredentialProviderSecretResponse,
+  RotateOrganizationCredentialProviderSecretResponse,
+  RotateWorkspaceWebhookSecretResponse,
+  RotateOrganizationWebhookSecretResponse,
   UpdateOrganizationWebhookRequest,
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
@@ -1256,6 +1260,16 @@ export class OpenGeniClient {
     await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/credential-provider`);
   }
 
+  /** Rotate immediately. Store the new secret; the old signing secret stops working. */
+  async rotateWorkspaceCredentialProviderSecret(
+    workspaceId: string,
+  ): Promise<RotateWorkspaceCredentialProviderSecretResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/credential-provider/rotate-secret`,
+    );
+  }
+
   /** Requires account:admin or a full organization key; not asUser or agent attempts. */
   async getOrganizationCredentialProvider(
     organizationId: string,
@@ -1267,8 +1281,9 @@ export class OpenGeniClient {
   }
 
   /**
-   * Register once for every matching workspace. An enabled workspace provider
-   * overrides it. Store the signing secret returned on first creation.
+   * Replace configuration for matching non-personal workspaces. A workspace
+   * registration overrides inheritance even when disabled. Explicit filter
+   * required: null means all non-personal workspaces. Store the first secret.
    */
   async putOrganizationCredentialProvider(
     organizationId: string,
@@ -1285,6 +1300,15 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider`,
+    );
+  }
+
+  async rotateOrganizationCredentialProviderSecret(
+    organizationId: string,
+  ): Promise<RotateOrganizationCredentialProviderSecretResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/credential-provider/rotate-secret`,
     );
   }
 
@@ -1335,6 +1359,16 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}`,
+    );
+  }
+
+  async rotateOrganizationWebhookSecret(
+    organizationId: string,
+    webhookId: string,
+  ): Promise<RotateOrganizationWebhookSecretResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/organizations/${encodeURIComponent(organizationId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
     );
   }
 
@@ -1393,6 +1427,16 @@ export class OpenGeniClient {
 
   async deleteWorkspaceWebhook(workspaceId: string, webhookId: string): Promise<void> {
     await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/webhooks/${webhookId}`);
+  }
+
+  async rotateWorkspaceWebhookSecret(
+    workspaceId: string,
+    webhookId: string,
+  ): Promise<RotateWorkspaceWebhookSecretResponse> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
+    );
   }
 
   async listWorkspaceWebhookDeliveries(
