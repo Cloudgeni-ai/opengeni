@@ -8,6 +8,87 @@ afterEach(() => {
 });
 
 describe("CdpConnection", () => {
+  test("detaching a target settles its event waits without cancelling sibling or browser events", async () => {
+    let emit: (message: unknown) => void = () => {
+      throw new Error("socket not ready");
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: {
+        open(socket) {
+          emit = (message) => {
+            socket.send(JSON.stringify(message));
+          };
+        },
+        message() {},
+      },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    const abort = new AbortController();
+    const cleanup = spyOn(abort.signal, "removeEventListener");
+    try {
+      const closing = connection
+        .waitForEvent("Page.fileChooserOpened", {
+          sessionId: "closing-tab",
+          signal: abort.signal,
+          timeoutMs: 100,
+        })
+        .catch((error: unknown) => error);
+      const sibling = connection.waitForEvent("Page.fileChooserOpened", {
+        sessionId: "sibling-tab",
+        timeoutMs: 1_000,
+      });
+      const browser = connection.waitForEvent("Browser.downloadWillBegin", { timeoutMs: 1_000 });
+      emit({
+        method: "Target.detachedFromTarget",
+        sessionId: "parent",
+        params: { sessionId: "closing-tab" },
+      });
+      const error = await closing;
+      expect(error).toMatchObject({
+        name: "CdpSessionDetachedError",
+        method: "Page.fileChooserOpened",
+      });
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      emit({ method: "Page.fileChooserOpened", sessionId: "closing-tab", params: { late: true } });
+      emit({ method: "Page.fileChooserOpened", sessionId: "sibling-tab", params: { node: 7 } });
+      emit({ method: "Browser.downloadWillBegin", params: { guid: "download" } });
+      expect((await sibling).params).toEqual({ node: 7 });
+      expect((await browser).params).toEqual({ guid: "download" });
+      abort.abort();
+      expect(cleanup).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup.mockRestore();
+      connection.close();
+    }
+  });
+
+  test("closing the connection settles event waits and refuses new waits", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: { message() {} },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    const waiting = connection
+      .waitForEvent("Page.fileChooserOpened", { sessionId: "tab", timeoutMs: 100 })
+      .catch((error: unknown) => error);
+    connection.close();
+    expect(await waiting).toMatchObject({ message: "CDP connection closed by browserd" });
+    expect(() => connection.waitForEvent("Page.fileChooserOpened", { timeoutMs: 100 })).toThrow(
+      "CDP connection closed by browserd",
+    );
+  });
+
   test("detaching one target settles only its pending commands and preserves the browser connection", async () => {
     const requests: Array<{ id: number; sessionId?: string }> = [];
     let send: (message: unknown) => void = () => {

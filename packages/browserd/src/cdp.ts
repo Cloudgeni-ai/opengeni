@@ -216,6 +216,7 @@ export class CdpConnection {
     } = {},
   ): Promise<CdpEvent> {
     const timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS);
+    if (this.failure) throw this.failure;
     if (options.signal?.aborted) throw new CdpTransportError(`CDP ${method} wait was aborted`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -236,12 +237,26 @@ export class CdpConnection {
         cleanup();
         reject(new CdpTransportError(`CDP ${method} wait was aborted`));
       };
+      const unsubscribeDetached = options.sessionId
+        ? this.on("Target.detachedFromTarget", (event) => {
+            if (event.params.sessionId !== options.sessionId) return;
+            cleanup();
+            reject(new CdpSessionDetachedError(method));
+          })
+        : () => undefined;
+      let unsubscribeDisconnected = () => {};
       const cleanup = () => {
         clearTimeout(timer);
         unsubscribe();
+        unsubscribeDetached();
+        unsubscribeDisconnected();
         options.signal?.removeEventListener("abort", abort);
       };
       options.signal?.addEventListener("abort", abort, { once: true });
+      unsubscribeDisconnected = this.onDisconnect(() => {
+        cleanup();
+        reject(this.failure ?? new CdpTransportError("CDP connection closed"));
+      });
     });
   }
 
