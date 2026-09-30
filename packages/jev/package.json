@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/jev",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeSafe Jev client and the Jev-ranked code_search engine behind the worker's code_search agent tool.",
   "license": "Apache-2.0",
   "repository": {
