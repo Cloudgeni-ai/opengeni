@@ -8,6 +8,8 @@ import {
   ListWorkspaceWebhooksResponse,
   PutWorkspaceCredentialProviderRequest,
   PutWorkspaceCredentialProviderResponse,
+  RotateWorkspaceCredentialProviderSecretResponse,
+  RotateWorkspaceWebhookSecretResponse,
   resolveWorkspaceDefaultSandboxImage,
   UpdateWorkspaceWebhookRequest,
   WorkspaceCredentialProvider,
@@ -15,7 +17,11 @@ import {
   WorkspaceWebhookDelivery,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   createWorkspaceWebhook,
   deleteWorkspaceCredentialProvider,
@@ -27,6 +33,8 @@ import {
   listWorkspaceWebhookDeliveries,
   listWorkspaceWebhooks,
   redeliverWorkspaceWebhookDelivery,
+  rotateWorkspaceCredentialProviderSecret,
+  rotateWorkspaceWebhookSecret,
   updateWorkspaceWebhook,
   upsertWorkspaceCredentialProvider,
   withCredentialProviderConfigurationLock,
@@ -105,10 +113,13 @@ function providerProjection(row: WorkspaceCredentialProviderRow): WorkspaceCrede
 export async function integrationBody<T extends z.ZodTypeAny>(
   c: Context,
   schema: T,
+  invalidStatus: 400 | 422 = 400,
 ): Promise<z.output<T>> {
   const parsed = schema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
-    throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "Invalid request" });
+    throw new HTTPException(invalidStatus, {
+      message: parsed.error.issues[0]?.message ?? "Invalid request",
+    });
   }
   return parsed.data;
 }
@@ -149,7 +160,7 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
   // Configuring where credentials come from or where events go is a human or
   // host decision; an agent may never redirect its own credential source.
   const requireIntegrationAdmin = async (c: Context, workspaceId: string): Promise<AccessGrant> => {
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     if (isIntegrationAgent(grant)) {
       throw new HTTPException(403, {
         message: "Agent attempts cannot manage workspace integrations",
@@ -180,28 +191,28 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     const request = await integrationBody(c, PutWorkspaceCredentialProviderRequest);
     requireDeployableUrl(request.url);
     const scope = { accountId: grant.accountId, workspaceId };
-    const { row, secret, created } = await withCredentialProviderConfigurationLock(
-      deps.db,
-      scope,
-      async (tx) => {
-        const existing = await getWorkspaceCredentialProvider(tx, scope);
-        const secret = existing ? undefined : newIntegrationSecret("ogcp");
-        const row = await upsertWorkspaceCredentialProvider(tx, {
-          ...scope,
-          url: request.url,
-          enabled: request.enabled ?? existing?.enabled ?? true,
-          timeoutMs: request.timeoutMs ?? existing?.timeoutMs ?? 10_000,
-          createdBySubjectId: grant.subjectId,
-          ...(secret ? { secretEncrypted: encryptEnvironmentValue(requireKey(), secret) } : {}),
-        });
-        return { row, secret, created: !existing };
-      },
-    );
+    const {
+      row: providerRow,
+      secret: signingSecret,
+      created,
+    } = await withCredentialProviderConfigurationLock(deps.db, scope, async (tx) => {
+      const existing = await getWorkspaceCredentialProvider(tx, scope);
+      const secret = existing ? undefined : newIntegrationSecret("ogcp");
+      const row = await upsertWorkspaceCredentialProvider(tx, {
+        ...scope,
+        url: request.url,
+        enabled: request.enabled ?? true,
+        timeoutMs: request.timeoutMs ?? 10_000,
+        createdBySubjectId: grant.subjectId,
+        ...(secret ? { secretEncrypted: encryptEnvironmentValue(requireKey(), secret) } : {}),
+      });
+      return { row, secret, created: !existing };
+    });
     c.header("cache-control", "private, no-store");
     return c.json(
       PutWorkspaceCredentialProviderResponse.parse({
-        provider: providerProjection(row),
-        ...(secret ? { secret } : {}),
+        provider: providerProjection(providerRow),
+        ...(signingSecret ? { secret: signingSecret } : {}),
       }),
       created ? 201 : 200,
     );
@@ -212,6 +223,24 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     const grant = await requireIntegrationAdmin(c, workspaceId);
     await deleteWorkspaceCredentialProvider(deps.db, { accountId: grant.accountId, workspaceId });
     return c.body(null, 204);
+  });
+  app.post("/v1/workspaces/:workspaceId/credential-provider/rotate-secret", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const secret = newIntegrationSecret("ogcp");
+    const row = await rotateWorkspaceCredentialProviderSecret(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      secretEncrypted: encryptEnvironmentValue(requireKey(), secret),
+    });
+    if (!row) throw new HTTPException(404, { message: "Credential provider not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      RotateWorkspaceCredentialProviderSecretResponse.parse({
+        provider: providerProjection(row),
+        secret,
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/webhooks", async (c) => {
@@ -299,6 +328,27 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
     });
     if (!deleted) throw new HTTPException(404, { message: "Webhook not found" });
     return c.body(null, 204);
+  });
+  app.post("/v1/workspaces/:workspaceId/webhooks/:webhookId/rotate-secret", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const id = z.string().uuid().safeParse(c.req.param("webhookId"));
+    if (!id.success) throw new HTTPException(404, { message: "Webhook not found" });
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const secret = newIntegrationSecret("whsec");
+    const row = await rotateWorkspaceWebhookSecret(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      webhookId: id.data,
+      secretEncrypted: encryptEnvironmentValue(requireKey(), secret),
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      RotateWorkspaceWebhookSecretResponse.parse({
+        webhook: webhookProjection(row),
+        secret,
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/webhooks/:webhookId/deliveries", async (c) => {

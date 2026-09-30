@@ -62,19 +62,26 @@ export function selectWorkspaceCredentialProvider<
   },
 >(
   scope: WorkspaceIntegrationScope,
-  workspace: { accountId: string; id: string; externalSource: string | null } | null,
+  workspace: {
+    accountId: string;
+    id: string;
+    externalSource: string | null;
+    kind: "personal" | "shared";
+  } | null,
   provider: W | null,
   organizationProvider: O | null,
 ): W | O | null {
   if (!workspace || workspace.accountId !== scope.accountId || workspace.id !== scope.workspaceId)
     return null;
-  if (
-    provider?.enabled &&
-    provider.accountId === scope.accountId &&
-    provider.workspaceId === scope.workspaceId
-  )
-    return provider;
-  return organizationProvider?.enabled &&
+  // A configured disabled row is an explicit opt-out, not absence.
+  if (provider)
+    return provider.enabled &&
+      provider.accountId === scope.accountId &&
+      provider.workspaceId === scope.workspaceId
+      ? provider
+      : null;
+  return workspace.kind === "shared" &&
+    organizationProvider?.enabled &&
     organizationProvider.accountId === scope.accountId &&
     integrationWorkspaceFilterMatches(organizationProvider.workspaceFilter, workspace)
     ? organizationProvider
@@ -105,13 +112,15 @@ export async function resolveInitiatingHuman(
   db: Database,
   scope: WorkspaceIntegrationScope,
   subjectId: string | null,
+  turnId?: string,
 ): Promise<InitiatingHuman | null> {
   if (subjectId === null) return null;
   return withRlsContext(db, scope, async (scopedDb) => {
     const [row] = await rawRows<{ human: InitiatingHuman | null }>(
       scopedDb,
       sql`select opengeni_private.resolve_integration_initiating_human_v1(
-        ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${subjectId}::text
+        ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${subjectId}::text,
+        ${turnId ?? null}::uuid
       ) as human`,
     );
     return row?.human ? integrationInitiatingHuman(subjectId, row.human.externalIdentity) : null;
@@ -122,10 +131,10 @@ export function integrationWorkspaceFilterMatches(
   filter: IntegrationWorkspaceFilter | null,
   workspace: { externalSource: string | null },
 ): boolean {
-  return filter?.externalSource === undefined || filter.externalSource === workspace.externalSource;
+  return filter === null || filter.externalSource === workspace.externalSource;
 }
 
-/** An enabled workspace provider overrides the matching organization provider. */
+/** Only absence inherits organization configuration; Personal never inherits. */
 export async function resolveWorkspaceCredentialProvider(
   db: Database,
   scope: WorkspaceIntegrationScope,
@@ -142,11 +151,19 @@ export async function resolveWorkspaceCredentialProvider(
       .limit(1);
     if (!workspace) return null;
     const provider = await getWorkspaceCredentialProvider(scopedDb, scope);
+    // Preserve the explicit opt-out for the worker adapter: null means absence
+    // and would allow it to borrow the deployment runCredentials port.
+    if (provider && !provider.enabled) return provider;
+    const [classification] = await rawRows<{ kind: "personal" | "shared" }>(
+      scopedDb,
+      sql`select get_workspace_kind(${scope.accountId}::uuid, ${scope.workspaceId}::uuid) as kind`,
+    );
+    const classifiedWorkspace = { ...workspace, kind: classification!.kind };
     const selectedWorkspace = selectWorkspaceCredentialProvider<
       WorkspaceCredentialProviderRow,
       OrganizationCredentialProviderRow
-    >(scope, workspace, provider, null);
-    if (selectedWorkspace) return selectedWorkspace;
+    >(scope, classifiedWorkspace, provider, null);
+    if (provider || classifiedWorkspace.kind === "personal") return selectedWorkspace;
     const [organizationProvider] = await rawRows<OrganizationCredentialProviderRow>(
       scopedDb,
       sql`select id, account_id as "accountId", url, secret_encrypted as "secretEncrypted",
@@ -156,12 +173,10 @@ export async function resolveWorkspaceCredentialProvider(
           ${scope.accountId}::uuid, ${scope.workspaceId}::uuid
         )`,
     );
-    return selectWorkspaceCredentialProvider(
-      scope,
-      workspace,
-      provider,
-      organizationProvider ?? null,
-    );
+    return selectWorkspaceCredentialProvider<
+      WorkspaceCredentialProviderRow,
+      OrganizationCredentialProviderRow
+    >(scope, classifiedWorkspace, provider, organizationProvider ?? null);
   });
 }
 
@@ -234,6 +249,40 @@ export async function deleteOrganizationCredentialProvider(
       .where(eq(organizationCredentialProviders.accountId, scope.accountId))
       .returning({ id: organizationCredentialProviders.id });
     return rows.length > 0;
+  });
+}
+
+/** Replace the only accepted secret atomically; never keep an overlap slot. */
+export async function rotateOrganizationCredentialProviderSecret(
+  db: Database,
+  input: OrganizationIntegrationScope & { secretEncrypted: string },
+): Promise<OrganizationCredentialProviderRow | null> {
+  return withCredentialProviderConfigurationLock(db, input, async (tx) => {
+    const [row] = await tx
+      .update(organizationCredentialProviders)
+      .set({ secretEncrypted: input.secretEncrypted, updatedAt: sql`now()` })
+      .where(eq(organizationCredentialProviders.accountId, input.accountId))
+      .returning();
+    return row ?? null;
+  });
+}
+
+export async function rotateOrganizationWebhookSecret(
+  db: Database,
+  input: OrganizationIntegrationScope & { webhookId: string; secretEncrypted: string },
+): Promise<OrganizationWebhookRow | null> {
+  return withAccountRls(db, input.accountId, async (tx) => {
+    const [row] = await tx
+      .update(organizationWebhooks)
+      .set({ secretEncrypted: input.secretEncrypted, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(organizationWebhooks.accountId, input.accountId),
+          eq(organizationWebhooks.id, input.webhookId),
+        ),
+      )
+      .returning();
+    return row ?? null;
   });
 }
 
@@ -498,6 +547,45 @@ export async function deleteWorkspaceCredentialProvider(
       )
       .returning({ id: workspaceCredentialProviders.id });
     return deleted.length > 0;
+  });
+}
+
+export async function rotateWorkspaceCredentialProviderSecret(
+  db: Database,
+  input: WorkspaceIntegrationScope & { secretEncrypted: string },
+): Promise<WorkspaceCredentialProviderRow | null> {
+  return withCredentialProviderConfigurationLock(db, input, async (tx) => {
+    const [row] = await tx
+      .update(workspaceCredentialProviders)
+      .set({ secretEncrypted: input.secretEncrypted, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(workspaceCredentialProviders.accountId, input.accountId),
+          eq(workspaceCredentialProviders.workspaceId, input.workspaceId),
+        ),
+      )
+      .returning();
+    return row ?? null;
+  });
+}
+
+export async function rotateWorkspaceWebhookSecret(
+  db: Database,
+  input: WorkspaceIntegrationScope & { webhookId: string; secretEncrypted: string },
+): Promise<WorkspaceWebhookRow | null> {
+  return withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .update(workspaceWebhooks)
+      .set({ secretEncrypted: input.secretEncrypted, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(workspaceWebhooks.accountId, input.accountId),
+          eq(workspaceWebhooks.workspaceId, input.workspaceId),
+          eq(workspaceWebhooks.id, input.webhookId),
+        ),
+      )
+      .returning();
+    return row ?? null;
   });
 }
 

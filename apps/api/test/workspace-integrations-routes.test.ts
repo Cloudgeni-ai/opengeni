@@ -145,9 +145,22 @@ describe("workspace integration routes", () => {
     expect(updatedBody.provider).toMatchObject({
       url: "http://127.0.0.1:9/v2",
       enabled: false,
-      timeoutMs: 4000,
+      timeoutMs: 10_000,
     });
+    const rotated = await call("POST", "/credential-provider/rotate-secret");
+    expect(rotated.status).toBe(200);
+    const rotatedBody = await rotated.json();
+    expect(rotatedBody.secret).not.toBe(createdBody.secret);
+    expect(rotatedBody.provider).toMatchObject({
+      url: updatedBody.provider.url,
+      enabled: false,
+      timeoutMs: 10_000,
+      createdAt: updatedBody.provider.createdAt,
+      workspaceId,
+    });
+    expect((await (await call("GET", "/credential-provider")).json()).secret).toBeUndefined();
     expect((await call("DELETE", "/credential-provider")).status).toBe(204);
+    expect((await call("POST", "/credential-provider/rotate-secret")).status).toBe(404);
     expect(await (await call("GET", "/credential-provider")).json()).toEqual({ provider: null });
   });
 
@@ -232,6 +245,10 @@ describe("workspace integration routes", () => {
         flaky.id,
       ]);
       expect(JSON.stringify(listed)).not.toContain("whsec_");
+      const rotated = await call("POST", `/webhooks/${webhook.id}/rotate-secret`);
+      expect(rotated.status).toBe(200);
+      const newSecret = (await rotated.json()).secret;
+      expect(newSecret).not.toBe(secret);
 
       const [event] = await appendSessionEvents(client.db, workspaceId, sessionId, [
         { type: "session.status.changed", payload: { status: "idle", reason: "done" } },
@@ -246,11 +263,12 @@ describe("workspace integration routes", () => {
       const verified = await verifyWebhookEvent({
         body: delivered!.body,
         headers: delivered!.headers,
-        secret,
+        secret: newSecret,
       });
       expect(verified.event).toMatchObject({
         id: event!.id,
         type: "session.status.changed",
+        lane: "workspace",
         workspaceId,
         sessionId,
         data: { status: "idle", reason: "done" },
@@ -259,7 +277,7 @@ describe("workspace integration routes", () => {
         verifyWebhookEvent({
           body: delivered!.body,
           headers: delivered!.headers,
-          secret: "whsec_wrong",
+          secret,
         }),
       ).rejects.toThrow("signature verification failed");
 

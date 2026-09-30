@@ -6,10 +6,10 @@ import {
 } from "../src/workspace-integrations";
 
 describe("organization integration workspace filtering", () => {
-  test("null and empty filters include native and external workspaces", () => {
+  test("only null includes native and external workspaces", () => {
     for (const externalSource of [null, "product", "other"]) {
       expect(integrationWorkspaceFilterMatches(null, { externalSource })).toBe(true);
-      expect(integrationWorkspaceFilterMatches({}, { externalSource })).toBe(true);
+      expect(integrationWorkspaceFilterMatches({} as never, { externalSource })).toBe(false);
     }
   });
   test("external source matches exactly, never native or another product", () => {
@@ -23,14 +23,19 @@ describe("organization integration workspace filtering", () => {
 
 describe("workspace credential provider precedence", () => {
   const scope = { accountId: "account", workspaceId: "workspace" };
-  const workspace = { accountId: "account", id: "workspace", externalSource: "product" };
+  const workspace = {
+    accountId: "account",
+    id: "workspace",
+    externalSource: "product",
+    kind: "shared" as const,
+  };
   const provider = { ...scope, enabled: true };
   const organization = {
     accountId: "account",
     enabled: true,
     workspaceFilter: { externalSource: "product" },
   };
-  test("enabled workspace wins; disabled workspace falls through", () => {
+  test("enabled workspace wins; disabled workspace opts out; only absence inherits", () => {
     expect(selectWorkspaceCredentialProvider(scope, workspace, provider, organization)).toBe(
       provider,
     );
@@ -41,7 +46,17 @@ describe("workspace credential provider precedence", () => {
         { ...provider, enabled: false },
         organization,
       ),
-    ).toBe(organization);
+    ).toBeNull();
+    expect(selectWorkspaceCredentialProvider(scope, workspace, null, organization)).toBe(
+      organization,
+    );
+  });
+  test("Personal never inherits but keeps its own provider", () => {
+    const personal = { ...workspace, kind: "personal" as const };
+    expect(selectWorkspaceCredentialProvider(scope, personal, null, organization)).toBeNull();
+    expect(selectWorkspaceCredentialProvider(scope, personal, provider, organization)).toBe(
+      provider,
+    );
   });
   test("organization must be enabled and match exact source/account", () => {
     expect(

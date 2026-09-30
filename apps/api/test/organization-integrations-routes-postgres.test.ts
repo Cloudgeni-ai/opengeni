@@ -8,6 +8,7 @@ import {
   createDb,
   decryptEnvironmentValue,
   getOrganizationCredentialProvider,
+  getOrganizationWebhook,
   type DbClient,
 } from "@opengeni/db";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
@@ -108,6 +109,7 @@ describe("organization integration routes (PostgreSQL)", () => {
       Array.from({ length: 8 }, (_, index) =>
         call("PUT", "/credential-provider", {
           url: `https://product.example/credentials/${index}`,
+          workspaceFilter: null,
         }),
       ),
     );
@@ -126,6 +128,8 @@ describe("organization integration routes (PostgreSQL)", () => {
     const created = await call("PUT", "/credential-provider", {
       url: "https://product.example/credentials",
       workspaceFilter: { externalSource: "product" },
+      enabled: false,
+      timeoutMs: 2000,
     });
     expect(created.status).toBe(201);
     const first = await created.json();
@@ -136,10 +140,15 @@ describe("organization integration routes (PostgreSQL)", () => {
     });
     const updated = await call("PUT", "/credential-provider", {
       url: "https://product.example/new",
+      workspaceFilter: null,
     });
     const second = await updated.json();
     expect(second.secret).toBeUndefined();
-    expect(second.provider.workspaceFilter).toEqual({ externalSource: "product" });
+    expect(second.provider).toMatchObject({
+      workspaceFilter: null,
+      enabled: true,
+      timeoutMs: 10_000,
+    });
     expect(
       (
         await (
@@ -153,7 +162,7 @@ describe("organization integration routes (PostgreSQL)", () => {
     const response = await call("POST", "/webhooks", {
       url: "https://receiver.example/events",
       eventTypes: ["turn.completed"],
-      workspaceFilter: {},
+      workspaceFilter: null,
     });
     expect(response.status).toBe(201);
     const { webhook, secret } = await response.json();
@@ -163,6 +172,33 @@ describe("organization integration routes (PostgreSQL)", () => {
     expect(fetched.status).toBe(200);
     expect(await fetched.json()).toEqual(webhook);
     expect(fetched.headers.get("cache-control")).toBe("private, no-store");
+    const rotatedProvider = await call("POST", "/credential-provider/rotate-secret");
+    expect(rotatedProvider.status).toBe(200);
+    const providerRotation = await rotatedProvider.json();
+    expect(providerRotation.secret).not.toBe(first.secret);
+    const providerRow = await getOrganizationCredentialProvider(client.db, { accountId });
+    expect(
+      decryptEnvironmentValue(
+        environmentsEncryptionKeyBytes(settings)!,
+        providerRow!.secretEncrypted,
+      ),
+    ).toBe(providerRotation.secret);
+    expect((await (await call("GET", "/credential-provider")).json()).secret).toBeUndefined();
+    const rotatedWebhook = await call("POST", `/webhooks/${webhook.id}/rotate-secret`);
+    expect(rotatedWebhook.status).toBe(200);
+    const webhookRotation = await rotatedWebhook.json();
+    expect(webhookRotation.secret).not.toBe(secret);
+    const webhookRow = await getOrganizationWebhook(client.db, {
+      accountId,
+      webhookId: webhook.id,
+    });
+    expect(
+      decryptEnvironmentValue(
+        environmentsEncryptionKeyBytes(settings)!,
+        webhookRow!.secretEncrypted,
+      ),
+    ).toBe(webhookRotation.secret);
+    expect((await (await call("GET", `/webhooks/${webhook.id}`)).json()).secret).toBeUndefined();
     expect((await call("GET", `/webhooks/${crypto.randomUUID()}`)).status).toBe(404);
     expect(
       (
@@ -193,7 +229,7 @@ describe("organization integration routes (PostgreSQL)", () => {
     });
     expect((await call("GET", "/webhooks", undefined, bearer)).status).toBe(403);
   });
-  test("human account administrators can configure organization integrations", async () => {
+  test("delegated human account administrators cannot configure organization integrations", async () => {
     const bearer = await signDelegatedAccessToken(delegationSecret, {
       accountId,
       workspaceId,
@@ -209,11 +245,45 @@ describe("organization integration routes (PostgreSQL)", () => {
           "/credential-provider",
           {
             url: "https://product.example/human-credentials",
+            workspaceFilter: null,
           },
           bearer,
         )
       ).status,
-    ).toBe(201);
-    expect((await call("DELETE", "/credential-provider", undefined, bearer)).status).toBe(204);
+    ).toBe(403);
+    expect((await call("DELETE", "/credential-provider", undefined, bearer)).status).toBe(403);
+  });
+  test("missing, empty and invalid filters return 422; PATCH cannot be empty", async () => {
+    for (const workspaceFilter of [undefined, {}, { externalSource: "" }, { other: "product" }]) {
+      const filter = workspaceFilter === undefined ? {} : { workspaceFilter };
+      expect(
+        (
+          await call("PUT", "/credential-provider", {
+            url: "https://provider.example",
+            ...filter,
+          })
+        ).status,
+      ).toBe(422);
+      expect(
+        (
+          await call("POST", "/webhooks", {
+            url: "https://receiver.example",
+            eventTypes: ["turn.completed"],
+            ...filter,
+          })
+        ).status,
+      ).toBe(422);
+    }
+    const created = await call("POST", "/webhooks", {
+      url: "https://receiver.example",
+      eventTypes: ["turn.completed"],
+      workspaceFilter: null,
+    });
+    const { webhook } = await created.json();
+    for (const request of [{}, { workspaceFilter: {} }])
+      expect((await call("PATCH", `/webhooks/${webhook.id}`, request)).status).toBe(422);
+    await call("DELETE", `/webhooks/${webhook.id}`);
+    expect((await call("POST", `/webhooks/${webhook.id}/rotate-secret`)).status).toBe(404);
+    expect((await call("POST", "/credential-provider/rotate-secret")).status).toBe(404);
   });
 });

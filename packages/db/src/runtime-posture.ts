@@ -3878,13 +3878,17 @@ export function evaluateRuntimeDatabasePosture(
       "organization_credential_providers",
       true,
     ],
-    ["resolve_integration_initiating_human_v1(uuid, uuid, text)", "external_identities", true],
     [
-      "integration_webhook_payload_v1(uuid, uuid, uuid, text, uuid, uuid, bigint, timestamp with time zone, jsonb)",
+      "resolve_integration_initiating_human_v1(uuid, uuid, text, uuid)",
+      "external_identities",
+      true,
+    ],
+    [
+      "integration_webhook_payload_v1(uuid, uuid, uuid, text, uuid, uuid, bigint, timestamp with time zone, jsonb, text)",
       "session_turns",
       false,
     ],
-    ["enqueue_organization_webhook_deliveries_v1()", "organization_webhook_deliveries", false],
+    ["enqueue_organization_webhook_deliveries_v1()", "organization_webhook_deliveries", true],
     [
       "claim_organization_webhook_deliveries_v1(uuid, integer, integer)",
       "organization_webhook_deliveries",

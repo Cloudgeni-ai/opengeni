@@ -3875,7 +3875,7 @@ export const workspaceWebhookDeliveries = pgTable(
   }),
 );
 
-export type IntegrationWorkspaceFilter = { externalSource?: string | undefined };
+export type IntegrationWorkspaceFilter = { externalSource: string };
 
 export const organizationCredentialProviders = pgTable(
   "organization_credential_providers",

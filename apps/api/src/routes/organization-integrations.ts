@@ -8,12 +8,18 @@ import {
   OrganizationWebhook,
   PutOrganizationCredentialProviderRequest,
   PutOrganizationCredentialProviderResponse,
+  RotateOrganizationCredentialProviderSecretResponse,
+  RotateOrganizationWebhookSecretResponse,
   UpdateOrganizationWebhookRequest,
   type AccessContext,
 } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  accessGrantAuthorizationFromContext,
+  requireAccountAdminAuthorizationStamp,
   requireAccessContext,
+  requireCanonicalLocalAccountAdministrator,
+  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -27,6 +33,8 @@ import {
   listOrganizationWebhooks,
   OrganizationWebhookLimitError,
   redeliverOrganizationWebhookDelivery,
+  rotateOrganizationCredentialProviderSecret,
+  rotateOrganizationWebhookSecret,
   updateOrganizationWebhook,
   upsertOrganizationCredentialProvider,
   withCredentialProviderConfigurationLock,
@@ -37,6 +45,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { organizationApiKeyAccess, requireOrganizationApiKeyControlPermission } from "./api-keys";
+import { requireSameOriginBrowserMutation } from "./codex";
 import {
   integrationBody as body,
   integrationDeliveryProjection as deliveryProjection,
@@ -51,6 +60,7 @@ import {
 export function requireOrganizationIntegrationAdmin(
   context: AccessContext,
   organizationId: string,
+  authorization?: AccessGrantAuthorization,
 ): string {
   if (context.workspaceGrants.some(isIntegrationAgent)) {
     throw new HTTPException(403, {
@@ -74,8 +84,19 @@ export function requireOrganizationIntegrationAdmin(
     ) {
       throw new HTTPException(403, { message: "organization API key authority required" });
     }
-  } else if (!grant.permissions.includes("account:admin")) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  } else {
+    if (!grant.permissions.includes("account:admin"))
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    if (
+      !authorization ||
+      !(authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession) ||
+      authorization.grant.accountId !== organizationId ||
+      authorization.authenticatedSubjectId !== context.subjectId ||
+      context.workspaceGrants.some((candidate) => candidate.metadata?.delegated === true)
+    ) {
+      throw new HTTPException(403, { message: "Canonical organization administrator required" });
+    }
+    requireAccountAdminAuthorizationStamp(authorization);
   }
   return grant.subjectId;
 }
@@ -102,9 +123,24 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
     const id = z.string().uuid().safeParse(c.req.param("organizationId"));
     if (!id.success) throw new HTTPException(422, { message: "invalid organization id" });
     const context = await requireAccessContext(c, deps);
-    const subjectId = requireOrganizationIntegrationAdmin(context, id.data);
+    const accountId = id.data.toLowerCase();
+    let authorization: AccessGrantAuthorization | undefined;
+    if (!accountScopedApiKeyWorkspaceAuthority(context)) {
+      if (deps.settings.productAccessMode === "local") {
+        authorization = (await requireCanonicalLocalAccountAdministrator(c, deps, accountId))
+          .authorization;
+      } else {
+        const grant = context.workspaceGrants.find(
+          (candidate) => candidate.accountId === accountId,
+        );
+        if (grant) authorization = accessGrantAuthorizationFromContext(context, grant);
+      }
+    }
+    const subjectId = requireOrganizationIntegrationAdmin(context, accountId, authorization);
+    if (!accountScopedApiKeyWorkspaceAuthority(context) && !["GET", "HEAD"].includes(c.req.method))
+      requireSameOriginBrowserMutation(c, deps);
     c.header("cache-control", "private, no-store");
-    return { accountId: id.data, subjectId };
+    return { accountId, subjectId };
   };
   const { requireKey, requireDeployableUrl: requireUrl } = integrationRouteConfiguration(
     deps,
@@ -128,33 +164,30 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
   });
   app.put(`${base}/credential-provider`, async (c) => {
     const target = await scope(c);
-    const request = await body(c, PutOrganizationCredentialProviderRequest);
+    const request = await body(c, PutOrganizationCredentialProviderRequest, 422);
     requireUrl(request.url);
-    const { row, secret, created } = await withCredentialProviderConfigurationLock(
-      deps.db,
-      target,
-      async (tx) => {
-        const existing = await getOrganizationCredentialProvider(tx, target);
-        const secret = existing ? undefined : newIntegrationSecret("ogcp");
-        const row = await upsertOrganizationCredentialProvider(tx, {
-          accountId: target.accountId,
-          url: request.url,
-          enabled: request.enabled ?? existing?.enabled ?? true,
-          timeoutMs: request.timeoutMs ?? existing?.timeoutMs ?? 10_000,
-          workspaceFilter:
-            request.workspaceFilter === undefined
-              ? (existing?.workspaceFilter ?? null)
-              : request.workspaceFilter,
-          createdBySubjectId: target.subjectId,
-          ...(secret ? { secretEncrypted: encrypted(secret) } : {}),
-        });
-        return { row, secret, created: !existing };
-      },
-    );
+    const {
+      row: providerRow,
+      secret: signingSecret,
+      created,
+    } = await withCredentialProviderConfigurationLock(deps.db, target, async (tx) => {
+      const existing = await getOrganizationCredentialProvider(tx, target);
+      const secret = existing ? undefined : newIntegrationSecret("ogcp");
+      const row = await upsertOrganizationCredentialProvider(tx, {
+        accountId: target.accountId,
+        url: request.url,
+        enabled: request.enabled ?? true,
+        timeoutMs: request.timeoutMs ?? 10_000,
+        workspaceFilter: request.workspaceFilter,
+        createdBySubjectId: target.subjectId,
+        ...(secret ? { secretEncrypted: encrypted(secret) } : {}),
+      });
+      return { row, secret, created: !existing };
+    });
     return c.json(
       PutOrganizationCredentialProviderResponse.parse({
-        provider: providerProjection(row),
-        ...(secret ? { secret } : {}),
+        provider: providerProjection(providerRow),
+        ...(signingSecret ? { secret: signingSecret } : {}),
       }),
       created ? 201 : 200,
     );
@@ -162,6 +195,21 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
   app.delete(`${base}/credential-provider`, async (c) => {
     await deleteOrganizationCredentialProvider(deps.db, await scope(c));
     return c.body(null, 204);
+  });
+  app.post(`${base}/credential-provider/rotate-secret`, async (c) => {
+    const target = await scope(c);
+    const secret = newIntegrationSecret("ogcp");
+    const row = await rotateOrganizationCredentialProviderSecret(deps.db, {
+      ...target,
+      secretEncrypted: encrypted(secret),
+    });
+    if (!row) throw new HTTPException(404, { message: "Credential provider not found" });
+    return c.json(
+      RotateOrganizationCredentialProviderSecretResponse.parse({
+        provider: providerProjection(row),
+        secret,
+      }),
+    );
   });
   app.get(`${base}/webhooks`, async (c) => {
     const rows = await listOrganizationWebhooks(deps.db, await scope(c));
@@ -171,7 +219,7 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
   });
   app.post(`${base}/webhooks`, async (c) => {
     const target = await scope(c);
-    const request = await body(c, CreateOrganizationWebhookRequest);
+    const request = await body(c, CreateOrganizationWebhookRequest, 422);
     requireUrl(request.url);
     const secret = newIntegrationSecret("whsec");
     try {
@@ -182,7 +230,7 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
         eventTypes: request.eventTypes,
         enabled: request.enabled ?? true,
         description: request.description ?? null,
-        workspaceFilter: request.workspaceFilter ?? null,
+        workspaceFilter: request.workspaceFilter,
         createdBySubjectId: target.subjectId,
       });
       return c.json(
@@ -206,7 +254,7 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
   });
   app.patch(`${base}/webhooks/:webhookId`, async (c) => {
     const target = await scope(c);
-    const request = await body(c, UpdateOrganizationWebhookRequest);
+    const request = await body(c, UpdateOrganizationWebhookRequest, 422);
     if (request.url) requireUrl(request.url);
     const row = await updateOrganizationWebhook(deps.db, {
       accountId: target.accountId,
@@ -228,6 +276,22 @@ export function registerOrganizationIntegrationRoutes(app: Hono, deps: ApiRouteD
       throw new HTTPException(404, { message: "Webhook not found" });
     }
     return c.body(null, 204);
+  });
+  app.post(`${base}/webhooks/:webhookId/rotate-secret`, async (c) => {
+    const target = await scope(c);
+    const secret = newIntegrationSecret("whsec");
+    const row = await rotateOrganizationWebhookSecret(deps.db, {
+      ...target,
+      webhookId: webhookId(c),
+      secretEncrypted: encrypted(secret),
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    return c.json(
+      RotateOrganizationWebhookSecretResponse.parse({
+        webhook: webhookProjection(row),
+        secret,
+      }),
+    );
   });
   app.get(`${base}/webhooks/:webhookId/deliveries`, async (c) => {
     const target = { ...(await scope(c)), webhookId: webhookId(c) };

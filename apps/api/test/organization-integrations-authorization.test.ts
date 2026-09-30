@@ -87,8 +87,10 @@ describe("organization integration authority", () => {
     expect(JSON.stringify(webhook)).not.toContain("never-expose");
     expect(webhook).not.toHaveProperty("createdBySubjectId");
   });
-  test("literal same-account admin works without workspace membership", () => {
-    expect(requireOrganizationIntegrationAdmin(context(), organizationId)).toBe("user:admin");
+  test("literal same-account admin cannot manufacture canonical cookie provenance", () => {
+    expect(() => requireOrganizationIntegrationAdmin(context(), organizationId)).toThrow(
+      "Canonical",
+    );
   });
   test("workspace admin, foreign-account and mismatched-subject grants do not qualify", () => {
     const access = context();

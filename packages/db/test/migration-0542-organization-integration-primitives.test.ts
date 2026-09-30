@@ -21,6 +21,8 @@ import {
   provisionRoles,
   assertRuntimeDatabasePosture,
   getOrganizationCredentialProvider,
+  grantWorkspaceAccess,
+  deleteWorkspaceCredentialProvider,
   listOrganizationWebhookDeliveries,
   listWorkspaceWebhookDeliveries,
   redeliverOrganizationWebhookDelivery,
@@ -151,6 +153,101 @@ test("0542 owner migration and custom runtime preserve FORCE-RLS dispatcher post
       claimId: crypto.randomUUID(),
     });
     expect(claims.map((row) => row.workspaceId)).toEqual([workspaceId]);
+    const external = await ensureExternalIdentity(runtime.db, {
+      accountId,
+      source: "owner-personal-test",
+      externalId: crypto.randomUUID(),
+    });
+    await owner.admin`update organization_memberships set personal_workspace_id = ${workspaceId}, status = 'suspended'
+      where account_id = ${accountId} and subject_id = ${external.subjectId}`;
+    expect(
+      await resolveWorkspaceCredentialProvider(runtime.db, { accountId, workspaceId }),
+    ).toBeNull();
+    await owner.admin`update organization_webhook_deliveries set claim_id = null, claim_until = null
+      where account_id = ${accountId}`;
+    expect(
+      (
+        await claimOrganizationWebhookDeliveries(runtime.db, {
+          claimId: crypto.randomUUID(),
+        })
+      ).some((row) => row.workspaceId === workspaceId),
+    ).toBe(false);
+    const access = await bootstrapWorkspace(runtime.db, {
+      accountExternalSource: "owner-enqueue",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "owner enqueue",
+      workspaceExternalSource: "owner-enqueue",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "owner enqueue",
+      subjectId: "user:owner-enqueue",
+    });
+    const target = access.workspaceGrants[0]!;
+    const targetScope = { accountId: target.accountId, workspaceId: target.workspaceId };
+    await upsertOrganizationCredentialProvider(runtime.db, {
+      accountId: target.accountId,
+      url: "https://owner-provider.example",
+      secretEncrypted: "sealed",
+      enabled: true,
+      timeoutMs: 5000,
+      workspaceFilter: null,
+      createdBySubjectId: null,
+    });
+    expect(await resolveWorkspaceCredentialProvider(runtime.db, targetScope)).not.toBeNull();
+    const eventSession = await createSession(runtime.db, {
+      ...targetScope,
+      initialMessage: "owner enqueue",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const registration = await createOrganizationWebhook(runtime.db, {
+      accountId: target.accountId,
+      url: "https://owner.example",
+      secretEncrypted: "sealed",
+      eventTypes: ["session.status.changed"],
+      enabled: true,
+      description: null,
+      workspaceFilter: null,
+      createdBySubjectId: null,
+    });
+    await appendSessionEvents(runtime.db, target.workspaceId, eventSession.id, [
+      { type: "session.status.changed", payload: { status: "idle" } },
+    ]);
+    const pointer = await ensureExternalIdentity(runtime.db, {
+      accountId: target.accountId,
+      source: "owner-pointer",
+      externalId: crypto.randomUUID(),
+    });
+    await owner.admin`update organization_memberships set personal_workspace_id = ${target.workspaceId}
+      where account_id = ${target.accountId} and subject_id = ${pointer.subjectId}`;
+    const [kindDefinition] = await owner.admin<Array<{ definition: string }>>`
+      select pg_get_functiondef('get_workspace_kind(uuid,uuid)'::regprocedure) as definition`;
+    try {
+      await owner.admin
+        .unsafe(`create or replace function get_workspace_kind(p_account_id uuid,p_workspace_id uuid)
+        returns text language sql security definer set search_path = pg_catalog, public, pg_temp
+        as $$ select 'shared'::text $$`);
+      expect(
+        await withRlsContext(runtime.db, targetScope, async (tx) =>
+          tx.execute(sql`select * from opengeni_private.resolve_organization_credential_provider_v1(
+          ${target.accountId}::uuid, ${target.workspaceId}::uuid)`),
+        ),
+      ).toHaveLength(0);
+      await appendSessionEvents(runtime.db, target.workspaceId, eventSession.id, [
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ]);
+    } finally {
+      await owner.admin.unsafe(kindDefinition!.definition);
+    }
+    expect(
+      await listOrganizationWebhookDeliveries(runtime.db, {
+        accountId: target.accountId,
+        webhookId: registration.id,
+      }),
+    ).toHaveLength(1);
     await assertRuntimeDatabasePosture(runtime.db, { rlsStrategy: "force", expectedRole: appRole });
   } finally {
     await runtime?.close();
@@ -159,7 +256,158 @@ test("0542 owner migration and custom runtime preserve FORCE-RLS dispatcher post
   }
 }, 240_000);
 describe("0542 organization integration primitives (PostgreSQL)", () => {
-  test("provider precedence is workspace enabled, then enabled matching organization", async () => {
+  test("workspace runtime cannot read or rewrite organization registrations or deliveries", async () => {
+    const { scope, session } = await fixture("rls");
+    const webhook = await createOrganizationWebhook(client.db, {
+      accountId: scope.accountId,
+      url: "https://receiver.example/rls",
+      secretEncrypted: "original",
+      eventTypes: ["session.status.changed"],
+      enabled: true,
+      description: null,
+      workspaceFilter: null,
+      createdBySubjectId: null,
+    });
+    await appendSessionEvents(client.db, scope.workspaceId, session.id, [
+      { type: "session.status.changed", payload: { status: "idle" } },
+    ]);
+    expect(
+      await listOrganizationWebhookDeliveries(client.db, {
+        accountId: scope.accountId,
+        webhookId: webhook.id,
+      }),
+    ).toHaveLength(1);
+    await withRlsContext(client.db, scope, async (tx) => {
+      for (const table of [
+        "organization_webhooks",
+        "organization_webhook_deliveries",
+        "organization_credential_providers",
+      ]) {
+        expect(await tx.execute(sql.raw(`select * from ${table}`))).toHaveLength(0);
+      }
+      expect(
+        await tx.execute(sql`update organization_webhooks set url = 'https://attacker.example',
+        secret_encrypted = 'attacker' where id = ${webhook.id}::uuid returning id`),
+      ).toHaveLength(0);
+      expect(
+        await tx.execute(sql`update organization_webhook_deliveries set payload = '{}'::jsonb
+        where webhook_id = ${webhook.id}::uuid returning id`),
+      ).toHaveLength(0);
+    });
+    await expectSqlState(
+      () =>
+        withRlsContext(client.db, scope, async (tx) =>
+          tx.execute(sql`
+      insert into organization_webhooks(account_id,url,secret_encrypted,event_types)
+      values (${scope.accountId}::uuid,'https://attacker.example','attacker',array['turn.completed'])`),
+        ),
+      "42501",
+    );
+    const other = await fixture("rls-other");
+    expect(
+      await withAccountRls(client.db, other.scope.accountId, async (tx) =>
+        tx.execute(sql`select id from organization_webhooks where id = ${webhook.id}::uuid`),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("Personal pointers remain excluded when suspended or kind is misclassified; own provider remains", async () => {
+    const { scope, session } = await fixture("personal");
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: scope.accountId,
+      source: "personal-test",
+      externalId: crypto.randomUUID(),
+    });
+    await shared!
+      .admin`update organization_memberships set personal_workspace_id = ${scope.workspaceId}
+      where account_id = ${scope.accountId} and subject_id = ${identity.subjectId}`;
+    await upsertOrganizationCredentialProvider(client.db, {
+      accountId: scope.accountId,
+      url: "https://provider.example",
+      secretEncrypted: "org",
+      enabled: true,
+      timeoutMs: 5000,
+      workspaceFilter: null,
+      createdBySubjectId: null,
+    });
+    const webhook = await createOrganizationWebhook(client.db, {
+      accountId: scope.accountId,
+      url: "https://receiver.example/personal",
+      secretEncrypted: "org",
+      enabled: true,
+      eventTypes: ["session.status.changed"],
+      workspaceFilter: null,
+      description: null,
+      createdBySubjectId: null,
+    });
+    const ownWebhook = await createWorkspaceWebhook(client.db, {
+      ...scope,
+      url: "https://receiver.example/own",
+      secretEncrypted: "own",
+      enabled: true,
+      eventTypes: ["session.status.changed"],
+      description: null,
+      createdBySubjectId: null,
+    });
+    const [original] = await shared!.admin<Array<{ definition: string }>>`
+      select pg_get_functiondef('get_workspace_kind(uuid,uuid)'::regprocedure) as definition`;
+    try {
+      // Simulate old kind derivation; the independent canonical pointer fence must still win.
+      await shared!.admin
+        .unsafe(`create or replace function get_workspace_kind(p_account_id uuid,p_workspace_id uuid)
+        returns text language sql security definer set search_path = pg_catalog, public, pg_temp
+        as $$ select 'shared'::text $$`);
+      for (const status of ["active", "suspended"]) {
+        await shared!.admin`update organization_memberships set status = ${status}
+          where account_id = ${scope.accountId} and subject_id = ${identity.subjectId}`;
+        expect(await resolveWorkspaceCredentialProvider(client.db, scope)).toBeNull();
+        expect(await resolveInitiatingHuman(client.db, scope, identity.subjectId)).toEqual(
+          status === "active"
+            ? {
+                subjectId: identity.subjectId,
+                externalIdentity: { source: "personal-test", externalId: identity.externalId },
+              }
+            : null,
+        );
+        await appendSessionEvents(client.db, scope.workspaceId, session.id, [
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ]);
+      }
+      expect(
+        await listOrganizationWebhookDeliveries(client.db, {
+          accountId: scope.accountId,
+          webhookId: webhook.id,
+        }),
+      ).toHaveLength(0);
+      expect(
+        await listWorkspaceWebhookDeliveries(client.db, { ...scope, webhookId: ownWebhook.id }),
+      ).toHaveLength(2);
+      await shared!.admin`insert into organization_webhook_deliveries
+        (account_id,workspace_id,webhook_id,event_id,event_type,payload)
+        values (${scope.accountId},${scope.workspaceId},${webhook.id},${crypto.randomUUID()},
+          'session.status.changed','{}'::jsonb)`;
+      expect(
+        (
+          await claimOrganizationWebhookDeliveries(client.db, {
+            claimId: crypto.randomUUID(),
+            limit: 100,
+          })
+        ).some((row) => row.webhookId === webhook.id),
+      ).toBe(false);
+      const own = await upsertWorkspaceCredentialProvider(client.db, {
+        ...scope,
+        url: "https://own.example",
+        secretEncrypted: "own",
+        enabled: true,
+        timeoutMs: 5000,
+        createdBySubjectId: null,
+      });
+      expect((await resolveWorkspaceCredentialProvider(client.db, scope))?.id).toBe(own.id);
+    } finally {
+      await shared!.admin.unsafe(original!.definition);
+    }
+  });
+  test("provider precedence is workspace row, then organization only on absence", async () => {
     const { scope } = await fixture("provider");
     const input = {
       accountId: scope.accountId,
@@ -188,6 +436,11 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
       timeoutMs: 5000,
       createdBySubjectId: null,
     });
+    expect(await resolveWorkspaceCredentialProvider(client.db, scope)).toMatchObject({
+      id: workspace.id,
+      enabled: false,
+    });
+    await deleteWorkspaceCredentialProvider(client.db, scope);
     expect((await resolveWorkspaceCredentialProvider(client.db, scope))?.id).toBe(organization.id);
     await upsertOrganizationCredentialProvider(client.db, {
       ...input,
@@ -211,15 +464,18 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
       source: "product",
       externalId: "alice",
     });
+    expect(await resolveInitiatingHuman(client.db, scope, identity.subjectId)).toBeNull();
+    await grantWorkspaceAccess(client.db, {
+      ...scope,
+      subjectId: identity.subjectId,
+      permissions: ["workspace:read"],
+    });
     expect(await resolveInitiatingHuman(client.db, scope, identity.subjectId)).toEqual({
       subjectId: identity.subjectId,
       externalIdentity: { source: "product", externalId: "alice" },
     });
     const other = await fixture("other-human");
-    expect(await resolveInitiatingHuman(client.db, other.scope, identity.subjectId)).toEqual({
-      subjectId: identity.subjectId,
-      externalIdentity: null,
-    });
+    expect(await resolveInitiatingHuman(client.db, other.scope, identity.subjectId)).toBeNull();
     expect(await resolveInitiatingHuman(client.db, scope, null)).toBeNull();
     const org = await createOrganizationWebhook(client.db, {
       accountId: scope.accountId,
@@ -269,6 +525,19 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
       metadata: {},
       initiator: { kind: "subject", subjectId: identity.subjectId },
     });
+    await shared!.admin`delete from workspace_memberships where account_id = ${scope.accountId}
+      and workspace_id = ${scope.workspaceId} and subject_id = ${identity.subjectId}`;
+    expect(await resolveInitiatingHuman(client.db, scope, identity.subjectId)).toBeNull();
+    expect(
+      await resolveInitiatingHuman(client.db, scope, identity.subjectId, crypto.randomUUID()),
+    ).toBeNull();
+    expect(
+      await resolveInitiatingHuman(client.db, other.scope, identity.subjectId, turn.id),
+    ).toBeNull();
+    expect(await resolveInitiatingHuman(client.db, scope, identity.subjectId, turn.id)).toEqual({
+      subjectId: identity.subjectId,
+      externalIdentity: { source: "product", externalId: "alice" },
+    });
     await appendSessionEvents(client.db, scope.workspaceId, session.id, [
       {
         type: "turn.completed",
@@ -282,6 +551,7 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
     });
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]!.payload).toMatchObject({
+      lane: "organization",
       workspace: { id: scope.workspaceId, externalSource: source, externalId },
       initiatingHuman: {
         subjectId: identity.subjectId,
@@ -298,6 +568,10 @@ describe("0542 organization integration primitives (PostgreSQL)", () => {
     expect(
       await listWorkspaceWebhookDeliveries(client.db, { ...scope, webhookId: workspace.id }),
     ).toHaveLength(1);
+    expect(
+      (await listWorkspaceWebhookDeliveries(client.db, { ...scope, webhookId: workspace.id }))[0]!
+        .payload,
+    ).toHaveProperty("lane", "workspace");
     expect(
       await listOrganizationWebhookDeliveries(client.db, {
         accountId: other.scope.accountId,
