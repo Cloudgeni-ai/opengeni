@@ -18,7 +18,7 @@ export type ChatAgentAccess = "session" | "user" | "workspace";
 /**
  * Compatibility option for personal or workspace Knowledge. `false` initializes
  * Knowledge authoring to Off; authorized retrieval remains available. Omitted
- * follows `chats`, which defaults to private chats with personal Knowledge.
+ * follows `chats`: private with a user, or legacy reach-based defaults without one.
  * Task notes cover temporary session-tree data.
  */
 export type ChatMemory = "user" | "workspace" | false;
@@ -53,11 +53,12 @@ export type ChatOptions = ChatTarget & {
    * The acting user is independent of the conversation's identity. */
   sessionId?: string | undefined;
   /**
-   * Private (default) uses personal Knowledge and session-only reach; shared uses
-   * workspace Knowledge and reach. Isolated also provisions a workspace per tenant/user.
+   * Private (default with a user) uses personal Knowledge and session-only reach;
+   * shared uses workspace Knowledge/reach, isolated adds a workspace per tenant/user.
+   * Without a user, omission keeps workspace visibility, session reach and Knowledge off.
    */
   chats?: Chats | undefined;
-  /** Agent identity, capabilities and instructions; renderer defaults to markdown. */
+  /** Agent identity, capabilities and instructions; implicit markdown falls back on older servers. */
   agent?: AgentConfigRequest | undefined;
   /** Explicit agent reach overrides the `chats` default. */
   agentAccess?: ChatAgentAccess | undefined;

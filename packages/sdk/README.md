@@ -71,7 +71,10 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 </OpenGeniProvider>;
 ```
 
-The proxy and `@opengeni/sdk/chat` facade accept `chats` (default `"private"`).
+The proxy and `@opengeni/sdk/chat` facade accept `chats`. The proxy defaults to
+`"private"`; the facade does too when a `user` is present. Without a user and with
+`chats` omitted, the facade keeps workspace visibility, session-only agent reach
+and Knowledge authoring off. Explicit `"private"` requires an authenticated user.
 Private chats use private visibility, session-only agent reach and personal
 Knowledge; `"shared"` uses workspace visibility, agent reach and Knowledge.
 The API wire values are `visibility: "private" | "workspace"`; stored visibility
@@ -85,11 +88,13 @@ The standalone resolver is on the server-only `@opengeni/sdk/tenant-workspaces`
 subpath. Keep tenant and user values host-authenticated.
 
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
-and defaults its renderer to `"markdown"`. Its private default now turns personal
-Knowledge on; pass `memory: false` to keep authoring off. Service-owned facade
-chats should explicitly select `"shared"` because private chats require `asUser`.
-The facade's renderer requires the deployment operator to enable
-`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true`; the SDK never bypasses that rollout gate.
+and defaults its renderer to `"markdown"` when the server admits agent configuration.
+Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
+and that refusal is cached per facade instance. This avoids a bootstrap request
+and supports older servers that cannot advertise admission. Explicit agent settings
+are never stripped: the 422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for the
+deployment operator. The private default with a user now turns personal Knowledge
+on; pass `memory: false` to keep authoring off.
 Missing organization private-session enablement raises `OpenGeniSetupError`,
 with owner/admin API, SDK and web-app instructions; the proxy preserves that
 actionable error for browser clients.
