@@ -361,7 +361,9 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
   });
   if (rec.scoredFiles > rec.candidates.length) {
     cuts.push(
-      `recall: ${rec.scoredFiles} files matched the keywords; only the best ${rec.candidates.length} by keyword score were triaged (the other ${rec.scoredFiles - rec.candidates.length} match fewer or more common keywords).`,
+      `recall: ${rec.scoredFiles} files matched the keywords; only the best ${rec.candidates.length} by keyword score were triaged (the other ${rec.scoredFiles - rec.candidates.length} match fewer or more common keywords; the strongest of them: ${rec.cutTop
+        .map((c) => c.path)
+        .join(", ")}).`,
     );
   }
 
@@ -686,6 +688,23 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
       `regions per file (limit ${cfg.wave2.windowsPerFile}, ${cfg.wave2.windowsPerRelevantFile} in relevant files, ${cfg.wave2.tileMaxWindows} in small relevant files read whole): not checked ${windowCuts.join("; ")}`,
     );
   const capped = capPassages(perFileWindows, cfg.wave2.maxPassages);
+  // keyword and symbol hit lines no checked window covers (seed-hit, window and passage caps together)
+  const uncovered: string[] = [];
+  selected.forEach((ci, f) => {
+    const c = cands[ci]!;
+    const n = readLines(c.path).length;
+    const lines = [...c.hitLines.keys()].filter(
+      (l) => l <= n && !capped[f]!.some((w) => l >= w.start && l <= w.end),
+    );
+    const stored = Object.entries(c.kwHits).some(
+      ([k, cnt]) => cnt > cfg.recall.maxMatchesPerFile && !kws[Number(k)]?.symbol,
+    );
+    if (lines.length || stored)
+      uncovered.push(
+        `${c.path}: ${lines.length ? fmtRanges(mergeRanges(lines.map((l) => [l, l]))) : ""}${stored ? `${lines.length ? "; " : ""}more matches past the first ${cfg.recall.maxMatchesPerFile} per keyword not examined` : ""}`,
+      );
+  });
+  if (uncovered.length) cuts.push(`keyword hits outside every checked region: ${uncovered.join("; ")}`);
   const passageCut = perFileWindows.flatMap((ws, f) =>
     ws.filter((w) => !capped[f]!.includes(w)).map((w) => `${cands[selected[f]!]!.path}:${w.start}-${w.end}`),
   );
@@ -900,8 +919,17 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
         return ds.length > 0 && !ds.every((d) => inEvidence(d.path, d.line));
       })
       .map((l) => ({ ...l, weight: Math.round(l.weight * genericity(l.name) * 1000) / 1000 }))
-      .sort((a, b) => b.weight - a.weight || (a.name < b.name ? -1 : 1))
-      .slice(0, cfg.wave3.maxLeadCandidates);
+      .sort((a, b) => b.weight - a.weight || (a.name < b.name ? -1 : 1));
+    if (leadCands.length > cfg.wave3.maxLeadCandidates) {
+      const rest = leadCands.slice(cfg.wave3.maxLeadCandidates);
+      cuts.push(
+        `leads: judged ${cfg.wave3.maxLeadCandidates} of ${leadCands.length} identifiers the evidence names; not judged: ${rest
+          .slice(0, 12)
+          .map((l) => l.name)
+          .join(", ")}${rest.length > 12 ? ", ..." : ""}`,
+      );
+      leadCands = leadCands.slice(0, cfg.wave3.maxLeadCandidates);
+    }
     const maxW = Math.max(...leadCands.map((l) => l.weight), 1e-9);
     const leadItems: LeadItem[] = leadCands.map((l, i) => ({
       id: `l${String(i).padStart(3, "0")}`,

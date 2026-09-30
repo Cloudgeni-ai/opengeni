@@ -542,6 +542,9 @@ export function renderFooter(f: FooterInput): string {
   const leads = f.leadsNotFollowed
     .slice(0, p.leadsNotFollowed)
     .map((l) => `${l.name} (${r2(l.score)}${l.note ? `, ${l.note}` : ""}) @${l.seenAt}`);
+  const moreLeads = f.leadsNotFollowed.length - leads.length;
+  const moreExcluded =
+    f.excluded.filter((x) => !coverageFiles.has(x.path)).length - more.length;
   const kw = (st: KeywordNote["status"]) =>
     f.keywords
       .filter((k) => k.status === st)
@@ -566,10 +569,12 @@ export function renderFooter(f: FooterInput): string {
     if (cuts.length) lines.push("Cut by limits:", ...cuts.map((c) => `  ${c}`));
     if (m.length || mf.length) {
       lines.push("More candidates (not included; read if needed):");
-      if (m.length) lines.push(`  ${m.join(", ")}`);
+      const restM = moreExcluded + (more.length - m.length);
+      if (m.length) lines.push(`  ${m.join(", ")}${restM > 0 ? ` (+${restM} weaker passages)` : ""}`);
       if (mf.length) lines.push(`  files: ${mf.join(", ")}`);
     }
-    if (l.length) lines.push(`Leads not followed: ${l.join(", ")}`);
+    const restL = moreLeads + (leads.length - l.length);
+    if (l.length) lines.push(`Leads not followed: ${l.join(", ")}${restL > 0 ? ` (+${restL} weaker)` : ""}`);
     if (zero.length) lines.push(`Keywords with zero hits: ${zero.join(", ")}`);
     if (irrelevant.length)
       lines.push(`Keywords that matched only files judged irrelevant: ${irrelevant.join(", ")}`);
