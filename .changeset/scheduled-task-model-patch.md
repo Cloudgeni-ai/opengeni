@@ -1,7 +1,7 @@
 ---
 "@opengeni/contracts": patch
 "@opengeni/core": patch
-"@opengeni/api": patch
+"@opengeni/api-router": patch
 "@opengeni/sdk": patch
 ---
 
