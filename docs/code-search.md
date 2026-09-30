@@ -77,6 +77,38 @@ The tool works on every sandbox backend and Connected Machine that has `rg` and
 `bash`; both stock sandbox images include them. Windows Connected Machines do
 not get the tool, because its search commands are POSIX shell scripts.
 
+### Credential directories are never searched
+
+The workspace holds platform credential material next to code, and a search
+result goes into model history and session events. So `code_search` never
+searches or reads these directories, at any depth:
+
+| Directory | Holds |
+| --- | --- |
+| `.opengeni/` | Per-session sandbox state: Codemode bearer tokens, Git credential files and bindings, delivered clients |
+| `.azure/` | The Azure CLI login cache from the sandbox's service-principal login (`HOME=/workspace`) |
+| `.config/opengeni/` | A Connected Machine agent's enrollment credentials, when its working directory is its home |
+
+The rule is path exclusion at the source, never content redaction:
+
+- Every ripgrep call excludes them: the engine adds the globs, and
+  `codeSearchRipgrep` appends them again after the engine's own globs so they
+  always win.
+- ripgrep searches an explicitly named path even when a glob excludes it, so an
+  explicit `paths` entry into one of them is ignored like a missing path. The
+  engine checks the normalized path case-insensitively (`./.opengeni`,
+  `.OpenGeni`, `a/../x` and backslashes included), and `codeSearchRipgrep`
+  refuses such a path again.
+- ripgrep follows a symlink named as a search root, so `codeSearchPathKinds`
+  resolves each path physically and reports one that lands in a credential
+  directory as missing. The directory walk itself never follows symlinks.
+
+The list lives in `CODE_SEARCH_CREDENTIAL_DIRS`, once in `@opengeni/jev` (which
+is published on its own) and once in `@opengeni/contracts/code-search` for the
+sandbox channel; a worker test pins that they agree. The agent can still read
+these files with `exec_command`; the rule keeps a code question from pulling
+credentials into its answer.
+
 ## Turning it on and off
 
 | Level | Setting | Effect |
