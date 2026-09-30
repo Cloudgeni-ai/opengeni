@@ -28,7 +28,7 @@ import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
-import { useAvailableModels } from "../src/hooks/use-available-models";
+import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
@@ -5715,6 +5715,27 @@ describe("useBillingUsage", () => {
 });
 
 describe("useAvailableModels", () => {
+  test("workspace model catalog passes the exact workspace to both catalog and config", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      getWorkspaceModelCatalog: async (workspaceId) => {
+        calls.push(`catalog:${workspaceId}`);
+        return { models: [] } as never;
+      },
+      getClientConfig: async (options) => {
+        calls.push(`config:${options?.workspaceId}`);
+        return { models: [], defaultModel: "workspace-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(calls).toEqual([`catalog:${WORKSPACE_ID}`, `config:${WORKSPACE_ID}`]);
+    expect(hook.result.current.defaultModel).toBe("workspace-default");
+    await hook.unmount();
+  });
   test("returns the host-exposed models and the default model from getClientConfig", async () => {
     let calls = 0;
     const client = fakeClient({
