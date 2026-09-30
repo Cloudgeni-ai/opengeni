@@ -576,6 +576,11 @@ export function useLatestCallback<Args extends unknown[], Result>(
   return useCallback((...args: Args) => callbackRef.current(...args), []);
 }
 
+/** The app context where one exists; null in hosts that render a piece of the app alone. */
+export function useOptionalAppContext(): AppContextValue | null {
+  return useContext(AppContext);
+}
+
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) {

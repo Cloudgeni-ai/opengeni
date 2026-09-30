@@ -37,7 +37,7 @@ const AgentLearningDraftEditor = lazyComposerPanel(() =>
   loadAgentLearning().then((module) => module.AgentLearningDraftEditor),
 );
 import { DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { useAppContext } from "@/context";
+import { useOptionalAppContext } from "@/context";
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -137,14 +137,15 @@ export function ComposerMobilePlusPanel(
 ) {
   const { triggerRef, panel, setPanel, setOpen, dialogOpen } = props;
   // Chat settings opens without a load: fetch its editor while the menu is open.
-  const { client } = useAppContext();
+  // A composer rendered outside the app (a preview harness) has no client.
+  const client = useOptionalAppContext()?.client ?? null;
   const chatSettings = props.chatSettings;
   const draftChatSettings = Boolean(props.draftChatSettings);
   useEffect(() => {
     if (!chatSettings && !draftChatSettings) return;
     void loadAgentLearning()
       .then((module) => {
-        if (chatSettings) {
+        if (chatSettings && client) {
           module.prefetchAgentLearningSettings(client, {
             workspaceId: chatSettings.workspaceId,
             scope: chatSettings.scope,
