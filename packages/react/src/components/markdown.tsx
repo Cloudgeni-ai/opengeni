@@ -391,12 +391,15 @@ function ActionMarkdownLink({
       type="button"
       className={cn(
         MARKDOWN_LINK_CLASS,
-        "inline-flex min-h-7 cursor-pointer items-center disabled:cursor-wait disabled:opacity-70 pointer-coarse:min-h-11",
+        "inline-flex min-h-7 cursor-pointer items-center aria-disabled:cursor-wait aria-disabled:opacity-70 pointer-coarse:min-h-11",
       )}
-      disabled={state === "loading"}
+      // Not `disabled`: disabling the focused control drops focus to the page,
+      // so a host viewer could not return focus to the link that opened it.
+      aria-disabled={state === "loading" || undefined}
       aria-busy={state === "loading"}
       title={state === "error" ? "Couldn't open this file. Select to retry." : title}
       onClick={() => {
+        if (state === "loading") return;
         setState("loading");
         void Promise.resolve()
           .then(onOpen)

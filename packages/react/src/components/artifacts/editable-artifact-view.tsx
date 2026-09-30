@@ -53,6 +53,8 @@ export type EditableArtifactViewProps = Readonly<{
   authorityKey?: string | undefined;
   describeError?: ((error: unknown) => ArtifactLoadErrorView) | undefined;
   onTitle?: ((title: string) => void) | undefined;
+  /** Loading copy; defaults to "Opening artifact". */
+  loadingLabel?: string | undefined;
 }>;
 
 type LoadState =
@@ -75,6 +77,7 @@ export function EditableArtifactView({
   authorityKey,
   describeError = describeEditableLoadError,
   onTitle,
+  loadingLabel = "Opening artifact",
 }: EditableArtifactViewProps) {
   const [loadEpoch, setLoadEpoch] = useState(0);
   const [state, setState] = useState<LoadState>({ kind: "loading" });
@@ -135,7 +138,7 @@ export function EditableArtifactView({
     });
   }, [baseUrl, ready, runtimes, workspaceId]);
 
-  if (state.kind === "loading") return <ArtifactLoading label="Opening artifact" />;
+  if (state.kind === "loading") return <ArtifactLoading label={loadingLabel} />;
   if (state.kind === "error") {
     return (
       <ArtifactProblem

@@ -18,6 +18,7 @@ export type SessionArtifactTarget = Readonly<
 export type SessionArtifactViewerLabels = Readonly<{
   close?: string;
   back?: string;
+  /** Header title and loading copy until the artifact's title is known. */
   opening?: string;
 }>;
 
@@ -114,6 +115,7 @@ export function SessionArtifactViewer({
             theme={theme}
             toolBridge={siteToolBridge}
             showTitle={false}
+            {...(labels?.opening ? { loadingLabel: labels.opening } : {})}
             onTitle={(next) => setLoaded({ key: targetKey, title: next, kind: "site" })}
           />
         ) : (
@@ -123,6 +125,7 @@ export function SessionArtifactViewer({
             workspaceId={workspaceId}
             artifactId={target.artifactId}
             runtimes={editableRuntimes}
+            loadingLabel={labels?.opening}
             onOpened={(next, modality) =>
               setLoaded({ key: targetKey, title: next, kind: modality })
             }
@@ -139,6 +142,7 @@ function EditableBody({
   workspaceId,
   artifactId,
   runtimes,
+  loadingLabel,
   onOpened,
   onUnavailable,
 }: {
@@ -146,6 +150,7 @@ function EditableBody({
   workspaceId: string;
   artifactId: string;
   runtimes: EditableArtifactRuntimes | undefined;
+  loadingLabel: string | undefined;
   onOpened: (title: string, modality: ArtifactKind) => void;
   onUnavailable: () => void;
 }) {
@@ -214,6 +219,7 @@ function EditableBody({
       }}
       transport={transport}
       showHeader={false}
+      loadingLabel={loadingLabel}
       open={async (signal) => {
         const replicaId = createEditableArtifactReplicaId();
         const artifact = await client.getEditableArtifact(workspaceId, artifactId, {

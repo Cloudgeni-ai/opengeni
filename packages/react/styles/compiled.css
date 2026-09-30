@@ -5419,6 +5419,16 @@
       padding-inline: calc(var(--spacing) * 2.5);
     }
   }
+:where(.og-root).aria-disabled\:cursor-wait,:where(.og-root) .aria-disabled\:cursor-wait {
+    &[aria-disabled="true"] {
+      cursor: wait;
+    }
+  }
+:where(.og-root).aria-disabled\:opacity-70,:where(.og-root) .aria-disabled\:opacity-70 {
+    &[aria-disabled="true"] {
+      opacity: 70%;
+    }
+  }
 :where(.og-root).data-\[disabled\]\:pointer-events-none,:where(.og-root) .data-\[disabled\]\:pointer-events-none {
     &[data-disabled] {
       pointer-events: none;

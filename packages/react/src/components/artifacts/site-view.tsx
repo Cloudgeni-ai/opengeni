@@ -18,6 +18,8 @@ export type SiteViewProps = {
   archivedMessage?: string | undefined;
   /** Show the Site title in the frame bar; hide it under a host header that already does. */
   showTitle?: boolean | undefined;
+  /** Loading copy; defaults to "Loading Site…". */
+  loadingLabel?: string | undefined;
   /** Called with the loaded title, for a host header. */
   onTitle?: ((title: string) => void) | undefined;
   className?: string | undefined;
@@ -35,6 +37,7 @@ export function SiteView({
   theme,
   archivedMessage = "This Site is archived.",
   showTitle = true,
+  loadingLabel = "Loading Site…",
   onTitle,
   className,
 }: SiteViewProps) {
@@ -83,7 +86,7 @@ export function SiteView({
     return (
       <ArtifactProblem view={artifactLoadErrorView(error, "site")} onRetry={() => void load()} />
     );
-  if (!snapshot || !content) return <ArtifactLoading label="Loading Site…" />;
+  if (!snapshot || !content) return <ArtifactLoading label={loadingLabel} />;
   if (snapshot.detail.artifact.status === "archived")
     return <div className="p-4 text-sm text-fg-muted">{archivedMessage}</div>;
   return (
