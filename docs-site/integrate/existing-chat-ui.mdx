@@ -49,7 +49,7 @@ Register `handleChat` for:
 
 Each tenant maps to one workspace and each conversation to one session. Keep one stable conversation id per thread, sent by custom clients in `x-opengeni-conversation`, and check that the user may open it. [Onboard users](/integrate/users-and-tenants#onboard-users) first; chat requests never grant membership. With a `user`, chats default to `"private"` (personal knowledge on; `memory: false` turns saving off). Without a user, leaving `chats` out keeps workspace visibility, session-only reach, and knowledge off; use `"shared"` for service-owned chats. `agent` takes the same object as sessions ([Configure the agent](/integrate/configure-the-agent)), and the facade's renderer defaults to `"markdown"`.
 
-The Vercel and OpenAI formats send the latest user message and import earlier messages once, when the conversation is created. After that, OpenGeni owns the history. These routes are served by **your** backend: the OpenGeni API does not expose `/chat/completions` or `/responses`.
+The Vercel and OpenAI formats send only the latest user message. Earlier messages from your app are imported only when the session is first created; after that, OpenGeni owns the history, and messages your app shows but never sends are not added. These routes are served by **your** backend: the OpenGeni API does not expose `/chat/completions` or `/responses`.
 
 Always pass `baseUrl`; without it the facade targets `app.opengeni.ai`.
 

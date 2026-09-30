@@ -14,11 +14,13 @@ icon: "palette"
 
 The proxy lists only the chats the user created (`sessionList: "mine"`, the default); `sessionList: "visible"` lists every chat the user may read in the workspace. Control the selection with `sessionId` and `onSessionChange` (for example from the URL), or mount `SessionList` and `SessionConversation` separately.
 
+Import the conversation components from `@opengeni/react/session-ui`. It has no optional peers; the package root also exports the workbench (editor, terminal, desktop), whose dependencies are optional peers your app would otherwise need to install.
+
 `SessionConversation` is the complete conversation for one session: streaming replies, tool activity, approvals, structured questions, file attachments, the message queue, Steer, and Pause/Resume. It uses the SDK client from `OpenGeniProvider`, so it works unchanged behind [the session proxy](/embed-manually).
 
 ```tsx
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniProvider, SessionConversation } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
@@ -71,7 +73,7 @@ Menus and dialogs that render in a portal copy the theme from the element that o
 Tool calls to your own MCP server can render as product UI instead of a generic activity row. Tool names are `<server id>__<tool name>`:
 
 ```tsx
-import { createDefaultToolRegistry, type ToolRendererProps } from "@opengeni/react";
+import { createDefaultToolRegistry, type ToolRendererProps } from "@opengeni/react/session-ui";
 
 function TicketTool({ item }: ToolRendererProps) {
   return <TicketCard call={item} />; // item.arguments, item.output, item.status

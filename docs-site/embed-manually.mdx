@@ -22,7 +22,7 @@ Install both packages from the same release.
     OPENGENI_API_KEY=ogk_...                        # server only
     ```
 
-    A read-only key can inspect sessions but cannot create them. See [Authentication](/reference/authentication).
+    This one key is all the integration needs: it creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` lists only its organization grants (`account:read`, `workspace:create`, `api_keys:manage`) under `accountGrants`; that is expected. Check `credential.access` (`"full"`) and `credential.effectiveWorkspacePermissions` instead. A read-only key can inspect sessions but cannot create them. See [Authentication](/reference/authentication).
 
   </Step>
   <Step title="Onboard each user">
@@ -94,13 +94,13 @@ Install both packages from the same release.
     });
     ```
 
-    For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters).
+    For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters). A Django, Rails, Go, PHP, or Java backend needs no Node sidecar: see [Proxy from any backend](/integrate/proxy-from-any-backend).
 
   </Step>
   <Step title="Render the conversation">
     ```tsx
     import { OpenGeniClient } from "@opengeni/sdk";
-    import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
+    import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react/session-ui";
     import "@opengeni/react/compiled.css";
 
     const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });

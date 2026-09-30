@@ -31,6 +31,7 @@
           "integrate/users-and-tenants",
           "integrate/approvals-and-questions",
           "integrate/existing-chat-ui",
+          "integrate/proxy-from-any-backend",
           "integrate/production",
           "integrate/host-managed-integrations"
         ]

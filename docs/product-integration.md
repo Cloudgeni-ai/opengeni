@@ -101,7 +101,8 @@ export const handler = createSessionProxyHandler(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
+// session-ui has no optional peers; the root also exports the workbench.
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
@@ -135,6 +136,11 @@ attach only files; `modelSelection: false` removes per-message model choices
 and `authorizeSession` adds a product-level session check. Without
 `authorizeMutation` only cross-site mutations (by `Sec-Fetch-Site`) are
 refused, so cookie-authenticated products should pass their CSRF check.
+
+The handler is JavaScript. A Django, Rails, Go, PHP, or Java backend implements
+the same allowlist in its own framework instead of running a Node sidecar: see
+[Proxy from any backend](../docs-site/integrate/proxy-from-any-backend.mdx)
+for the routes, headers, stripped fields, security rules, and a Django example.
 
 The permissions above cover the conversation; drop `files:*` without
 attachments. Membership is granted only by explicit onboarding: the proxy and
@@ -267,8 +273,10 @@ defaults to `"private"` (personal Knowledge on; `memory: false` turns authoring
 off); without one, omitted `chats` keeps workspace visibility, session-only
 reach and Knowledge off. `og.chat(...)` and `resolve` also take `agent`, and the
 facade's renderer defaults to `"markdown"`. The
-adapters send only the latest user message and import earlier messages once as
-context on the first message; after that OpenGeni owns the history. Reopen
+adapters send only the latest user message. Earlier messages from the app are
+imported only when the session is first created, as context on its first
+message; after that OpenGeni owns the history, and messages the app shows but
+never sends are not added. Reopen
 legacy user-namespaced conversations with `chatBySessionId`. `og.client`,
 `chat.workspaceId`, and `chat.sessionId` address the same session through the
 full client, so `SessionConversation` can take over without a migration. The
@@ -369,7 +377,15 @@ reconciliation and cleanup rather than repeated manual setup.
 | Delegated token | A host acts with short-lived, explicit user/workspace authority | A standing multi-tenant backend credential |
 | Deployment access key | An operator needs a coarse configured/self-hosted deployment perimeter | Tenant identity, account selection, or workspace authorization |
 
-An organization API key is the default for the product shape on this page.
+An organization API key is the default for the product shape on this page. A
+full-access organization key is all the integration needs: it creates
+workspaces, adds external members, and creates and controls sessions as those
+users (`asUser`). Its `/v1/access/me` `accountGrants` (`account:read`,
+`workspace:create`, `api_keys:manage`) and empty `workspaceGrants` do not list
+that workspace authority; check `credential.access === "full"` and
+`credential.effectiveWorkspacePermissions` instead, and on a deployment that
+omits `credential`, make the idempotent call (`ensureWorkspace`) rather than
+concluding the key is too weak.
 Choosing it does not remove the product backend's obligation to authenticate
 its own users and resolve their allowed tenant before every proxy call.
 

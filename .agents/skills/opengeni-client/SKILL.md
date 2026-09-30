@@ -75,11 +75,17 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 
 ## Default: the full conversation behind a packaged proxy
 
-Default to OpenGeni's complete conversation experience: `@opengeni/react`'s
-`OpenGeniChat` (the user's chat list plus `SessionConversation`) and
-`@opengeni/react/compiled.css` (brand it with `--og-*` tokens), backed by the
+Default to OpenGeni's complete conversation experience: `OpenGeniProvider`,
+`OpenGeniChat` (the user's chat list plus `SessionConversation`) from
+`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css` (brand it with
+`--og-*` tokens). Import from `session-ui`, not the package root: the root also
+exports the workbench, whose editors, terminal and desktop viewer are optional
+peer dependencies your bundler would try to resolve. The UI is backed by the
 normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped
-same-origin proxy on the product server with Next.js, Express, and Hono adapters. It already provides streaming, replay, queue, steer, approvals,
+same-origin proxy on the product server with Next.js, Express, and Hono
+adapters (other backends: see
+[Proxy from any backend](references/proxy-from-any-backend.md)). It already
+provides streaming, replay, queue, steer, approvals,
 human input, attachments, and pause/resume. Deviate only when the product needs
 a materially different interaction model, a non-React frontend, or compute
 surfaces, and record why.
@@ -145,7 +151,7 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
 ```tsx
 // Browser: the unmodified SDK client, pointed at the mount.
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
+import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
@@ -178,6 +184,10 @@ Choose one only for its stated reason; read
   queue, composer, approval, and human-input behavior.
 - **SDK only**: a non-React frontend (Svelte, Vue, native mobile), a CLI, or
   backend automation. Keep the SDK on a product backend route.
+- **A non-JavaScript backend** (Django, Rails, Go, PHP, Java): keep the React
+  conversation and implement the proxy's small HTTP contract in that backend
+  instead of adding a Node sidecar. See
+  [Proxy from any backend](references/proxy-from-any-backend.md).
 - **Workbench**: the product genuinely exposes agent compute (changes, files,
   terminal, desktop). It has optional heavy peers.
 - **Chat facade fallback** (`@opengeni/sdk/chat`): the product already has a
@@ -291,9 +301,16 @@ Use one organization API key for the external backend (`createOrganizationApiKey
 `listOrganizationApiKeys`, `deleteOrganizationApiKey`); the token is shown once,
 so store it in the product's secret manager.
 
-The organization key needs `workspace:admin` (included in full-access keys;
-it implies session, file, MCP-attach, and member management). `/v1/access/me`
-shows only that account-level grant; an empty `workspaceGrants` is expected.
+**A full-access organization API key is all the integration needs.** It creates
+workspaces (`ensureWorkspace`, `workspaceIdFor`), adds external members, and
+creates and controls sessions as those users (`asUser`). Do not judge it by
+`/v1/access/me`'s `accountGrants` (`account:read`, `workspace:create`,
+`api_keys:manage`) or its empty `workspaceGrants`: those list account-level
+grants, not what the key may do inside shared workspaces. Check
+`credential.access === "full"` and `credential.effectiveWorkspacePermissions`
+instead; older deployments omit `credential`, so if it is missing, try the call
+(`ensureWorkspace` is idempotent) rather than concluding the key is too weak.
+Only an `access: "read"` key is limited, to reading.
 
 For each chosen product sharing boundary, call `ensureWorkspace` /
 `PUT /v1/workspaces/external` with a stable external mapping identity and persist
