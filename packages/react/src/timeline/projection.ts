@@ -1782,10 +1782,12 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   for (const item of items) {
     if (item.kind === "user-message") legacyTurn = item.id;
     const key = ("turnId" in item && item.turnId) || legacyTurn;
-    // Legacy activity still establishes a work boundary using its prompt key.
+    // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
     if (
-      (("turnId" in item && item.turnId) || isActivityItem(item)) &&
+      (("turnId" in item && item.turnId) ||
+        isActivityItem(item) ||
+        (item.kind === "agent-message" && item.text.trim())) &&
       key !== currentTurn &&
       !turns.has(key)
     ) {

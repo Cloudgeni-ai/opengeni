@@ -151,6 +151,26 @@ const workRows = (groups: TimelineGroup[]) =>
   groups.filter((group) => group.kind === "activity" && group.work);
 
 describe("readable per-turn grouping", () => {
+  test("new legacy text-only work stops the prior clock, but a human steer alone does not", () => {
+    sequence = 0;
+    const legacy = (type: string, payload: unknown) => event(type, payload, { turnId: null });
+    const first = [
+      legacy("user.message", { text: "First question" }),
+      legacy("agent.message.completed", { text: "First reply", messageId: "first" }),
+    ];
+    const nextQuestion = legacy("user.message", { text: "Next question" });
+    const before = workRows(fold([...first, nextQuestion]))[0]!;
+    expect(before.kind === "activity" && before.work?.endedAt).toBeUndefined();
+    const next = legacy("agent.message.completed", { text: "Next reply", messageId: "next" });
+    const rows = workRows(fold([...first, nextQuestion, next]));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.kind === "activity" && rows[0].work?.endedAt).toBe(next.occurredAt);
+    expect(visibleProse(fold([...first, nextQuestion, next]))).toEqual([
+      "First reply",
+      "Next reply",
+    ]);
+  });
+
   test("presented media in earlier prose remains primary beside the final response", () => {
     sequence = 0;
     const preview = "![Preview](artifact:9c1e4b7a-5d2f-4e3a-8b6c-0f1a2b3c4d5f)";
