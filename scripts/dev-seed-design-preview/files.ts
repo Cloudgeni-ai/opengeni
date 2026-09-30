@@ -282,10 +282,10 @@ export async function buildSeedFiles(): Promise<Record<string, SeedFile>> {
     },
     {
       key: "contract",
-      filename: "Nordstore renewal agreement 2027.pdf",
+      filename: "Northwind Storage renewal agreement 2027.pdf",
       contentType: "application/pdf",
-      bytes: simplePdf("Nordstore AS - Storage Services Agreement (Renewal)", [
-        'Between Nordstore AS ("Vendor") and Acme Robotics AS ("Customer"). Fake sample document.',
+      bytes: simplePdf("Northwind Storage AS - Storage Services Agreement (Renewal)", [
+        'Between Northwind Storage AS ("Vendor") and Acme Robotics AS ("Customer"). Fake sample document.',
         "",
         "2.1 Term. This Agreement renews automatically for successive 24-month terms",
         "    unless either party gives written notice at least 90 days before renewal.",

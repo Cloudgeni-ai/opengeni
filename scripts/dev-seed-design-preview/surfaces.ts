@@ -145,7 +145,7 @@ const briefingRun = (alerts: string) => (b: ConversationBuilder) => {
         `- ${alerts}`,
         "- 3 pull requests wait on your review; #1287 (Terraform state split) is the oldest at 2 days.",
         "- Checkout p95 is back under 300 ms after the index rebuild.",
-        "- 10:00 platform sync, 13:30 1:1 with Maria, 15:00 vendor call (Nordstore).",
+        "- 10:00 platform sync, 13:30 1:1 with Maria, 15:00 vendor call (Northwind Storage).",
         "- Deploy freeze starts Friday 14:00.",
       ].join("\n"),
     );

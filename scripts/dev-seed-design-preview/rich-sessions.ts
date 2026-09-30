@@ -1510,7 +1510,7 @@ const escalationReview: RichSessionSeed = {
         args: { ticketIds: [88121, 88107, 88093] },
         output: mcpJson({
           companies: [
-            { name: "Nordic Packaging AS", arr: 184000 },
+            { name: "Contoso Packaging AS", arr: 184000 },
             { name: "Fjord Foods", arr: 62000 },
           ],
         }),
@@ -1521,7 +1521,7 @@ const escalationReview: RichSessionSeed = {
           "",
           "| Root cause | Tickets | Biggest account | Status |",
           "| --- | ---: | --- | --- |",
-          "| Firmware 4.2 stops arm mid-cycle | 5 | Nordic Packaging AS ($184k ARR) | Hotfix 4.2.1 in QA |",
+          "| Firmware 4.2 stops arm mid-cycle | 5 | Contoso Packaging AS ($184k ARR) | Hotfix 4.2.1 in QA |",
           "| Android pairing (Pixel 8) | 3 | Fjord Foods ($62k ARR) | Workaround sent |",
           "| Wrong VAT on invoices | 1 | — | Fixed, credit note issued |",
           "",
