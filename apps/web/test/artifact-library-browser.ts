@@ -72,6 +72,18 @@ try {
     await page
       .getByRole("link", { name: "Project mark", exact: true })
       .waitFor({ timeout: 90_000 });
+    const site = page.getByRole("link", { name: "Product analytics", exact: true });
+    const still = page.getByTitle("Preview of Product analytics", { exact: true });
+    if (height === 600) {
+      assert.ok(
+        await site.evaluate(
+          (element) => element.closest("li")!.getBoundingClientRect().top >= innerHeight,
+        ),
+        "the short viewport starts with the Site card below the visible gallery",
+      );
+      assert.deepEqual((await activity()).siteHtml, [], "an offscreen Site does not fetch HTML");
+      assert.equal(await still.count(), 0, "an offscreen Site does not mount a still");
+    }
     await page.getByRole("link", { name: "Project mark", exact: true }).scrollIntoViewIfNeeded();
     await page.getByRole("img", { name: "Project mark", exact: true }).waitFor();
     await page.locator('[data-slot="content-page"]').evaluate((element) => {
@@ -83,8 +95,12 @@ try {
       "Help me create a workspace artifact. Ask what I want to make before creating it.",
     );
     // The gallery (default) shows a Site as a still: sandboxed with no scripts, no network.
-    const still = page.getByTitle("Preview of Product analytics", { exact: true });
+    // Activate this card's viewport gate explicitly, rather than relying on the
+    // preceding image scroll to happen to bring a nearby Site into view too.
+    await site.scrollIntoViewIfNeeded();
     await still.waitFor({ state: "attached" });
+    await still.contentFrame().getByText("Weekly active teams by plan.", { exact: true }).waitFor();
+    assert.equal((await activity()).siteHtml.length, 1, "the visible Site fetches its HTML once");
     assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
     assert.equal(
       await page.locator("iframe:not([sandbox=''])").count(),
@@ -102,6 +118,10 @@ try {
       false,
       "no horizontal overflow",
     );
+    await page.screenshot({ path: `${output}/site-still-${suffix}.png`, fullPage: true });
+    await page.locator('[data-slot="content-page"]').evaluate((element) => {
+      element.scrollTop = 0;
+    });
     await page.screenshot({ path: `${output}/gallery-${suffix}.png`, fullPage: true });
     await page.getByRole("radio", { name: "List", exact: true }).click();
     assert.equal(await page.locator("iframe").count(), 0, "the list shows no Site stills");
