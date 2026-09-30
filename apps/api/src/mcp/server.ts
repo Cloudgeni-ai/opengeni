@@ -2860,9 +2860,15 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with concrete evidence. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared. Successful completion returns report artifact references and prevents further continuation turns.",
+        "Mark the session goal as completed with a short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable and is not shown as your final chat reply; do not squeeze a report into it or remove spaces to fit. After this tool succeeds, reply to the user with the requested deliverable, or its summary and retained artifact link. Completion stops automatic goal continuations, not the current turn or its final reply. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
-        evidence: z4.string().min(1),
+        evidence: z4
+          .string()
+          .min(1)
+          .max(8192)
+          .describe(
+            "Short ledger proof, at most 8192 characters; not the final answer. Keep normal spaces. Deliver the answer in your final user-facing reply.",
+          ),
         reportDeliveries: SessionGoalReportDeliveries.optional(),
       },
     },
@@ -2922,6 +2928,8 @@ function registerGoalTools(
           ...delivery,
           artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
         })),
+        handoff:
+          "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
       });
     },
   );

@@ -170,8 +170,18 @@ A goal is `active`, `paused`, or `completed`.
   and mutation commit atomically. A recovered attempt can therefore reconcile
   a lost response without applying the update twice; replaying an older key
   returns its stored result and never overwrites a newer goal revision.
-- `goal_complete { evidence }` is terminal. Only a new `goal_set` can replace a
-  completed goal.
+- `goal_complete { evidence }` is terminal for the goal, not the current turn.
+  Only a new `goal_set` can replace a completed goal. Its agent-facing evidence
+  has an explicit 8192-character limit and is a short ledger proof, not the
+  deliverable. The agent must still send the requested final answer (or summary
+  and retained artifact link) in the same turn. The tool receipt reminds it to
+  do so. Late child results remain context to integrate and deliver, not a
+  command to stay silent or restart completed work.
+  If one same-turn reply reminder still produces an empty final, the turn
+  completes with a typed `emptyFinalReply: true` notice, not `turn.failed`.
+  The goal is untouched: active goals can continue, and later child results
+  remain deliverable. The marker records missing answer delivery, not success
+  of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or

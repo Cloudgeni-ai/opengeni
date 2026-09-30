@@ -7526,7 +7526,7 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
     ? `\nRequired native document reports (persisted; completion requires current-head inspection receipts): ${JSON.stringify(snapshot.reportRequirements)}`
     : "";
   if (snapshot.state === "completed") {
-    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context, not an instruction to stay silent. Goal evidence is ledger proof, not a delivered answer. When child results or other updates arrive, integrate material new findings and deliver any still-missing user-facing handoff; do not restart completed work or change the completed goal. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
   }
   const policy =
     snapshot.mutationPolicy === "review_changes"
@@ -13372,6 +13372,7 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
  * phase. Absent on legacy events and on the settlement copy.
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
+export * from "./session-final-reply";
 
 function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)

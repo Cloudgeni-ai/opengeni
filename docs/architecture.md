@@ -28,8 +28,8 @@ verified active-turn user. Task notes coordinate; linking never merges users.
 Skill removal deletes scoped heads/revisions with exact approval and Learning
 enforcement, preserving conversation context.
 
-Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
-retain catalog floors but grant no capabilities or credentials.
+`mcpApprovalPolicies` requires session-control authority. Frozen policies
+retain catalog floors, granting no capabilities/credentials.
 
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
@@ -38,7 +38,7 @@ Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-acc
 
 ## 3. Core invariants
 
-Hosted tool-call `status` survives persistence and Codex replay; function/message
+Hosted tool-call `status` survives persistence/Codex replay; function/message
 annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
 [model providers](model-providers.md).
 
@@ -86,23 +86,21 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 Temporal coordinates execution; activities read Postgres obligations, not signals.
 Conversation, goals, queues, usage and provider/tool transcripts stay outside
-workflow history; streams use ordinary events.
+workflow history.
 
-Canonical: `apps/worker/src/workflows/session.ts` and
+Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Control observation is not settlement: unavailable scoped reads and owned
-attempts retain bounded, signal-interruptible waits without marking work idle,
-revoking writers, or dispatching successors. Temporal metadata cannot prove
-physical-writer quiescence.
+Control observation is not settlement: unavailable reads/owned attempts retain
+bounded, interruptible waits without marking idle, revoking writers or dispatching
+successors. Temporal metadata cannot prove physical-writer quiescence.
 
 Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
-effects. Updates form atomic batches; resumed attempts append batches, preserving
-ordered, exactly-once history.
+A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
+attempts append atomic update batches, preserving ordered, exactly-once history.
 
 `wait_for_input` ends execution after tool-batch settlement, preserving trusted
 wait authority and immutable same-turn deadlines. Command results remain durable;
@@ -110,9 +108,8 @@ alone, they wake only explicit waits. Notices cannot block other inbox input.
 Batching preserves causal authority; messages/Steer inherit the sender’s human
 independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 
-`runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
-operations have external effects. Recovery is explicit and attempt-fenced.
-Provider work stays outside retries; retry only idempotent settlement.
+`runAgentTurn` is non-retryable: provider/tool operations have external effects.
+Recovery is explicit and attempt-fenced; retry only idempotent settlement.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
@@ -180,15 +177,19 @@ unless review is configured; human-owned constraints remain. Goals never live
 in `Agent.instructions` or solely workflow memory.
 Generic caps cannot replace lifecycle fixes.
 
+Goal completion is not chat delivery. One handoff corrects empty
+finals; repetition completes with a typed notice, preserving goals/history/waits.
+See [run lifecycle](run-lifecycle.md).
+
 Non-transient preclaim rejection parks accepted work behind a durable admission
 block. Resume/Send/Steer rechecks without granting authority; operational outages
 retain backoff.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
-Reports default to chat; requested or large ones use native documents authored
-via the Documents Skill; goal/artifact domains validate persisted
-requirements/current inspection proof. See [`goals.md`](goals.md).
+Reports default to chat; requested/large ones use native documents and the
+Documents Skill. Goal/artifact domains validate requirements/inspection proof.
+See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 

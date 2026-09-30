@@ -1,5 +1,8 @@
 import { measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
 import {
+  appendSessionHistoryItems,
+  sessionTurnFinalReplyFacts,
+  sessionTurnHasFinalReplyNudge,
   getSessionEvent,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
@@ -141,6 +144,7 @@ import {
 import { inputWaitReply, latestDurableTurnMessageText } from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
 import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
@@ -583,9 +587,11 @@ export async function runTurnStreamAttempt(
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
   let workerPreparationTotalRecorded = false;
+  let toolsExecuted = false;
+  let finalReplyNudged = false;
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
-  }): Promise<RunAgentTurnResult> => {
+  }): Promise<RunAgentTurnResult | "reply_nudge"> => {
     if (!runInput) {
       throw new Error("Run input was not prepared");
     }
@@ -1159,6 +1165,7 @@ export async function runTurnStreamAttempt(
         }
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
         if (completedToolCall) {
+          toolsExecuted = true;
           retainedScreenshotMetadata =
             media.retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
           const typedScreenshot = retainedScreenshotMetadata
@@ -1472,7 +1479,10 @@ export async function runTurnStreamAttempt(
     // External Codemode stays reachable until finalization. Close wait
     // admission before any terminal output/history decision, and drain an
     // already-admitted wait before consulting the actual runner-yield latch.
-    await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
+    // Drain trusted receipts before deciding whether an empty stream may need
+    // a handoff. Do not terminally seal the attempt until that decision: the
+    // one same-turn stream still uses the ordinary input-wait admission gate.
+    await eventing.preparedTools?.inputWaitYield?.drainForHandoff(runtimeCancellationSignal);
     if (
       options.requireTerminalModelResponse &&
       !eventing.preparedTools?.inputWaitYield?.yielded &&
@@ -1585,6 +1595,7 @@ export async function runTurnStreamAttempt(
       }
     }
     if (eventing.stream.interruptions.length > 0) {
+      await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
       await historySink.reconcileConversationTruth({ requireDurable: true });
       const approvals = runtime.serializeApprovals(eventing.stream.interruptions);
       const humanInputInterruptions =
@@ -1739,6 +1750,60 @@ export async function runTurnStreamAttempt(
     const finalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
     );
+    const durableReplyFacts =
+      !inputWaitYielded && finalOutput.trim().length === 0
+        ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)
+        : { toolsExecuted: false, completedGoal: false };
+    let emptyFinalReply = false;
+    if (
+      needsFinalReply({
+        output: finalOutput,
+        inputWaitYielded:
+          inputWaitYielded || eventing.preparedTools?.inputWaitYield?.requested === true,
+        interrupted: false, // interruption settlement returned above
+        maintenance: turn.source === "compaction",
+        toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
+        completedGoal: durableReplyFacts.completedGoal,
+      })
+    ) {
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      // Consult retained truth, including inactive compacted rows, so an
+      // attempt replacement or compaction cannot spend this bound again.
+      if (
+        finalReplyNudged ||
+        (await sessionTurnHasFinalReplyNudge(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          activeTurnId,
+          finalReplyNudge(activeTurnId).content[0]!.text,
+        ))
+      ) {
+        // A second empty response is a delivery-quality notice, not failed
+        // execution: preserve goal continuation and later machine-input wakes.
+        emptyFinalReply = true;
+      } else {
+        const appended = await appendSessionHistoryItems(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          expectedExecutionGeneration: attempt.executionGeneration,
+          expectedAttemptId: input.attemptId,
+          items: [
+            {
+              position: await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId),
+              item: finalReplyNudge(activeTurnId),
+            },
+          ],
+        });
+        if (!appended) throw new TurnAttemptFencedError("turn ended before final reply handoff");
+        finalReplyNudged = true;
+        await prepareRunAttemptInput();
+        return "reply_nudge";
+      }
+    }
+    await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
     // The final output is the newest message this stream completed, already
     // durable with its provider identity and phase. A phase-less settlement
     // copy is published only when this stream did not complete that text.
@@ -1773,7 +1838,11 @@ export async function runTurnStreamAttempt(
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
           {
             type: "turn.completed",
-            payload: { output: finalOutput, ...(reply === null ? {} : { reply }) },
+            payload: {
+              output: finalOutput,
+              ...(reply === null ? {} : { reply }),
+              ...(emptyFinalReply ? { emptyFinalReply: true } : {}),
+            },
           },
           { type: "session.status.changed", payload: { status: "idle" } },
         ],
@@ -1871,11 +1940,19 @@ export async function runTurnStreamAttempt(
   }
   try {
     let retriedAfterCompaction = false;
+    finalReplyNudged = await sessionTurnHasFinalReplyNudge(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      activeTurnId,
+      finalReplyNudge(activeTurnId).content[0]!.text,
+    );
     while (true) {
       try {
         const result = await runStreamAttempt({
           requireTerminalModelResponse: retriedAfterCompaction,
         });
+        if (result === "reply_nudge") continue;
         if (retriedAfterCompaction) {
           observability.info("context compaction recovery succeeded after in-activity retry", {
             sessionId: input.sessionId,

@@ -87,6 +87,10 @@ export type ChatReply = {
   status: ChatReplyStatus;
   /** Set when the turn is waiting on `chat.respond` instead of finished. */
   pending: ChatPending | null;
+  /** A non-destructive completion without a model-authored final answer. */
+  emptyFinalReply?: true;
+  /** Display this informational notice when emptyFinalReply is present. */
+  notice?: string;
   /** Every event consumed while folding this turn. */
   events: SessionEvent[];
   toString(): string;

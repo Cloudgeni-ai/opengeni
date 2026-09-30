@@ -96,4 +96,11 @@ describe("goal MCP report field contracts", () => {
       }).success,
     ).toBe(false);
   });
+  test("evidence has an explicit character cap without stripping spaces", () => {
+    const schema = tools().goal_complete!.inputSchema;
+    const evidence = " normal proof ".repeat(500);
+    expect(schema.safeParse({ evidence }).data).toEqual({ evidence });
+    expect(schema.safeParse({ evidence: "x".repeat(8192) }).success).toBe(true);
+    expect(schema.safeParse({ evidence: "x".repeat(8193) }).success).toBe(false);
+  });
 });

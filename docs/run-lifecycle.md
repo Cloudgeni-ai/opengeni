@@ -49,6 +49,19 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+An empty or whitespace-only final after tool execution or a completed goal,
+with no input/approval wait, receives one durable developer-message handoff in
+the same logical turn. The worker checkpoints the original response and tool
+results first, then continues from that truth without replaying completed
+tools. The turn-scoped marker survives recovery and compaction; a second empty
+final settles `turn.completed` with `emptyFinalReply: true`. The timeline shows
+an informational notice, and SDK chat replies expose the marker and notice.
+It does not claim a deliverable was sent, fail or pause the goal, or defer later
+child-result wakes; active goals retain normal continuation eligibility.
+This bounds only the handoff correction, not legitimate
+run length or tool work, and introduces no Temporal retry or history rewrite.
+Explicit `wait_for_input`, approvals, and maintenance compaction remain exempt.
+
 Each accepted turn also freezes a content-free **surface**
 (`session_turns.surface`, `SessionTurnSurface` in
 `packages/contracts/src/product-analytics.ts`): the product surface its request
