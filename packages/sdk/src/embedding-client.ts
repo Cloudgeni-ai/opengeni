@@ -53,6 +53,106 @@ function serializeServiceContext(context: ServiceContext): string {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
+  /** Read configuration (null means no configured ceiling). Requires admin or organization-key read authority. */
+  async getWorkspaceAllowance(
+    workspaceId: string,
+  ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceAllowance | null> {
+    return this.requestJson("GET", `/v1/workspaces/${encodeURIComponent(workspaceId)}/allowance`);
+  }
+
+  /**
+   * Set a USD-micro ceiling with exact-version CAS (0 only for first creation;
+   * after clear reuse its returned version). Requires
+   * organization key-control authority or account:admin, never workspace admin
+   * alone. Shares may oversubscribe the pool; actual post-call settlement can
+   * overshoot before the next admission check.
+   */
+  async setWorkspaceAllowance(
+    workspaceId: string,
+    request: import("@opengeni/contracts/usage-allowances").SetWorkspaceAllowanceRequest,
+  ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceAllowance> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/allowance`,
+      request,
+    );
+  }
+
+  /** Clear with the exact version; grants and settled usage are not a billing refund. */
+  async clearWorkspaceAllowance(
+    workspaceId: string,
+    request: import("@opengeni/contracts/usage-allowances").ClearWorkspaceAllowanceRequest,
+  ): Promise<import("@opengeni/contracts/usage-allowances").ClearWorkspaceAllowanceResponse> {
+    return this.requestJson(
+      "DELETE",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/allowance`,
+      request,
+    );
+  }
+
+  /** Grant USD micros once. Reuse the operationId and exact request after an uncertain response. */
+  async grantWorkspaceCredits(
+    workspaceId: string,
+    request: import("@opengeni/contracts/usage-allowances").GrantWorkspaceCreditsRequest,
+  ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceCreditGrant> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/allowance/grants`,
+      request,
+    );
+  }
+
+  /**
+   * Administer an existing member by canonical subject or external identity.
+   * null restores memberDefault; shares >1 are valid ceilings, not reservations.
+   * Concurrent calls may exceed the ceiling until their actual cost settles.
+   */
+  async setMemberAllowance(
+    workspaceId: string,
+    member: string | { source: string; externalId: string },
+    request: import("@opengeni/contracts/usage-allowances").SetMemberAllowanceRequest,
+  ): Promise<import("@opengeni/contracts/usage-allowances").MemberAllowance> {
+    const path =
+      typeof member === "string"
+        ? encodeURIComponent(member)
+        : `external/${encodeURIComponent(member.source)}/${encodeURIComponent(member.externalId)}`;
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/members/${path}/allowance`,
+      request,
+    );
+  }
+
+  /** Paginated settled usage, current or YYYY-MM. Requires admin or organization-key read authority. */
+  async getUsage(
+    workspaceId: string,
+    query: import("@opengeni/contracts/usage-allowances").GetUsageRequest = {},
+    options: import("./client").OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceUsageResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/usage`,
+      undefined,
+      usageQuery(query),
+      options,
+    );
+  }
+
+  /** Own usage only. On your backend use asUser(authenticatedUser); subject selectors are not accepted. */
+  async getMyUsage(
+    workspaceId: string,
+    query: import("@opengeni/contracts/usage-allowances").GetMyUsageRequest = {},
+    options: import("./client").OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts/usage-allowances").WorkspaceUsageResponse> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/usage/me`,
+      undefined,
+      usageQuery(query),
+      options,
+    );
+  }
+
   /** Recover this actor's connection creation result without resending secrets.
    * A 404 means no visible committed result, not proof that an in-flight write failed. */
   async getConnectionCreationResult(
@@ -381,4 +481,14 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
   ): Promise<import("@opengeni/contracts/external-identities").ExternalIdentity> {
     return this.requestJson("POST", `/v1/workspaces/${workspaceId}/external-members`, request);
   }
+}
+
+function usageQuery(
+  query: import("@opengeni/contracts/usage-allowances").GetUsageRequest,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(query)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, String(value)]),
+  );
 }

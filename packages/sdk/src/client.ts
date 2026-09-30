@@ -50,6 +50,8 @@ import type {
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniAllowanceExhaustedError,
+  allowanceExhaustedFields,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
@@ -9125,7 +9127,11 @@ async function apiErrorFromResponse(
   response: FetchResponse,
   context: ApiErrorRequestContext,
 ): Promise<OpenGeniApiError> {
-  return new OpenGeniApiError(response.status, await readBoundedJsonErrorBody(response), {
+  const body = await readBoundedJsonErrorBody(response);
+  const ErrorType = allowanceExhaustedFields(body)
+    ? OpenGeniAllowanceExhaustedError
+    : OpenGeniApiError;
+  return new ErrorType(response.status, body, {
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     mutation: isMutationMethod(context.method),
   });

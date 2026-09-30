@@ -322,6 +322,15 @@ export function createSessionProxyHandler(
       }
       const base = `/v1/workspaces/${workspaceId}`;
 
+      // Only the resolved user's own usage. No full roster, allowance config,
+      // member selectors, or controls can pass through this browser boundary.
+      if (area === "usage" && tail.length === 1 && tail[0] === "me" && method === "GET") {
+        if (Object.keys(query).some((key) => key !== "period")) {
+          return errorJson(400, "invalid_usage_query", "Only period is accepted for own usage.");
+        }
+        return await read(`${base}/usage/me`);
+      }
+
       // Workspace reads and the live control stream used by <OpenGeniProvider>.
       if (area === undefined && method === "GET") return await read(base);
       if (area === "model-catalog" && tail.length === 0 && method === "GET") {

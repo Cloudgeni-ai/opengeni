@@ -39,7 +39,31 @@ export type {
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEvent,
   WorkspaceWebhookEventType,
+  SessionWorkspaceWebhookEvent,
+  WorkspaceUsageWebhookEvent,
 } from "./workspace-integrations";
+export type {
+  AllowanceExhaustedRefusal,
+  ClearWorkspaceAllowanceRequest,
+  ClearWorkspaceAllowanceResponse,
+  GetUsageRequest,
+  GetMyUsageRequest,
+  GrantWorkspaceCreditsRequest,
+  MemberAllowance,
+  MemberAllowanceDefault,
+  MemberAllowanceRule,
+  MemberAllowanceUsage,
+  SetMemberAllowanceRequest,
+  SetWorkspaceAllowanceRequest,
+  UsageAllowancePeriod,
+  UsageAllowanceStatus,
+  UsageAllowanceWindow,
+  WorkspaceAllowance,
+  WorkspaceAllowanceConfig,
+  WorkspaceAllowanceUsage,
+  WorkspaceCreditGrant,
+  WorkspaceUsageResponse,
+} from "@opengeni/contracts/usage-allowances";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type { ToolDisplayMetadata } from "@opengeni/contracts";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
@@ -144,6 +168,7 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniAllowanceExhaustedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
