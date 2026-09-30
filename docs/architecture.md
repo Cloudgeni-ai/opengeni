@@ -569,11 +569,12 @@ Canonical: `packages/contracts/src/work-claims.ts`,
 
 ### 3.12 Usage allowances constrain debits, not authority
 
-Org admins set budgets; workspace admins split members; agents do neither.
-USD-micro counters permit overshoot without reservations. Shares may
-oversubscribe included credits and remaining grants. Default-off
-`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until every consumer supports
-enforcement.
+Org admins set budgets; workspace admins split members.
+Counters permit overshoot, not reservations. Shares oversubscribe
+included credits plus remaining grants. Default-off
+`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers support enforcement.
+Private FORCE-RLS storage preserves older binaries' data-schema inventory for
+rolling deployment.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ---

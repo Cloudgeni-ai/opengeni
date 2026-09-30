@@ -1032,6 +1032,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/allowance/state",
+      "sdk": [
+        "OpenGeniEmbeddingClient.getWorkspaceAllowanceState"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceAllowanceState"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/api-keys",
       "sdk": [
         "OpenGeniClient.listApiKeys"
@@ -9212,7 +9223,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.expectedVersion": "integer!"
+        "$.expectedVersion": "integer!",
+        "$.operationId": "string?"
       }
     },
     "ClearWorkspaceAllowanceResponse": {
@@ -21777,6 +21789,16 @@
         "$.version": "integer!"
       }
     },
+    "WorkspaceAllowanceState": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.config": "ref(WorkspaceAllowance)! null",
+        "$.version": "integer!"
+      }
+    },
     "WorkspaceAllowanceUsage": {
       "io": [
         "output"
@@ -24431,6 +24453,7 @@
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
       "WorkspaceAllowance": "type",
       "WorkspaceAllowanceConfig": "type",
+      "WorkspaceAllowanceState": "type",
       "WorkspaceAllowanceUsage": "type",
       "WorkspaceArtifact": "type",
       "WorkspaceArtifactContentResponse": "type",
@@ -27548,6 +27571,7 @@
       "getMyUsage",
       "getUsage",
       "getWorkspaceAllowance",
+      "getWorkspaceAllowanceState",
       "grantWorkspaceCredits",
       "listConnectAccounts",
       "listConnectProviders",

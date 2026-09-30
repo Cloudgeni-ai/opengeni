@@ -19,6 +19,14 @@ with the existing `budget_exhausted` marker, keeps the session usable, and pause
 an active goal with reason `allowance` in the settlement transaction. No
 pre-call reservation or event-scan admission is introduced.
 
+A paid compaction commits its summary/checkpoint and cost before admission is
+rechecked for the frozen turn's workspace and initiating human. An exhausted
+allowance stops before another title or inference request; retained compaction
+truth is not replayed or discarded. Goal-continuation admission resolves the
+same latest-finished causal row under the session/goal locks as materialization,
+so a newer-started turn cannot lend a different member's allowance to the
+continuation.
+
 Workspace control revisions never move backwards. Migration 0505 repairs heads
 behind retained control events by advancing only the revision, preserving pause
 state, timers and event history. Fresh browser streams start at that head; old

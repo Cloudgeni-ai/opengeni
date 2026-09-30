@@ -39,6 +39,24 @@ must not make persisted policies invisible or let older consumers execute
 accepted work without their allowance checks. Retain the compatible readers
 and use an authorized versioned clear/rule change for policy recovery.
 Migration rollout compatibility does not by itself authorize early activation.
+All new allowance tables (including attribution, clear-replay and video
+allocation receipts) live in `opengeni_private`, with no direct runtime grants.
+The public data-schema lifecycle functions use explicit private-table references
+and a pinned `pg_catalog, <data schema>, pg_temp` path. Older consumers retain
+their exact table inventory; regression coverage runs the complete pre-allowance
+readiness inspector/evaluator and role provisioner against the new schema.
+The capability stamp remains bound to backend, transaction, data schema and
+tenant even though its storage is private.
+
+Debits and policy mutations advance an expired active window transactionally.
+Switching from monthly to nonrenewing preserves settled usage in the current
+window; it does not revive a stale window or reset its usage to zero.
+The additive DB `getWorkspaceAllowanceState` helper returns `{ version, config }`,
+including the tombstone revision when `config` is null. Existing nullable
+`getWorkspaceAllowance` remains compatible. A clear with an `operationId`
+replays its exact committed revision while that tombstone remains current,
+bound to actor and expected version. A superseded clear replay conflicts and
+cannot clear a subsequent configuration.
 See [client/server compatibility](architecture.md#310-clientserver-compatibility-policy).
 
 ## PostgreSQL verification

@@ -51,6 +51,8 @@ The root `OpenGeniClient` provides:
 - `getWorkspaceAllowance(workspaceId)`
 - `setWorkspaceAllowance(workspaceId, { ...config, expectedVersion })`
 - `clearWorkspaceAllowance(workspaceId, { expectedVersion })`
+- `getWorkspaceAllowanceState(workspaceId)` returns `{ version, config }`,
+  including a cleared lifecycle's version.
 - `grantWorkspaceCredits(workspaceId, { operationId, credits, expiresAt? })`
 - `setMemberAllowance(workspaceId, subjectId | { source, externalId },
   { rule: { share } | { credits } | null, expectedVersion })`
@@ -71,10 +73,19 @@ Membership must already exist; assigning a rule never grants access.
 `expectedVersion: 0` means initial creation, exact versions thereafter.
 Store returned versions; refresh/reconcile conflicts rather than guessing.
 Member `null` restores the workspace default and is itself versioned.
-Clear requires an exact positive version and returns `{ version }`; retain
-that cleared lifecycle receipt because a config read then returns null.
+Clear requires an exact positive version and returns `{ version }`. Supply an
+`operationId` and reuse the exact request after a lost response. The replay
+rechecks authority and conflicts after a later lifecycle change; read
+`getWorkspaceAllowanceState` to reconcile without guessing a version.
+The existing configuration read still returns null after clear.
 Recreation requires that exact clear version; zero is rejected after any
 configuration has existed, including after clear.
+
+Allowance refusals identify `scope` and `resetsAt`. A workspace ceiling is
+raised by an organization administrator/full organization key; a member
+ceiling is adjusted by a workspace administrator/full organization key.
+Buying organization credits or connecting a subscription does not by itself
+raise an exhausted allowance. Web, MCP, and Slack retain this distinction.
 Reuse the grant's operation ID and exact body after an uncertain result; a
 new ID grants again and a changed body under the same ID conflicts.
 Omitted/null expiry means no expiry. A grant increases allowance capacity,
