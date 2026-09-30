@@ -3,6 +3,7 @@ import * as core from "@opengeni/core";
 import * as db from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
+import { parseSync } from "oxc-parser";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
@@ -102,17 +103,44 @@ describe("manual schedule allowance attribution", () => {
 
   test("MCP trigger uses the task revision authority and the resolved catalog before admission", async () => {
     const source = await Bun.file(new URL("../src/mcp/server.ts", import.meta.url)).text();
+    const parsed = parseSync("server.ts", source);
+    expect(parsed.errors).toEqual([]);
+    const calls: Array<{ name: string; start: number; end: number }> = [];
+    function visit(value: unknown): void {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item);
+        return;
+      }
+      const node = value as Record<string, unknown>;
+      if (node.type === "CallExpression") {
+        const callee = node.callee as { type?: string; name?: string } | undefined;
+        if (callee?.type === "Identifier" && typeof callee.name === "string") {
+          calls.push({ name: callee.name, start: Number(node.start), end: Number(node.end) });
+        }
+      }
+      for (const child of Object.values(node)) visit(child);
+    }
+    visit(parsed.program);
     const trigger = source.indexOf('"scheduled_tasks_trigger"');
-    const authority = source.indexOf("getScheduledTaskRevisionAuthoritySubject(deps.db,", trigger);
-    const limit = source.indexOf(
-      "await requireLimit({ ...deps, settings: catalogSettings },",
-      authority,
+    const authority = calls.find(
+      (call) => call.name === "getScheduledTaskRevisionAuthoritySubject" && call.start > trigger,
     );
-    const dispatch = source.indexOf("await triggerScheduledTaskForGrant(", limit);
-    expect(authority).toBeGreaterThan(trigger);
-    expect(limit).toBeGreaterThan(authority);
-    expect(dispatch).toBeGreaterThan(limit);
-    expect(source.slice(limit, dispatch)).toContain(
+    const limit = calls.find(
+      (call) => call.name === "requireLimit" && call.start > (authority?.start ?? Infinity),
+    );
+    const dispatch = calls.find(
+      (call) =>
+        call.name === "triggerScheduledTaskForGrant" && call.start > (limit?.start ?? Infinity),
+    );
+    expect(trigger).toBeGreaterThanOrEqual(0);
+    expect(authority).toBeDefined();
+    expect(limit).toBeDefined();
+    expect(dispatch).toBeDefined();
+    expect(source.slice(limit!.start, limit!.end)).toContain(
+      "{ ...deps, settings: catalogSettings }",
+    );
+    expect(source.slice(limit!.start, limit!.end)).toContain(
       "taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null",
     );
   });
