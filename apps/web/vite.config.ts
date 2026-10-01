@@ -247,12 +247,12 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // The account-menu usage row and the composer's limit notice load
-              // on every session page (behind usage-entry's lazy boundaries).
-              // Keep them, the member-facing React usage pieces and the SDK
-              // reads apart from the budget pages, which pull settings.
-              name: "usage-surfaces",
-              test: /(?:apps[\\/]web[\\/]src[\\/]components[\\/]usage[\\/]usage-surfaces\.tsx|packages[\\/]react[\\/]src[\\/](?:usage\.ts|usage[\\/]summary\.ts|hooks[\\/]use-usage\.ts|components[\\/]usage-(?:meter|limit-notice)\.tsx)|packages[\\/]sdk[\\/]src[\\/]usage-allowances\.ts)$/,
+              // The composer's "+" menu primitives are called at module scope
+              // (lazyComposerPanel) by pickers on the composer and session
+              // graphs. Keep them in a leaf chunk (React, icons and class
+              // helpers only) so no chunk cycle can evaluate a caller first.
+              name: "composer-menu-primitives",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:composer-menu\.tsx|menu-styles\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
@@ -261,7 +261,7 @@ export default defineConfig({
               // (with its Radix primitive, used nowhere else; it must not join
               // the shared UI runtime). Only reached from lazy settings routes.
               name: "usage-allowances",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]usage[\\/](?!usage-entry\.|usage-surfaces\.)[\w-]+\.tsx?|lib[\\/]usage-allowances\.ts)|packages[\\/]react[\\/]src[\\/]components[\\/]usage-member-list\.tsx|@radix-ui(?:\+|[\\/])react-slider(?:@|[\\/]).*)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]usage[\\/](?!usage-entry\.)[\w-]+\.tsx?|lib[\\/]usage-allowances\.ts)|packages[\\/]react[\\/]src[\\/]components[\\/]usage-member-list\.tsx|@radix-ui(?:\+|[\\/])react-slider(?:@|[\\/]).*)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
