@@ -333,6 +333,12 @@ privacy semantics are unchanged.
   execution digest and access-drift report), composer drafts
   (`new_session_drafts`), site-auth maintenance sessions, and browser sessions.
   Their stored legacy fields keep working.
+- **Scheduled recovery validates the accepted configuration.** Generated
+  sessions must match the complete frozen agent configuration, its instruction
+  alias, and its creation identity. The database binding fence and worker recovery
+  use the same proof; a legacy NULL snapshot still requires a legacy session.
+  Migration `0561_scheduled_agent_config_fence.sql` updates the binding fence
+  without changing existing grants or its schema-scoped security boundary.
 - **Goals imply the goals capability.** Setting a goal enables `goals`, and a
   request that disables `goals` while setting a goal is a 422.
 - **No separate preview API.** Every session reports `agent` and

@@ -2443,8 +2443,15 @@ async function recoverBoundScheduledTaskDispatch(input: {
     );
     const expectedTaskMetadata = { ...task.agentConfig.metadata };
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
+    const agentConfigIdentityKey = "_opengeni_session_create_agent_config_v1";
+    delete expectedTaskMetadata[agentConfigIdentityKey];
+    const { source: _agentSource, ...acceptedAgentIdentity } =
+      input.acceptedExecution.resolvedAgentConfig ?? {};
     const expectedMetadata = {
       ...expectedTaskMetadata,
+      ...(input.acceptedExecution.resolvedAgentConfig
+        ? { [agentConfigIdentityKey]: acceptedAgentIdentity }
+        : {}),
       model: input.acceptedExecution.resolvedModel,
       reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
       scheduledTaskId: task.id,
@@ -2456,7 +2463,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     if (
       session.createIdempotencyKey !== expectedCreateKey ||
       session.initialMessage !== task.agentConfig.prompt ||
-      session.instructions !== null ||
+      session.instructions !== (input.acceptedExecution.resolvedAgentInstructions ?? null) ||
       session.policyRole !== null ||
       stableJson(session.skills) !== "[]" ||
       stableJson(session.toolPolicy) !==
@@ -2498,8 +2505,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpTools) ||
       stableJson(session.firstPartyMcpPermissions) !==
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpPermissions) ||
-      stableJson(session.agent?.capabilities ?? null) !==
-        stableJson(input.acceptedExecution.resolvedAgentConfig?.capabilities ?? null) ||
+      stableJson(session.agent) !==
+        stableJson(input.acceptedExecution.resolvedAgentConfig ?? null) ||
       session.maxNestedAgentDepthOverride !== (task.agentConfig.maxNestedAgentDepth ?? null) ||
       (session.variableSetId ?? null) !==
         (input.acceptedExecution.resolvedVariableSet?.id ?? null) ||

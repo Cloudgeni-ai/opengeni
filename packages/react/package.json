@@ -15,7 +15,8 @@
   ],
   "type": "module",
   "sideEffects": [
-    "**/*.css"
+    "**/*.css",
+    "./demo/workbench-peers.ts"
   ],
   "main": "./src/index.ts",
   "module": "./src/index.ts",

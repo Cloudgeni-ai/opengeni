@@ -64,6 +64,11 @@ workspace bindings never acquire a personal owner. The account-qualified routes
 are separately visible to tool discovery, so selecting a tool also selects its
 account. Missing or revoked accounts do not fall back to another identity.
 
+Initial turns and follow-up messages resolve the same executable connector
+policy before freezing accounts. Workspace-default connectors participate even
+when absent from the stored creation snapshot; explicit lists and connector
+exclusions still limit the accepted accounts.
+
 Starting voice freezes eligible accounts under the authenticated request's
 authority on its durable lease. Live delegations and the final transcript
 handoff copy that exact snapshot, including after automatic lease expiry.
