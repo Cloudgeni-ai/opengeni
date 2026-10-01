@@ -817,6 +817,88 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test.each(["wheel", "End", "pointer"])(
+    "returning to the live bottom survives a commit before the reader scroll event (%s)",
+    async (navigation) => {
+      const events = manyEvents(20);
+      const r = await renderComponent(<MessageTimeline events={events} />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2400,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        await readerScrollUp(scroller, 400);
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+
+        await actRun(() => {
+          scroller.dispatchEvent(
+            navigation === "wheel"
+              ? new WheelEvent("wheel", { deltaY: 1600, bubbles: true })
+              : navigation === "pointer"
+                ? new PointerEvent("pointerdown", {
+                    button: 0,
+                    pointerType: "mouse",
+                    bubbles: true,
+                  })
+                : new KeyboardEvent("keydown", { key: navigation, bubbles: true }),
+          );
+          scroller.scrollTop = 2000;
+        });
+        // React may commit a stream/chrome update before the browser delivers
+        // the scroll notification. The layout effect adopts the new geometry.
+        await r.rerender(<MessageTimeline events={events} />);
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+
+        expect(distanceFromBottom(scroller)).toBe(0);
+        expect(scroller.dataset.ogBottomFollow).toBe("true");
+      } finally {
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
+  test("returning to the live bottom releases the question navigation focus", async () => {
+    const events = manyEvents(20);
+    const props = { events, turnSummary: { rolling: true } };
+    const r = await renderComponent(<MessageTimeline {...props} />);
+    const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2400,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    try {
+      layout.syncTipAtBottom();
+      await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+      await actRun(() =>
+        scroller.querySelector<HTMLElement>("[data-og-prompt]")!.focus({ preventScroll: true }),
+      );
+      await readerScrollUp(scroller, 400);
+      expect(scroller.dataset.ogBottomFollow).toBe("false");
+
+      await actRun(() => {
+        scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: 1600, bubbles: true }));
+        scroller.scrollTop = 2000;
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      await r.rerender(<MessageTimeline {...props} />);
+
+      expect(scroller.ownerDocument.activeElement).toBe(scroller);
+      expect(distanceFromBottom(scroller)).toBe(0);
+      expect(scroller.dataset.ogBottomFollow).toBe("true");
+    } finally {
+      layout.restore();
+      await r.unmount();
+    }
+  });
+
   test("a sentinel-owned prepend restores an unpinned compact tail instead of snapping to the tip", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {

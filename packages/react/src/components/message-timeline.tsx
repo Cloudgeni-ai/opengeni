@@ -807,7 +807,7 @@ export function MessageTimeline({
    * jumps (Vimium) settle via scrollend while the camera is idle.
    */
   const readerIntentArmRef = useRef(false);
-  /** Gesture-start geometry; cumulative tiny pointer scrolls share one budget. */
+  /** Gesture-start geometry survives commits before the native scroll event. */
   const readerIntentStartRef = useRef<{ scrollTop: number; maxScroll: number } | null>(null);
   /**
    * Count of camera/snap scrollTop writes whose scroll echoes are not yet
@@ -925,6 +925,8 @@ export function MessageTimeline({
     if (before === next) {
       return;
     }
+    // A camera/anchor write is not a continuation of the reader's gesture.
+    readerIntentStartRef.current = null;
     programmaticScrollRef.current += 1;
     node.scrollTop = next;
     if (node.scrollTop === before) {
@@ -1073,6 +1075,10 @@ export function MessageTimeline({
     disclosureKeepsUnpinnedRef.current = false;
     programmaticScrollRef.current = 0;
     if (event.deltaY >= 0) {
+      const node = scrollRef.current;
+      readerIntentStartRef.current = node
+        ? { scrollTop: node.scrollTop, maxScroll: maxScrollOf(node) }
+        : null;
       return;
     }
     requestEarlierFromReader();
@@ -1118,6 +1124,10 @@ export function MessageTimeline({
     ) {
       stopSettlement();
       disclosureKeepsUnpinnedRef.current = false;
+      const node = scrollRef.current;
+      readerIntentStartRef.current = node
+        ? { scrollTop: node.scrollTop, maxScroll: maxScrollOf(node) }
+        : null;
     }
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
       return;
@@ -2148,11 +2158,29 @@ export function MessageTimeline({
     // roughly the same amount as maxScroll; treating that as a scroll-down
     // re-pinned a compact-tail history reader (their preserved gap falls
     // inside PIN_THRESHOLD once the window is tall) and snapped them back.
-    const inserted = Math.max(0, nextMaxScroll - previousMaxScroll);
-    const towardTip = nextTop - previousTop - inserted;
+    // A commit may already have adopted this scroll position into the layout
+    // baseline. Explicit wheel/key/pointer intent retains its own start so
+    // returning to the tip still re-pins after that interleaving.
+    // Passive wheel handlers may run after compositor scrolling; retain the
+    // earlier layout baseline when it still contains that reader movement.
+    const returnStart =
+      readerIntentStart && readerIntentStart.scrollTop < previousTop ? readerIntentStart : null;
+    const inserted = Math.max(0, nextMaxScroll - (returnStart?.maxScroll ?? previousMaxScroll));
+    const towardTip = nextTop - (returnStart?.scrollTop ?? previousTop) - inserted;
     const nextPinned = !hasNewer && nearBottom && towardTip > 0.5 && inserted <= 1;
     if (!nextPinned) {
       stopFollow();
+    }
+    const focused = node.ownerDocument.activeElement;
+    if (
+      nextPinned &&
+      focused instanceof HTMLElement &&
+      focused.hasAttribute("data-og-prompt") &&
+      node.contains(focused)
+    ) {
+      // Question navigation focuses its destination. Returning to the live
+      // tip releases that stale reader ownership before the commit snapshot.
+      node.focus({ preventScroll: true });
     }
     applyPinned(nextPinned);
     // A far-from-bottom scroll while a Jump-to-latest is pending is the reader
@@ -2164,6 +2192,7 @@ export function MessageTimeline({
       wantPinRef.current = false;
     }
     if (nextPinned) {
+      clearReaderIntent();
       return;
     }
     if (!olderPrefetchArmedRef.current) {
@@ -2181,6 +2210,7 @@ export function MessageTimeline({
       return;
     }
     cancelLeaveFallback();
+    clearReaderIntent();
     if (disclosureKeepsUnpinnedRef.current) {
       programmaticScrollRef.current = 0;
       stopFollow();
