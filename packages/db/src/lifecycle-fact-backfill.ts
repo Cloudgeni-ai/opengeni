@@ -12,9 +12,12 @@ import postgres from "postgres";
  * ids and keep their original timestamps, so an overlap with live capture or
  * a repeated run never adds a second fact. A completed source is a durable
  * no-op. Run as the migration owner only after a lifecycle consumer is
- * registered:
+ * registered, and not while a deploy or migration is running:
  *
  *   OPENGENI_MIGRATIONS_DATABASE_URL=... bun run db:backfill-lifecycle-facts
+ *
+ * Each call runs under a statement timeout (default 15min, override with
+ * `--statement-timeout=30min`).
  */
 export const LIFECYCLE_BACKFILL_SOURCES = [
   "auth.sign_up",
@@ -89,8 +92,15 @@ if (import.meta.main) {
     );
   }
   const batchArgument = process.argv.find((value) => value.startsWith("--batch-size="));
+  const timeoutArgument = process.argv.find((value) => value.startsWith("--statement-timeout="));
+  // Bounds every call, including the one-pass read that materializes a
+  // source; a timeout rolls that call back and a rerun starts it again.
+  const statementTimeout = timeoutArgument?.split("=")[1] ?? "15min";
   const sql = postgres(databaseUrl, { max: 1, onnotice: () => undefined });
   try {
+    // One pooled connection, so these session settings bound every call.
+    await sql`select set_config('statement_timeout', ${statementTimeout}, false),
+      set_config('lock_timeout', '5s', false)`;
     const results = await backfillProductLifecycleFacts(sql, {
       ...(requested.length > 0 ? { sources: requested as LifecycleBackfillSource[] } : {}),
       ...(batchArgument ? { batchSize: Number(batchArgument.split("=")[1]) } : {}),

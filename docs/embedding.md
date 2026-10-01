@@ -1240,20 +1240,35 @@ OPENGENI_MIGRATIONS_DATABASE_URL=<migration owner URL> bun run db:backfill-lifec
 
 It calls `opengeni_private.backfill_product_lifecycle_facts(source, batch)` until every source
 reports completion; the function refuses any login other than the migration owner (or a member of
-it). The first call for a source reads its source tables once into a private queue, taking only
-ACCESS SHARE locks: FORCE RLS stays on, and the owner reads through SELECT-only policies that open
-only while a capability row bound to that exact backend transaction exists. Every later call is
-its own short transaction that enqueues one primary-key page of that queue, so total work is
-linear and no source table is altered or locked against writers. Backfilled facts keep the
-original source timestamp as `occurredAt` and reuse the live trigger's deterministic fact id, so
-an overlap with live capture or a repeated run never produces a second fact, and a completed source
-is a durable no-op (`opengeni_private.product_lifecycle_backfill_progress`). Limits: sign-ins only
-exist for sessions that are still stored; email-password verification time is approximated by the
-account's last update; `user.active` history is approximated from the UTC days on which a stored
-browser session was created or refreshed; `connection.revoked` covers connections still stored as
-revoked (deleted connections are gone). Both new kinds only backfill rows older than the moment
-their live capture began: migration 0565, or the first lifecycle consumer registration when that
-came later.
+it). Do not run it while a deploy or migration is in progress. The first call for a source reads
+its source tables once into a private queue, taking only ACCESS SHARE locks: FORCE RLS stays on,
+and the owner reads through SELECT-only `lifecycle_backfill_read` policies (one short migration per
+source table, 0568 to 0581, each with a 1 second lock timeout and safe to rerun) that open only
+while a capability row bound to that exact backend transaction exists. Restrictive SELECT policies
+on those tables admit the same capability. If any of them is missing, for example because a later
+migration recreated a restrictive policy without it, the backfill refuses to read that source
+instead of completing with zero rows. Every later call is its own short transaction that enqueues
+one primary-key page of the queue, so total work is linear and no source table is altered or
+locked against writers. The runner sets a statement timeout on every call (default `15min`,
+`--statement-timeout=30min` to change it); a timed-out call rolls back and a rerun starts that
+source's read again. Backfilled facts keep the original source timestamp as `occurredAt` and reuse
+the live trigger's deterministic fact id, so an overlap with live capture or a repeated run never
+produces a second fact, and a completed source is a durable no-op
+(`opengeni_private.product_lifecycle_backfill_progress`). Limits: sign-ins only exist for sessions
+that are still stored; email-password verification time is approximated by the account's last
+update; `user.active` history is approximated from the UTC days on which a stored browser session
+was created or refreshed; `connection.revoked` covers connections still stored as revoked (deleted
+connections are gone). Both new kinds only backfill rows older than the moment their live capture
+began: migration 0565, or the first lifecycle consumer registration when that came later.
+
+Facts are written only by the owner's capture trigger function, which ignores any table outside
+the deployment's own schemas (so a runtime role cannot attach it to a temporary table), and by the
+owner-only backfill; there is no separately callable writer. Runtime roles still hold EXECUTE on
+`capture_product_lifecycle_fact()`, `observe_credit_grant()` and
+`backfill_product_lifecycle_facts(text, integer)` because the runtime posture of pre-0565 binaries
+requires EXECUTE on every private routine. Binaries from this release list them as owner-internal,
+so once no older binary can run, a follow-up migration should revoke runtime EXECUTE on those
+three routines.
 
 ### EventBus
 

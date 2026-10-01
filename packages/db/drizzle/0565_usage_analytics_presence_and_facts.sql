@@ -19,6 +19,10 @@
 --    (attribute: grant class) and `connection.revoked` (attribute: provider
 --    class, same list as `connection.created`).
 --
+-- This file touches no busy table. The new triggers on credit_ledger_entries
+-- and connections (0566, 0567) and the backfill read policies (0568-0581, one
+-- source table each) are separate short migrations with 1 second lock timeouts.
+--
 -- Nothing here reads or copies a name, email, domain, amount into a fact, or
 -- free text. Every capture path is telemetry only and never fails the product
 -- change that triggered it.
@@ -138,10 +142,12 @@ $function$;
 DO $migration$
 DECLARE target_schema text := current_schema();
 BEGIN
-  -- Same capture function as 0532 with three additions: the credit ledger
-  -- distinguishes a purchase from a grant, a connection revocation or
-  -- deletion is a `connection.revoked` fact, and a new UTC day of presence is
-  -- a `user.active` fact. Every other branch is byte-for-byte unchanged.
+  -- The 0532 capture function with three additions (a credit grant is not a
+  -- purchase, a connection revocation or deletion is `connection.revoked`,
+  -- and a new UTC day of presence is `user.active`). Each branch now selects
+  -- its fact and one block writes it, so no separately callable writer
+  -- exists, and a trigger fires only for the real source tables: a runtime
+  -- role cannot attach this function to a temporary table of its own.
   EXECUTE format($create$
     CREATE OR REPLACE FUNCTION opengeni_private.capture_product_lifecycle_fact()
     RETURNS trigger
@@ -153,7 +159,23 @@ BEGIN
       v_enabled boolean;
       v_provider text;
       v_marker text;
+      v_fact_type text;
+      v_attribute text;
+      v_subject_id text;
+      v_account_id uuid;
+      v_workspace_id uuid;
+      v_dedupe_key text;
+      v_occurred_at timestamptz;
+      v_exported_subject text;
+      v_subject_kind text;
+      v_initiator jsonb;
+      v_source_id uuid;
+      v_payload jsonb;
+      v_inserted integer := 0;
     BEGIN
+      IF TG_TABLE_SCHEMA NOT IN (%1$L, 'opengeni_private') THEN
+        RETURN NULL;
+      END IF;
       SELECT c.lifecycle_facts_enabled INTO v_enabled
       FROM %1$I.host_export_config c WHERE c.id = 1;
       IF coalesce(v_enabled, false) = false THEN
@@ -167,16 +189,16 @@ BEGIN
               SELECT 1 FROM %1$I.auth_identities other
               WHERE other.user_id = NEW.user_id AND other.id <> NEW.id
             ) THEN
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'auth.sign_up',
+              SELECT 'auth.sign_up',
                 opengeni_private.product_lifecycle_auth_method(NEW.provider_id),
                 'user:' || NEW.user_id, NULL, NULL, NEW.user_id
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             END IF;
           WHEN 'auth_users' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'auth.email_verified', NULL, 'user:' || NEW.id, NULL, NULL, NEW.id
-            );
+            SELECT 'auth.email_verified', NULL, 'user:' || NEW.id, NULL, NULL, NEW.id
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'auth_sessions' THEN
             -- Session-set modes create and immediately discard an expired
             -- provider session; only a live session is a sign-in.
@@ -195,97 +217,97 @@ BEGIN
                 WHERE identity.user_id = NEW.user_id
                 HAVING count(*) = 1;
               END IF;
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'auth.sign_in',
+              SELECT 'auth.sign_in',
                 opengeni_private.product_lifecycle_auth_method(v_provider),
                 'user:' || NEW.user_id, NULL, NULL, NEW.id
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             END IF;
           WHEN 'self_service_organization_setup_receipts' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'organization.setup', 'created', 'user:' || NEW.auth_user_id,
+            SELECT 'organization.setup', 'created', 'user:' || NEW.auth_user_id,
               NEW.account_id, NULL, NEW.account_id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'additional_organization_creation_receipts' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'organization.setup', 'additional', NEW.actor_subject_id,
+            SELECT 'organization.setup', 'additional', NEW.actor_subject_id,
               NEW.account_id, NULL, NEW.account_id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'codex_subscription_credentials' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'model.connected', 'codex', NEW.connected_by_subject_id,
+            SELECT 'model.connected', 'codex', NEW.connected_by_subject_id,
               NEW.account_id, NEW.workspace_id, NEW.id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'xai_subscription_credentials' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'model.connected', 'supergrok', NEW.connected_by_subject_id,
+            SELECT 'model.connected', 'supergrok', NEW.connected_by_subject_id,
               NEW.account_id, NEW.workspace_id, NEW.id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'organization_model_provider_connections' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'model.connected', NEW.provider_kind, NEW.updated_by_subject_id,
+            SELECT 'model.connected', NEW.provider_kind, NEW.updated_by_subject_id,
               NEW.account_id, NULL, NEW.id::text || ':' || NEW.operation_id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'credit_ledger_entries' THEN
             IF NEW.type = 'credit_topup' THEN
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'credits.purchased', NULL, NULL,
+              SELECT 'credits.purchased', NULL, NULL,
                 NEW.account_id, NULL, NEW.id::text
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             ELSE
               -- The verified-signup trial grant runs as the new owner, so its
               -- subject is that person; webhook and operator grants carry none.
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'credits.granted',
+              SELECT 'credits.granted',
                 opengeni_private.credit_grant_class(NEW.type, NEW.source_type),
                 opengeni_private.current_subject_id(),
                 NEW.account_id, NULL, NEW.id::text
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             END IF;
           WHEN 'connections' THEN
             IF TG_OP = 'INSERT' THEN
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'connection.created',
+              SELECT 'connection.created',
                 opengeni_private.product_lifecycle_connection_class(NEW.provider_domain),
                 NEW.created_by_subject_id, NEW.account_id, NEW.workspace_id, NEW.id::text
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             ELSIF TG_OP = 'UPDATE' THEN
               -- Every revocation advances the connection version, so a
               -- reconnect-then-revoke is a second fact.
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'connection.revoked',
+              SELECT 'connection.revoked',
                 opengeni_private.product_lifecycle_connection_class(NEW.provider_domain),
                 NEW.updated_by_subject_id, NEW.account_id, NEW.workspace_id,
                 NEW.id::text || ':revoked:' || NEW.version::text
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             ELSE
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'connection.revoked',
+              SELECT 'connection.revoked',
                 opengeni_private.product_lifecycle_connection_class(OLD.provider_domain),
                 opengeni_private.current_subject_id(), OLD.account_id, OLD.workspace_id,
                 OLD.id::text || ':deleted'
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             END IF;
           WHEN 'scheduled_tasks' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'scheduled_task.created', NULL, NEW.created_by_subject_id,
+            SELECT 'scheduled_task.created', NULL, NEW.created_by_subject_id,
               NEW.account_id, NEW.workspace_id, NEW.id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'skill_source_bindings' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'skill.installed', NULL, opengeni_private.current_subject_id(),
+            SELECT 'skill.installed', NULL, opengeni_private.current_subject_id(),
               NEW.account_id, NEW.workspace_id, NEW.preference_id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'slack_bot_user_links' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'slack.user_linked', NULL, NEW.subject_id,
+            SELECT 'slack.user_linked', NULL, NEW.subject_id,
               NEW.account_id, NEW.workspace_id, NEW.id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'enrollments' THEN
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'machine.enrolled', NULL, opengeni_private.current_subject_id(),
+            SELECT 'machine.enrolled', NULL, opengeni_private.current_subject_id(),
               NEW.account_id, NEW.workspace_id, NEW.id::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           WHEN 'organization_memberships' THEN
             -- The founder's own membership is covered by organization.setup.
             IF EXISTS (
@@ -295,20 +317,77 @@ BEGIN
                 AND earlier.subject_id <> NEW.subject_id
                 AND earlier.created_at <= NEW.created_at
             ) THEN
-              PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-                'member.joined', NULL, NEW.subject_id,
+              SELECT 'member.joined', NULL, NEW.subject_id,
                 NEW.account_id, NULL, NEW.id::text
-              );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
             END IF;
           WHEN 'user_activity_presence' THEN
             -- A person belongs to no single organization, like a sign-in.
-            PERFORM opengeni_private.enqueue_product_lifecycle_fact(
-              'user.active', NULL, NEW.subject_id, NULL, NULL,
+            SELECT 'user.active', NULL, NEW.subject_id, NULL, NULL,
               NEW.subject_id || ':' || NEW.active_day::text
-            );
+              INTO v_fact_type, v_attribute, v_subject_id, v_account_id,
+                v_workspace_id, v_dedupe_key;
           ELSE
             NULL;
         END CASE;
+
+      -- Validate and write the one fact: a fixed type and attribute, a
+      -- pseudonymous subject, and a deterministic name-based id.
+      IF v_fact_type IS NOT NULL THEN
+        SELECT c.lifecycle_facts_enabled INTO v_enabled
+        FROM %1$I.host_export_config c WHERE c.id = 1
+        FOR SHARE;
+        IF coalesce(v_enabled, false) THEN
+          IF NOT opengeni_private.product_lifecycle_fact_valid(v_fact_type, v_attribute) THEN
+            RAISE EXCEPTION 'invalid product lifecycle fact' USING ERRCODE = '22023';
+          END IF;
+          IF v_dedupe_key IS NULL OR length(v_dedupe_key) NOT BETWEEN 1 AND 512 THEN
+            RAISE EXCEPTION 'invalid product lifecycle fact key' USING ERRCODE = '22023';
+          END IF;
+          IF v_workspace_id IS NOT NULL AND v_account_id IS NULL THEN
+            RAISE EXCEPTION 'product lifecycle workspace requires its organization'
+              USING ERRCODE = '22023';
+          END IF;
+          v_exported_subject := CASE
+            WHEN v_subject_id ~ '^(user|api_key):[A-Za-z0-9_-]{8,128}$' THEN v_subject_id
+            ELSE NULL
+          END;
+          v_subject_kind := CASE
+            WHEN nullif(btrim(coalesce(v_subject_id, '')), '') IS NULL THEN 'none'
+            WHEN v_exported_subject IS NOT NULL AND starts_with(v_exported_subject, 'user:') THEN 'user'
+            WHEN v_exported_subject IS NOT NULL THEN 'api_key'
+            WHEN starts_with(v_subject_id, 'service:') THEN 'service'
+            ELSE 'other'
+          END;
+          v_initiator := CASE
+            WHEN v_exported_subject IS NULL THEN NULL
+            ELSE jsonb_build_object('kind', 'subject', 'subjectId', v_exported_subject)
+          END;
+          v_source_id := overlay(overlay(md5(
+            'opengeni-product-lifecycle-fact:v1:' || v_fact_type || ':' || v_dedupe_key
+          ) placing '5' from 13) placing '8' from 17)::uuid;
+          v_payload := jsonb_build_object(
+            'factType', v_fact_type,
+            'attribute', v_attribute,
+            'subjectKind', v_subject_kind
+          );
+          INSERT INTO %1$I.host_export_outbox (
+            export_kind, source_id, account_id, workspace_id, event_type,
+            idempotency_key, initiator, initiator_context, origin, payload,
+            envelope_bytes, occurred_at, source_recorded_at, enqueued_at
+          ) VALUES (
+            'lifecycle_fact', v_source_id, v_account_id, v_workspace_id, v_fact_type,
+            'lifecycle_fact:' || v_source_id::text, v_initiator, '{}'::jsonb, NULL,
+            v_payload,
+            octet_length(v_payload::text)
+              + octet_length(coalesce(v_initiator, 'null'::jsonb)::text) + 512,
+            coalesce(v_occurred_at, clock_timestamp()), clock_timestamp(), clock_timestamp()
+          )
+          ON CONFLICT (export_kind, source_id) DO NOTHING;
+          GET DIAGNOSTICS v_inserted = ROW_COUNT;
+        END IF;
+      END IF;
       EXCEPTION WHEN OTHERS THEN
         -- Telemetry only: roll back the fact, never the product change.
         RAISE WARNING 'product lifecycle fact capture skipped (%%)', SQLSTATE;
@@ -321,53 +400,40 @@ REVOKE ALL ON FUNCTION opengeni_private.capture_product_lifecycle_fact() FROM PU
 
 -- Mirror one content-free row per positive grant. Telemetry only: a failure
 -- rolls back the observation, never the grant.
-CREATE OR REPLACE FUNCTION opengeni_private.observe_credit_grant()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog
-AS $function$
+DO $migration$
+DECLARE target_schema text := current_schema();
 BEGIN
-  BEGIN
-    INSERT INTO opengeni_private.credit_grant_observations (
-      ledger_entry_id, grant_class, amount_micros
-    ) VALUES (
-      NEW.id, opengeni_private.credit_grant_class(NEW.type, NEW.source_type), NEW.amount_micros
-    )
-    ON CONFLICT (ledger_entry_id) DO NOTHING;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'credit grant observation skipped (%)', SQLSTATE;
-  END;
-  RETURN NULL;
-END $function$;
+  -- Fires only for the real ledger, never a runtime role's temporary table.
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_private.observe_credit_grant()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    BEGIN
+      IF TG_TABLE_SCHEMA <> %1$L THEN
+        RETURN NULL;
+      END IF;
+      BEGIN
+        INSERT INTO opengeni_private.credit_grant_observations (
+          ledger_entry_id, grant_class, amount_micros
+        ) VALUES (
+          NEW.id, opengeni_private.credit_grant_class(NEW.type, NEW.source_type),
+          NEW.amount_micros
+        )
+        ON CONFLICT (ledger_entry_id) DO NOTHING;
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'credit grant observation skipped (%%)', SQLSTATE;
+      END;
+      RETURN NULL;
+    END $function$;
+  $create$, target_schema);
+END $migration$;
 REVOKE ALL ON FUNCTION opengeni_private.observe_credit_grant() FROM PUBLIC;
 
-DROP TRIGGER IF EXISTS credit_grant_observation ON "credit_ledger_entries";
-CREATE TRIGGER credit_grant_observation
-AFTER INSERT ON "credit_ledger_entries"
-FOR EACH ROW WHEN (NEW.type IN ('grant', 'manual_credit_grant') AND NEW.amount_micros > 0)
-EXECUTE FUNCTION opengeni_private.observe_credit_grant();
-
-DROP TRIGGER IF EXISTS product_lifecycle_fact_credits_granted ON "credit_ledger_entries";
-CREATE TRIGGER product_lifecycle_fact_credits_granted
-AFTER INSERT ON "credit_ledger_entries"
-FOR EACH ROW WHEN (NEW.type IN ('grant', 'manual_credit_grant') AND NEW.amount_micros > 0)
-EXECUTE FUNCTION opengeni_private.capture_product_lifecycle_fact();
-
-DROP TRIGGER IF EXISTS product_lifecycle_fact_connection_revoked ON "connections";
-CREATE TRIGGER product_lifecycle_fact_connection_revoked
-AFTER UPDATE OF "status" ON "connections"
-FOR EACH ROW WHEN (NEW.status = 'revoked' AND OLD.status IS DISTINCT FROM 'revoked')
-EXECUTE FUNCTION opengeni_private.capture_product_lifecycle_fact();
-
--- Deleting a live connection removes it just as a revocation does; a row that
--- was already revoked was counted when it was revoked.
-DROP TRIGGER IF EXISTS product_lifecycle_fact_connection_deleted ON "connections";
-CREATE TRIGGER product_lifecycle_fact_connection_deleted
-AFTER DELETE ON "connections"
-FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM 'revoked')
-EXECUTE FUNCTION opengeni_private.capture_product_lifecycle_fact();
-
+-- The new triggers on the busy ledger and connections tables live in their
+-- own short migrations (0566 and 0567).
 DROP TRIGGER IF EXISTS product_lifecycle_fact_user_active
   ON opengeni_private.user_activity_presence;
 CREATE TRIGGER product_lifecycle_fact_user_active
@@ -589,144 +655,13 @@ $function$;
 -- restricted roles (artifact dispatcher/materializer) never do.
 REVOKE ALL ON FUNCTION opengeni_private.lifecycle_backfill_read_active() FROM PUBLIC;
 
--- SELECT-only owner reads of each FORCE-RLS source table while the capability
--- is active. Restrictive SELECT policies on those tables admit the same
--- capability, so their existing tenant rules are otherwise unchanged. The
--- capability is evaluated once per statement (an InitPlan), not per row.
-DO $policies$
-DECLARE
-  target_schema text := current_schema();
-  table_name text;
-  restrictive record;
-BEGIN
-  FOREACH table_name IN ARRAY ARRAY[
-    'canonical_human_login_bindings', 'self_service_organization_setup_receipts',
-    'additional_organization_creation_receipts', 'codex_subscription_credentials',
-    'xai_subscription_credentials', 'organization_model_provider_connections',
-    'organization_model_provider_connection_operations', 'credit_ledger_entries',
-    'connections', 'scheduled_tasks', 'skill_source_bindings',
-    'preference_registry_preferences', 'slack_bot_user_links', 'enrollments',
-    'organization_memberships'
-  ] LOOP
-    IF to_regclass(format('%I.%I', target_schema, table_name)) IS NULL THEN
-      CONTINUE;
-    END IF;
-    EXECUTE format('DROP POLICY IF EXISTS lifecycle_backfill_read ON %I.%I',
-      target_schema, table_name);
-    EXECUTE format(
-      'CREATE POLICY lifecycle_backfill_read ON %I.%I AS PERMISSIVE FOR SELECT '
-        'USING ((SELECT opengeni_private.lifecycle_backfill_read_active()))',
-      target_schema, table_name
-    );
-    FOR restrictive IN
-      SELECT policy.polname, pg_get_expr(policy.polqual, policy.polrelid) AS qual
-      FROM pg_policy policy
-      WHERE policy.polrelid = format('%I.%I', target_schema, table_name)::regclass
-        AND NOT policy.polpermissive
-        AND policy.polcmd IN ('r', '*')
-        AND policy.polqual IS NOT NULL
-    LOOP
-      IF position('lifecycle_backfill_read_active' IN restrictive.qual) = 0 THEN
-        EXECUTE format(
-          'ALTER POLICY %I ON %I.%I USING ((%s) OR (SELECT opengeni_private.lifecycle_backfill_read_active()))',
-          restrictive.polname, target_schema, table_name, restrictive.qual
-        );
-      END IF;
-    END LOOP;
-  END LOOP;
-END $policies$;
+-- The SELECT-only read policies that this capability opens live in one short
+-- migration per source table (0568 onward), so each table's ACCESS EXCLUSIVE
+-- policy lock is held only for its own transaction.
 
 DO $migration$
 DECLARE target_schema text := current_schema(); owner_role text := current_user;
 BEGIN
-  -- enqueue_product_lifecycle_fact with an explicit occurrence time. Same
-  -- gate, validation, subject reduction and deterministic id.
-  EXECUTE format($create$
-    CREATE OR REPLACE FUNCTION opengeni_private.enqueue_product_lifecycle_fact_at(
-      p_fact_type text,
-      p_attribute text,
-      p_subject_id text,
-      p_account_id uuid,
-      p_workspace_id uuid,
-      p_dedupe_key text,
-      p_occurred_at timestamptz
-    ) RETURNS boolean
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-    DECLARE
-      v_enabled boolean;
-      v_subject_id text;
-      v_subject_kind text;
-      v_source_id uuid;
-      v_payload jsonb;
-      v_initiator jsonb;
-      v_inserted integer;
-    BEGIN
-      -- Only capture triggers and the owner-run backfill (which holds the
-      -- transaction-local capability) may write facts; a direct call from a
-      -- runtime role is refused, so no tenant can forge a fact.
-      IF pg_trigger_depth() = 0 AND NOT opengeni_private.lifecycle_backfill_read_active() THEN
-        RAISE EXCEPTION 'lifecycle facts are written only by capture triggers'
-          USING ERRCODE = '42501';
-      END IF;
-      SELECT c.lifecycle_facts_enabled INTO v_enabled
-      FROM %1$I.host_export_config c WHERE c.id = 1
-      FOR SHARE;
-      IF coalesce(v_enabled, false) = false THEN
-        RETURN false;
-      END IF;
-      IF NOT opengeni_private.product_lifecycle_fact_valid(p_fact_type, p_attribute) THEN
-        RAISE EXCEPTION 'invalid product lifecycle fact' USING ERRCODE = '22023';
-      END IF;
-      IF p_dedupe_key IS NULL OR length(p_dedupe_key) NOT BETWEEN 1 AND 512 THEN
-        RAISE EXCEPTION 'invalid product lifecycle fact key' USING ERRCODE = '22023';
-      END IF;
-      IF p_workspace_id IS NOT NULL AND p_account_id IS NULL THEN
-        RAISE EXCEPTION 'product lifecycle workspace requires its organization'
-          USING ERRCODE = '22023';
-      END IF;
-      v_subject_id := CASE
-        WHEN p_subject_id ~ '^(user|api_key):[A-Za-z0-9_-]{8,128}$' THEN p_subject_id
-        ELSE NULL
-      END;
-      v_subject_kind := CASE
-        WHEN nullif(btrim(coalesce(p_subject_id, '')), '') IS NULL THEN 'none'
-        WHEN v_subject_id IS NOT NULL AND starts_with(v_subject_id, 'user:') THEN 'user'
-        WHEN v_subject_id IS NOT NULL THEN 'api_key'
-        WHEN starts_with(p_subject_id, 'service:') THEN 'service'
-        ELSE 'other'
-      END;
-      v_initiator := CASE
-        WHEN v_subject_id IS NULL THEN NULL
-        ELSE jsonb_build_object('kind', 'subject', 'subjectId', v_subject_id)
-      END;
-      v_source_id := overlay(overlay(md5(
-        'opengeni-product-lifecycle-fact:v1:' || p_fact_type || ':' || p_dedupe_key
-      ) placing '5' from 13) placing '8' from 17)::uuid;
-      v_payload := jsonb_build_object(
-        'factType', p_fact_type,
-        'attribute', p_attribute,
-        'subjectKind', v_subject_kind
-      );
-      INSERT INTO %1$I.host_export_outbox (
-        export_kind, source_id, account_id, workspace_id, event_type,
-        idempotency_key, initiator, initiator_context, origin, payload,
-        envelope_bytes, occurred_at, source_recorded_at, enqueued_at
-      ) VALUES (
-        'lifecycle_fact', v_source_id, p_account_id, p_workspace_id, p_fact_type,
-        'lifecycle_fact:' || v_source_id::text, v_initiator, '{}'::jsonb, NULL,
-        v_payload,
-        octet_length(v_payload::text)
-          + octet_length(coalesce(v_initiator, 'null'::jsonb)::text) + 512,
-        coalesce(p_occurred_at, clock_timestamp()), clock_timestamp(), clock_timestamp()
-      )
-      ON CONFLICT (export_kind, source_id) DO NOTHING;
-      GET DIAGNOSTICS v_inserted = ROW_COUNT;
-      RETURN v_inserted = 1;
-    END $function$;
-  $create$, target_schema);
 
   -- The owner-only operator backfill. Each source query yields
   -- (fact_type, attribute, subject_id, account_id, workspace_id, dedupe_key,
@@ -757,6 +692,22 @@ BEGIN
       v_scanned integer := 0;
       v_enqueued integer := 0;
       v_last_seq bigint;
+      v_tables text[];
+      v_table text;
+      v_marker text;
+      v_fact_type text;
+      v_attribute text;
+      v_subject_id text;
+      v_account_id uuid;
+      v_workspace_id uuid;
+      v_dedupe_key text;
+      v_occurred_at timestamptz;
+      v_exported_subject text;
+      v_subject_kind text;
+      v_initiator jsonb;
+      v_source_id uuid;
+      v_payload jsonb;
+      v_inserted integer := 0;
     BEGIN
       -- Operator-only: the login must be (a member of) the migration owner.
       IF NOT pg_has_role(session_user, %2$L, 'MEMBER') THEN
@@ -786,8 +737,8 @@ BEGIN
       END IF;
 
       -- Transaction-local capability for this call only: it opens the
-      -- SELECT-only source policies and lets enqueue_product_lifecycle_fact_at
-      -- accept backfill writes. It is removed before returning.
+      -- SELECT-only source policies (migrations 0568 onward). It is removed
+      -- before returning.
       INSERT INTO opengeni_private.lifecycle_backfill_read_capabilities (
         backend_pid, transaction_id
       ) VALUES (pg_backend_pid(), pg_current_xact_id())
@@ -981,8 +932,57 @@ BEGIN
           RAISE EXCEPTION 'unknown lifecycle backfill source' USING ERRCODE = '22023';
         END IF;
 
+        -- Fail closed rather than complete with zero rows: every FORCE-RLS
+        -- source table must carry the read policy, and each of its
+        -- restrictive SELECT policies must admit the capability.
+        v_tables := CASE p_source
+          WHEN 'organization.setup' THEN ARRAY[
+            'self_service_organization_setup_receipts',
+            'additional_organization_creation_receipts'
+          ]
+          WHEN 'model.connected' THEN ARRAY[
+            'codex_subscription_credentials', 'xai_subscription_credentials',
+            'organization_model_provider_connections',
+            'organization_model_provider_connection_operations'
+          ]
+          WHEN 'credits.purchased' THEN ARRAY['credit_ledger_entries']
+          WHEN 'credits.granted' THEN ARRAY['credit_ledger_entries']
+          WHEN 'connection.created' THEN ARRAY['connections']
+          WHEN 'connection.revoked' THEN ARRAY['connections']
+          WHEN 'scheduled_task.created' THEN ARRAY['scheduled_tasks']
+          WHEN 'skill.installed' THEN ARRAY[
+            'skill_source_bindings', 'preference_registry_preferences'
+          ]
+          WHEN 'slack.user_linked' THEN ARRAY['slack_bot_user_links']
+          WHEN 'machine.enrolled' THEN ARRAY['enrollments']
+          WHEN 'member.joined' THEN ARRAY['organization_memberships']
+          ELSE ARRAY[]::text[]
+        END;
+        FOREACH v_table IN ARRAY v_tables LOOP
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_policy policy
+            WHERE policy.polrelid = format('%%I.%%I', %1$L, v_table)::regclass
+              AND policy.polname = 'lifecycle_backfill_read'
+          ) OR EXISTS (
+            SELECT 1 FROM pg_policy policy
+            WHERE policy.polrelid = format('%%I.%%I', %1$L, v_table)::regclass
+              AND NOT policy.polpermissive
+              AND policy.polcmd IN ('r', '*')
+              AND position('lifecycle_backfill_read_active'
+                IN coalesce(pg_get_expr(policy.polqual, policy.polrelid), '')) = 0
+          ) THEN
+            RAISE EXCEPTION 'lifecycle backfill read access is missing on %%', v_table
+              USING ERRCODE = '55000';
+          END IF;
+        END LOOP;
+
         -- One read of the source tables, ACCESS SHARE only, under the
-        -- transaction-local read capability opened above.
+        -- transaction-local read capability opened above. Sign-in methods are
+        -- read under the canonical identity lifecycle marker, exactly like the
+        -- live sign-in capture. The statement is bounded by the caller's
+        -- statement_timeout (the runner sets one).
+        v_marker := current_setting('opengeni.canonical_human_identity_lifecycle', true);
+        PERFORM set_config('opengeni.canonical_human_identity_lifecycle', 'active', true);
         EXECUTE
           'INSERT INTO opengeni_private.product_lifecycle_backfill_queue ('
             || 'source, fact_type, attribute, subject_id, account_id, workspace_id, '
@@ -992,6 +992,9 @@ BEGIN
             || 'occurred_at) ORDER BY candidate.occurred_at, candidate.dedupe_key'
           USING v_boundary, p_source;
         GET DIAGNOSTICS v_materialized = ROW_COUNT;
+        PERFORM set_config(
+          'opengeni.canonical_human_identity_lifecycle', coalesce(v_marker, ''), true
+        );
         UPDATE opengeni_private.product_lifecycle_backfill_progress progress
         SET materialized_at = clock_timestamp(), materialized = v_materialized,
             updated_at = clock_timestamp()
@@ -1007,12 +1010,71 @@ BEGIN
       LOOP
         v_scanned := v_scanned + 1;
         v_last_seq := v_row.seq;
-        IF opengeni_private.enqueue_product_lifecycle_fact_at(
-          v_row.fact_type, v_row.attribute, v_row.subject_id, v_row.account_id,
-          v_row.workspace_id, v_row.dedupe_key, v_row.occurred_at
-        ) THEN
-          v_enqueued := v_enqueued + 1;
+        v_fact_type := v_row.fact_type;
+        v_attribute := v_row.attribute;
+        v_subject_id := v_row.subject_id;
+        v_account_id := v_row.account_id;
+        v_workspace_id := v_row.workspace_id;
+        v_dedupe_key := v_row.dedupe_key;
+        v_occurred_at := v_row.occurred_at;
+        v_inserted := 0;
+        -- Validate and write the one fact: a fixed type and attribute, a
+        -- pseudonymous subject, and a deterministic name-based id.
+        IF v_fact_type IS NOT NULL THEN
+          SELECT c.lifecycle_facts_enabled INTO v_enabled
+          FROM %1$I.host_export_config c WHERE c.id = 1
+          FOR SHARE;
+          IF coalesce(v_enabled, false) THEN
+            IF NOT opengeni_private.product_lifecycle_fact_valid(v_fact_type, v_attribute) THEN
+              RAISE EXCEPTION 'invalid product lifecycle fact' USING ERRCODE = '22023';
+            END IF;
+            IF v_dedupe_key IS NULL OR length(v_dedupe_key) NOT BETWEEN 1 AND 512 THEN
+              RAISE EXCEPTION 'invalid product lifecycle fact key' USING ERRCODE = '22023';
+            END IF;
+            IF v_workspace_id IS NOT NULL AND v_account_id IS NULL THEN
+              RAISE EXCEPTION 'product lifecycle workspace requires its organization'
+                USING ERRCODE = '22023';
+            END IF;
+            v_exported_subject := CASE
+              WHEN v_subject_id ~ '^(user|api_key):[A-Za-z0-9_-]{8,128}$' THEN v_subject_id
+              ELSE NULL
+            END;
+            v_subject_kind := CASE
+              WHEN nullif(btrim(coalesce(v_subject_id, '')), '') IS NULL THEN 'none'
+              WHEN v_exported_subject IS NOT NULL AND starts_with(v_exported_subject, 'user:') THEN 'user'
+              WHEN v_exported_subject IS NOT NULL THEN 'api_key'
+              WHEN starts_with(v_subject_id, 'service:') THEN 'service'
+              ELSE 'other'
+            END;
+            v_initiator := CASE
+              WHEN v_exported_subject IS NULL THEN NULL
+              ELSE jsonb_build_object('kind', 'subject', 'subjectId', v_exported_subject)
+            END;
+            v_source_id := overlay(overlay(md5(
+              'opengeni-product-lifecycle-fact:v1:' || v_fact_type || ':' || v_dedupe_key
+            ) placing '5' from 13) placing '8' from 17)::uuid;
+            v_payload := jsonb_build_object(
+              'factType', v_fact_type,
+              'attribute', v_attribute,
+              'subjectKind', v_subject_kind
+            );
+            INSERT INTO %1$I.host_export_outbox (
+              export_kind, source_id, account_id, workspace_id, event_type,
+              idempotency_key, initiator, initiator_context, origin, payload,
+              envelope_bytes, occurred_at, source_recorded_at, enqueued_at
+            ) VALUES (
+              'lifecycle_fact', v_source_id, v_account_id, v_workspace_id, v_fact_type,
+              'lifecycle_fact:' || v_source_id::text, v_initiator, '{}'::jsonb, NULL,
+              v_payload,
+              octet_length(v_payload::text)
+                + octet_length(coalesce(v_initiator, 'null'::jsonb)::text) + 512,
+              coalesce(v_occurred_at, clock_timestamp()), clock_timestamp(), clock_timestamp()
+            )
+            ON CONFLICT (export_kind, source_id) DO NOTHING;
+            GET DIAGNOSTICS v_inserted = ROW_COUNT;
+          END IF;
         END IF;
+        v_enqueued := v_enqueued + v_inserted;
       END LOOP;
       IF v_last_seq IS NOT NULL THEN
         DELETE FROM opengeni_private.product_lifecycle_backfill_queue queued
@@ -1035,47 +1097,18 @@ BEGIN
   $create$, target_schema, owner_role);
 END $migration$;
 
--- The fact writers stay executable by runtime roles (the runtime posture
--- requires EXECUTE on every private routine, so revoking it would make older
--- binaries unready during a rolling deploy), but each refuses a direct call:
--- writes come only from capture triggers and the owner-run backfill.
-REVOKE ALL ON FUNCTION opengeni_private.enqueue_product_lifecycle_fact_at(
-  text, text, text, uuid, uuid, text, timestamptz
-) FROM PUBLIC;
+-- 0532's separately callable writer is gone: the capture trigger function
+-- writes facts itself and refuses any table outside the real schemas, and the
+-- backfill refuses any login but the migration owner. Runtime roles keep
+-- EXECUTE on the remaining routines for now because the runtime posture of
+-- already-running binaries requires it; new binaries list the trigger
+-- functions and the backfill as owner-internal, and a later migration revokes
+-- runtime EXECUTE on them once no older binary can run.
+DROP FUNCTION IF EXISTS opengeni_private.enqueue_product_lifecycle_fact(
+  text, text, text, uuid, uuid, text
+);
 REVOKE ALL ON FUNCTION opengeni_private.backfill_product_lifecycle_facts(text, integer)
   FROM PUBLIC;
-DO $migration$
-DECLARE target_schema text := current_schema();
-BEGIN
-  -- 0532's writer, unchanged apart from refusing calls outside a trigger.
-  EXECUTE format($create$
-    CREATE OR REPLACE FUNCTION opengeni_private.enqueue_product_lifecycle_fact(
-      p_fact_type text,
-      p_attribute text,
-      p_subject_id text,
-      p_account_id uuid,
-      p_workspace_id uuid,
-      p_dedupe_key text
-    ) RETURNS boolean
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-    BEGIN
-      IF pg_trigger_depth() = 0 THEN
-        RAISE EXCEPTION 'lifecycle facts are written only by capture triggers'
-          USING ERRCODE = '42501';
-      END IF;
-      RETURN opengeni_private.enqueue_product_lifecycle_fact_at(
-        p_fact_type, p_attribute, p_subject_id, p_account_id, p_workspace_id,
-        p_dedupe_key, clock_timestamp()
-      );
-    END $function$;
-  $create$);
-END $migration$;
-REVOKE ALL ON FUNCTION opengeni_private.enqueue_product_lifecycle_fact(
-  text, text, text, uuid, uuid, text
-) FROM PUBLIC;
 
 -- Existing runtime roles keep EXECUTE on every new private routine so the
 -- runtime posture of running binaries is unchanged; provisionRoles converges
@@ -1096,8 +1129,6 @@ BEGIN
         'opengeni_private.credit_grant_class(text, text), '
         'opengeni_private.observe_credit_grant(), '
         'opengeni_private.lifecycle_backfill_read_active(), '
-        'opengeni_private.enqueue_product_lifecycle_fact(text, text, text, uuid, uuid, text), '
-        'opengeni_private.enqueue_product_lifecycle_fact_at(text, text, text, uuid, uuid, text, timestamptz), '
         'opengeni_private.backfill_product_lifecycle_facts(text, integer) TO %I',
       recipient.rolname
     );

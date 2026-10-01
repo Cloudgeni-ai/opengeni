@@ -781,15 +781,15 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
 
   test("a capture failure never fails the product change", async () => {
     if (!owned) return;
+    // Make validation (called from inside the capture's exception block) fail.
     const [original] = await owned.admin<{ definition: string }[]>`
       select pg_get_functiondef(
-        'opengeni_private.enqueue_product_lifecycle_fact(text, text, text, uuid, uuid, text)'::regprocedure
+        'opengeni_private.product_lifecycle_fact_valid(text, text)'::regprocedure
       ) as definition`;
     await owned.admin.unsafe(`
-      CREATE OR REPLACE FUNCTION opengeni_private.enqueue_product_lifecycle_fact(
-        p_fact_type text, p_attribute text, p_subject_id text,
-        p_account_id uuid, p_workspace_id uuid, p_dedupe_key text
-      ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+      CREATE OR REPLACE FUNCTION opengeni_private.product_lifecycle_fact_valid(
+        p_fact_type text, p_attribute text
+      ) RETURNS boolean LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog
       AS $$ BEGIN RAISE EXCEPTION 'simulated capture failure'; END $$`);
     try {
       const person = await insertAuthUser({ verified: true, provider: "credential" });

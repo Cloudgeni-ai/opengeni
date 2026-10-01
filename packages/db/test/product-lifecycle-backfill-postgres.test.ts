@@ -4,7 +4,6 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
-import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
 import {
@@ -33,6 +32,7 @@ let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let exporter: DbClient | null = null;
 let ownerSql: postgres.Sql | null = null;
+let appSql: postgres.Sql | null = null;
 
 type FactRow = {
   source_id: string;
@@ -83,10 +83,11 @@ beforeAll(async () => {
   client = createDb(appUrl.toString(), { max: 4, rlsStrategy: "force" });
   exporter = createDb(owned.ownerUrl, { max: 2 });
   ownerSql = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+  appSql = postgres(appUrl.toString(), { max: 1, onnotice: () => undefined });
 }, 900_000);
 
 afterAll(async () => {
-  await Promise.allSettled([client?.close(), exporter?.close(), ownerSql?.end()]);
+  await Promise.allSettled([client?.close(), exporter?.close(), ownerSql?.end(), appSql?.end()]);
   await owned?.release();
 }, 180_000);
 
@@ -241,27 +242,123 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
   });
 
   test("runtime roles can neither forge facts nor run the backfill", async () => {
-    if (!owned || !client) return;
-    const attempts = [
-      sql`select opengeni_private.enqueue_product_lifecycle_fact(
-        'auth.sign_up', 'email', 'user:forged-subject-1', null, null, 'forged')`,
-      sql`select opengeni_private.enqueue_product_lifecycle_fact_at(
-        'auth.sign_up', 'email', 'user:forged-subject-1', null, null, 'forged', now())`,
-      sql`select * from opengeni_private.backfill_product_lifecycle_facts('auth.sign_up', 10)`,
-    ];
-    for (const attempt of attempts) {
-      let refused: unknown = null;
-      try {
-        await client.db.execute(attempt);
-      } catch (error) {
-        refused = error;
-      }
-      expect(refused).not.toBeNull();
-    }
-    const forged = await owned.admin`
+    if (!owned || !appSql) return;
+    const forgedSubject = "user:forged-subject-1";
+    // The separately callable 0532 writer no longer exists.
+    const [writer] = await owned.admin<{ present: boolean }[]>`
+      select to_regprocedure(
+        'opengeni_private.enqueue_product_lifecycle_fact(text, text, text, uuid, uuid, text)'
+      ) is not null as present`;
+    expect(writer?.present).toBe(false);
+
+    // A runtime role attaching the owner's trigger functions to temporary
+    // tables named like real sources captures nothing.
+    await appSql.begin(async (tx) => {
+      await tx`create temp table credit_ledger_entries (
+        id uuid, account_id uuid, workspace_id uuid, type text, source_type text,
+        source_id text, amount_micros bigint) on commit drop`;
+      await tx`create temp table user_activity_presence (
+        subject_id text, active_day date) on commit drop`;
+      await tx`create trigger forged_fact after insert on pg_temp.credit_ledger_entries
+        for each row execute function opengeni_private.capture_product_lifecycle_fact()`;
+      await tx`create trigger forged_observation after insert on pg_temp.credit_ledger_entries
+        for each row execute function opengeni_private.observe_credit_grant()`;
+      await tx`create trigger forged_presence after insert on pg_temp.user_activity_presence
+        for each row execute function opengeni_private.capture_product_lifecycle_fact()`;
+      await tx`insert into pg_temp.credit_ledger_entries values (
+        ${crypto.randomUUID()}, ${crypto.randomUUID()}, null, 'grant', 'promotion',
+        'forged', 1000)`;
+      await tx`insert into pg_temp.user_activity_presence values (${forgedSubject}, current_date)`;
+    });
+    const forgedFacts = await owned.admin`
       select 1 from host_export_outbox
-      where export_kind = 'lifecycle_fact' and initiator ->> 'subjectId' = 'user:forged-subject-1'`;
-    expect(forged).toHaveLength(0);
+      where export_kind = 'lifecycle_fact'
+        and (initiator ->> 'subjectId' = ${forgedSubject} or event_type = 'credits.granted'
+          and payload ->> 'attribute' = 'other' and account_id is not null
+          and not exists (select 1 from credit_ledger_entries e where e.account_id = host_export_outbox.account_id))`;
+    expect(forgedFacts).toHaveLength(0);
+    const [observations] = await owned.admin<{ count: number }[]>`
+      select count(*)::int as count from opengeni_private.credit_grant_observations o
+      where not exists (select 1 from credit_ledger_entries e where e.id = o.ledger_entry_id)`;
+    expect(observations?.count).toBe(0);
+
+    // The backfill refuses any login but the migration owner, directly or
+    // from a temporary trigger.
+    let refused: unknown = null;
+    try {
+      await appSql`select * from opengeni_private.backfill_product_lifecycle_facts('auth.sign_up', 10)`;
+    } catch (error) {
+      refused = error;
+    }
+    expect(String(refused)).toMatch(/migration owner|permission denied/);
+  });
+
+  test("every backfill source keeps its capability read path", async () => {
+    if (!owned || !ownerSql) return;
+    const sourceTables = [
+      "self_service_organization_setup_receipts",
+      "additional_organization_creation_receipts",
+      "codex_subscription_credentials",
+      "xai_subscription_credentials",
+      "organization_model_provider_connections",
+      "organization_model_provider_connection_operations",
+      "credit_ledger_entries",
+      "connections",
+      "scheduled_tasks",
+      "skill_source_bindings",
+      "preference_registry_preferences",
+      "slack_bot_user_links",
+      "enrollments",
+      "organization_memberships",
+    ];
+    const policies = await owned.admin<
+      { table_name: string; name: string; permissive: boolean; qual: string | null }[]
+    >`
+      select c.relname::text as table_name, p.polname::text as name,
+        p.polpermissive as permissive, pg_get_expr(p.polqual, p.polrelid) as qual
+      from pg_policy p join pg_class c on c.oid = p.polrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = current_schema() and c.relname = any(${sourceTables})
+        and p.polcmd in ('r', '*')`;
+    for (const table of sourceTables) {
+      const own = policies.filter((policy) => policy.table_name === table);
+      // A later migration that recreates a restrictive policy without the
+      // capability branch would make that source backfill zero rows.
+      expect({
+        table,
+        read: own.some((policy) => policy.name === "lifecycle_backfill_read"),
+      }).toEqual({ table, read: true });
+      for (const policy of own.filter((candidate) => !candidate.permissive && candidate.qual)) {
+        expect({
+          table,
+          policy: policy.name,
+          escape: policy.qual!.includes("lifecycle_backfill_read_active"),
+        }).toEqual({ table, policy: policy.name, escape: true });
+      }
+    }
+
+    // And the backfill fails closed instead of completing with zero rows.
+    const [restrictive] = await owned.admin<{ name: string; qual: string }[]>`
+      select p.polname::text as name, pg_get_expr(p.polqual, p.polrelid) as qual
+      from pg_policy p where p.polrelid = 'connections'::regclass and not p.polpermissive
+        and p.polcmd in ('r', '*') limit 1`;
+    expect(restrictive).toBeDefined();
+    await owned.admin.unsafe(`ALTER POLICY ${restrictive!.name} ON connections USING (true)`);
+    await owned.admin`
+      update opengeni_private.product_lifecycle_backfill_progress
+      set materialized_at = null, cursor_seq = 0, completed_at = null
+      where source = 'connection.created'`;
+    let failure: unknown = null;
+    try {
+      await ownerSql`select * from opengeni_private.backfill_product_lifecycle_facts('connection.created', 10)`;
+    } catch (error) {
+      failure = error;
+    } finally {
+      await owned.admin.unsafe(
+        `ALTER POLICY ${restrictive!.name} ON connections USING (${restrictive!.qual})`,
+      );
+    }
+    expect(String(failure)).toContain("read access is missing on connections");
   });
 
   test("a backfill batch holds only ACCESS SHARE on source tables", async () => {
