@@ -826,6 +826,7 @@ export function SessionChrome({
         onRefresh={queue.refresh}
         onClearMutationError={queue.clearMutationError}
         onRetryOptimistic={composer?.retryOptimisticMessage}
+        onRestoreOptimistic={composer?.restoreOptimisticMessage}
         onRemoveOptimistic={composer?.removeOptimisticMessage}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
@@ -1333,6 +1334,7 @@ function QueuePanel({
   onRefresh,
   onClearMutationError,
   onRetryOptimistic,
+  onRestoreOptimistic,
   onRemoveOptimistic,
   readOnly,
   mutationFor,
@@ -1351,6 +1353,7 @@ function QueuePanel({
   onRefresh: () => Promise<void>;
   onClearMutationError: () => void;
   onRetryOptimistic?: ((clientEventId: string) => void) | undefined;
+  onRestoreOptimistic?: ((clientEventId: string) => void) | undefined;
   onRemoveOptimistic?: ((clientEventId: string) => void) | undefined;
   readOnly: boolean;
   mutationFor: UseTurnQueueResult["mutationFor"];
@@ -1536,23 +1539,39 @@ function QueuePanel({
             <span className="shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
               {turns.length + index + 1}
             </span>
-            <CompactQueueItemContent text={message.text} annotations={message.annotations} />
+            <div className="min-w-0 flex-1">
+              <CompactQueueItemContent text={message.text} annotations={message.annotations} />
+              {message.state === "failed" && message.error ? (
+                <p className="break-words text-og-xs">{message.error}</p>
+              ) : null}
+            </div>
             <span className="sr-only">
               {message.state === "failed"
-                ? "Not confirmed"
+                ? message.outcomeUnknown
+                  ? "Not confirmed"
+                  : "Message not sent"
                 : message.state === "sending"
                   ? "Placing in queue"
                   : "Queued"}
             </span>
             {message.state === "failed" ? (
               <div className="flex shrink-0 items-center gap-1 text-[10px]">
-                {onRetryOptimistic ? (
+                {message.retryable !== false && onRetryOptimistic ? (
                   <button
                     type="button"
                     className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                     onClick={() => onRetryOptimistic(message.clientEventId)}
                   >
                     Retry
+                  </button>
+                ) : null}
+                {message.retryable === false && onRestoreOptimistic ? (
+                  <button
+                    type="button"
+                    className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    onClick={() => onRestoreOptimistic(message.clientEventId)}
+                  >
+                    Edit message
                   </button>
                 ) : null}
                 {onRemoveOptimistic ? (

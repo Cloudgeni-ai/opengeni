@@ -9,6 +9,7 @@ import {
   ReplaceKeyDialog,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
+import { modelsScopeLabels } from "./models-ui";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.
@@ -77,6 +78,7 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   const places: SuperGrokPlaces = {
     scopeName: "Local",
     organizationName: "Organization",
+    scope: modelsScopeLabels("Organization", false),
     openAccount: () => undefined,
     openConnect: () => undefined,
     openAccess: () => undefined,
@@ -96,7 +98,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   );
   expect(clickedAction(submitButton())).toBe("connect_supergrok");
 
-  // "Open xAI again" reopens the same sign-in; it is not another connect.
+  // While the code waits, the step holds its own actions: no second connect
+  // button that could be counted again.
   await act(async () =>
     root.render(
       <SuperGrokConnectPage
@@ -106,7 +109,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
       />,
     ),
   );
-  expect(submitButton().hasAttribute("data-analytics-action")).toBe(false);
+  expect(container.querySelector('button[type="submit"]')).toBeNull();
+  expect(container.querySelector("[data-analytics-action]")).toBeNull();
 });
 
 test("Claude credentials use distinct accessible forms and explain subscription expiry", async () => {
@@ -284,7 +288,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
         codexAvailable={false}
         grok="hidden"
         gateways={gateways}
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,
@@ -301,7 +307,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,

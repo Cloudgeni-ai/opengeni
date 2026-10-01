@@ -30,13 +30,17 @@
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
-import { ModalCommandStartPreDispatchUnavailableError } from "../providers/modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartNotDispatchedError,
+} from "../providers/modal-command-router-wire";
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
   withCommandSupervisionReady,
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
+  ProviderCommandStartOutcomeUnknownError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -247,11 +251,11 @@ export interface RoutingSandboxSessionDeps {
     op: string;
     backend: ResolvedActiveBackend;
     admission: unknown;
-    outcome: "resolved" | "rejected";
-    /** Provider result for a resolved call. Never present for rejection. */
+    outcome: "resolved" | "rejected" | "outcome_unknown";
+    /** Provider result for a resolved call. Absent when Start is unknown. */
     result?: unknown;
-    /** Stable candidate generated before durable promotion is attempted. It is
-     * supplied only when the provider returned a positive yielded-session id. */
+    /** Exact candidate for a yielded process or a client-chosen unknown Start.
+     * Unknown Start settlement retains this writer; it does not prove exit. */
     retainedProcess?: RoutingRetainedProcess;
   }) => Promise<void | RoutingMutationSettlementResult>;
   /** Admit one model/user-visible stdin mutation under the already-durable
@@ -519,6 +523,15 @@ export class RoutingRetainedProcessNotFoundError extends Error {
   constructor(public readonly providerSessionId: number) {
     super(`retained sandbox process ${providerSessionId} is not tracked on its original route`);
   }
+}
+
+export function renderRoutingMutationOutcomeUnknownToolResult(
+  error: RoutingMutationOutcomeUnknownError,
+): string {
+  const locator = error.retainedProcess
+    ? ` Inspect the exact invocation with write_stdin using session_id ${error.retainedProcess.providerSessionId} and empty chars.`
+    : " Inspect state before deciding how to proceed.";
+  return `Sandbox operation outcome unknown; the operation was not replayed. Do not blindly retry the command.${locator} Error: ${error}`;
 }
 
 type PendingParentPromotion = Parameters<
@@ -1070,7 +1083,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         { cause: error },
       );
     }
-    await this.captureRetainedOutput(record, formatExecResult(pending.result));
+    if (pending.result !== undefined)
+      await this.captureRetainedOutput(record, formatExecResult(pending.result));
   }
 
   private confirmDurableRejectedPromotion(
@@ -1710,9 +1724,50 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        if (
+          !reservedProcess &&
+          error instanceof ProviderCommandStartOutcomeUnknownError &&
+          mutatesWorkspace &&
+          this.deps.afterMutation
+        ) {
+          const handle = this.deps.providerCommandHandle?.(admission);
+          if (!handle) throw error;
+          const process: RoutingRetainedProcess = {
+            id: crypto.randomUUID(),
+            providerSessionId: handle,
+            providerCommand: error.command,
+          };
+          const record = this.registerRetainedProcess(process, backend);
+          const settlement: PendingParentPromotion = {
+            op,
+            backend,
+            admission,
+            outcome: "outcome_unknown",
+            retainedProcess: process,
+          };
+          record.pendingParentPromotion = settlement;
+          try {
+            const rejected = await this.deps.afterMutation(settlement);
+            if (rejected) this.confirmDurableRejectedPromotion(record, rejected);
+            else record.durable = true;
+            record.pendingParentPromotion = null;
+          } catch (cause) {
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              "Command Start outcome is unknown and exact invocation promotion remains unresolved; it was not replayed",
+              { cause: new AggregateError([error, cause]), retainedProcess: process },
+            );
+          }
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Command Start outcome is unknown; its exact invocation is retained and was not replayed",
+            { cause: error, retainedProcess: process },
+          );
+        }
         if (reservedProcess) {
           if (
             (error instanceof ProviderCommandStartRejectedError ||
+              error instanceof ModalCommandStartNotDispatchedError ||
               error instanceof ModalCommandStartPreDispatchUnavailableError) &&
             reservedProcess.providerCommand?.kind === "modal-router-v1"
           ) {

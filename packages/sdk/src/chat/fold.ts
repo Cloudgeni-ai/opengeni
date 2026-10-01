@@ -1,4 +1,8 @@
 import type { SessionEvent } from "../types";
+import {
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
+} from "@opengeni/contracts/session-final-reply";
 import { OpenGeniChatError, type ChatChunk, type ChatPending, type ChatReply } from "./types";
 
 /**
@@ -91,6 +95,7 @@ export class ChatTurnFold {
   turnId: string | null;
   pending: ChatPending | null = null;
   failure: SessionEvent | null = null;
+  private emptyFinalReply = false;
   private readonly segments: Segment[] = [];
   private readonly openTools = new Map<string, string>();
 
@@ -231,6 +236,7 @@ export class ChatTurnFold {
         };
       }
       case "turn.completed":
+        this.emptyFinalReply = turnCompletedWithEmptyFinalReply(payload);
         return { chunks: this.settleSegments(), terminal: "completed" };
       case "turn.failed":
         this.failure = event;
@@ -252,6 +258,9 @@ export class ChatTurnFold {
       status:
         terminal === "pending" ? "pending" : terminal === "cancelled" ? "cancelled" : "completed",
       pending: this.pending,
+      ...(this.emptyFinalReply
+        ? { emptyFinalReply: true as const, notice: EMPTY_FINAL_REPLY_NOTICE }
+        : {}),
       events: [...this.events],
       toString: () => text,
     };
@@ -347,6 +356,9 @@ export class ChatTurnFold {
    */
   private settleSegments(): ChatChunk[] {
     this.closeSegments();
+    // A typed missing-final notice must not turn progress commentary into
+    // the missing answer. Ordinary waits retain their historical fallback.
+    if (this.emptyFinalReply) return [];
     if (this.segments.some((segment) => !segment.commentary)) return [];
     const latest = [...this.segments]
       .reverse()

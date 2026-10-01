@@ -4,8 +4,11 @@ import {
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
 } from "@opengeni/config";
 import {
+  agentConfigMayResolve,
+  applySessionAgentConfigWriteThrough,
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
+  resolveSessionAgentConfigForCreate,
   createAndStartSessionWithOutcome,
   recordWorkspaceUsage,
   resolveCatalogSettings,
@@ -16,6 +19,7 @@ import {
   assertAutomationRunAuthorityInTransaction,
   claimAutomationRun,
   settleAutomationRun,
+  requireWorkspace,
 } from "@opengeni/db";
 import { SessionSkills } from "@opengeni/contracts";
 import { agentRunAdmissionDenial } from "./agent-run-admission";
@@ -30,6 +34,8 @@ export type AutomationActivityOptions = {
   settle?: typeof settleAutomationRun;
   assertAuthority?: typeof assertAutomationRunAuthorityInTransaction;
   createSession?: typeof createAndStartSessionWithOutcome;
+  /** Workspace read for agent-configuration defaults (tests inject it). */
+  readWorkspace?: typeof requireWorkspace;
   admit?: typeof agentRunAdmissionDenial;
   assertModelPolicy?: typeof assertWorkspaceModelPolicyAllows;
   recordUsage?: typeof recordWorkspaceUsage;
@@ -43,6 +49,7 @@ export function createAutomationActivities(
   const settle = options.settle ?? settleAutomationRun;
   const assertAuthority = options.assertAuthority ?? assertAutomationRunAuthorityInTransaction;
   const createSession = options.createSession ?? createAndStartSessionWithOutcome;
+  const readWorkspace = options.readWorkspace ?? requireWorkspace;
   const admit = options.admit ?? agentRunAdmissionDenial;
   const assertModelPolicy = options.assertModelPolicy ?? assertWorkspaceModelPolicyAllows;
   const recordUsage = options.recordUsage ?? recordWorkspaceUsage;
@@ -158,6 +165,50 @@ export function createAutomationActivities(
             reason: "interactive_compute_not_allowed",
           };
         }
+        // Agent configuration for the generated session (null = legacy). The
+        // template's explicit tools are its baseline; capabilities only narrow.
+        let agentWriteThrough: {
+          config: import("@opengeni/contracts").ResolvedAgentConfig | null;
+          instructions: string | undefined;
+          firstPartyMcpTools: typeof template.firstPartyMcpTools;
+          tools: typeof template.tools;
+        };
+        try {
+          const workspaceSettings = agentConfigMayResolve(catalogSettings, template.agent)
+            ? (await readWorkspace(service.db, input.workspaceId)).settings
+            : {};
+          const resolution = resolveSessionAgentConfigForCreate({
+            settings: catalogSettings,
+            creator: "automation",
+            request: template.agent,
+            instructions: template.instructions ?? undefined,
+            workspaceSettings,
+            parent: null,
+            goal: false,
+          });
+          const written = applySessionAgentConfigWriteThrough({
+            config: resolution.config,
+            firstPartyMcpTools: template.firstPartyMcpTools,
+            tools: template.tools,
+            toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+            productServerIds: template.tools.map((tool) => tool.id),
+          });
+          agentWriteThrough = {
+            config: resolution.config,
+            instructions: resolution.instructions,
+            firstPartyMcpTools: written.firstPartyMcpTools,
+            tools: written.tools,
+          };
+        } catch (error) {
+          if (!isUnprocessableEntity(error)) throw error;
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: "dispatch_failed",
+          });
+          return { action: "failed", reason: "dispatch_failed" };
+        }
         const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
           modelId: model,
           requestedModelId: template.model,
@@ -193,7 +244,7 @@ export function createAutomationActivities(
           resources: template.resources,
           skills: SessionSkills.parse(template.skills),
           bundledSkillIds: template.bundledSkillIds,
-          tools: template.tools,
+          tools: agentWriteThrough.tools,
           toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
           model,
           reasoningEffort,
@@ -212,10 +263,11 @@ export function createAutomationActivities(
             label: accepted.serviceLabel,
           },
           createdByContext: accepted.provenance,
-          instructions: template.instructions,
+          instructions: agentWriteThrough.instructions ?? template.instructions,
           policyRole: template.policyRole,
           firstPartyMcpPermissions: template.firstPartyMcpPermissions,
-          firstPartyMcpTools: template.firstPartyMcpTools,
+          firstPartyMcpTools: agentWriteThrough.firstPartyMcpTools,
+          ...(agentWriteThrough.config ? { agentConfig: agentWriteThrough.config } : {}),
           retainWorkspaceCustomModel:
             model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
             model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX),

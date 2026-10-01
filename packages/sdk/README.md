@@ -40,6 +40,11 @@ authority and returns 409 after any later allowance lifecycle change. On 409,
 read the current state and decide whether a new operation is intended; never
 guess a CAS version. The SDK does not automatically retry mutations.
 
+The same reads and administration are free functions on the
+`@opengeni/sdk/usage-allowances` subpath for browser code that only has the
+narrow `OpenGeniBrowserClient` (`getMyUsage(client, workspaceId)`,
+`getAllUsage`, `setMemberAllowance`, ...); they call the same routes as the root methods.
+
 State reads require the same budget-read authority as configuration reads.
 Full usage additionally requires target workspace access; organization budget
 authority alone does not expose the member roster. Agents cannot read or
@@ -90,6 +95,48 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
   <OpenGeniChat />
 </OpenGeniProvider>;
 ```
+
+The proxy and `@opengeni/sdk/chat` facade accept `chats`. The proxy defaults to
+`"private"`; the facade does too when a `user` is present. Without a user and with
+`chats` omitted, the facade keeps workspace visibility, session-only agent reach
+and Knowledge authoring off. Explicit `"private"` requires an authenticated user.
+Private chats use private visibility, session-only agent reach and personal
+Knowledge; `"shared"` uses workspace visibility, agent reach and Knowledge.
+The API wire values are `visibility: "private" | "workspace"`; stored visibility
+is `user_private | workspace_shared`. Explicit hook/create fields override defaults.
+
+For `"isolated"`, pass the facade and return `{ tenant, user }` from `resolve`.
+`og.workspaceIdFor({ tenant, user }, { isolation: "user" })` provisions a separate
+workspace and that user's external membership. It uses stable onboarding keys,
+so retries do not restore revoked access. Other modes need explicit onboarding.
+The standalone resolver is on the server-only `@opengeni/sdk/tenant-workspaces`
+subpath. Keep tenant and user values host-authenticated.
+
+Isolated members get only workspace read, session create/read/control (including
+sending messages), file upload/read, and `mcp_servers:attach` for host-provided
+per-session servers. No admin permissions are included. Pass `memberPermissions`
+to the `OpenGeni` constructor or `createWorkspaceIdResolver` options to replace
+that list, for example to disable file uploads or MCP attachment. The organization
+key must also permit each operation. This is initial onboarding, not a membership
+update: changing the option does not update existing grants or restore revoked access.
+Keep MCP URLs and credentials in the server's `createSession` hook; the browser
+cannot choose them through the proxy.
+An existing onboarding conflict returns the workspace address without retrying
+or changing the grant. The address is not authorization: later `asUser` calls
+still enforce current permissions. Existing isolated users need an explicit
+`updateExternalWorkspaceMember` to gain newly added permissions such as MCP attachment.
+
+The facade also accepts `agent` (identity, capabilities, instructions, renderer)
+and defaults its renderer to `"markdown"` when the server admits agent configuration.
+Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
+and that refusal is cached per facade instance. This avoids a bootstrap request
+and supports older servers that cannot advertise admission. Explicit agent settings
+are never stripped: the 422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for the
+deployment operator. The private default with a user now turns personal Knowledge
+on; pass `memory: false` to keep authoring off.
+Missing organization private-session enablement raises `OpenGeniSetupError`,
+with owner/admin API, SDK and web-app instructions; the proxy preserves that
+actionable error for browser clients.
 
 Framework adapters are thin wrappers over the same web-standard handler (they
 also accept `createChatHandler` or any `(Request) => Promise<Response>`):
@@ -567,6 +614,83 @@ personal grant, Variable Set, Sandbox Environment, MCP server configuration, pro
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 
+## Archived session history import (server only)
+
+Use `@opengeni/sdk/session-history-import` to migrate historical conversations
+into read-only archives. These functions take `client` first, use its ordinary
+`requestJson` transport, and are not eager client methods or root helper exports:
+
+Create requires `sessions:create`; append requires `sessions:control` and the same
+authenticated importer. With `asUser`, the user's permissions apply rather than
+the organization key's permissions.
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+import {
+  importArchivedSession,
+  appendArchivedSessionEvents,
+} from "@opengeni/sdk/session-history-import";
+
+const og = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
+// Existing tenant mapping + explicitly onboarded original creator.
+const actor = og.asUser(originalExternalUserId, { source });
+const imported = await importArchivedSession(actor, workspaceId, {
+  importId: "embedded:thread-42", // Stable; persist the exact request before sending.
+  title: "Original conversation",
+  createdAt: "2025-04-01T09:30:00Z",
+  visibility: "user_private",
+});
+const appended = await appendArchivedSessionEvents(actor, workspaceId, imported.importId, {
+  batchId: "thread-42:batch-0001", // Stable; also persist this exact body first.
+  offset: imported.nextOffset,
+  events: [{
+    type: "agent.message.completed",
+    createdAt: "2025-04-01T09:31:00Z",
+    payload: { text: "Historical answer", channel: "final" },
+  }],
+});
+// Persist imported.session.id and appended.nextOffset in the migration ledger.
+```
+
+External mapping equivalents take `(client, source, externalId, ...)`:
+`importExternalWorkspaceArchivedSession` and
+`appendExternalWorkspaceArchivedSessionEvents`. These resolve an existing
+mapping; neither import form creates a workspace or grants membership. A bare
+organization key creates a shared, ownerless archive. Use `asUser` for the
+verified creator/owner; private imports require existing private-session
+enablement. Preserve source visibility rather than widening it on failure.
+
+The subpath exports `ImportArchivedSessionRequest/Response`,
+`AppendArchivedSessionEventsRequest/Response`, `ArchivedSessionImportEvent` and
+`SessionImportedArchive` types. Requests accept at most 100 events / 1 MiB
+serialized UTF-8 JSON and 256 KiB per event. IDs and titles are bounded to 200
+characters. Import events default to `[]`; append batches must be non-empty.
+Events carry `{ type, createdAt, turnId?, payload }`: a finite supported historical
+type, ISO timestamp, optional UUID/null correlation and JSON-object payload.
+Source timestamps support at most millisecond precision; normalize finer dates
+explicitly and retain originals in the ledger. Negative-zero JSON is rejected.
+
+Exact create replay returns `created: false`; exact append replay returns
+`replayed: true`. `offset` is a zero-based imported-event count, not a timeline
+sequence. Retain the exact actor, mapping, IDs, offset and bodies for uncertain
+retries; new batches use the acknowledged `nextOffset`. Changed key reuse or
+an out-of-order new offset returns 409. Helpers propagate `OpenGeniApiError`,
+including `outcomeUnknown`, and do not automatically retry mutations.
+
+Import is timeline-only: completed messages, calls/results and goals may be
+historical facts, but no model-facing history, live goal, pending decision or
+execution is restored. `session.importedArchive` has
+`{ importId, importedAt, readOnly: true }`, independent of personal archive state.
+Render through the unchanged `SessionConversation` and session proxy; never
+offer Send or Steer. Continuing an imported archive is unsupported in v1.
+The proxy does not expose import routes. Re-upload files through existing APIs
+and replace references before import; preserve additional source metadata and
+source/destination IDs in the host ledger. See
+[Migrating from embedded OpenGeni](../../docs/product-integration.md#migrating-from-embedded-opengeni).
+
 ## Connected accounts
 
 Authenticated messages use the initiating user's eligible connected accounts.
@@ -607,6 +731,12 @@ const request = await verifyCredentialProviderRequest({
   secret: providerSecret,
 });
 ```
+
+To check an endpoint now, `testWorkspaceWebhook(client, workspaceId, webhookId)` sends a
+signed `webhook.test` event (acknowledge it with any 2xx) and
+`testWorkspaceCredentialProvider(client, workspaceId)` sends a request with
+`purpose: "test"`; both come from `@opengeni/sdk/workspace-integrations` and return
+what the endpoint answered, naming returned credentials but never their values.
 
 `listWorkspaceSandboxImages` returns the deployment's allowlisted images; set one
 with `updateWorkspaceSettings(workspaceId, { defaultSandboxImage })`.
@@ -1082,6 +1212,9 @@ await client.cancelSession(workspaceId, sessionId, {
   reason: "host record deleted",
   clientEventId: crypto.randomUUID(),
 });
+// approvalId is `approvals[].id` from the latest `session.requiresAction`
+// event (type SessionApprovalRequest: { id, name, arguments }); it is the
+// pending tool call id, not the event id.
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 

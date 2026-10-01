@@ -35,6 +35,12 @@ export async function loadRailFooterMenuHarness() {
     WorkspaceNav: () => null,
   }));
 
+  // The usage row renders only while the workspace has a limit for you; it
+  // has its own coverage and would otherwise fetch usage here.
+  mock.module("@/components/usage/usage-entry", () => ({
+    AccountUsageMenuItem: () => null,
+  }));
+
   mock.module("@/context", () => ({
     useAppContext: () => ({
       client: {},

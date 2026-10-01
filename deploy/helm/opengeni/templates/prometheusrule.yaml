@@ -130,6 +130,9 @@ spec:
         # unbounded so Temporal can tune concurrency against real headroom. These
         # records map node-exporter instances onto Kubernetes nodes, then retain
         # alerts only for nodes currently hosting this OpenGeni release.
+        # Group labels identify output series; they do not scope expression
+        # inputs. Every reference to a release-owned record must select this
+        # deployment, otherwise co-located releases duplicate the join's RHS.
         - record: opengeni:workload_node:present
           expr: |
             max by (node) (
@@ -152,21 +155,21 @@ spec:
             max by (node) (
               rate(node_pressure_memory_stalled_seconds_total[2m])
               * on (instance) group_left (node)
-              opengeni:node_exporter_instance:info
+              opengeni:node_exporter_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             )
         - record: opengeni:node_io_psi_stall_ratio
           expr: |
             max by (node) (
               rate(node_pressure_io_stalled_seconds_total[2m])
               * on (instance) group_left (node)
-              opengeni:node_exporter_instance:info
+              opengeni:node_exporter_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             )
         - record: opengeni:node_swap_out_pages_per_second
           expr: |
             max by (node) (
               rate(node_vmstat_pswpout[2m])
               * on (instance) group_left (node)
-              opengeni:node_exporter_instance:info
+              opengeni:node_exporter_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             )
         - alert: OpenGeniTurnStuck
           expr: opengeni_turn_oldest_no_progress_age_seconds > 900
@@ -856,9 +859,9 @@ spec:
         # ── OpenGeni-hosting node pressure ───────────────────────────────────
         - alert: OpenGeniNodeMemoryPressureStalled
           expr: |
-            opengeni:node_memory_psi_stall_ratio > 0.1
+            opengeni:node_memory_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1
             and on (node)
-            opengeni:workload_node:present
+            opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           for: 2m
           labels:
             severity: critical
@@ -867,9 +870,9 @@ spec:
             description: Sustained memory PSI indicates reclaim or swap contention across the node, even when no pod has a finite memory limit.
         - alert: OpenGeniNodeIoPressureStalled
           expr: |
-            opengeni:node_io_psi_stall_ratio > 0.1
+            opengeni:node_io_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1
             and on (node)
-            opengeni:workload_node:present
+            opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           for: 2m
           labels:
             severity: critical
@@ -878,11 +881,11 @@ spec:
             description: Sustained I/O PSI can stall the container runtime, DNS, NATS, Temporal, and every worker together on a single node.
         - alert: OpenGeniNodeSwapThrashing
           expr: |
-            opengeni:node_swap_out_pages_per_second > 0
+            opengeni:node_swap_out_pages_per_second{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
             and on (node)
-            opengeni:node_memory_psi_stall_ratio > 0.1
+            opengeni:node_memory_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1
             and on (node)
-            opengeni:workload_node:present
+            opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           labels:
             severity: critical
           annotations:
@@ -893,10 +896,10 @@ spec:
             sum by (node, operation_type) (
               increase(kubelet_runtime_operations_errors_total[5m])
               * on (job, instance) group_left (node)
-              opengeni:kubelet_instance:info
+              opengeni:kubelet_instance:info{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             ) > 0
             and on (node)
-            opengeni:workload_node:present
+            opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           labels:
             severity: critical
           annotations:
@@ -908,7 +911,7 @@ spec:
               kube_node_status_condition{condition="Ready", status="true"}
             ) == 0
             and on (node)
-            opengeni:workload_node:present
+            opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           for: 1m
           labels:
             severity: critical

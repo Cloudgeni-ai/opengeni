@@ -50,6 +50,7 @@ import type {
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
   allowanceExhaustedFields,
   OpenGeniSecureContextRequiredError,
@@ -524,6 +525,7 @@ import type {
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -1435,6 +1437,24 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-policy`,
+      request,
+    );
+  }
+
+  /**
+   * Replace the session's agent configuration (capabilities, identity,
+   * instructions alias, renderer). Omitted fields keep their current values.
+   * Uses the tool-policy version (409 when stale) and applies from the next
+   * turn. A legacy session converts from its current effective state.
+   */
+  async updateSessionAgent(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionAgentRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/agent`,
       request,
     );
   }
@@ -4607,13 +4627,17 @@ export class OpenGeniClient {
    * reasoning efforts, MCP servers, file-upload limits, and how the client is
    * expected to authenticate. Drives a composer's model picker without prior
    * knowledge of the host setup; safe to call before any auth is established.
+   * Authenticated calls resolve the caller's default workspace, or the exact
+   * `workspaceId` option, using the same selection rules as fresh session create.
    */
-  async getClientConfig(options: OpenGeniRequestOptions = {}): Promise<ClientConfig> {
+  async getClientConfig(
+    options: OpenGeniRequestOptions & { workspaceId?: string } = {},
+  ): Promise<ClientConfig> {
     const config = await this.requestJson<ClientConfig>(
       "GET",
       "/v1/config/client",
       undefined,
-      {},
+      options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId },
       options,
     );
     if (this.apiContractStrict && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
@@ -9293,10 +9317,15 @@ async function apiErrorFromResponse(
   const ErrorType = allowanceExhaustedFields(body)
     ? OpenGeniAllowanceExhaustedError
     : OpenGeniApiError;
-  return new ErrorType(response.status, body, {
+  const error = new ErrorType(response.status, body, {
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     mutation: isMutationMethod(context.method),
   });
+  return error.status >= 400 &&
+    error.status < 500 &&
+    (error.code === "SESSION_TENANCY_NOT_ACTIVATED" || error.code === "OPENGENI_SETUP_REQUIRED")
+    ? new OpenGeniSetupError(error)
+    : error;
 }
 
 async function assertJsonResponse(

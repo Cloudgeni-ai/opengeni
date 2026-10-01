@@ -15,6 +15,8 @@ import {
   TurnExecutionPolicyV1,
   type ScheduledTask,
   type ScheduledTaskRun,
+  AgentConfigError,
+  type ResolvedAgentConfig,
 } from "@opengeni/contracts";
 import {
   openGeniSlackBotMetadata,
@@ -33,6 +35,9 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
+  agentConfigMayResolve,
+  applySessionAgentConfigWriteThrough,
+  resolveSessionAgentConfigForCreate,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -62,6 +67,7 @@ import {
   getNestedAgentDepthDeploymentPolicy,
   getSessionByCreateIdempotencyKey,
   getSessionCreationExecutionPolicy,
+  metadataWithAgentConfigCreateIdentity,
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
@@ -501,7 +507,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
       let sandboxOs: "linux" | "macos" | "windows" = "linux";
-      const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
+      let taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
       // A task created by a live agent attempt froze its creator's effective
       // first-party selection, permission set, and session access policy;
       // its generated sessions inherit that boundary under today's
@@ -510,13 +516,55 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
       // A person-chosen Slack channel adds only the two bot posting tools;
       // they post nowhere else, whatever the creator's own selection was.
-      const firstPartyMcpTools = withScheduledSlackBotPostingTools(
+      let firstPartyMcpTools = withScheduledSlackBotPostingTools(
         creatorPolicy?.firstPartyMcpTools
           ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
           : resolveFirstPartyMcpToolPolicy(settings).default,
         task.agentConfig,
         resolveFirstPartyMcpToolPolicy(settings).allowed,
       );
+      // Agent configuration for generated sessions (null = legacy). The
+      // scheduled baseline above (creator policy or deployment default) is
+      // what "all" reproduces; capabilities only narrow it. Frozen into the
+      // accepted execution so retries and recovery never resolve again.
+      let resolvedAgentConfig: ResolvedAgentConfig | null = null;
+      let resolvedAgentInstructions: string | undefined;
+      try {
+        const agentResolution = resolveSessionAgentConfigForCreate({
+          settings,
+          creator: "scheduled",
+          request: task.agentConfig.agent,
+          instructions: undefined,
+          workspaceSettings: agentConfigMayResolve(settings, task.agentConfig.agent)
+            ? (await requireWorkspace(db, task.workspaceId)).settings
+            : {},
+          parent: null,
+          goal: task.agentConfig.goal !== undefined,
+        });
+        resolvedAgentConfig = agentResolution.config;
+        resolvedAgentInstructions = agentResolution.instructions;
+        const written = applySessionAgentConfigWriteThrough({
+          config: resolvedAgentConfig,
+          firstPartyMcpTools,
+          tools: taskTools,
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+          productServerIds: task.agentConfig.tools.map((tool) => tool.id),
+        });
+        firstPartyMcpTools = written.firstPartyMcpTools;
+        taskTools = written.tools;
+      } catch (error) {
+        const status =
+          error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
+        if (!(error instanceof Error) || status !== 422) throw error;
+        const notEnabled =
+          error.cause instanceof AgentConfigError &&
+          error.cause.code === "agent_config_not_enabled";
+        return await refuseAdmission(
+          "scheduled_authority_unavailable",
+          notEnabled,
+          `scheduled agent configuration is not admissible: ${error.message}`,
+        );
+      }
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
         ? [...creatorPolicy.firstPartyMcpPermissions]
         : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
@@ -995,6 +1043,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
           resolvedFirstPartyMcpPermissions: firstPartyMcpPermissions,
+          ...(resolvedAgentConfig
+            ? {
+                resolvedAgentConfig,
+                ...(resolvedAgentInstructions !== undefined ? { resolvedAgentInstructions } : {}),
+              }
+            : {}),
           resolvedVariableSet: acceptedVariableSet
             ? { id: acceptedVariableSet.id, generation: acceptedVariableSet.generation }
             : null,
@@ -1202,6 +1256,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 tools: taskTools,
                 firstPartyMcpTools,
                 firstPartyMcpPermissions,
+                ...(resolvedAgentConfig ? { agentConfig: resolvedAgentConfig } : {}),
+                ...(resolvedAgentInstructions !== undefined
+                  ? { instructions: resolvedAgentInstructions }
+                  : {}),
                 ...creatorSessionPolicy,
                 ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
                   ? {
@@ -2243,6 +2301,12 @@ async function recoverBoundScheduledTaskDispatch(input: {
       tools: input.acceptedExecution.resolvedTools,
       firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
       firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
+      ...(input.acceptedExecution.resolvedAgentConfig
+        ? { agentConfig: input.acceptedExecution.resolvedAgentConfig }
+        : {}),
+      ...(input.acceptedExecution.resolvedAgentInstructions !== undefined
+        ? { instructions: input.acceptedExecution.resolvedAgentInstructions }
+        : {}),
       ...scheduledCreatorSessionPolicyInput(recoveredCreatorPolicy?.sessionPolicy ?? null),
       ...(task.agentConfig.knowledgeSource?.destination.kind === "personal"
         ? {
@@ -2380,20 +2444,23 @@ async function recoverBoundScheduledTaskDispatch(input: {
     );
     const expectedTaskMetadata = { ...task.agentConfig.metadata };
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
-    const expectedMetadata = {
-      ...expectedTaskMetadata,
-      model: input.acceptedExecution.resolvedModel,
-      reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
-      scheduledTaskId: task.id,
-      scheduledTaskRunMode: task.runMode,
-      ...(task.agentConfig.goal ? { scheduledTaskGoal: task.agentConfig.goal } : {}),
-      scheduledTaskRunId: canonicalGeneratedRunId,
-      ...(frozenSlack ? { [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: frozenSlack.id } : {}),
-    };
+    const expectedMetadata = metadataWithAgentConfigCreateIdentity(
+      {
+        ...expectedTaskMetadata,
+        model: input.acceptedExecution.resolvedModel,
+        reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
+        scheduledTaskId: task.id,
+        scheduledTaskRunMode: task.runMode,
+        ...(task.agentConfig.goal ? { scheduledTaskGoal: task.agentConfig.goal } : {}),
+        scheduledTaskRunId: canonicalGeneratedRunId,
+        ...(frozenSlack ? { [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: frozenSlack.id } : {}),
+      },
+      input.acceptedExecution.resolvedAgentConfig,
+    );
     if (
       session.createIdempotencyKey !== expectedCreateKey ||
       session.initialMessage !== task.agentConfig.prompt ||
-      session.instructions !== null ||
+      session.instructions !== (input.acceptedExecution.resolvedAgentInstructions ?? null) ||
       session.policyRole !== null ||
       stableJson(session.skills) !== "[]" ||
       stableJson(session.toolPolicy) !==
@@ -2435,6 +2502,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpTools) ||
       stableJson(session.firstPartyMcpPermissions) !==
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpPermissions) ||
+      stableJson(session.agent) !==
+        stableJson(input.acceptedExecution.resolvedAgentConfig ?? null) ||
       session.maxNestedAgentDepthOverride !== (task.agentConfig.maxNestedAgentDepth ?? null) ||
       (session.variableSetId ?? null) !==
         (input.acceptedExecution.resolvedVariableSet?.id ?? null) ||

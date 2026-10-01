@@ -853,10 +853,47 @@ the intent is an explicit fixed allow-list instead.
 
 ## Static catalog and workspace availability
 
-`GET /v1/config/client` is public deployment bootstrap configuration. Its
-`models` array exposes client-safe static definitions and the legacy
-`allowedModels` list. It never contains workspace credential readiness,
-workspace policy, concrete connected-account identity, or provider secrets.
+`GET /v1/config/client` remains public bootstrap configuration. Signed-out
+responses expose stably admissible deployment models, never disconnected
+subscription models. Bearer or actor-epoch authenticated responses resolve the
+caller's default workspace; `?workspaceId=<id>` selects an exact authorized workspace (required
+for organization keys without a default). The SDK accepts this selector through
+`getClientConfig({ workspaceId })`, and the embedded session proxy pins its host
+workspace. A managed-browser cookie alone remains unscoped deployment bootstrap
+so account/session-set reconciliation can load before scoped reads; it never
+discloses a workspace model catalog.
+
+`models` contains exactly the canonical IDs that
+direct fresh session creation accepts through the shared stable admission
+predicate. It rejects only absent/retired definitions, unsupported text/SSE,
+workspace policy or connection model permissions, inactive/reauth-required
+connections, and missing deployment API keys. Unknown, stale or unavailable
+provider health (including xAI freshness) and deployment credential-resolver
+observations never reject creation. Azure AD/managed identity credentials are
+resolved at execution, not assumed absent when no observation exists.
+
+Client config and omitted-model creation use the complete same default
+decision, including reasoning effort. When the configured deployment default
+is stably blocked, the shared decision falls back to the first admitted model
+with that model's default reasoning effort. A transiently unavailable but
+stably admitted deployment default is not replaced by this fallback.
+
+Each config model carries an optional `availability` observation for degraded
+UI display. Its status/reason/checkedAt and transient `selectable` flag do not
+override membership in `models`: a model may remain creatable while
+reported unavailable. A caller lacking `sessions:create` receives no models.
+`models` is authoritative and may be empty. Normally `allowedModels` has the
+same IDs; only when `models` is empty, it retains the one `defaultModel` hint so
+older clients with a nonempty-list parser still load. The additive
+`legacyModelFallback: { id, availability }` explicitly marks that hint
+unavailable and not selectable, with its stable reason. It grants no admission;
+creation still rejects it. New clients use `models`, not this legacy fallback,
+for choices. Older string-list-only clients may show the unusable hint but
+receive the ordinary rejection instead of failing bootstrap parsing.
+Billing/usage admission and a provider's live response are separate from model
+selection. Changes between listing and creating are re-evaluated at creation.
+Responses contain no connected-account identity, provider secrets, or execution
+topology. Child inheritance and keyed repair keep their accepted-work rules.
 
 Authenticated callers use:
 

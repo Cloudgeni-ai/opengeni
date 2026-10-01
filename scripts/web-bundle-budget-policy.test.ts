@@ -56,6 +56,28 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
+  test("pins the measured agent-configuration and current-main merge aggregates", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_572_187, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(726_074, 1.5 * kib)");
+    expect(source).toContain("Grouping the new config/allowance modules into startup-sdk-runtime");
+    expect(wholeKibEnvelope(2_572_187, 1.5 * KIB)).toBe(2514 * KIB);
+    expect(wholeKibEnvelope(726_074, 1.5 * KIB)).toBe(711 * KIB);
+    expect(2514 * KIB - 2_572_187).toBeGreaterThanOrEqual(1.5 * KIB);
+    expect(711 * KIB - 726_074).toBeGreaterThanOrEqual(1.5 * KIB);
+    for (const limit of [
+      "initialRaw: 1485 * kib",
+      "initialGzip: 405 * kib",
+      "initialFileGzip: wholeKibEnvelope(82_325)",
+      "initialFiles: 18",
+      "lazyChunkRaw: 800 * kib",
+      "lazyChunkGzip: 240 * kib",
+      "cssGzip: wholeKibEnvelope(44_100)",
+    ])
+      expect(source).toContain(limit);
+    expect(source).toContain("39,");
+  });
+
   test("calibrates only the measured session artifact navigation gzip envelope", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     expect(source).toContain("wholeKibEnvelope(656_741, 1.5 * kib)");
@@ -322,10 +344,46 @@ describe("web bundle budget policy", () => {
     ).toBeGreaterThanOrEqual(MINIMUM_RAW_HEADROOM_BYTES);
   });
 
+  test("bounds the runtime-robustness session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(711_698, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(2_533_812, 1.5 * kib)");
+  });
+
   test("bounds the usage-allowance session graph growth", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     expect(source).toContain("wholeKibEnvelope(2_531_746, 1.5 * kib)");
     expect(source).toContain("wholeKibEnvelope(713_634, 1.5 * kib)");
     expect(wholeKibEnvelope(713_634, 1.5 * KIB) - 713_634).toBeGreaterThanOrEqual(1.5 * KIB);
+  });
+
+  test("bounds the organization Models page session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_533_407, 1.5 * kib)");
+    expect(wholeKibEnvelope(2_533_407, 1.5 * KIB) - 2_533_407).toBeGreaterThanOrEqual(1.5 * KIB);
+  });
+
+  test("keeps usage allowance pages lazy without a session-graph envelope", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    // The usage UI fits the existing caps: the session graph carries only the
+    // refusal row and the small eager usage entry. Keep it that way.
+    expect(source).not.toContain("Usage allowance UI:");
+    const vite = readFileSync(new URL("../apps/web/vite.config.ts", import.meta.url), "utf8");
+    expect(vite).toContain('name: "usage-allowances"');
+    // The eager account-menu/composer usage entry must not join the budget pages.
+    expect(vite).toContain("(?!usage-entry\\.)");
+    expect(vite).not.toContain('name: "usage-surfaces"');
+    expect(vite).toContain("react-slider");
+    // Settings-only rows stay out of the paused banner/provider chunk that
+    // direct workspace and session loads import.
+    expect(vite).toContain('name: "workspace-chrome"');
+    expect(vite).toContain("default-sandbox-environment-row");
+    // Module-scope composer panel callers must not sit in a chunk cycle.
+    expect(vite).toContain('name: "composer-menu-primitives"');
+  });
+
+  test("bounds the usage allowances UI session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_536_098, 1.5 * kib)");
   });
 });

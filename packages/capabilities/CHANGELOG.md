@@ -1,5 +1,11 @@
 # @opengeni/capabilities
 
+## 0.3.5
+
+### Patch Changes
+
+- 6a97313: Publish the curated Integration `autoApproval` governance field and the `autoApprovalForbidden` helper that `@opengeni/api-router` imports.
+
 ## 0.3.4
 
 ### Patch Changes

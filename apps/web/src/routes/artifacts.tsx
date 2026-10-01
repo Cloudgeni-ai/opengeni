@@ -55,8 +55,9 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
+import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
 
@@ -66,7 +67,17 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function SiteLoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+function SiteLoadError({
+  error,
+  accessDenied,
+  onRetry,
+}: {
+  error: unknown;
+  accessDenied: boolean;
+  onRetry: () => void;
+}) {
+  if (accessDenied)
+    return <Notice title="You can't open this Site">{ARTIFACT_ACCESS_REQUIRED}</Notice>;
   const view = artifactLoadErrorView(error, "site");
   return (
     <Notice
@@ -125,6 +136,12 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     context.accessKeyVersion,
   );
   const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "sessions:create");
+  // The catalog quietly omits Sites and editable artifacts without `artifacts:read`.
+  const artifactKindsHidden = lacksWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "artifacts:read",
+  );
   const startSession = async () => {
     const created = await context.startSession(workspaceId, {
       text:
@@ -184,6 +201,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
             onLoadMore={catalog.loadMore}
             emptyAction={newArtifact}
             onEmptyChange={setEmpty}
+            artifactKindsHidden={artifactKindsHidden}
           />
         </LineTabsContent>
       </LineTabs>
@@ -377,7 +395,11 @@ function ArtifactDetailPage({
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
         <DetailPage back={back}>
-          <SiteLoadError error={error} onRetry={() => void load()} />
+          <SiteLoadError
+            error={error}
+            accessDenied={isArtifactReadDenied(error, context.accessContext, workspaceId)}
+            onRetry={() => void load()}
+          />
         </DetailPage>
       </ContentPage>
     );

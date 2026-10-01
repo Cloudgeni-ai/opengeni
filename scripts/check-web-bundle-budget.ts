@@ -482,6 +482,17 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Usage allowances UI (composer limit notice, conversation refusal row)
+    // with #3053's final-reply notice: 2,536,098 raw on Bun 1.4 macOS/arm64.
+    wholeKibEnvelope(2_536_098, 1.5 * kib),
+    // Runtime robustness (empty-final-reply notice, per-model availability) on
+    // main with usage allowances and the pill dodge: 2,533,812 raw on Bun 1.4
+    // macOS/arm64 with the notice grouped into session-shared-primitives.
+    wholeKibEnvelope(2_533_812, 1.5 * kib),
+    // Main after #3071 (organization Models page) and #3039: Linux/x64 CI
+    // measures 2,533,407 raw, 31 bytes over the previous envelope. Record the
+    // measurement with the established 1.5 KiB allowance; other caps unchanged.
+    wholeKibEnvelope(2_533_407, 1.5 * kib),
     // Usage allowances: typed allowance refusal rendering in the session timeline
     // plus usage event types in shared contracts, on top of main f874217f5
     // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
@@ -587,9 +598,34 @@ const effectiveBudgets = {
     // files (Bun 1.4 Linux/x64). Keep the established 1.5 KiB headroom; gzip
     // and every other cap stay fixed.
     wholeKibEnvelope(2_529_339, 1.5 * kib),
+    // Agent configuration: session creation resolves the chat's capabilities
+    // (the capability catalog and its tool map in @opengeni/contracts), and
+    // the composer's + menu offers Capabilities. Merged with main f874217f5
+    // the graph measures 2,545,412 raw / 717,339 gzip across 39 files (main
+    // alone: 2,524,559 / 710,439 / 37; Bun 1.4 macOS/arm64). Startup stays at
+    // 17 files. Keep the established 1.5 KiB headroom; gzip below is the same
+    // measurement, and every other cap stays fixed.
+    wholeKibEnvelope(2_545_412, 1.5 * kib),
+    // Agent configuration integrated with main bb2f7ea7f (allowances, timeline
+    // placement and session model controls): Bun 1.4 Linux/x64 measures
+    // 2,571,800 raw / 725,870 gzip across 38 files; startup remains 17 files.
+    // Grouping the new config/allowance modules into startup-sdk-runtime was
+    // tried first: 2,572,020 / 726,382, still 38 files, so retain the smaller
+    // existing partition. Shared SDK methods and capability contracts are
+    // retained runtime code, not settings-only modules to move behind a route.
+    // The required peer-state leaf fixes a production registration cycle;
+    // the final graph is 2,572,187 / 726,074 across 39 files. Recalibrating to
+    // that measurement leaves both rounded aggregate caps unchanged.
+    // Bound only these measured aggregates with the established 1.5 KiB
+    // headroom; every initial, per-file, file-count, lazy and CSS cap stays fixed.
+    wholeKibEnvelope(2_572_187, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Runtime robustness on main f874217f5: the empty-final-reply notice and
+    // per-model availability in the session timeline measure 711,698 gzip
+    // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(711_698, 1.5 * kib),
     // Usage allowances on main f874217f5: 713,634 gzip (Linux/x64 CI).
     wholeKibEnvelope(713_634, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
@@ -660,6 +696,10 @@ const effectiveBudgets = {
     // grows to 709,242 (+2,522; Bun 1.4 Linux/x64). Retain the established
     // 1.5 KiB allowance; raw, initial, per-file, lazy, and CSS caps stay fixed.
     wholeKibEnvelope(709_242, 1.5 * kib),
+    // Agent configuration merged with main f874217f5, as measured above.
+    wholeKibEnvelope(717_339, 1.5 * kib),
+    // Same current-main integration and grouping trial documented above.
+    wholeKibEnvelope(726_074, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

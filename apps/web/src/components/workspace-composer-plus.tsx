@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ComposerMobilePlus, type ComposerPlusProps } from "@/components/composer-mobile-plus";
+import {
+  ComposerMobilePlus,
+  type ComposerPlusPanel,
+  type ComposerPlusProps,
+} from "@/components/composer-mobile-plus";
 import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission, isWorkspacePermissionDenied } from "@/lib/permissions";
@@ -40,7 +44,12 @@ function cacheConnectorCatalog(
   else byWorkspace.delete(workspaceId);
 }
 
-export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: string }) {
+export function WorkspaceComposerPlus(
+  props: ComposerPlusProps & {
+    workspaceId: string;
+    openRequest?: { panel: ComposerPlusPanel; nonce: number } | undefined;
+  },
+) {
   const context = useAppContext();
   const { client } = context;
   const { workspaceId } = props;

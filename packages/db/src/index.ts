@@ -11,7 +11,11 @@ export {
   readSessionFileAttachments,
   type SessionAttachmentReadAccess,
 } from "./session-file-attachments";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  sessionCreateConnectionSelectionFailure,
+} from "./mcp-account-bindings";
+export { SessionCreateConnectionSelectionUnavailableError } from "./mcp-account-bindings";
 import {
   childTerminalResultFinalAnswer,
   childTerminalResultFinalAnswerSequences,
@@ -86,6 +90,7 @@ import {
   SessionMessageSearchRequest,
   type SessionMessageSearchResponse,
 } from "@opengeni/contracts";
+import { ResolvedAgentConfig } from "@opengeni/contracts";
 import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
@@ -656,6 +661,24 @@ export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
+import { createArchivedSessionImportPersistence } from "./archived-session-imports";
+export {
+  ArchivedSessionImportError,
+  assertSessionIsNotImported,
+  canonicalArchivedSessionImportHash,
+  archivedSessionImportFileIds,
+  getArchivedSessionImportId,
+  type ArchivedSessionImportErrorCode,
+} from "./archived-session-imports";
+export const { importArchivedSession, appendArchivedSessionEvents } =
+  createArchivedSessionImportPersistence({
+    createSessionWithIdempotencyKeyResult,
+    getFilesForSubject,
+    getSession,
+    getWorkspaceGrant,
+    isCreateConflict: (error) => error instanceof SessionCreateIdempotencyConflictError,
+    isCreateUnavailable: (error) => error instanceof SessionCreateIdempotencyUnavailableError,
+  });
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -812,7 +835,11 @@ export {
 } from "./database";
 export { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
-export { normalizedCredentialHeaders } from "./connection-token-resolver";
+export {
+  BROKERED_CREDENTIAL_SHAPE_HINT,
+  brokeredCredentialBundleProblem,
+  normalizedCredentialHeaders,
+} from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
@@ -20555,11 +20582,13 @@ export class SessionVariableSetSelectionUnavailableError extends Error {
   }
 }
 
-async function translateSessionVariableSetSelectionCreateError(
+async function translateSessionCreateError(
   db: Database,
   input: SessionCreateInput,
   error: unknown,
 ): Promise<never> {
+  const connectionFailure = sessionCreateConnectionSelectionFailure(error);
+  if (connectionFailure) throw connectionFailure;
   if (!isSessionVariableSetSelectionFkViolation(error) || !input.subjectId) throw error;
 
   // The failed create transaction, including its session row and projection
@@ -33253,6 +33282,15 @@ export class SessionCreateIdempotencyConflictError extends Error {
   }
 }
 
+/** An idempotent INSERT lost, but RLS exposes neither its winner nor a denial.
+ * Never probe outside the caller's visibility merely to explain the conflict. */
+export class SessionCreateIdempotencyUnavailableError extends Error {
+  readonly name = "SessionCreateIdempotencyUnavailableError";
+  constructor() {
+    super("Session create idempotency result is unavailable");
+  }
+}
+
 async function frozenSessionCreatorForInsert(
   tx: Database,
   input: {
@@ -33344,6 +33382,11 @@ export type SessionCreateInput = {
   parentSessionId?: string | null;
   /** Freezes a new root session's code_search decision; omitted uses the boot-installed policy. */
   codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
+  /**
+   * Frozen agent configuration (migration 0559). Omitted or null writes a
+   * legacy session. When provided it also participates in keyed-create replay.
+   */
+  agentConfig?: ResolvedAgentConfig | null;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
@@ -33664,6 +33707,8 @@ type SessionCreateReplayIdentity = {
   agentAccess?: SessionAgentAccess;
   scopeSubjectId?: SessionScopeSubjectId | null;
   memoryScope?: SessionMemoryScope;
+  /** Resolved creation-time configuration; omitted and null are equivalent. */
+  agentConfig?: ResolvedAgentConfig | null;
 };
 
 // Session metadata is immutable after creation and already participates in
@@ -33680,6 +33725,20 @@ function metadataWithAgentLearningCreateIdentity(
   delete next[SESSION_CREATE_AGENT_LEARNING_METADATA_KEY];
   if (settings && Object.keys(settings).length)
     next[SESSION_CREATE_AGENT_LEARNING_METADATA_KEY] = settings;
+  return next;
+}
+
+const SESSION_CREATE_AGENT_CONFIG_METADATA_KEY = "_opengeni_session_create_agent_config_v1";
+
+/** Canonical creation metadata shared with strict generated-session admission. */
+export function metadataWithAgentConfigCreateIdentity(
+  metadata: Record<string, unknown>,
+  config: ResolvedAgentConfig | null | undefined,
+): Record<string, unknown> {
+  const next = { ...metadata };
+  delete next[SESSION_CREATE_AGENT_CONFIG_METADATA_KEY];
+  const identity = agentConfigReplayIdentity(config);
+  if (identity !== null) next[SESSION_CREATE_AGENT_CONFIG_METADATA_KEY] = identity;
   return next;
 }
 
@@ -33755,6 +33814,32 @@ function assertSessionCreateReplayIdentity(
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
+  // Compare immutable creation truth, never the live /agent configuration.
+  // Missing metadata denotes a legacy-null create, including later conversion.
+  if (
+    stableJson(existing.metadata?.[SESSION_CREATE_AGENT_CONFIG_METADATA_KEY] ?? null) !==
+    stableJson(agentConfigReplayIdentity(input.agentConfig))
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+}
+
+/** Replay compares what the session does, not the bookkeeping `source` label. */
+function agentConfigReplayIdentity(config: unknown): unknown {
+  const parsed = parseStoredSessionAgentConfig(config);
+  if (!parsed) return null;
+  const { source: _source, ...identity } = parsed;
+  return identity;
+}
+
+/**
+ * Read a stored agent configuration. A value this release cannot parse (for
+ * example written by a newer release after a rollback) projects as null.
+ */
+export function parseStoredSessionAgentConfig(value: unknown): ResolvedAgentConfig | null {
+  if (value === null || value === undefined) return null;
+  const parsed = ResolvedAgentConfig.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 async function lockSessionCreateIdempotencyKey(
@@ -33850,7 +33935,10 @@ async function createSessionInTransaction(
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
     withoutRetiredSessionCreateMetadata(
       withBundledSkillSelectionMetadata(
-        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+        metadataWithAgentConfigCreateIdentity(
+          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+          input.agentConfig,
+        ),
         input.bundledSkillIds,
       ),
     ),
@@ -33915,6 +34003,7 @@ async function createSessionInTransaction(
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
         ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
         ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+        ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
@@ -34144,6 +34233,7 @@ async function createSessionInTransaction(
                 ? resolveWorkspaceCodexCompactionDefault(workspace.settings)
                 : "portable"),
             codeSearchEnabled,
+            agentConfig: input.agentConfig ?? null,
             status: "queued",
           },
           "initialMessage",
@@ -34186,6 +34276,7 @@ async function createSessionInTransaction(
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
           ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+          ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -34232,6 +34323,8 @@ async function createSessionInTransaction(
           denial: existingDenial,
         };
       }
+      if (input.requestedSessionId) throw new SessionIdConflictError(input.requestedSessionId);
+      throw new SessionCreateIdempotencyUnavailableError();
     }
     if (input.requestedSessionId) throw new SessionIdConflictError(input.requestedSessionId);
     throw new Error("Failed to create session");
@@ -34273,7 +34366,7 @@ export async function createSession(db: Database, input: SessionCreateInput): Pr
         ),
     );
   } catch (error) {
-    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+    return await translateSessionCreateError(db, input, error);
   }
   if (result.denied) {
     // Throw only after withRlsContext's outer transaction commits the denial.
@@ -34310,7 +34403,7 @@ export async function createSessionWithIdempotencyKeyResult(
         ),
     );
   } catch (error) {
-    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+    return await translateSessionCreateError(db, input, error);
   }
 }
 
@@ -34397,6 +34490,8 @@ export async function getInitializedSessionCreateReplay(
 
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
+    /** Resolved agent configuration of the retry; omitted skips the comparison. */
+    agentConfig?: ResolvedAgentConfig | null;
   },
 ): Promise<InitializedSessionCreateReplay | null> {
   return await withWorkspaceSubjectSessionActivityRls(
@@ -42091,6 +42186,31 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
   );
 }
 
+/** Historical router exposure is a protocol fact, not renewed tool authority. */
+export async function sessionHasToolRouterHistory(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  return withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ id: schema.sessionHistoryItems.id })
+      .from(schema.sessionHistoryItems)
+      .where(
+        and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          sql`(
+          ${schema.sessionHistoryItems.item}->>'type' IN ('tool_search_call', 'tool_search_output')
+          OR (${schema.sessionHistoryItems.item}->>'type' = 'function_call'
+            AND ${schema.sessionHistoryItems.item}->>'name' IN ('tool_search', 'tool_list', 'tool_invoke'))
+        )`,
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  });
+}
+
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
 export async function ensureSessionSkillCatalog(
   db: Database,
@@ -45282,6 +45402,11 @@ export interface AcquireLeaseInput {
   // durable capture-and-drain rotation, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
+  /** Deployment/workspace pins select only a cold-create image. Reuse preserves
+   * the existing warming/warm/draining group's image under the lease row lock.
+   * Omission retains required image matching for explicit image changes (B3).
+   * Capture, rotation, epoch and rig-version fences remain independent. */
+  imagePolicy?: "require_match" | "new_creates_only";
   /** Direct control of an already-owned interaction instance. Admit only that
    * live provider, retaining its image across deployment changes. Never spawn
    * or rotate a replacement for this request. Capture/rotation fences still apply. */
@@ -46943,7 +47068,7 @@ async function acquireLeaseOnce(
 
         // -- SHARED STATE CONFLICT (B3 image + M3 rig): a LIVE box (warm/draining/warming)
         // was created under a specific image AND rig version. If this run resolves a
-        // DIFFERENT image OR a DIFFERENT rig version (each checked only when both sides are
+        // DIFFERENT required image OR a DIFFERENT rig version (each checked only when both sides are
         // known), the one shared filesystem cannot serve both. Under the held row lock we
         // count the OTHER holders (not this exact (kind, holderId) — an idempotent retry of
         // our own holder is not a rival):
@@ -46955,11 +47080,13 @@ async function acquireLeaseOnce(
         //   - OTHER holders present: REFUSE. Throw — recreating would yank the running
         //     filesystem out from under the other sessions. Image conflict is reported first
         //     so its (pre-rig) error is unchanged for the image-only case.
-        // Each axis is enforced only when BOTH sides are known; a cold row / a legacy null /
+        // Deployment pins (new_creates_only) retain the live image instead. Each required
+        // axis is enforced only when BOTH sides are known; a cold row / a legacy null /
         // an unset input never conflicts (the selfhosted path passes neither; a rig-less run
         // passes no rigVersionId, so it never stamps or conflicts on rig).
         const imageConflict =
           input.retainedInstanceId === undefined &&
+          input.imagePolicy !== "new_creates_only" &&
           image !== null &&
           row.image !== null &&
           row.image !== image;
@@ -47036,7 +47163,8 @@ async function acquireLeaseOnce(
         // -- cold: WIN the cold->warming CAS (C1). Exactly one winner under the
         // held row lock; concurrent arrivals serialize behind us and see warming.
         // The image (B3) is (re-)stamped on the CAS so the box the spawner cold-creates
-        // records the image it runs — for a fresh cold row or a solo-recreate above.
+        // records the image it runs — for a fresh cold row or a successor after
+        // rotation/reaping. Deployment pins do not relabel a reused live box.
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
           // An audited system decision to continue on an EMPTY workspace makes
@@ -67152,6 +67280,14 @@ export async function setSessionGoalStatusWithEvent(
               sequence: session.lastSequence + 1,
               type: input.event.type,
               payload: payload,
+              ...(input.commandActor
+                ? {
+                    turnId: input.commandActor.turnId,
+                    turnGeneration: input.commandActor.executionGeneration,
+                    turnAttemptId: input.commandActor.attemptId,
+                    turnAssociation: "current",
+                  }
+                : {}),
               occurredAt: now,
             },
             "payload",
@@ -82777,6 +82913,8 @@ function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
+  agentConfig?: ResolvedAgentConfig | null;
+  instructions?: string | null;
   toolPolicy?: SessionToolPolicy;
   toolPolicyVersion?: number;
   expectedToolPolicyVersion?: number;
@@ -84245,6 +84383,10 @@ type LockedSessionUpdateResult = {
     resources?: ResourceRef[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
+    /** Agent configuration (migration 0559); written with the tool-policy CAS. */
+    agentConfig?: ResolvedAgentConfig | null;
+    /** Session instructions (the `agent.instructions` alias). */
+    instructions?: string | null;
     toolPolicy?: SessionToolPolicy;
     toolPolicyVersion?: number;
     expectedToolPolicyVersion?: number;
@@ -84412,6 +84554,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
               : {}),
+            ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
+            ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -84633,6 +84777,15 @@ function mapSession(
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     status: row.status as SessionStatus,
+    ...(row.importedArchiveImportId && row.importedArchiveImportedAt
+      ? {
+          importedArchive: {
+            importId: row.importedArchiveImportId,
+            importedAt: row.importedArchiveImportedAt.toISOString(),
+            readOnly: true as const,
+          },
+        }
+      : {}),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: row.title ?? null,
@@ -84707,6 +84860,7 @@ function mapSession(
         ? row.codexCompactionMode
         : "portable",
     codeSearchEnabled: row.codeSearchEnabled === true,
+    agent: parseStoredSessionAgentConfig(row.agentConfig),
     ...pin,
     ...attention,
     ...archive,
@@ -85921,6 +86075,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./codemode-operations";
 export * from "./browser-sessions";
+export * from "./browser-deadline-checkpoints";
 export * from "./computer-sessions";
 export * from "./browser-identities";
 export * from "./browser-state-artifacts";
@@ -85952,6 +86107,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 }
 
 export * from "./feedback";
+export * from "./session-final-reply";
 export * from "./knowledge-entries";
 
 export * from "./knowledge-indexing";

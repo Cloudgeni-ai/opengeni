@@ -64,6 +64,13 @@ export type SessionConversationProps = ClientOverride & {
   /** Product-specific tool-call renderers; defaults to the built-in registry. */
   toolRegistry?: MessageTimelineProps["toolRegistry"];
   /**
+   * Replace the "usage limit reached" row for an `allowance_exhausted`
+   * refusal, for example to link your own plan or admin page.
+   */
+  renderAllowanceExhausted?: MessageTimelineProps["renderAllowanceExhausted"];
+  /** Replace the words of the default "usage limit reached" row. */
+  allowanceExhaustedLabels?: MessageTimelineProps["allowanceExhaustedLabels"];
+  /**
    * File attachments in the composer. Defaults to true; the attach control
    * appears only when the deployment's client config enables file uploads.
    */
@@ -99,6 +106,8 @@ function Conversation({
   onOpenArtifact,
   renderInteractiveBlock,
   toolRegistry,
+  renderAllowanceExhausted,
+  allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
   modelPicker,
   userMessageDisclosureLabels,
@@ -111,8 +120,6 @@ function Conversation({
 }: SessionConversationProps) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
-  const scopeRef = useRef(context);
-  scopeRef.current = context;
   const config = useClientConfigFlags(context.client);
   const showModelPicker = modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({
@@ -124,10 +131,6 @@ function Conversation({
   const options = { ...scope, events: feed.events };
   const detail = useSession(sessionId, options);
   const queue = useTurnQueue(sessionId, options);
-  const [queueFocusTarget, setQueueFocusTarget] = useState<{
-    turnId: string;
-    requestId: number;
-  }>();
   const human = useHumanInputRequests(sessionId, options);
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
@@ -135,6 +138,7 @@ function Conversation({
   const uploadsEnabled = attachmentsRequested && config.uploads;
   const status = feed.sessionStatus ?? detail.session?.status;
   const terminal = status === "cancelled";
+  const importedArchive = detail.session?.importedArchive?.readOnly === true;
   const releaseSentFiles = (input: SendMessageInput) =>
     files.removeReadyFiles(
       (input.resources ?? []).flatMap((resource) =>
@@ -209,6 +213,8 @@ function Conversation({
             : (renderInteractiveBlock ?? defaultInteractiveBlock)
         }
         userMessageDisclosureLabels={userMessageDisclosureLabels}
+        renderAllowanceExhausted={renderAllowanceExhausted}
+        allowanceExhaustedLabels={allowanceExhaustedLabels}
         className="min-h-0 flex-1"
         {...(toolRegistry ? { toolRegistry } : {})}
         events={feed.events}
@@ -226,100 +232,90 @@ function Conversation({
         }}
         loadingOldest={feed.loadingOldest}
         onJumpToLatest={feed.jumpToLatest}
-        onJumpToLatestQuestion={() =>
-          feed.jumpToLatestQuestion({
-            onQueuedQuestion: async (turn, navigation) => {
-              await queue.refresh();
-              if (
-                !navigation.isCurrent() ||
-                scopeRef.current.client !== context.client ||
-                scopeRef.current.workspaceId !== context.workspaceId
-              )
-                return;
-              setQueueFocusTarget((previous) => ({
-                turnId: turn.id,
-                requestId: (previous?.requestId ?? 0) + 1,
-              }));
-            },
-          })
-        }
-        onAnnotate={composer.addAnnotation}
+        onAnnotate={importedArchive ? undefined : composer.addAnnotation}
       />
-      <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">
-        {approvals.length > 0 && !terminal ? (
-          <ApprovalSurface
-            className="mx-auto max-w-3xl"
-            approvals={approvals}
-            onApprove={async (approval) => {
-              await control.approve(approval.id);
-            }}
-            onReject={async (approval) => {
-              await control.reject(approval.id);
-            }}
-            responding={control.responding}
-            error={control.error}
-          />
-        ) : null}
-        <HumanInputSurface
-          loadSkillReview={loadSkillReview}
-          requests={human.requests}
-          onSubmit={async (id, response) => {
-            await human.respond(id, response);
-          }}
-          respondingRequestId={human.respondingRequestId}
-          error={human.mutationError?.message}
-          autoFocus={false}
-        />
-        {terminal ? (
-          <SessionChrome
-            queue={queue}
-            queueFocusTarget={queueFocusTarget}
-            sessionStatus={status}
-            readOnly
-          />
-        ) : (
-          <SessionChrome
-            queue={queue}
-            queueFocusTarget={queueFocusTarget}
-            composer={composer}
-            sessionStatus={status}
-            onComposerFocus={() =>
-              region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
-            }
-          />
-        )}
-      </div>
-      <div className="shrink-0" data-og-conversation-composer="">
-        <ChatComposer
-          {...composerProps}
-          composer={composer}
-          attachments={uploadsEnabled ? files : undefined}
-          disabled={terminal || composerProps?.disabled}
-          controlsStart={
-            composerProps?.controlsStart ??
-            (showModelPicker && composer.policy && (
-              <ModelPolicyPicker
-                rows={catalog.rows}
-                model={composer.policy.model}
-                effort={composer.policy.reasoningEffort}
-                latencyMode={composer.policy.latencyMode}
-                loading={catalog.loading}
-                error={catalog.error?.message}
-                disabled={terminal}
-                sessionKey={sessionId}
-                onModelChange={(model) => composer.setModel?.(model)}
-                onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
-                onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
+      {importedArchive ? (
+        <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+          Archived conversation · Read only
+        </p>
+      ) : (
+        <>
+          <div
+            className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto"
+            data-og-conversation-inputs=""
+          >
+            {approvals.length > 0 && !terminal ? (
+              <ApprovalSurface
+                className="mx-auto max-w-3xl"
+                approvals={approvals}
+                onApprove={async (approval) => {
+                  await control.approve(approval.id);
+                }}
+                onReject={async (approval) => {
+                  await control.reject(approval.id);
+                }}
+                responding={control.responding}
+                error={control.error}
               />
-            ))
-          }
-          responsiveBasis={composerProps?.responsiveBasis ?? "container"}
-          effectiveControl={
-            composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl
-          }
-          queuedAheadCount={queue.queue.length}
-        />
-      </div>
+            ) : null}
+            <HumanInputSurface
+              loadSkillReview={loadSkillReview}
+              requests={human.requests}
+              onSubmit={async (id, response) => {
+                await human.respond(id, response);
+              }}
+              respondingRequestId={human.respondingRequestId}
+              error={human.mutationError?.message}
+              autoFocus={false}
+            />
+            {terminal ? (
+              <SessionChrome queue={queue} sessionStatus={status} readOnly />
+            ) : (
+              <SessionChrome
+                queue={queue}
+                composer={composer}
+                sessionStatus={status}
+                onComposerFocus={() =>
+                  region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
+                }
+              />
+            )}
+          </div>
+          <div className="shrink-0" data-og-conversation-composer="">
+            <ChatComposer
+              {...composerProps}
+              composer={composer}
+              attachments={uploadsEnabled ? files : undefined}
+              disabled={terminal || composerProps?.disabled}
+              controlsStart={
+                composerProps?.controlsStart ??
+                (showModelPicker && composer.policy && (
+                  <ModelPolicyPicker
+                    rows={catalog.rows}
+                    model={composer.policy.model}
+                    effort={composer.policy.reasoningEffort}
+                    latencyMode={composer.policy.latencyMode}
+                    loading={catalog.loading}
+                    error={catalog.error?.message}
+                    disabled={terminal}
+                    sessionKey={sessionId}
+                    onModelChange={(model) => composer.setModel?.(model)}
+                    onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
+                    onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
+                  />
+                ))
+              }
+              responsiveBasis={composerProps?.responsiveBasis ?? "container"}
+              effectiveControl={
+                composer.effectiveControl ??
+                queue.effectiveControl ??
+                detail.session?.effectiveControl
+              }
+              queuedAheadCount={queue.queue.length}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

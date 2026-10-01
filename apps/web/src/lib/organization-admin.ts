@@ -5,13 +5,14 @@ import type {
 } from "@/types";
 
 /** The organization settings pages, in nav order. */
+// Rail order: a person who opens a page they can't use lands on the first one they can.
 export const ORGANIZATION_ADMIN_SECTIONS = [
   "general",
   "people",
   "workspaces",
+  "identity",
   "models",
   "integrations",
-  "identity",
   "billing",
   "developer",
   "security",

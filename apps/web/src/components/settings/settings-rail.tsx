@@ -10,6 +10,7 @@ import {
   BarChart3Icon,
   CodeIcon,
   ContainerIcon,
+  GaugeIcon,
   GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
@@ -63,9 +64,13 @@ export const WORKSPACE_SETTINGS_COPY: Record<
     description: ({ workspace, organization }) =>
       `People from ${organization} who can use ${workspace}.`,
   },
+  // No subtitle: the Default model row says what a new chat uses and who pays.
   models: {
     title: "Models",
-    description: () => "Which models this workspace can use, and who pays for them.",
+  },
+  usage: {
+    title: "Usage",
+    description: ({ workspace }) => `Your usage and the monthly budget in ${workspace}.`,
   },
   "api-keys": {
     title: "API keys",
@@ -73,7 +78,8 @@ export const WORKSPACE_SETTINGS_COPY: Record<
   },
   developer: {
     title: "Developer",
-    description: () => "Webhooks and a credential provider for products built on this workspace.",
+    description: () =>
+      "For products built on Opengeni: tell your backend what happens here, and give runs credentials from it.",
   },
   learning: {
     title: "Agent learning",
@@ -85,16 +91,19 @@ const SECTION_ICONS = {
   general: SlidersHorizontalIcon,
   access: UsersIcon,
   models: SparklesIcon,
+  usage: GaugeIcon,
   learning: GraduationCapIcon,
   "api-keys": KeyRoundIcon,
   developer: CodeIcon,
 } as const;
 
 // Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+// Models is not a workspace page: every model setting, each workspace's included,
+// lives on Organization > Models, and the old workspace URL redirects there.
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
-  "models",
+  "usage",
   "api-keys",
   "developer",
 ];
@@ -223,9 +232,13 @@ export function useSettingsRail(input: {
     managedWorkspace?.organizationName ??
     knownName ??
     (accountId ? orgLabel(accountId, context.accessContext.accountGrants) : null);
+  // Models stays named when it refuses someone (members choose models in the
+  // composer), so the page and the rail don't jump to another page.
   const organizationSection =
     access && location.kind === "organization"
-      ? resolveOrganizationSettingsSection(location.section, access.visibleSections)
+      ? location.section === "models"
+        ? "models"
+        : resolveOrganizationSettingsSection(location.section, access.visibleSections)
       : null;
 
   function openWorkspace(nextWorkspaceId: string) {
@@ -334,8 +347,12 @@ export function useSettingsRail(input: {
           items: [
             // Nobody administers a Personal workspace, so its API keys and
             // Developer pages could only say they aren't available.
+            // Budgets apply to shared workspaces only, so a Personal workspace
+            // has no Usage page either.
             ...SECTION_ORDER.filter(
-              (section) => !personal || (section !== "api-keys" && section !== "developer"),
+              (section) =>
+                !personal ||
+                (section !== "api-keys" && section !== "developer" && section !== "usage"),
             ).map((section) => ({
               id: `workspace:${section}`,
               label: WORKSPACE_SETTINGS_COPY[section].title,

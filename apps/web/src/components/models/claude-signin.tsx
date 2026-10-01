@@ -36,11 +36,20 @@ export function ClaudeSignInPage({
   onClose,
   onConnected,
   footerStart,
+  fields,
+  blockedReason,
+  afterSave,
 }: {
   state: ProviderConnectionView;
   onClose(): void;
   onConnected(): void;
   footerStart?: React.ReactNode;
+  /** Fields above the sign-in, such as which workspaces can use it. */
+  fields?: React.ReactNode;
+  /** Why it can't be connected yet (a choice above is incomplete). */
+  blockedReason?: string | null | undefined;
+  /** Runs once the subscription is saved, before its page opens (the form stays pending). */
+  afterSave?: (() => Promise<void>) | undefined;
 }) {
   const target = state.accessTarget;
   const scopeId = target.organizationId ?? target.workspaceId!;
@@ -84,7 +93,7 @@ export function ClaudeSignInPage({
   };
   return (
     <ModelsFormPage
-      backLabel={state.connected ? "Claude subscription" : "Models"}
+      backLabel={state.connected ? "Claude subscription" : undefined}
       headerAside={<ProviderTile provider="claude_subscription" />}
       title={state.connected ? "Reconnect Claude subscription" : "Connect Claude subscription"}
       description="Use your Claude plan, with usage limits and reset times available here."
@@ -98,11 +107,13 @@ export function ClaudeSignInPage({
       pendingLabel={attempt && !legacy ? "Connecting…" : "Starting sign-in…"}
       onPendingChange={setPending}
       submitDisabled={
-        !state.canManageConnection || (legacy ? !token.trim() : Boolean(attempt && !code.trim()))
+        !state.canManageConnection ||
+        Boolean(blockedReason) ||
+        (legacy ? !token.trim() : Boolean(attempt && !code.trim()))
       }
       disabledReason={
         state.canManageConnection
-          ? undefined
+          ? (blockedReason ?? undefined)
           : "Only people who can manage connections can connect Claude."
       }
       footerStart={
@@ -114,7 +125,10 @@ export function ClaudeSignInPage({
       onSubmit={async () => {
         if (legacy) {
           const saved = await state.saveKey(token);
-          if (saved) reset();
+          if (saved) {
+            reset();
+            await afterSave?.();
+          }
           return saved;
         }
         if (!attempt) {
@@ -152,6 +166,7 @@ export function ClaudeSignInPage({
         reset();
         if (!active.current) return false;
         await state.refreshConnection();
+        await afterSave?.();
         return true;
       }}
       onSubmitted={() => {
@@ -159,6 +174,7 @@ export function ClaudeSignInPage({
       }}
     >
       <FieldStack>
+        {fields}
         {!legacy ? (
           <>
             <p className="text-sm text-fg-muted">

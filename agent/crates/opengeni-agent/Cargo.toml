@@ -26,6 +26,7 @@ path = "src/main.rs"
 macos-desktop = ["opengeni-agent-platform/macos-desktop"]
 
 [dependencies]
+fs2 = "=0.4.3"
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 opengeni-agent-engine = { path = "../opengeni-agent-engine" }
 opengeni-agent-platform = { path = "../opengeni-agent-platform" }

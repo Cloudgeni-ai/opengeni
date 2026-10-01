@@ -163,9 +163,9 @@ function ConnectModelLink({ workspaceId, label }: { workspaceId: string; label: 
   return (
     <Button asChild size="sm">
       <Link
-        to="/workspaces/$workspaceId/settings"
+        to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
-        search={{ section: "models" }}
+        search={{ section: "models", workspace: workspaceId }}
         {...analyticsAction("connect_model")}
       >
         {label}

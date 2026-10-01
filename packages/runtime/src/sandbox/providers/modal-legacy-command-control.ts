@@ -1,5 +1,9 @@
 import { posix } from "node:path";
 import { ModalClient } from "modal";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
+import { status } from "@grpc/grpc-js";
+import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
+import { ProviderCommandStartRejectedError } from "../provider-command-session";
 import { ModalLegacyProviderCommand } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
 import { shellQuote } from "@openai/agents-core/sandbox/internal";
@@ -151,7 +155,10 @@ export class ModalCommandControl {
     // Hydration replaces the SDK sandbox. Freeze its current identity for this
     // start so an asynchronous replacement cannot relabel the returned locator.
     const sandboxId = this.sandboxId;
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined);
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     if (sandboxId !== this.sandboxId)
       throw new Error("Modal sandbox changed during command preparation");
@@ -175,35 +182,58 @@ export class ModalCommandControl {
     }
     // Do not retry this mutating start on an ambiguous transport error: this
     // provider API assigns the execution id in its response, not in our request.
-    const result = await this.client.containerExec(
-      {
-        taskId: task.taskId,
-        command,
-        terminateContainerOnExit: false,
-        runtimeDebug: false,
-        stdoutOutput: 2,
-        stderrOutput: 2,
-        timeoutSecs: 0,
-        workdir,
-        secretIds: [],
-        ...(args.tty
-          ? {
-              ptyInfo: {
-                enabled: true,
-                winszRows: 24,
-                winszCols: 80,
-                envTerm: "xterm",
-                envColorterm: "",
-                envTermProgram: "",
-                ptyType: 1,
-                noTerminateOnIdleStdin: true,
-              },
-            }
-          : {}),
-      },
-      { retries: 0, ...(signal ? { signal } : {}) },
-    );
-    if (!result.execId) throw new Error("Modal command start returned no execution identity");
+    const result = await this.client
+      .containerExec(
+        {
+          taskId: task.taskId,
+          command,
+          terminateContainerOnExit: false,
+          runtimeDebug: false,
+          stdoutOutput: 2,
+          stderrOutput: 2,
+          timeoutSecs: 0,
+          workdir,
+          secretIds: [],
+          ...(args.tty
+            ? {
+                ptyInfo: {
+                  enabled: true,
+                  winszRows: 24,
+                  winszCols: 80,
+                  envTerm: "xterm",
+                  envColorterm: "",
+                  envTermProgram: "",
+                  ptyType: 1,
+                  noTerminateOnIdleStdin: true,
+                },
+              }
+            : {}),
+        },
+        { retries: 0, ...(signal ? { signal } : {}) },
+      )
+      .catch((error: unknown) => {
+        const code = (error as { code?: unknown } | null)?.code;
+        if (
+          typeof code === "number" &&
+          [
+            status.INVALID_ARGUMENT,
+            status.NOT_FOUND,
+            status.PERMISSION_DENIED,
+            status.UNAUTHENTICATED,
+            status.UNIMPLEMENTED,
+          ].includes(code)
+        )
+          throw new ProviderCommandStartRejectedError(error);
+        // Legacy ContainerExec assigns its id in the lost response. There is no
+        // safe invocation locator and no authority to issue another launch.
+        throw new ModalCommandStartOutcomeUnknownError(task.taskId!, "", error);
+      });
+    if (!result.execId)
+      throw new ModalCommandStartOutcomeUnknownError(
+        task.taskId,
+        "",
+        new Error("Modal command start returned no execution identity"),
+      );
     return {
       kind: "modal-control-v1",
       sandboxId,

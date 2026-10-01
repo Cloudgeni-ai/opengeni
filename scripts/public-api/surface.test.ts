@@ -241,6 +241,39 @@ describe("schema compatibility rules", () => {
     const responseAfter = withSchemas(Request, z.object({ sandbox: Narrow }));
     expect(breakingIds(responseBefore, responseAfter)).toEqual([]);
   });
+
+  test("a field moved to a differently named schema breaks only when that shape breaks", () => {
+    const a = z.object({ kind: z.literal("a"), url: z.string() });
+    const b = z.object({ kind: z.literal("b") });
+    const c = z.object({ kind: z.literal("c"), text: z.string() });
+    const source = shapeOf(z.discriminatedUnion("kind", [a, b]), "input");
+    const request = (ref: string) => ({
+      io: ["input" as const],
+      shape: { $: "object", "$.source": `ref(${ref})` },
+    });
+    const before = snapshot({
+      schemas: { Req: request("Source"), Source: { io: ["input"], shape: source } },
+    });
+    const widened = snapshot({
+      schemas: {
+        Req: request("SourceInput"),
+        Source: { io: ["input"], shape: source },
+        SourceInput: {
+          io: ["input"],
+          shape: shapeOf(z.discriminatedUnion("kind", [a, b, c]), "input"),
+        },
+      },
+    });
+    expect(breakingIds(before, widened)).toEqual([]);
+    const narrowed = snapshot({
+      schemas: {
+        Req: request("SourceInput"),
+        Source: { io: ["input"], shape: source },
+        SourceInput: { io: ["input"], shape: shapeOf(z.discriminatedUnion("kind", [a]), "input") },
+      },
+    });
+    expect(breakingIds(before, narrowed)).toEqual(["schema:Req:$.source"]);
+  });
 });
 
 describe("surface-level rules", () => {

@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
 import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
 import {
   TurnExecutionPolicyV1,
@@ -36,7 +37,14 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 
+let restoreModelsProbe = () => {};
 beforeAll(async () => {
+  const modelsProbe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+    ok: true,
+    status: 200,
+    slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+  });
+  restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("worker-scheduled-default-model");
   if (!shared) {
     available = false;
@@ -47,6 +55,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  restoreModelsProbe();
   await client?.close().catch(() => undefined);
   await shared?.release();
 });
@@ -199,7 +208,7 @@ describe("scheduled occurrences without a model use the resolved default", () =>
       scopes: null,
       planType: "pro",
       isFedramp: false,
-      expiresAt: new Date(Date.now() + 60_000),
+      expiresAt: new Date(Date.now() + 3_600_000),
       lastRefreshAt: new Date(),
     });
     await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);

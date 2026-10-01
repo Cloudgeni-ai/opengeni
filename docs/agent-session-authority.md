@@ -16,6 +16,13 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+Browser and desktop inventories apply `session.read` authorization to the chat
+that created each resource, for humans, services, API keys and agent attempts.
+This matches direct resource reads. A later observing/using association does not
+grant visibility through a different chat; missing or ambiguous creation
+associations are omitted. Authorization outages fail the list request rather
+than returning an apparently complete partial inventory.
+
 `session_get({})` resolves only the session in the authenticated exact agent
 attempt claims, then performs the same live-attempt and target authorization as
 an explicit ID. A child reads itself, never its parent or root. Sessionless,
@@ -168,7 +175,9 @@ rather than hijacking an unrelated existing session. The prompt does not widen
 authority; the relationship policy above remains the enforcement boundary. A
 leaf turn without those tools continues the work itself.
 
-Canonical implementation: `packages/runtime/src/operational-instructions.ts`,
+Canonical implementation: `packages/runtime/src/operational-instructions.ts`
+(legacy sessions), `packages/runtime/src/agent-instructions/modules/subagents.ts`
+(sessions with an agent configuration and the subagents capability),
 `packages/core/src/session-authorization.ts`,
 `packages/db/src/session-control.ts`, `packages/db/src/index.ts`,
 `apps/api/src/routes/sessions.ts`, and `apps/api/src/mcp/server.ts`.

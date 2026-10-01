@@ -186,8 +186,13 @@ A later correction, deactivation, expiry, or scope change cannot rewrite that
 snapshot or redirect its handle. Runtime reconstructs active state from the
 immutable lifecycle ledger at the logical turn's acceptance timestamp, so a
 turn queued before a later activation/deactivation retains its accepted
-descriptor set. Recovery attempts replay that same boundary. A new human turn,
-continuation, or compaction gets a new boundary and the then-current state.
+descriptor set. Recovery attempts copy the first immutable descriptor snapshot
+for that same turn and initiating human, including its exact encoding, hash,
+and truncation flag. Permanent Skill removal or a later descriptor-rendering
+change must not rebuild that accepted receipt. Removed revision content remains
+unavailable; snapshot replay never restores it or grants stale-attempt access.
+A new human turn, continuation, or compaction gets a new boundary and the
+then-current state.
 
 ## Runtime composition
 

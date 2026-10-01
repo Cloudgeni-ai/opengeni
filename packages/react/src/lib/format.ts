@@ -111,20 +111,46 @@ export function tryParseJson(text: string): unknown {
 export const CREDIT_EXHAUSTION_MESSAGE =
   "Out of Opengeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
 
+/** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
+export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE =
+  "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.";
+export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE =
+  "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.";
+
 /**
  * Actionable composer copy for an edge rejection before a turn is accepted.
  * Unlike an in-flight credit exhaustion, this path has not consumed the
  * actor-private draft or any finalized attachment.
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
-  "This turn requires Opengeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
+  "Your organization doesn't have enough OpenGeni credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.";
 
 export function composerSubmissionErrorMessage(error: Error): string {
-  return error instanceof OpenGeniApiError &&
-    error.status === 402 &&
-    error.code === "payment_required"
-    ? COMPOSER_PAYMENT_REQUIRED_MESSAGE
-    : error.message;
+  if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
+    // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
+    // so this startup-path helper adds no SDK or wording imports.
+    return (error as { scope?: unknown }).scope === "workspace"
+      ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
+      : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
+  }
+  return isComposerCreditRefusal(error) ? COMPOSER_PAYMENT_REQUIRED_MESSAGE : error.message;
+}
+
+/** These definitive refusals need a payment or allowance change, not an unchanged retry. */
+export function composerSubmissionCanRetry(error: Error): boolean {
+  return !(
+    isComposerCreditRefusal(error) ||
+    (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
+  );
+}
+
+function isComposerCreditRefusal(error: Error): boolean {
+  return (
+    (error instanceof OpenGeniApiError &&
+      error.status === 402 &&
+      (error.code === "payment_required" || error.code === "insufficient_credits")) ||
+    isCreditExhaustion(error.message)
+  );
 }
 
 /**

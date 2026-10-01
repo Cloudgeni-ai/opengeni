@@ -4,7 +4,7 @@
 
 Fetch https://docs.opengeni.ai/llms.txt for the official documentation index.
 Read the relevant Markdown page, especially
-https://docs.opengeni.ai/guides/integrate-your-product.md,
+https://docs.opengeni.ai/embed-manually.md,
 https://docs.opengeni.ai/reference/authentication.md, and
 https://docs.opengeni.ai/reference/sdk.md. An ordinary customer integration
 does not require a clone of OpenGeni. If a fetch fails, report that source as

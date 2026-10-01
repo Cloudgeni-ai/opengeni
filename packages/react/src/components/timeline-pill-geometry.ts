@@ -1,10 +1,67 @@
-import type { TimelinePillPlacement } from "./timeline-pill-placement";
+import type { TimelinePillPlacement, TimelinePillPosition } from "./timeline-pill-placement";
 
 const INTERACTIVE =
   'a[href], button, input, select, textarea, summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="switch"], [role="checkbox"], [contenteditable="true"]';
 
 /** A control this wide is a row (a disclosure header); only what it draws counts. */
 const ROW_WIDTH_RATIO = 0.8;
+
+/** The full contextual label may not fit beside a compact toolbar on phones. */
+export function chooseQuestionPosition(
+  pill: HTMLElement,
+  frame: HTMLElement,
+  scroller: HTMLElement,
+  preference: readonly TimelinePillPlacement[],
+  current: TimelinePillPosition,
+): TimelinePillPosition {
+  const rect = pill.getBoundingClientRect();
+  const bounds = frame.getBoundingClientRect();
+  const view = scroller.getBoundingClientRect();
+  if (!rect.width || !view.width) return current;
+  const style = getComputedStyle(frame);
+  const baseTop = bounds.top - current.offsetY;
+  const left = (placement: TimelinePillPlacement) =>
+    placement === "start"
+      ? bounds.left + parseFloat(style.paddingLeft || "0")
+      : placement === "end"
+        ? bounds.right - parseFloat(style.paddingRight || "0") - rect.width
+        : bounds.left + (bounds.width - rect.width) / 2;
+  const controls: DOMRect[] = [];
+  for (const control of scroller.querySelectorAll<HTMLElement>(INTERACTIVE)) {
+    const box = control.getBoundingClientRect();
+    if (!box.width || !box.height || box.bottom <= baseTop || box.top >= view.bottom) continue;
+    if (box.width < view.width * ROW_WIDTH_RATIO) controls.push(box);
+    else {
+      for (const icon of control.querySelectorAll("svg, img, canvas, video"))
+        controls.push(icon.getBoundingClientRect());
+      const walker = scroller.ownerDocument.createTreeWalker(control, NodeFilter.SHOW_TEXT);
+      for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+        if (!text.textContent?.trim()) continue;
+        const range = scroller.ownerDocument.createRange();
+        range.selectNodeContents(text);
+        controls.push(...range.getClientRects());
+      }
+    }
+  }
+  const clear = (placement: TimelinePillPlacement, offsetY: number) =>
+    !controls.some(
+      (control) =>
+        control.right > left(placement) &&
+        control.left < left(placement) + rect.width &&
+        control.bottom > baseTop + offsetY &&
+        control.top < baseTop + offsetY + rect.height,
+    );
+  const order = [current.placement, ...preference.filter((value) => value !== current.placement)];
+  // Return to the normal strip once it is clear, without touching scroll geometry.
+  for (const placement of order) if (clear(placement, 0)) return { placement, offsetY: 0 };
+  const offsets = [...new Set(controls.map((control) => control.bottom + 4 - baseTop))]
+    .filter((offset) => offset > 0 && baseTop + offset + rect.height <= view.bottom)
+    .sort((a, b) => a - b);
+  for (const offsetY of offsets) {
+    for (const placement of order) if (clear(placement, offsetY)) return { placement, offsetY };
+  }
+  return current;
+}
 
 /**
  * Hit-testing for useTimelinePillPlacement, loaded only once a pill shows so it

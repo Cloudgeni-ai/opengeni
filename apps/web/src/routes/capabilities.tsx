@@ -929,11 +929,22 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       return;
     }
     const preview = customApi.preview!;
+    const source = preview.source;
+    if (source.kind === "openapi_document") {
+      // The web flow only previews URL sources; an inline document must be
+      // resent in full on install, which this echo intentionally omits.
+      dispatchCustomApi({
+        type: "phase",
+        phase: "review",
+        error: "Inline API documents are installed through the API.",
+      });
+      return;
+    }
     dispatchCustomApi({ type: "phase", phase: "installing", error: null });
     const editing = customApi.editingInstance;
     try {
       await client.installApiIntegration(workspaceId, {
-        source: preview.source,
+        source,
         expectedRevisionId: preview.revisionId,
         expectedContentSha256: preview.contentSha256,
         ...(customApi.connection && preview.auth.kind !== "none"

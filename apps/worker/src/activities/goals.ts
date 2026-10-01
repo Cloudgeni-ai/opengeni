@@ -1,6 +1,7 @@
 import {
   allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
+  isModelAvailableForNewSelection,
   policyProviderIdForModel,
   resolveModelProvider,
   resolveTurnExecutionPolicyV1,
@@ -62,7 +63,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
-    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
@@ -71,6 +71,13 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     // Kept below the goal-less fast path so a non-goal session still skips the
     // reads entirely.
     const session = await requireSession(db, input.workspaceId, input.sessionId);
+    // Terminal sessions retain their goal for human recovery, but cannot
+    // continue. Do not validate an obsolete model before the locked guard gets
+    // the chance to reject that work; otherwise a deterministic error retries.
+    if (session.status === "failed" || session.status === "cancelled") {
+      return { action: "none" };
+    }
+    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     const inheritedContinuationModel = session.model;
     let continuationModel = inheritedContinuationModel;
     const continuationReasoningEffort = session.reasoningEffort;
@@ -106,15 +113,17 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: continuationModel,
-      requestedModelId: null,
-      modelSource: "continuation",
-      reasoningEffort: continuationReasoningEffort,
-      reasoningSource: "continuation",
-      latencyMode: continuationLatencyMode,
-      latencyModeSource: "continuation",
-    });
+    const turnExecutionPolicy = modelPolicyBlocked
+      ? undefined
+      : resolveTurnExecutionPolicyV1(settings, {
+          modelId: continuationModel,
+          requestedModelId: null,
+          modelSource: "continuation",
+          reasoningEffort: continuationReasoningEffort,
+          reasoningSource: "continuation",
+          latencyMode: continuationLatencyMode,
+          latencyModeSource: "continuation",
+        });
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -153,7 +162,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
         latencyMode: continuationLatencyMode,
-        turnExecutionPolicy,
+        ...(turnExecutionPolicy ? { turnExecutionPolicy } : {}),
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },
@@ -206,17 +215,20 @@ export function goalContinuationModelDecision(input: {
       providerId: policyProviderIdForModel(catalogSettings, modelId),
       modelId,
     }).allowed;
-  if (
-    resolveModelProvider(catalogSettings, input.inheritedModel) &&
-    !policyBlocks(input.inheritedModel)
-  ) {
-    return { model: input.inheritedModel, blocked: null };
-  }
   if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
     return {
       model: input.inheritedModel,
       blocked: `model "${input.inheritedModel}" is no longer in the deployment or workspace catalog; choose an available model before resuming the goal`,
     };
+  }
+  if (!isModelAvailableForNewSelection(catalogSettings, input.inheritedModel)) {
+    return {
+      model: input.inheritedModel,
+      blocked: `model "${input.inheritedModel}" is retired from new selection; choose an available model before resuming the goal`,
+    };
+  }
+  if (!policyBlocks(input.inheritedModel)) {
+    return { model: input.inheritedModel, blocked: null };
   }
   return {
     model: input.inheritedModel,
@@ -298,6 +310,8 @@ export function goalContinuationPrompt(
     "- For document report deliverables (a document the user asked for, or a large report meant to be kept or shared), follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, and explicitly requested local-file work remain outside this report contract.",
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
+    "Goal evidence is a short proof for the ledger, not the deliverable. After goal_complete succeeds, finish this same turn with the requested user-facing answer, or a concise summary and retained artifact link. Goal completion stops future automatic continuations; it does not send the answer or end this turn. Never compress a report into evidence or omit the final reply.",
+    "Goal progress notes are short human-readable milestone statuses, not raw transcripts or continuation instructions. Keep normal spaces and summarize detail instead of squeezing words into a ledger field. The text and successCriteria fields each allow 8192 UTF-8 bytes, progressNote allows 8192 UTF-8 bytes, rationale allows 2048 UTF-8 bytes, and evidence allows 8192 characters.",
     "",
     ...waitingGuidance,
     ...childNoticeGuidance,

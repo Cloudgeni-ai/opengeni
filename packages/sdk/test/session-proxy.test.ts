@@ -362,6 +362,9 @@ describe("createSessionProxyHandler", () => {
     expect(inputs).toEqual([{ initialMessage: "hi", idempotencyKey: "k1" }]);
     expect(upstream.requests[0]!.body).toEqual({
       initialMessage: "hi",
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "user",
       idempotencyKey: "k1",
       tools: [],
       firstPartyMcpTools: [],
@@ -552,6 +555,15 @@ describe("createSessionProxyHandler", () => {
     expect(events.headers.get("X-OpenGeni-Has-More")).toBe("true");
   });
 
+  test("client config pins the resolved host workspace even when the browser supplies another", async () => {
+    const { browser, upstream } = setup();
+    await browser.getClientConfig({ workspaceId: OTHER_WORKSPACE_ID });
+    const configRequest = upstream.requests.find(
+      (request) => request.url.pathname === "/v1/config/client",
+    )!;
+    expect(configRequest.url.searchParams.get("workspaceId")).toBe(WORKSPACE_ID);
+  });
+
   test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({
@@ -591,6 +603,9 @@ describe("createSessionProxyHandler", () => {
     await browser.createSession(WORKSPACE_ID, { initialMessage: "start" } as never);
     expect(upstream.requests[3]!.body).toEqual({
       initialMessage: "start",
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "user",
       modelContext: "Page: /reports · TZ: Europe/Oslo · 2026-09-29\n\nWorkspace plan",
     });
     expect(inputs).toEqual([

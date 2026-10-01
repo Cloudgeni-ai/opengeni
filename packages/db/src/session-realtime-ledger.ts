@@ -1,7 +1,13 @@
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
-import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
+import {
+  LatencyMode,
+  McpPersonalConnectionDelegations,
+  ReasoningEffort,
+  type SessionRealtimeMode,
+} from "@opengeni/contracts";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -1150,6 +1156,19 @@ async function admitRealtimeDelegationInTransaction(
   }
   const [policy] = await withEffectiveSessionPolicy(db, input.workspaceId, [session]);
   if (!policy) throw new Error("Realtime delegation session disappeared");
+  const [mode] = await db
+    .select()
+    .from(schema.sessionRealtimeModes)
+    .where(
+      and(
+        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeModes.id, input.realtimeId),
+        eq(schema.sessionRealtimeModes.ownerSubjectId, input.ownerSubjectId),
+      ),
+    )
+    .limit(1);
+  if (!mode) throw new Error("Realtime delegation authority snapshot disappeared");
   const provenance = {
     source: "realtime_provider_delegation",
     realtimeId: input.realtimeId,
@@ -1191,6 +1210,10 @@ async function admitRealtimeDelegationInTransaction(
     },
     source: "api",
     surface: "voice",
+    personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+      mode.personalConnectionDelegations,
+    ),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
   });
   return {
     turnId: admitted.turnId,

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  resolveAgentConfig,
 } from "@opengeni/contracts";
 import {
   DEFAULT_OPENROUTER_MODEL_ID,
@@ -24,7 +25,67 @@ import {
   startParallelSessionTitleGeneration,
 } from "../src/activities/agent-turn/session-title";
 
+const minimalAgentConfig = resolveAgentConfig({
+  creator: "api",
+  request: { capabilities: { from: "none" } },
+  deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+  workspace: { defaults: null, humanInputEnabled: true },
+  goal: false,
+}).config!;
+
 describe("shouldRequestMissingSessionTitle", () => {
+  test("configured sessions title without opting into the first-party title tool", () => {
+    expect(
+      shouldRequestMissingSessionTitle({
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        agentConfig: minimalAgentConfig,
+        firstPartyMcpTools: [],
+        firstPartyMcpPermissions: null,
+      }),
+    ).toBe(true);
+    for (const firstPartyMcpPermissions of [[], ["sessions:read"]] as const) {
+      expect(
+        shouldRequestMissingSessionTitle({
+          title: null,
+          titleSource: null,
+          agentConfig: minimalAgentConfig,
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions,
+        }),
+      ).toBe(false);
+    }
+    for (const [title, titleSource] of [
+      ["Human title", "user"],
+      [AUTOMATIC_SESSION_TITLE_FALLBACK, "user"],
+      ["Semantic agent title", "agent"],
+    ] as const) {
+      expect(
+        shouldRequestMissingSessionTitle({
+          title,
+          titleSource,
+          agentConfig: minimalAgentConfig,
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: null,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  test("explicit null config preserves the legacy selected-tool admission exactly", () => {
+    for (const firstPartyMcpTools of [[], ["set_session_title"]] as const) {
+      const input = {
+        title: null,
+        titleSource: null,
+        firstPartyMcpTools,
+        firstPartyMcpPermissions: null,
+      };
+      expect(shouldRequestMissingSessionTitle({ ...input, agentConfig: null })).toBe(
+        shouldRequestMissingSessionTitle(input),
+      );
+    }
+  });
+
   test("an empty linked permission ceiling cannot promote or generate a title", () => {
     const shouldRequestTitle = shouldRequestMissingSessionTitle({
       title: null,
@@ -109,6 +170,68 @@ describe("shouldRequestMissingSessionTitle", () => {
 });
 
 describe("sessionTitleToolPlan", () => {
+  test("configured titling is runtime-owned without a selected tool or MCP carrier", () => {
+    for (const parallelGenerationAvailable of [true, false]) {
+      expect(
+        sessionTitleToolPlan({
+          tools: [],
+          agentConfig: minimalAgentConfig,
+          selectedFirstPartyMcpTools: [],
+          shouldRequestTitle: true,
+          parallelGenerationAvailable,
+          routeAllowsTitleRequests: true,
+        }),
+      ).toEqual({
+        promoteTitleTool: !parallelGenerationAvailable,
+        generateTitleInParallel: parallelGenerationAvailable,
+        remoteFirstPartyMcpTools: [],
+        preparationIndependentToolNames: parallelGenerationAvailable
+          ? []
+          : [SESSION_TITLE_MODEL_TOOL_NAME],
+      });
+    }
+  });
+
+  test("configured titling still respects the provider route and missing-title decision", () => {
+    for (const [shouldRequestTitle, routeAllowsTitleRequests] of [
+      [true, false],
+      [false, true],
+    ] as const) {
+      expect(
+        sessionTitleToolPlan({
+          tools: [],
+          agentConfig: minimalAgentConfig,
+          selectedFirstPartyMcpTools: [],
+          shouldRequestTitle,
+          parallelGenerationAvailable: true,
+          routeAllowsTitleRequests,
+        }),
+      ).toMatchObject({
+        promoteTitleTool: false,
+        generateTitleInParallel: false,
+        remoteFirstPartyMcpTools: [],
+        preparationIndependentToolNames: [],
+      });
+    }
+  });
+
+  test("explicit null config preserves the legacy carrier and disclosure plan exactly", () => {
+    for (const tools of [[], [{ kind: "mcp", id: "opengeni" }]] as const) {
+      for (const parallelGenerationAvailable of [true, false]) {
+        const input = {
+          tools,
+          selectedFirstPartyMcpTools: ["set_session_title", "goal_set"] as const,
+          shouldRequestTitle: true,
+          parallelGenerationAvailable,
+          routeAllowsTitleRequests: true,
+        };
+        expect(sessionTitleToolPlan({ ...input, agentConfig: null })).toEqual(
+          sessionTitleToolPlan(input),
+        );
+      }
+    }
+  });
+
   test("removes automatic titling from the agent loop when parallel generation is available", () => {
     const tools = [
       { kind: "mcp" as const, id: "opengeni" },

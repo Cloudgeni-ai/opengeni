@@ -20,7 +20,7 @@ import type {
   ComputerTarget,
   InteractionIntervention,
 } from "@opengeni/contracts";
-import type { InteractionTransport } from "@opengeni/sdk";
+import { OpenGeniApiError, type InteractionTransport } from "@opengeni/sdk";
 import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
@@ -1275,6 +1275,137 @@ describe("interaction attempt tools", () => {
       data: Buffer.from(image).toString("base64"),
       mimeType: "image/jpeg",
     });
+  });
+
+  test.each(["browser_screenshot", "browser_observe"] as const)(
+    "%s preserves a known capture timeout without replay or partial success",
+    async (toolName) => {
+      let captures = 0;
+      let observations = 0;
+      const target = browserTarget();
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          observeBrowserTarget: async () => {
+            observations += 1;
+            return browserObservation(target);
+          },
+          captureBrowserTarget: async () => {
+            captures += 1;
+            throw new OpenGeniApiError(
+              504,
+              JSON.stringify({
+                error: {
+                  status: 504,
+                  code: "upstream_unavailable",
+                  message: "This tab did not produce a screenshot in time.",
+                  retryable: true,
+                  requestId: "capture-request-42",
+                },
+              }),
+              { mutation: false },
+            );
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: [toolName],
+        permissions: ["sessions:read"],
+      });
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          ...(toolName === "browser_observe" ? { includeScreenshot: true } : {}),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result).toEqual({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: "upstream_unavailable",
+                message:
+                  "This tab did not produce a screenshot in time. Reference: capture-request-42.",
+                retryable: true,
+                requestId: "capture-request-42",
+              },
+            }),
+          },
+        ],
+        structuredContent: {
+          error: {
+            code: "upstream_unavailable",
+            message:
+              "This tab did not produce a screenshot in time. Reference: capture-request-42.",
+            retryable: true,
+            requestId: "capture-request-42",
+          },
+        },
+      });
+      expect(captures).toBe(1);
+      expect(observations).toBe(toolName === "browser_observe" ? 1 : 0);
+    },
+  );
+
+  test.each([
+    new Error("unexpected failure"),
+    new OpenGeniApiError(504, "uncertain", { outcomeUnknown: true }),
+  ])(
+    "does not convert unexpected or uncertain read failures to definite results: %s",
+    async (failure) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          captureBrowserTarget: async () => {
+            throw failure;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_screenshot"],
+        permissions: ["sessions:read"],
+      });
+      await expect(
+        definitions[0]!.execute(
+          { browserSessionId, targetId: browserTarget().id },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        ),
+      ).rejects.toBe(failure);
+    },
+  );
+
+  test("does not downgrade a failed browser mutation to a known read failure", async () => {
+    const failure = new OpenGeniApiError(504, "mutation failed", { outcomeUnknown: false });
+    let calls = 0;
+    const target = browserTarget();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        actInBrowser: async () => {
+          calls += 1;
+          throw failure;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+    });
+    await expect(
+      definitions[0]!.execute(
+        {
+          browserSessionId,
+          targetId: target.id,
+          expectedTargetGeneration: target.targetGeneration,
+          expectedDocumentGeneration: target.documentGeneration,
+          expectedFrameId: null,
+          action: { type: "scroll", deltaX: 0, deltaY: 100 },
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      ),
+    ).rejects.toBe(failure);
+    expect(calls).toBe(1);
   });
 
   test("rejects a screenshot before the 16 MiB Code Mode result journal can overflow", async () => {

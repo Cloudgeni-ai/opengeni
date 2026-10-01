@@ -73,6 +73,23 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+An empty or whitespace-only final after tool execution or a completed goal,
+with no input/approval wait, receives one durable developer-message handoff in
+the same logical turn. The worker checkpoints the original response and tool
+results first, then continues from that truth without replaying completed
+tools. The turn-scoped marker survives recovery and compaction; a second empty
+final settles `turn.completed` with `emptyFinalReply: true`. The timeline shows
+an informational notice, and SDK chat replies expose the marker and notice.
+It does not claim a deliverable was sent, fail or pause the goal, or defer later
+child-result wakes; active goals retain normal continuation eligibility.
+This bounds only the handoff correction, not legitimate
+run length or tool work, and introduces no Temporal retry or history rewrite.
+Explicit `wait_for_input`, approvals, and maintenance compaction remain exempt.
+Completed hosted-tool history also establishes handoff eligibility, including
+after attempt recovery. The durable developer reminder stays exact; Chat
+requests project its structured text to a Chat-native system string without
+rewriting stored history.
+
 Each accepted turn also freezes a content-free **surface**
 (`session_turns.surface`, `SessionTurnSurface` in
 `packages/contracts/src/product-analytics.ts`): the product surface its request
@@ -158,6 +175,11 @@ appends `session.title_set`. Generation or persistence failure leaves the safe
 pending marker in place, and a human title remains protected from every later
 automatic write. Historical fallback sessions therefore self-heal on their
 next eligible model turn.
+
+For non-null agent configurations, title generation is a runtime mechanic:
+selection of `set_session_title` is not required. Session-control permissions and
+the provider-route exception below still apply; null configurations retain the
+exact selected-tool rule above.
 
 The managed OpenRouter free route sends no title request at all. A turn whose
 resolved provider is the deployment-funded OpenRouter provider serving an
@@ -248,6 +270,12 @@ does not accept this intent because it has no initial logical-turn boundary.
 
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
+Starting voice freezes native MCP account bindings and personal delegations
+from the authenticated request on `session_realtime_modes` (migration 0562).
+Live delegation and end/expiry transcript-tail Steer copy that exact snapshot;
+they never discover a later participant's accounts. Historical leases retain
+their absent bindings and empty delegation receipts. Revocation and physical
+provider authorization still run against current authority.
 Only the authenticated browser owner/connection is exclusive. Human
 composer/queue/Send/Steer, ordinary turns, recovery, compaction, goals, and
 maintenance continue through their existing transactions and worker claims
@@ -584,6 +612,10 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Once a preference snapshot exists, later attempts of that same turn copy its
+exact immutable descriptors rather than re-rendering historical state. This
+preserves accepted receipts across permanent Skill removal and renderer changes,
+without restoring removed content or relaxing live attempt authority.
 Service-only turns have no human preference scope and skip the preference
 snapshot capability entirely; service continuations carrying a frozen causal
 human and legacy subject turns still snapshot that human's applicable entries.
@@ -653,16 +685,27 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. Native Modal `TaskExecStart` recovery is safe only when the client-side
-channel-readiness gate fails before issuing the RPC. This also covers resolver
+delay. Modal `TaskExecStart` recovery is safe only when read-only task/router
+preparation or the client-side channel-readiness gate fails before issuing the
+RPC. Both native Starts and the pinned Modal SDK enforce this boundary; SDK
+manifest/setup, file/path helpers, and archive hydration/capture must not bypass
+it. SDK provider/archive wrappers preserve the typed error cause. This also covers resolver
 failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
 server replies. After exact never-started reservation settlement, OpenGeni
-resumes the same accepted turn through bounded connectivity backoff. Retained
+resumes the same accepted turn through bounded connectivity backoff, including
+pre-model setup before `turn.started` eventing exists. The same durable five-replacement
+budget applies, with explicit typed exhaustion on the sixth failure. Retained
 or outcome-unknown routing errors veto recovery even if their causes look safe.
 Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
 batches, message-only lookalikes, HTTP status metadata, and the exact
-`FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
-non-retryable because pre-command safety is not proven. Required first-party
+`FAILED_PRECONDITION: Modal Sandbox is shutting down` condition never authorize
+automatic Start replay because pre-command safety is not proven. Ambiguous
+model-facing native Starts instead return explicit outcome-unknown tool results,
+keeping inference alive. Internal SDK/probe ambiguity has no adopted durable
+command handle; it is a non-retryable `sandbox_command_start_outcome_unknown`
+failure rather than raw gRPC failure or permission to replay setup. Legacy
+`ContainerExec` still disables SDK retries and cannot recover an execution id
+lost with its response. Required first-party
 connect/tools-list also treats a rolling API
 replacement's temporary `404` or statusless plain transport `Error` as
 recovery-safe. That narrow exception does not apply to external MCP servers,
@@ -673,9 +716,9 @@ OpenGeni. A failed MCP request records its HTTP method, parsed JSON-RPC method
 when available, and a bounded exact source/cause chain in the durable recovery
 detail before SDK layers can flatten the transport error. Only genuinely public
 SDK/console diagnostics receive a fixed structural projection; raw transport
-messages, URLs, and response bodies remain exact on internal data paths. Other
-HTTP client failures and unknown provider codes remain authoritative and
-terminal. Hitting an explicitly configured
+messages, URLs, and response bodies remain exact on internal data paths. Outside
+rendered tool failures, other HTTP client failures and unknown provider codes
+remain authoritative and terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
 waits for the next user message. For an MCP timeout that escapes after a
@@ -683,6 +726,48 @@ successful tool output, conversation truth is checkpointed before the turn
 settles and the continuation is a new follow-up — the completed tool call/full
 turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
 rather than failing the session, so a top-up lets the same session continue.
+
+**Modal Start DNS provenance and unknown outcomes.** The pinned
+`@grpc/grpc-js@1.14.4` resolver (`resolver-dns.ts`, `defaultResolutionError`)
+creates `UNAVAILABLE: Name resolution failed for target dns:...` locally.
+An initial configuration failure exits `ResolvingCall` before constructing a
+retrying child or reaching `LoadBalancingCall`'s transport dispatch, so that
+specific local path sends no Start bytes. But `subchannel-call.ts` accepts
+server-controlled `grpc-status`/`grpc-message` trailers, and `nice-grpc@2.1.17`
+`wrapClientError` converts both origins to the same public
+`ClientError(path, code, details)`. The accepting TLS-server regression in
+`packages/runtime/test/modal-command-router-wire.test.ts` demonstrates a
+dispatched Start returning identical DNS text. Exact status/details/hostname
+matching therefore cannot prove pre-dispatch provenance.
+
+Unpatched `modal@0.9.0` also wraps `execStart` in `callUnary` with ten transient
+retries: a final genuine resolver failure can follow an earlier dispatched
+attempt. `patches/modal@0.9.0.patch` bypasses that transient retry loop for Start
+and disables grpc-js transparent retries on the task-router channel. The
+existing authentication-rejection retry and read/control retry loops remain;
+the native command wire already disables gRPC retries. Neither reusing an
+`execId` nor unspecified server-side deduplication licenses Start replay.
+
+After an ambiguous native Start, `ProviderCommandStartOutcomeUnknownError`
+carries the original client-chosen invocation. Routing completes the tool-side
+admission with `outcome_unknown` by promoting that exact locator through the
+existing retained-process protocol, never by marking its provider rejection or
+physical exit. Its database parent remains `provider_outcome='retained'` with
+`settled_at IS NULL`, preserving capture, rotation and successor/quiescence
+fences until exact terminal proof. A supervised launch keeps its existing
+pre-dispatch reservation and does not release user code on an ambiguous reply.
+Local readiness cancellation/closure carries distinct never-dispatched proof:
+settle only its exact supervised reservation, never retain a phantom invocation
+or authorize another launch. Closed/cancelled proof vetoes connectivity recovery
+even when a nested cause is a readiness failure.
+Failed promotion retains the same candidate and retries only settlement before
+inspection/control. Model-facing function tools return explicit uncertainty,
+the numeric inspection handle when available, and no blind-retry advice; the
+physical tool fence keeps the process registered for cleanup. Setup/lifecycle
+callers still throw and never receive a fabricated successful result. The
+scripted Runner and native PostgreSQL worker tests cover continuation,
+exactly-once Start, failed promotion recovery, retained writer fencing and
+terminal-proof settlement. No new database outcome or migration is required.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
@@ -748,6 +833,18 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
+OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` terminals
+are intercepted before the SDK flattens their diagnostic. Closed server-error
+and overload codes use this recovery lane; rate-limit codes retain the pacing
+below. Invalid requests, content-policy refusals, and unknown terminal codes
+remain terminal even when their diagnostic mentions transient failures. The
+failure/recovery `detail` preserves the exact provider message through 4 KiB;
+larger messages keep a UTF-8-safe prefix and explicit truncation marker. SDK
+error messages, tracing and worker public diagnostics stay structural.
+Recognized safety diagnostics veto transient recovery regardless of a broad
+server-error code; bounded terminal detail still participates in context-overflow
+classification. Streamed terminals retain bounded Retry-After evidence before
+the SDK discards the HTTP receipt, including long quota-reset hints.
 An explicit provider retry hint is a lower bound. Rate limits wait for the
 longer of the provider's `Retry-After` (60 s when absent) and an escalating floor
 of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
@@ -1959,7 +2056,15 @@ attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
 not create a temporary box and ask SDK hydration to replace it. Directory and tar
 archives still hydrate the elected destination. This removes the hidden second
-create. Migration 0523 adds a durable Modal creation receipt immediately before
+create. Deployment/workspace image pins apply only to new sandbox creates. Turn,
+viewer and direct-operation admissions retain a warming, warm or re-armable
+draining group's recorded image under the lease row lock; a between-turn repin
+neither relabels the existing provider nor requests rotation. The cold successor
+election after normal rotation/reaping stamps the then-selected pin. Explicit
+required-image changes retain their shared-state conflict behavior; rig-version,
+capture, rotation and epoch fences remain enforced.
+
+Migration 0523 adds a durable Modal creation receipt immediately before
 the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
 creation and retains the pinned SDK's public session implementation; its
 `modal-create-boundary.ts` hook runs after image/secret preparation and before
@@ -2279,7 +2384,16 @@ readers cannot parse the new discriminator. After old active locators have
 settled or passed the existing evidence-backed drain, remove the legacy live
 reader; historical records remain immutable and do not authorize execution.
 
-SDK-internal setup/readiness commands still use their original live SDK observer
+Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
+`/bin/true` invocation with no shell, user environment or command admission.
+The existing 60-second budget covers channel readiness and exit observation.
+Only typed local pre-dispatch failure retries Start. A transport failure after
+dispatch instead observes the same UUID, retrying transient reads without another
+Start. Budget expiry and attempt cancellation abort the native RPCs; success
+requires zero exit and EOF on both streams. Definitive rejection and nonzero
+exit remain failures. This applies to both new boxes and warm reattachment.
+
+Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range
 (1–2147483647), so a setup process cannot collide with a retained command. Only
 the same adapter can read those aliases; they cannot be bound as durable commands

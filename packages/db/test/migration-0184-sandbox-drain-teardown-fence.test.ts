@@ -95,6 +95,12 @@ const withheldMigrationNames = [
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
   "0539_scheduled_admission_refusals.sql",
   ...allowanceMigrationTail,
+  // Extends the attachment helper from withheld 0499; replay after it.
+  "0560_archived_session_imports.sql",
+  // Patches the scheduled producer fence after its withheld prerequisites.
+  "0561_scheduled_session_agent_identity.sql",
+  // Patches the reaper installed by withheld 0345/0388/0391/0397.
+  "0564_browser_deadline_checkpoints.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -21,7 +21,7 @@
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
-//   /workspaces/:id/settings                 → workspace settings (general, access, models, API keys)
+//   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
@@ -49,9 +49,15 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
-import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
+import {
+  parseModelsAccount,
+  parseModelsView,
+  workspaceModelsRedirect,
+  type ModelsView,
+} from "@/lib/models-route";
 import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
+import { parseDeveloperView, parseWebhookParam, type DeveloperView } from "@/lib/developer-route";
 import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
 import {
   workspaceSettingsSectionFromSearch,
@@ -486,9 +492,10 @@ const workspaceSettingsRoute = createRoute({
   ): {
     section?: WorkspaceSettingsSection | "plugins";
     account?: string;
-    view?: ModelsView | AccessUrlView;
+    view?: ModelsView | AccessUrlView | DeveloperView | "agent-defaults";
     key?: string;
     member?: string;
+    webhook?: string;
   } & ReturnToSearch => {
     // Older sections still parse: Members is Access, Danger zone lives in
     // General, and the Capabilities stub opens the Capabilities page.
@@ -497,14 +504,23 @@ const workspaceSettingsRoute = createRoute({
         ? ("plugins" as const)
         : (workspaceSettingsSectionFromSearch(search.section) ?? undefined);
     const account = section === "models" ? parseModelsAccount(search.account) : undefined;
-    const view = section === "models" ? parseModelsView(search.view) : undefined;
+    const view =
+      section === "models"
+        ? parseModelsView(search.view)
+        : section === "developer"
+          ? parseDeveloperView(search.view)
+          : (section ?? "general") === "general" && search.view === "agent-defaults"
+            ? ("agent-defaults" as const)
+            : undefined;
     const key = section === "api-keys" ? parseApiKeyParam(search.key) : undefined;
+    const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const access = section === "access" ? parseAccessSearch(search) : {};
     return {
       ...(section ? { section } : {}),
       ...(account ? { account } : {}),
       ...(view ? { view } : {}),
       ...(key ? { key } : {}),
+      ...(webhook ? { webhook } : {}),
       ...access,
       ...parseReturnTo(search),
     };
@@ -553,10 +569,11 @@ const workspaceOrganizationRoute = createRoute({
     checkout?: CheckoutOutcome;
     section?: OrganizationAdminSection;
     account?: string;
-    view?: ModelsView | OrganizationView;
+    view?: ModelsView | OrganizationView | DeveloperView;
     person?: string;
     invitation?: string;
     workspace?: string;
+    webhook?: string;
   } & ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
     const section = parseOrganizationSection(search.section);
@@ -564,14 +581,22 @@ const workspaceOrganizationRoute = createRoute({
     const view =
       section === "models"
         ? parseModelsView(search.view)
-        : section === "people" || section === "workspaces" || section === "developer"
+        : section === "people" || section === "workspaces"
           ? parseOrganizationView(search.view)
-          : undefined;
+          : section === "developer"
+            ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
+            : undefined;
+    const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
     const invitation =
       section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
+    // Workspaces: the workspace whose page is open. Models: the workspace whose
+    // model page is open, or that a page was opened from. Billing: the
+    // workspace whose budget page is open.
     const workspace =
-      section === "workspaces" ? parseOrganizationRecordId(search.workspace) : undefined;
+      section === "workspaces" || section === "models" || section === "billing"
+        ? parseOrganizationRecordId(search.workspace)
+        : undefined;
     return {
       ...(checkout ? { checkout } : {}),
       ...(section ? { section } : {}),
@@ -580,6 +605,7 @@ const workspaceOrganizationRoute = createRoute({
       ...(person ? { person } : {}),
       ...(invitation ? { invitation } : {}),
       ...(workspace ? { workspace } : {}),
+      ...(webhook ? { webhook } : {}),
       ...parseReturnTo(search),
     };
   },
@@ -852,9 +878,25 @@ function Memory() {
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  const { section, account, view, key, member } = workspaceSettingsRoute.useSearch();
+  const { section, account, view, key, member, webhook } = workspaceSettingsRoute.useSearch();
   if (section === "plugins") {
     return <Navigate to="/workspaces/$workspaceId/plugins" params={{ workspaceId }} replace />;
+  }
+  // Every model setting lives on Organization > Models; a workspace's Models
+  // URL opens that workspace's page there, keeping the account or form.
+  if (section === "models") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={workspaceModelsRedirect({
+          workspaceId,
+          account,
+          view: view as ModelsView | undefined,
+        })}
+        replace
+      />
+    );
   }
   // Agent learning is the Learning page of Knowledge now.
   if (section === "learning") {
@@ -871,9 +913,18 @@ function WorkspaceSettings() {
     <LazyWorkspaceSettingsRoute
       workspaceId={workspaceId}
       section={section ?? "general"}
-      modelsAccount={account}
-      modelsView={section === "models" ? (view as ModelsView | undefined) : undefined}
+      generalView={
+        (section ?? "general") === "general" && view === "agent-defaults" ? view : undefined
+      }
       apiKey={key}
+      developer={
+        section === "developer"
+          ? {
+              ...(view ? { view: view as DeveloperView } : {}),
+              ...(webhook ? { webhook } : {}),
+            }
+          : undefined
+      }
       access={
         section === "access"
           ? { ...(view ? { view: view as AccessUrlView } : {}), ...(member ? { member } : {}) }
@@ -920,18 +971,36 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout, section, account, view, person, invitation, workspace, from, fromLabel } =
-    workspaceOrganizationRoute.useSearch();
+  const {
+    checkout,
+    section,
+    account,
+    view,
+    person,
+    invitation,
+    workspace,
+    webhook,
+    from,
+    fromLabel,
+  } = workspaceOrganizationRoute.useSearch();
   const page = parseOrganizationSection(section);
   return (
     <LazyOrgSettingsRoute
       workspaceId={workspaceId}
       checkout={checkout}
       section={page}
-      modelsAccount={account}
+      modelsAccount={page === "models" ? account : undefined}
       modelsView={page === "models" ? parseModelsView(view) : undefined}
       returnTo={returnToOf({ from, fromLabel })}
       organizationView={page === "models" ? undefined : parseOrganizationView(view)}
+      developer={
+        page === "developer"
+          ? {
+              ...(parseDeveloperView(view) ? { view: parseDeveloperView(view)! } : {}),
+              ...(webhook ? { webhook } : {}),
+            }
+          : undefined
+      }
       person={person}
       invitation={invitation}
       workspace={workspace}

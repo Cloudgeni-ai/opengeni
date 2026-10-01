@@ -18,23 +18,22 @@ import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
-  canonicalizeConfiguredModelId,
   codeSearchDeploymentPolicy,
-  configuredAllowedModels,
+  agentConfigDeploymentPolicy,
   configuredAllowedReasoningEfforts,
-  configuredModels,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
-  withCodexCatalogProvider,
-  withXaiSubscriptionCatalogProvider,
+  type Settings,
 } from "@opengeni/config";
 import {
+  AGENT_CAPABILITY_IDS,
   ClientConfig,
   CodemodeCallRequest,
   ErrorEnvelope,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  resolveAgentToolFamilies,
   resolveWorkspaceMemoryEnabled,
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
@@ -42,7 +41,10 @@ import {
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
   type AccessGrant,
+  type ClientAgentConfig,
   type ErrorCode,
+  type FirstPartyMcpToolName,
+  type Session,
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
@@ -83,6 +85,7 @@ import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import {
   ApiHttpError,
+  agentConfigHttpError,
   allowanceExhaustedHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
@@ -108,10 +111,16 @@ import {
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireAccessContext,
   requirePermission,
   releaseManagedAuthRequestActorLease,
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
+  resolveCallerWorkspaceModelSelections,
+  resolveDefaultSessionModelForSelections,
+  selectDefaultSessionModel,
+  isWorkspaceModelAdmissible,
+  resolveWorkspaceModelSelection,
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -229,6 +238,11 @@ import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
+import {
+  archivedSessionImportErrorResponse,
+  isSessionHistoryImportRequest,
+  registerSessionHistoryImportRoutes,
+} from "./routes/session-history-imports";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerUsageAllowanceRoutes } from "./routes/usage-allowances";
@@ -627,7 +641,8 @@ export function createAppComposition(deps: AppDependencies): {
     // streamed body; the generic ceiling would buffer far more first.
     if (
       isClientErrorReportRequest(c.req.method, pathname) ||
-      isAnalyticsConsentReportRequest(c.req.method, pathname)
+      isAnalyticsConsentReportRequest(c.req.method, pathname) ||
+      isSessionHistoryImportRequest(c.req.method, pathname)
     ) {
       await next();
       return;
@@ -1071,27 +1086,117 @@ export function createAppComposition(deps: AppDependencies): {
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
-    const baseCatalogSettings = resolvedCatalog.settings;
-    const codexCatalogSettings = baseCatalogSettings.codexSubscriptionEnabled
-      ? withCodexCatalogProvider(baseCatalogSettings)
-      : baseCatalogSettings;
-    const catalogSettings = baseCatalogSettings.supergrokSubscriptionEnabled
-      ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
-      : codexCatalogSettings;
+    let catalogSettings = resolvedCatalog.settings;
+    let selections = resolveWorkspaceModelSelection({
+      settings: catalogSettings,
+      policy: null,
+      codexSubscriptionActive: false,
+    });
+    let defaultSelection = selectDefaultSessionModel({
+      settings: catalogSettings,
+      selections,
+      workspaceDefaults: null,
+      creditsAvailable: false,
+    });
+    let modelSelectionForbidden = false;
+    const requestedWorkspaceId = c.req.query("workspaceId");
+    if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
+      throw new HTTPException(422, { message: "workspaceId must not be empty" });
+    }
+    const callerScoped =
+      requestedWorkspaceId !== undefined ||
+      deps.settings.productAccessMode !== "managed" ||
+      c.req.header("authorization") !== undefined ||
+      // Browser bootstrap precedes session-set reconciliation. A cookie alone
+      // cannot scope this public read (broker/changed actors need an epoch).
+      c.req.header("x-opengeni-actor-epoch") !== undefined ||
+      c.req.header("x-opengeni-external-actor") !== undefined;
+    if (callerScoped) {
+      let context: Awaited<ReturnType<typeof requireAccessContext>> | null = null;
+      try {
+        context = await requireAccessContext(c, routeDeps);
+      } catch (error) {
+        // A stale browser cookie must not break the signed-out bootstrap.
+        // Explicit workspace/bearer/external-actor requests fail closed.
+        if (
+          !(error instanceof HTTPException && error.status === 401) ||
+          requestedWorkspaceId !== undefined ||
+          c.req.header("authorization") !== undefined ||
+          c.req.header("x-opengeni-actor-epoch") !== undefined ||
+          c.req.header("x-opengeni-external-actor") !== undefined
+        ) {
+          throw error;
+        }
+      }
+      const workspaceId = requestedWorkspaceId ?? context?.defaultWorkspaceId;
+      if (context && workspaceId) {
+        const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+        await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+          catalogSettings = (
+            await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+              accountId: grant.accountId,
+              workspaceId,
+            })
+          ).settings;
+          selections = await resolveCallerWorkspaceModelSelections(
+            deps.db,
+            catalogSettings,
+            { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+            { observeAvailability: true },
+          );
+          if (!hasPermission(grant.permissions, "sessions:create")) {
+            modelSelectionForbidden = true;
+            selections = [];
+          }
+          const workspace = await getWorkspace(deps.db, workspaceId);
+          defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
+            settings: catalogSettings,
+            accountId: grant.accountId,
+            workspaceSettings: workspace?.settings ?? {},
+            selections,
+          });
+        });
+      } else if (context) {
+        // An organization key has no implicit workspace. Do not advertise
+        // another workspace's authority; it can request an exact workspace.
+        selections = [];
+        modelSelectionForbidden = true;
+      }
+    }
+    const models = selections.filter(isWorkspaceModelAdmissible);
+    const defaultModel = defaultSelection.model;
+    const fallbackDefinition = selections.find(
+      ({ model }) => model.id === defaultModel || model.aliases.includes(defaultModel),
+    );
+    const legacyModelFallback =
+      models.length === 0
+        ? {
+            id: defaultModel,
+            availability: {
+              status: "unavailable" as const,
+              selectable: false as const,
+              reason: modelSelectionForbidden
+                ? ("policy_blocked" as const)
+                : (fallbackDefinition?.availability.reason ?? ("unsupported" as const)),
+              checkedAt: fallbackDefinition?.availability.checkedAt ?? null,
+            },
+          }
+        : undefined;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
-        allowedModels: configuredAllowedModels(catalogSettings),
-        // Provider-grouped model list for the picker. configuredModels() carries the
-        // union of the built-in allow-list and every registry provider's models, in
-        // selection order (default model first); project each to the client-safe
-        // provider-blind ClientModel shape (execution topology remains server-side).
-        models: configuredModels(catalogSettings).map(projectClientModel),
-        defaultReasoningEffort: deps.settings.openaiReasoningEffort,
+        defaultModel,
+        allowedModels: models.length > 0 ? models.map(({ model }) => model.id) : [defaultModel],
+        ...(legacyModelFallback ? { legacyModelFallback } : {}),
+        // Availability remains an observation hint, not the admission predicate.
+        models: models.map(({ model, availability }) => ({
+          ...projectClientModel(model),
+          availability,
+        })),
+        defaultReasoningEffort: defaultSelection.reasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         defaultSandboxBackend: deps.settings.sandboxBackend,
         mcpServers: deps.settings.mcpServers.map((server) => ({
@@ -1100,6 +1205,7 @@ export function createAppComposition(deps: AppDependencies): {
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         codeSearch: codeSearchDeploymentPolicy(deps.settings),
+        agentConfig: clientAgentConfig(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -1390,12 +1496,14 @@ export function createAppComposition(deps: AppDependencies): {
     const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
     let forwarded: Request;
     try {
-      forwarded = await codemodeSessionRequest(
-        routeDeps,
-        grant,
-        c.req.raw,
-        url.pathname.slice(prefix.length) + url.search,
-      );
+      const path = url.pathname.slice(prefix.length) + url.search;
+      forwarded = await codemodeSessionRequest(routeDeps, grant, c.req.raw, path, (session) => {
+        assertConfiguredCodemodeSessionProxyPath(session, path, c.req.method);
+        const proxyTools = configuredCodemodeSessionProxyTools(routeDeps.settings, session);
+        return proxyTools === null
+          ? routeDeps.settings
+          : { ...routeDeps.settings, allowedFirstPartyMcpTools: proxyTools };
+      });
     } catch (error) {
       throw codemodeHttpError(error);
     }
@@ -1504,6 +1612,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
@@ -1543,6 +1652,14 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   app.onError((rawError, c) => {
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_CORRELATION_HEADER, requestId);
+    if (new URL(c.req.url).pathname.startsWith("/v1/")) {
+      c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    }
+    // Archives remain read-only through the existing Send/Steer/control paths.
+    const importErrorResponse = archivedSessionImportErrorResponse(c, rawError);
+    if (importErrorResponse) return importErrorResponse;
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
@@ -1550,6 +1667,7 @@ export function createAppComposition(deps: AppDependencies): {
         ? new HTTPException(403, { message: rawError.message })
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
+          agentConfigHttpError(rawError) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
@@ -1559,11 +1677,6 @@ export function createAppComposition(deps: AppDependencies): {
     const code: ErrorCode = compactionLock
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
-    c.header(OPENGENI_CORRELATION_HEADER, requestId);
-    if (new URL(c.req.url).pathname.startsWith("/v1/")) {
-      c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
-    }
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
@@ -1622,6 +1735,10 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
   // the route performs its own organization API-key authorization.
   if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
+  // Import adapters apply their own exact create/control gates and request-local
+  // RLS in core. Tenant mirrors first resolve the organization-local mapping;
+  // "external" itself is not a native workspace id.
+  if (isSessionHistoryImportRequest(method, pathname)) return true;
   // Organization budget authority is independent of ordinary workspace
   // membership; these routes apply their own exact account/workspace gate.
   if (
@@ -1731,6 +1848,136 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     };
   }
   return { mode: "none" as const };
+}
+
+/** Configured SDK credentials cannot regain tools from widened legacy columns. */
+export function configuredCodemodeSessionProxyTools(
+  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  session: Pick<Session, "agent">,
+): FirstPartyMcpToolName[] | null {
+  if (!session.agent) return null;
+  const families = resolveAgentToolFamilies(session.agent);
+  return resolveFirstPartyMcpToolPolicy(settings).allowed.filter((tool) =>
+    families.allowsFirstPartyTool(tool),
+  );
+}
+
+/**
+ * Permissions span capabilities: project_create grants sessions:create,
+ * and runtime titling grants sessions:control. Fence the endpoint family
+ * too, without changing null-config routing or ordinary REST authorization.
+ */
+export function assertConfiguredCodemodeSessionProxyPath(
+  session: Pick<Session, "id" | "agent">,
+  path: string,
+  method: string,
+): void {
+  if (!session.agent) return;
+  const families = resolveAgentToolFamilies(session.agent);
+  const pathname = new URL(path, "http://codemode.invalid").pathname;
+  const segments = pathname.split("/").filter(Boolean);
+  const verb = method.toUpperCase();
+  const read = verb === "GET" || verb === "HEAD";
+  const allows = (tool: FirstPartyMcpToolName) => families.allowsFirstPartyTool(tool);
+  let allowed = false;
+  if (pathname === "/v1/config/client") {
+    allowed = read;
+  } else if (segments[0] === "v1" && segments[1] === "workspaces" && segments[2] === "site-host") {
+    const [surface, targetSessionId, operation] = segments.slice(3);
+    if (!surface) {
+      allowed = read;
+    } else if (surface === "sessions") {
+      const ownSession = targetSessionId === session.id;
+      const targetAllowed = ownSession || families.subagents;
+      if (!targetSessionId) {
+        allowed = families.subagents;
+      } else if (ownSession && !operation && read) {
+        allowed = true;
+      } else if (ownSession && !operation && verb === "PATCH") {
+        allowed = allows("set_session_title");
+      } else if (ownSession && operation === "background-commands") {
+        allowed = read && allows("command_read");
+      } else if (operation === "goal") {
+        allowed = allows("goal_set") && targetAllowed;
+      } else if (operation === "browser" || operation === "computer") {
+        allowed = allows("browser_open") && targetAllowed;
+      } else if (operation === "human-input-requests") {
+        allowed = families.humanInput && targetAllowed;
+      } else if (operation === "artifacts") {
+        allowed = allows("artifacts_list") && targetAllowed;
+      } else if (ownSession && ["fs", "git", "terminal", "workspace"].includes(operation ?? "")) {
+        // Resource-derived sandbox mechanics are not platform capabilities.
+        allowed = true;
+      } else if (
+        [
+          "agent",
+          "tool-policy",
+          "mcp-servers",
+          "mcp-credentials",
+          "variable-sets",
+          "project",
+        ].includes(operation ?? "")
+      ) {
+        allowed = allows("project_get") && targetAllowed;
+      } else {
+        allowed = families.subagents;
+      }
+    } else if (surface === "files") {
+      allowed = families.allowsMcpServer("files");
+    } else if (surface === "skills") {
+      allowed = families.skills === "manage" || (families.skills === "read" && read);
+    } else if (surface === "human-input-requests") {
+      allowed = families.humanInput;
+    } else {
+      const owners: Record<string, FirstPartyMcpToolName> = {
+        "model-catalog": "sessions_list",
+        "realtime-model-catalog": "sessions_list",
+        "model-policy": "sessions_list",
+        "gateway-custom-models": "sessions_list",
+        "openrouter-custom-models": "sessions_list",
+        "new-session-draft": "session_create",
+        "session-tenancy": "session_create",
+        "session-message-search": "session_events",
+        "agent-topology": "sessions_list",
+        projects: "project_get",
+        sandboxes: "sandboxes_list",
+        machines: "sandboxes_list",
+        rigs: "rig_list",
+        environments: "environment_list",
+        "variable-sets": "variable_set_list",
+        capabilities: "capability_catalog_search",
+        catalog: "capability_catalog_search",
+        members: "project_get",
+        "member-candidates": "project_get",
+        "control-events": "project_get",
+        "browser-identities": "browser_identity",
+        "browser-sessions": "browser_open",
+        "computer-sessions": "computer_open",
+        "attached-browsers": "browser_open",
+        documents: "knowledge_search",
+        knowledge: "knowledge_search",
+        memory: "knowledge_search",
+        "instruction-policy": "instruction_policy_get",
+        preferences: "preference_registry_get",
+        "company-profile": "company_profile_propose",
+        artifacts: "artifacts_list",
+        "scheduled-tasks": "scheduled_tasks_list",
+        automations: "scheduled_tasks_list",
+        connections: "github_connect_link",
+        integrations: "github_connect_link",
+        github: "github_connect_link",
+        social: "social_connections_list",
+        mcp: "github_connect_link",
+      };
+      const tool = owners[surface];
+      allowed = tool !== undefined && allows(tool);
+    }
+  }
+  if (!allowed) {
+    throw new HTTPException(403, {
+      message: "Agent configuration does not allow this Codemode SDK operation",
+    });
+  }
 }
 
 function codemodeHttpError(error: unknown): HTTPException {
@@ -2149,6 +2396,14 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/session-imports$/,
+    label: "/v1/workspaces/:workspaceId/session-imports",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/session-imports\/[^/]+\/events$/,
+    label: "/v1/workspaces/:workspaceId/session-imports/:importId/events",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/session-message-search$/,
     label: "/v1/workspaces/:workspaceId/session-message-search",
   },
@@ -2445,6 +2700,14 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/external$/,
     label: "/v1/workspaces/external",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/session-imports$/,
+    label: "/v1/workspaces/external/:source/:externalId/session-imports",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/session-imports\/[^/]+\/events$/,
+    label: "/v1/workspaces/external/:source/:externalId/session-imports/:importId/events",
   },
   {
     pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/,
@@ -3030,4 +3293,17 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   const segments = pathname.split("/");
   return !segments.includes("mcp") && !segments.includes("codemode");
+}
+
+/** Client-safe agent-configuration rollout projection. */
+function clientAgentConfig(settings: Settings): ClientAgentConfig {
+  const policy = agentConfigDeploymentPolicy(settings);
+  return {
+    enabled: policy.admissionEnabled,
+    defaultForNewSessions: policy.defaultForNewSessions,
+    capabilities: AGENT_CAPABILITY_IDS.map((id) => {
+      const reason = policy.unavailable[id];
+      return reason === undefined ? { id, available: true } : { id, available: false, reason };
+    }),
+  };
 }

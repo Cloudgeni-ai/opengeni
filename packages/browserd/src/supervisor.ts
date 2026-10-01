@@ -326,6 +326,7 @@ export class BrowserSupervisor {
   private readonly uploadDownload: typeof uploadBrowserDownload;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
+  private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
   private readonly ending = new Map<string, Promise<void>>();
   private readonly stateTransferTails = new Map<string, Promise<void>>();
   private closed = false;
@@ -467,59 +468,79 @@ export class BrowserSupervisor {
         "ephemeral browser contexts are disabled by the operator",
       );
     }
+    const request = this.createValidatedSession(options);
+    this.creationRequests.add(request);
     try {
-      await this.retireTerminalSessions();
-      const active = this.sessions.get(options.browserSessionId);
-      if (active) {
-        this.assertSameBinding(active, options);
-        return {
-          ...binding(active),
-          observation: await this.currentObservation(active),
-        };
-      }
-      const pending = this.creating.get(options.browserSessionId);
-      if (pending) {
-        const runtime = await pending;
-        this.assertSameBinding(runtime, options);
-        return {
-          ...binding(runtime),
-          observation: await this.currentObservation(runtime),
-        };
-      }
-      if (this.sessions.size + this.creating.size >= this.maxSessions) {
-        throw new InteractionControllerError(
-          "resource_unavailable",
-          "browser supervisor session capacity is exhausted",
-          true,
-        );
-      }
-      const creation = this.buildRuntime(options);
-      this.creating.set(options.browserSessionId, creation);
-      try {
-        const runtime = await creation;
-        if (this.closed) {
-          await this.disposeRuntime(runtime, false);
-          throw new InteractionControllerError(
-            "resource_unavailable",
-            "browser supervisor is closed",
-          );
-        }
-        this.sessions.set(options.browserSessionId, runtime);
-        const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
-        runtime.creationObservation = null;
-        return {
-          ...binding(runtime),
-          observation,
-        };
-      } finally {
-        if (this.creating.get(options.browserSessionId) === creation) {
-          this.creating.delete(options.browserSessionId);
-        }
-      }
+      return await request;
     } finally {
+      this.creationRequests.delete(request);
       options.restore?.dataKey.fill(0);
       options.restore?.aad.fill(0);
     }
+  }
+
+  private async createValidatedSession(
+    options: ValidatedBrowserSupervisorSessionOptions,
+  ): Promise<BrowserSupervisorSession> {
+    await this.retireTerminalSessions();
+    const active = this.sessions.get(options.browserSessionId);
+    if (active) {
+      this.assertSameBinding(active, options);
+      return {
+        ...binding(active),
+        observation: await this.currentObservation(active),
+      };
+    }
+    const pending = this.creating.get(options.browserSessionId);
+    if (pending) {
+      const runtime = await pending;
+      this.assertSameBinding(runtime, options);
+      return {
+        ...binding(runtime),
+        observation: await this.currentObservation(runtime),
+      };
+    }
+    if (this.sessions.size + this.creating.size >= this.maxSessions) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser supervisor session capacity is exhausted",
+        true,
+      );
+    }
+    const creation = this.buildRuntime(options);
+    this.creating.set(options.browserSessionId, creation);
+    try {
+      const runtime = await creation;
+      if (this.closed) {
+        await this.disposeRuntime(runtime, false);
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "browser supervisor is closed",
+        );
+      }
+      this.sessions.set(options.browserSessionId, runtime);
+      const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
+      runtime.creationObservation = null;
+      return {
+        ...binding(runtime),
+        observation,
+      };
+    } finally {
+      if (this.creating.get(options.browserSessionId) === creation) {
+        this.creating.delete(options.browserSessionId);
+      }
+    }
+  }
+
+  /** Update safety includes work hidden from the public active-session list. */
+  isIdle(): boolean {
+    return (
+      this.creationRequests.size === 0 &&
+      this.sessions.size === 0 &&
+      this.creating.size === 0 &&
+      this.ending.size === 0 &&
+      this.stateTransferTails.size === 0
+    );
   }
 
   listSessions(): BrowserSessionReference[] {
@@ -841,6 +862,7 @@ export class BrowserSupervisor {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    await Promise.allSettled([...this.creationRequests]);
     await Promise.allSettled([...this.creating.values()]);
     const active = [...this.sessions.values()];
     await Promise.allSettled(

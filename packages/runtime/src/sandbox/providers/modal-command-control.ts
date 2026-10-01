@@ -1,5 +1,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { posix } from "node:path";
+import { status } from "@grpc/grpc-js";
+import { setTimeout as delay } from "node:timers/promises";
 import { shellQuote } from "@openai/agents-core/sandbox/internal";
 import {
   SandboxProviderCommand,
@@ -12,6 +14,7 @@ import {
   admittedCommandSupervisionReady,
   markPendingCommandSupervised,
   reserveSupervisedLaunch,
+  ProviderCommandStartOutcomeUnknownError,
 } from "../provider-command-session";
 import {
   ModalCommandControl as LegacyControl,
@@ -22,6 +25,7 @@ import {
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
+  ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
 
 export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
@@ -142,6 +146,27 @@ export class ModalCommandControl {
       }
   }
 
+  /** Access lookup may retry safely, but once the callback enters the Start
+   * boundary only the wire's own dispatch proof can authorize recovery. */
+  private async withStartRouter<T>(
+    taskId: string,
+    signal: AbortSignal | undefined,
+    run: (router: ModalCommandRouterWire) => Promise<T>,
+  ): Promise<T> {
+    let entered = false;
+    try {
+      return await this.withRouter(taskId, signal, async (router) => {
+        entered = true;
+        return await run(router);
+      });
+    } catch (error) {
+      if (entered) throw error;
+      return await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(async () => {
+        throw error;
+      }, signal);
+    }
+  }
+
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalRouterProviderCommand> {
     signal?.throwIfAborted();
     const supervised = admittedCommandSupervisionReady() && !args.tty && !args.runAs;
@@ -150,7 +175,10 @@ export class ModalCommandControl {
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
       throw new Error("Command workdir is outside the sandbox workspace");
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined);
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     const taskId = task.taskId;
     if (this.sandboxId !== sandboxId)
@@ -208,9 +236,11 @@ export class ModalCommandControl {
       },
     };
     if (supervision) await reserveSupervisedLaunch(command);
+    let startAttempted = false;
     try {
-      await this.withRouter(taskId, signal, (router) =>
-        router.start(
+      await this.withStartRouter(taskId, signal, async (router) => {
+        startAttempted = true;
+        await router.start(
           {
             taskId,
             execId,
@@ -231,18 +261,20 @@ export class ModalCommandControl {
               : {}),
           },
           signal,
-        ),
-      );
+        );
+      });
     } catch (error) {
-      // A client-chosen router id remains the only possible invocation. The
-      // supervisor is idle, so an ambiguous launch never ran user code. Retain
-      // the descriptor and reconcile that id; do not replay the start.
+      // A client-chosen router id remains the only possible invocation. Retain
+      // it even for PTY/runAs/unsupervised starts: a rejected acknowledgement
+      // does not prove that the provider rejected the launch.
       if (
-        !supervision ||
+        !startAttempted ||
+        error instanceof ModalCommandStartNotDispatchedError ||
         error instanceof ModalCommandStartRejectedError ||
         error instanceof ModalCommandStartPreDispatchUnavailableError
       )
         throw error;
+      throw new ProviderCommandStartOutcomeUnknownError(command, error);
     }
     return command;
   }
@@ -253,9 +285,12 @@ export class ModalCommandControl {
   async verifySupervisionCapability(): Promise<{ sandboxId: string; taskId: string }> {
     const sandboxId = this.sandboxId;
     const signal = AbortSignal.timeout(5_000);
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, { signal }),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    await this.withRouter(task.taskId, signal, async (router) => {
+    await this.withStartRouter(task.taskId, signal, async (router) => {
       const identity = { taskId: task.taskId!, execId: randomUUID() };
       await router.start(
         {
@@ -289,6 +324,74 @@ export class ModalCommandControl {
     return { sandboxId, taskId: task.taskId };
   }
 
+  /** Fixed provider readiness probe. No shell, user environment, admission or
+   * SDK Start retries. Once Start may have been sent, only observe that exact
+   * invocation; DNS-shaped server replies never authorize another Start. */
+  async verifyExecReadiness(signal: AbortSignal): Promise<number> {
+    signal.throwIfAborted();
+    const sandboxId = this.sandboxId;
+    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+    if (sandboxId !== this.sandboxId)
+      throw new Error("Modal sandbox changed during readiness preparation");
+    const identity = { taskId: task.taskId, execId: randomUUID() };
+    const transientObservation = (error: unknown) =>
+      [status.UNAVAILABLE, status.DEADLINE_EXCEEDED].includes(
+        (error as { code?: number } | null)?.code ?? -1,
+      );
+    const pause = () => delay(100, undefined, { signal });
+    return await this.withRouter(task.taskId, signal, async (router) => {
+      for (;;) {
+        signal.throwIfAborted();
+        try {
+          await router.start(
+            { ...identity, commandArgs: ["/bin/true"], workdir: "/tmp", env: {} },
+            signal,
+          );
+          break;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error instanceof ModalCommandStartPreDispatchUnavailableError) {
+            await pause();
+            continue;
+          }
+          // A lost Start acknowledgement is not replay permission. The probe
+          // may already exist, so keep this identity even if observation later
+          // exhausts the caller's readiness budget.
+          if (
+            error instanceof ModalCommandStartRejectedError ||
+            error instanceof ModalCommandStartNotDispatchedError
+          )
+            throw error;
+          break;
+        }
+      }
+      const streams = {
+        stdout: { offset: 0, eof: false },
+        stderr: { offset: 0, eof: false },
+      };
+      for (;;) {
+        signal.throwIfAborted();
+        try {
+          for (const stream of ["stdout", "stderr"] as const) {
+            const cursor = streams[stream];
+            if (cursor.eof) continue;
+            const page = await router.read(identity, stream, cursor.offset, 1_000, signal);
+            cursor.offset += page.bytes.length;
+            cursor.eof = page.eof;
+          }
+          const exit = await router.poll(identity, signal);
+          signal.throwIfAborted();
+          if (exit !== null && streams.stdout.eof && streams.stderr.eof) return exit;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (!transientObservation(error)) throw error;
+        }
+        await pause();
+      }
+    });
+  }
+
   /** Separate authenticated provider execution of the installed control helper.
    * User command streams are never inspected for control evidence. */
   async supervisionControl(
@@ -302,7 +405,7 @@ export class ModalCommandControl {
       throw new Error("Supervised command identity is unavailable");
     const identity = { taskId: command.taskId, execId: randomUUID() };
     const signal = AbortSignal.timeout(5_000);
-    return await this.withRouter(command.taskId, signal, async (router) => {
+    return await this.withStartRouter(command.taskId, signal, async (router) => {
       await router.start(
         {
           ...identity,

@@ -1,7 +1,9 @@
 import {
   CORE_INTEGRATION_DEFINITIONS,
   INTEGRATION_DEFINITION_PRESENTATIONS,
+  autoApprovalForbidden,
   createPinnedIntegrationTransport,
+  integrationDefinitionById,
   integrationFacetDefinitions,
   type IntegrationCredentialResolver,
 } from "@opengeni/capabilities";
@@ -90,6 +92,29 @@ export function validatedIntegrationInstallInput(
     throw new HTTPException(422, {
       message: "Choose a Personal Connection before installing for yourself.",
     });
+  if (payload.autoApprovedTools?.length) {
+    const selected = new Set(payload.allowedTools ?? resolved.preview.tools.map((tool) => tool.id));
+    const outside = payload.autoApprovedTools.find((tool) => !selected.has(tool));
+    if (outside)
+      throw new HTTPException(422, {
+        message: `autoApprovedTools must name selected Integration tools: ${outside.slice(0, 200)}`,
+      });
+    // Curated and custom Integrations share one rule (capabilities:manage plus
+    // the organization acquisition recheck in the installer); only a curated
+    // definition's reviewed governance can forbid an exemption.
+    if (resolved.preview.definitionProvenance === "curated") {
+      const definition = integrationDefinitionById(resolved.preview.definitionId);
+      const forbidden = resolved.preview.tools.find(
+        (tool) =>
+          payload.autoApprovedTools!.includes(tool.id) &&
+          autoApprovalForbidden(definition, tool.operationKey),
+      );
+      if (forbidden)
+        throw new HTTPException(422, {
+          message: `This Integration requires human approval for ${forbidden.id.slice(0, 200)}; it cannot be auto-approved.`,
+        });
+    }
+  }
   return {
     accountId: grant.accountId,
     workspaceId,
@@ -120,6 +145,7 @@ export function validatedIntegrationInstallInput(
     ...(payload.allowedTools
       ? { allowedTools: validatedAllowedToolIds(payload.allowedTools, resolved.revision.tools) }
       : {}),
+    ...(payload.autoApprovedTools ? { autoApprovedTools: payload.autoApprovedTools } : {}),
     facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
     revision: resolved.revision,
   };
@@ -273,7 +299,18 @@ export function registerApiIntegrationRoutes(
       subjectId: grant.subjectId,
       payload,
     });
-    return c.json(ApiIntegrationPreview.parse(resolved.preview));
+    const credentialWarnings = await connectionCredentialPlacementWarnings(
+      deps,
+      workspaceId,
+      grant.subjectId,
+      resolved.preview,
+    );
+    return c.json(
+      ApiIntegrationPreview.parse({
+        ...resolved.preview,
+        warnings: [...resolved.preview.warnings, ...credentialWarnings].slice(0, 32),
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/integrations/install", async (c) => {
@@ -515,6 +552,75 @@ async function storedReconciliationPreview(
     requiredScopes,
     authScheme: runtime.authScheme,
   };
+}
+
+/**
+ * Advisory preview check that the selected credential Connection delivers
+ * its secret where the API description says the provider reads it. Compares
+ * carrier and name only; never returns or logs a credential value. Install is
+ * unchanged: descriptions are often imprecise, so a mismatch warns instead of
+ * refusing a Connection the provider may actually accept.
+ */
+async function connectionCredentialPlacementWarnings(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  subjectId: string,
+  preview: ApiIntegrationPreview,
+): Promise<string[]> {
+  if (!preview.connectionId || (preview.auth.kind !== "api_key" && preview.auth.kind !== "http")) {
+    return [];
+  }
+  const connection = await getConnectionMetadata(
+    deps.db,
+    workspaceId,
+    preview.connectionId,
+    subjectId,
+  );
+  if (!connection || connection.kind === "oauth2") return [];
+  let result: Awaited<ReturnType<ReturnType<typeof buildConnectionTokenResolver>>>;
+  try {
+    result = await buildConnectionTokenResolver(
+      deps.db,
+      deps.settings,
+    )({
+      workspaceId,
+      ...(connection.subjectId ? { subjectId } : {}),
+      serverId: `preview_${connection.id}`,
+      connectionRef: {
+        connectionId: connection.id,
+        providerDomain: connection.providerDomain,
+        kind: connection.kind,
+        subjectScope: connection.subjectId ? "subject" : "workspace",
+      },
+      destinationUrl: preview.baseUrl,
+      credentialTarget: "http_api",
+    });
+  } catch {
+    return [];
+  }
+  if (result.status === "auth_needed") return [];
+  const expected =
+    preview.auth.kind === "api_key"
+      ? { carrier: preview.auth.carrier, name: preview.auth.name }
+      : { carrier: "header" as const, name: "Authorization" };
+  const placements =
+    result.placements ??
+    Object.keys(result.headers).map((name) => ({ carrier: "header" as const, name }));
+  const matches = placements.some(
+    (placement) =>
+      placement.carrier === expected.carrier &&
+      (placement.carrier === "header"
+        ? placement.name.toLowerCase() === expected.name.toLowerCase()
+        : placement.name === expected.name),
+  );
+  if (matches) return [];
+  const actual = placements
+    .slice(0, 3)
+    .map((placement) => `${placement.carrier} "${placement.name.slice(0, 64)}"`)
+    .join(", ");
+  return [
+    `The API description expects the credential in ${expected.carrier} "${expected.name.slice(0, 64)}", but the selected Connection sends it in ${actual}. Calls may be rejected as unauthenticated.`,
+  ];
 }
 
 async function requireVisibleConnection(

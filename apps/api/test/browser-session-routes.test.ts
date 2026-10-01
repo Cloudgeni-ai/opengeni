@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { CreateBrowserSessionRequest, type AccessGrant, type FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
+import { testSettings } from "@opengeni/testing";
+import { createApp } from "../src/app";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
 import {
@@ -11,6 +14,7 @@ import {
   requireAuthorizedBrowserUploadFiles,
   parseBrowserScreenshotOptions,
   browserScreenshotResponse,
+  browserScreenshotError,
   browserCreateInput,
 } from "../src/routes/browser-sessions";
 
@@ -47,6 +51,59 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("publishes a definite screenshot timeout through the ordinary API error envelope", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const internal = new BrowserControlRequestError(504, {
+      code: "timeout",
+      message: "PRIVATE /home/user/profile secret",
+      retryable: true,
+      details: { privatePath: "/home/user/profile" },
+    });
+    const projected = browserScreenshotError(internal);
+    expect(projected).toBeInstanceOf(HTTPException);
+    expect((projected as Error).cause).toBe(internal);
+    app.get("/v1/test/browser-capture-timeout", () => {
+      throw projected;
+    });
+    const response = await app.request("http://localhost/v1/test/browser-capture-timeout", {
+      headers: { "x-opengeni-correlation-id": "capture-request-42" },
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 504,
+        code: "upstream_unavailable",
+        message:
+          "This tab did not produce a screenshot in time. Other browser operations may still work.",
+        retryable: true,
+        requestId: "capture-request-42",
+      },
+    });
+  });
+
+  test("does not relabel another screenshot failure as a timeout", () => {
+    for (const error of [
+      new Error("unexpected"),
+      new BrowserControlRequestError(403, {
+        code: "permission_denied",
+        message: "protected authentication",
+        retryable: false,
+      }),
+      new BrowserControlRequestError(409, {
+        code: "outcome_unknown",
+        message: "uncertain",
+        retryable: false,
+      }),
+    ])
+      expect(browserScreenshotError(error)).toBe(error);
+  });
+
   test("existing managed browser control retains the durable provider instance across image upgrades", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(source.indexOf("async function withBrowserPlacement"));

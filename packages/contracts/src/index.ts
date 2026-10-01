@@ -4,11 +4,22 @@ export * from "./claude-subscription-oauth";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
+export * from "./session-history-import";
+import { SessionImportedArchive } from "./session-history-import";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
+export * from "./agent-config";
+import {
+  AGENT_INSTRUCTIONS_MAX_CHARACTERS,
+  AgentConfigRequest,
+  AgentEffectiveTools,
+  ClientAgentConfig,
+  ResolvedAgentConfig,
+  WorkspaceAgentDefaults,
+} from "./agent-config";
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 export * from "./skill-use";
@@ -2383,9 +2394,40 @@ export const WorkspaceSettingsSchema = z
     // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
     // null uses the deployment image.
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+    // Agent configuration defaults for new sessions ("Defaults for new
+    // sessions"). Validated leniently here and resolved by
+    // resolveWorkspaceAgentDefaults, so a value written by a newer release can
+    // never fail this bag and revert unrelated settings; writes are strict.
+    sessionAgentDefaults: z.unknown().optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** Explicit agent defaults for new sessions, or null when unset/unreadable. */
+export function resolveWorkspaceAgentDefaults(settings: unknown): WorkspaceAgentDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  if (!parsed.success || parsed.data.sessionAgentDefaults == null) return null;
+  const defaults = WorkspaceAgentDefaults.safeParse(parsed.data.sessionAgentDefaults);
+  return defaults.success ? defaults.data : null;
+}
+
+/**
+ * The workspace default agent identity as the settings page shows it: an
+ * explicit default identity, else the legacy white-label persona
+ * (`agentInstructions`) with the CORE placeholder removed. Legacy personas stay
+ * live at compose time; only explicit defaults are frozen into new sessions.
+ */
+export function resolveWorkspaceDefaultAgentIdentity(
+  settings: unknown,
+  legacyAgentInstructions: string | null | undefined,
+): { identity: string | null; source: "explicit" | "legacy_agent_instructions" | null } {
+  const explicit = resolveWorkspaceAgentDefaults(settings)?.identity;
+  if (explicit) return { identity: explicit, source: "explicit" };
+  const legacy = legacyAgentInstructions?.split("{{core}}").join("").trim();
+  return legacy
+    ? { identity: legacy, source: "legacy_agent_instructions" }
+    : { identity: null, source: null };
+}
 
 /** The workspace sandbox image override, or null for the deployment image. */
 export function resolveWorkspaceDefaultSandboxImage(settings: unknown): string | null {
@@ -2536,6 +2578,9 @@ export const UpdateWorkspaceSettingsRequest = z
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
+    // Agent defaults for new sessions; null clears them. Requires the agent
+    // configuration admission switch.
+    sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -6274,7 +6319,7 @@ export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
 export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
-export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_PROGRESS_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES = 512;
 export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES = 4 * 1024;
 export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS = 16;
@@ -6287,6 +6332,10 @@ function boundedSessionGoalString(maxBytes: number, field: string) {
   return z
     .string()
     .min(1)
+    .max(maxBytes)
+    .describe(
+      `${field}: at most ${maxBytes} UTF-8 bytes. Write concise, human-readable text with normal spacing; summarize instead of compressing words.`,
+    )
     .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
       message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
     });
@@ -7554,7 +7603,7 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
     ? `\nRequired native document reports (persisted; completion requires current-head inspection receipts): ${JSON.stringify(snapshot.reportRequirements)}`
     : "";
   if (snapshot.state === "completed") {
-    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context, not an instruction to stay silent. Goal evidence is ledger proof, not a delivered answer. When child results or other updates arrive, integrate material new findings and deliver any still-missing user-facing handoff; do not restart completed work or change the completed goal. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
   }
   const policy =
     snapshot.mutationPolicy === "review_changes"
@@ -7843,6 +7892,7 @@ export const NewSessionDraftOptions = withVariableSetIdAlias({
   goal: GoalSpec.optional(),
   firstPartyMcpPermissions: z.array(Permission).optional(),
   firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+  agent: AgentConfigRequest.optional(),
 });
 export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
 
@@ -9793,6 +9843,9 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       .min(SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS)
       .max(SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS)
       .optional(),
+    // Agent configuration for every generated session; resolved at dispatch
+    // (the whole-row execution digest covers it). Omitted keeps legacy.
+    agent: AgentConfigRequest.optional(),
   };
 }
 
@@ -10010,6 +10063,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
     resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
     resolvedFirstPartyMcpPermissions: z.array(Permission),
+    /** Agent configuration resolved for generated sessions; absent = legacy. */
+    resolvedAgentConfig: ResolvedAgentConfig.optional(),
+    /** Effective instructions from the `agent.instructions` alias, when set. */
+    resolvedAgentInstructions: z.string().min(1).max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).optional(),
     resolvedVariableSet: z
       .object({
         id: z.string().uuid(),
@@ -10689,6 +10746,8 @@ export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSche
       sandboxBackend: SandboxBackend.nullable().default(null),
       policyRole: z.string().trim().min(1).max(128).nullable().default(null),
       metadata: AutomationBoundedJson.default({}),
+      // Agent configuration for generated sessions. Omitted keeps legacy.
+      agent: AgentConfigRequest.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -12249,9 +12308,63 @@ export const IntegrationSource = z.discriminatedUnion("kind", [
 ]);
 export type IntegrationSource = z.infer<typeof IntegrationSource>;
 
+/** Custom OpenAPI documents must fit the same 8 MiB bound as fetched specs. */
+export const INLINE_OPENAPI_DOCUMENT_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * An OpenAPI 3.x document supplied in the request body (JSON or YAML text)
+ * instead of fetched from a URL. `sourceKey` is the caller's stable identity
+ * for the Integration: the same key updates the same installation across
+ * document revisions. Server URLs must be absolute (or `baseUrl` given), and
+ * every call still goes through the deployment network policy, so a product
+ * on a private or loopback address stays unreachable unless the operator
+ * enables private targets; a local product still needs a public tunnel.
+ */
+export const InlineOpenApiDocumentSource = z
+  .object({
+    kind: z.literal("openapi_document"),
+    sourceKey: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    document: z
+      .string()
+      .min(1)
+      .refine(
+        (value) => new TextEncoder().encode(value).byteLength <= INLINE_OPENAPI_DOCUMENT_MAX_BYTES,
+        `OpenAPI document must be at most ${INLINE_OPENAPI_DOCUMENT_MAX_BYTES} bytes`,
+      ),
+    baseUrl: z.string().url().max(2048).optional(),
+  })
+  .strict();
+export type InlineOpenApiDocumentSource = z.infer<typeof InlineOpenApiDocumentSource>;
+
+/** Preview/install input: every stored source kind plus an inline document. */
+export const IntegrationSourceInput = z.discriminatedUnion("kind", [
+  ...IntegrationSource.options,
+  InlineOpenApiDocumentSource,
+]);
+export type IntegrationSourceInput = z.infer<typeof IntegrationSourceInput>;
+
+/** Responses echo an inline document only by its digest, never its text. */
+export const InlineOpenApiDocumentSourceEcho = z
+  .object({
+    kind: z.literal("openapi_document"),
+    sourceKey: InlineOpenApiDocumentSource.shape.sourceKey,
+    documentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    baseUrl: z.string().url().max(2048).optional(),
+  })
+  .strict();
+export const IntegrationSourceProjection = z.discriminatedUnion("kind", [
+  ...IntegrationSource.options,
+  InlineOpenApiDocumentSourceEcho,
+]);
+export type IntegrationSourceProjection = z.infer<typeof IntegrationSourceProjection>;
+
 export const PreviewApiIntegrationRequest = z
   .object({
-    source: IntegrationSource,
+    source: IntegrationSourceInput,
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
   })
@@ -12327,7 +12440,7 @@ export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview
 
 export const ApiIntegrationPreview = z
   .object({
-    source: IntegrationSource,
+    source: IntegrationSourceProjection,
     definitionId: z.string().min(1).max(200),
     definitionProvenance: IntegrationDefinitionProvenance,
     protocol: ApiIntegrationProtocol,
@@ -12353,7 +12466,7 @@ export type ApiIntegrationPreview = z.infer<typeof ApiIntegrationPreview>;
 
 export const InstallApiIntegrationRequest = z
   .object({
-    source: IntegrationSource,
+    source: IntegrationSourceInput,
     expectedRevisionId: z.string().min(1).max(96),
     expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
     connectionId: z.string().uuid().optional(),
@@ -12362,6 +12475,14 @@ export const InstallApiIntegrationRequest = z
     displayName: z.string().min(1).max(200).optional(),
     expectedInstanceVersion: z.number().int().positive().optional(),
     allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
+    // Selected write/destructive tools (preview approvalMode "ask") that run
+    // without per-call human approval, for unattended/scheduled work. Custom and
+    // curated Integrations alike; requires capabilities:manage and re-passes
+    // organization acquisition policy. A curated definition may forbid it per
+    // operation (IntegrationDefinition.autoApproval). Declarative: omission restores
+    // approval for every "ask" tool. Session approval policy, connector Block,
+    // and action policies still apply.
+    autoApprovedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   })
   .strict();
 export type InstallApiIntegrationRequest = z.infer<typeof InstallApiIntegrationRequest>;
@@ -12956,6 +13077,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Exact model-visible OpenGeni selection. The default omits connector-wide
     // tools; [] intentionally selects none.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName),
+    // Frozen agent configuration (migration 0559). null = a legacy session
+    // with byte-identical historical behavior.
+    agent: ResolvedAgentConfig.nullable().default(null),
+    // Capability-level projection of what a configured session can use.
+    // Omitted by internal readers; null for legacy sessions.
+    effectiveTools: AgentEffectiveTools.nullable().optional(),
     // Per-session third-party MCP servers, metadata only. Credential values are
     // write-only and never appear here.
     mcpServers: z.array(SessionMcpServerMetadata).default([]),
@@ -13036,6 +13163,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
     archived: z.boolean().default(false),
     archivedAt: z.string().nullable().default(null),
+    /** Workspace-persisted read-only import, independent of a member's rail archive. */
+    importedArchive: z.lazy(() => SessionImportedArchive).optional(),
     /** Optimistic archive-state revision; zero represents an absent personal relation. */
     archiveVersion: z.number().int().nonnegative().default(0),
     /**
@@ -13310,6 +13439,7 @@ export const SessionEventType = z.enum([
   "session.model_settings.updated",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
+  "session.agent.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
@@ -13403,6 +13533,7 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
  * phase. Absent on legacy events and on the settlement copy.
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
+export * from "./session-final-reply";
 
 function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)
@@ -13547,6 +13678,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.queue.prompt.cancelled",
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
+    "session.agent.updated",
     "session.model_settings.updated",
   ],
   terminal: [
@@ -15690,6 +15822,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // The same child omission rule applies to selected MCP tool refs. Top-level
       // omission still applies workspace-default capability MCP tools; explicit []
       // suppresses those defaults (the first-party OpenGeni server remains added).
+      // Servers attached in this request's `mcpServers` are selected either way.
       tools: z.array(ToolRef).default([]),
       excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
@@ -15754,12 +15887,19 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // exposes none.
       // This does not grant authority: every registered tool is permission-gated.
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
+      // One agent configuration: capabilities, identity, instructions alias and
+      // renderer. Omission keeps today's behavior (or inherits a configured
+      // parent). Children may only narrow. Behind the admission switch.
+      agent: AgentConfigRequest.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
       // policies, connection refs, and encrypted credentials. Explicit arrays,
       // including [], are authoritative; non-empty explicit arrays require attach
       // permission. Credential headers are write-only: create responses and events
-      // expose only SessionMcpServerMetadata.
+      // expose only SessionMcpServerMetadata. On a top-level create, every server
+      // attached here is also selected as a strict tool ref whether `tools` is
+      // omitted or explicit; list `{ kind: "mcp", id, eager: true }` in `tools`
+      // only to change its startup/degradation markers.
       mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
       // Override approval policy without copying inherited capability definitions.
       // Unknown/disabled servers are rejected; curated approval floors still apply.
@@ -16063,6 +16203,39 @@ export function approvalIdentifier(value: unknown): string | null {
   const candidate = rawItem?.callId ?? rawItem?.id ?? approval.id ?? approval.name;
   if (typeof candidate !== "string" && typeof candidate !== "number") return null;
   return String(candidate);
+}
+
+/**
+ * Stable public fields on every `session.requiresAction` approval entry.
+ * `id` is exactly the `approvalId` that `user.approvalDecision` accepts (the
+ * tool call id); `name` is the model-visible tool name. Producers add these on
+ * top of their historical fields (`rawItem` on a turn's first pause, `raw` on
+ * later pauses), which stay for compatibility.
+ */
+export type SessionApprovalRequestPublicFields = {
+  id: string;
+  name: string;
+  arguments: unknown;
+};
+
+export function withPublicApprovalFields<T>(
+  value: T,
+): T | (T & SessionApprovalRequestPublicFields) {
+  const id = approvalIdentifier(value);
+  if (id === null || !value || typeof value !== "object") return value;
+  const approval = value as Record<string, unknown>;
+  const nested = [approval.rawItem, approval.raw].filter(
+    (candidate): candidate is Record<string, unknown> =>
+      Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate),
+  );
+  const name = [approval.name, approval.toolName, ...nested.map((item) => item.name)].find(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+  );
+  const args =
+    approval.arguments !== undefined
+      ? approval.arguments
+      : (nested.find((item) => item.arguments !== undefined)?.arguments ?? null);
+  return { ...value, id, name: name ?? "tool", arguments: args };
 }
 
 function requireMessageTextOrAnnotations(
@@ -16607,6 +16780,22 @@ export const DeviceEnrollmentApproveRequest = z.object({
   scope: ResourceAuthorityScope.default("user"),
 });
 export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
+
+// Machine-authenticated renewal: possession of a bearer alone is insufficient.
+// The existing install key signs this exact, bounded request. No consent/scope
+// fields are accepted; the server retains the current enrollment authority.
+export const RenewEnrollmentRequest = z
+  .object({
+    bearer: z.string().min(1).max(4096),
+    signedAt: z.number().int().positive(),
+    signature: z.string().min(1).max(128),
+  })
+  .strict();
+export type RenewEnrollmentRequest = z.infer<typeof RenewEnrollmentRequest>;
+
+export function enrollmentRenewalProof(bearer: string, signedAt: number): string {
+  return `opengeni:enrollment-renew:v1\n${signedAt}\n${bearer}`;
+}
 
 export const DeviceEnrollmentApproveResponse = z.object({
   approved: z.boolean(),
@@ -17545,6 +17734,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
+    /** Transient health/readiness hint; membership in config models determines admission. */
+    availability: z.lazy(() => ModelAvailabilityV1).optional(),
     definitionVersion: z
       .string()
       .regex(/^sha256:[a-f0-9]{64}$/u)
@@ -17702,10 +17893,22 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
+    // Legacy parsers require a nonempty list. If models is empty, this contains
+    // only the explicitly unavailable legacyModelFallback hint, not admission.
     allowedModels: z.array(z.string()).min(1),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for
     // back-compat: callers that only read allowedModels are unaffected.
     models: z.array(ClientModel).default([]),
+    /** Only present when no model is admitted; preserves older min(1) parsers. */
+    legacyModelFallback: z
+      .object({
+        id: z.string(),
+        availability: ModelAvailabilityV1.extend({
+          status: z.literal("unavailable"),
+          selectable: z.literal(false),
+        }),
+      })
+      .optional(),
     defaultReasoningEffort: ReasoningEffort,
     allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
     // Client-safe execution default. The schedule editor uses this to avoid
@@ -17759,6 +17962,13 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxDurationSeconds: VOICE_INPUT_MAX_DURATION_SECONDS,
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
+    }),
+    // Agent configuration rollout: whether `agent` is admitted, whether new
+    // sessions default to a configuration, and per-capability availability.
+    agentConfig: ClientAgentConfig.default({
+      enabled: false,
+      defaultForNewSessions: false,
+      capabilities: [],
     }),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.

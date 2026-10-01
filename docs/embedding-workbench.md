@@ -45,6 +45,29 @@ surface to a notice; it never crashes the dock.
 The authoritative list is the `peerDependencies` block of the package manifest
 (`packages/react/package.json`).
 
+The root keeps every existing export but does not import optional peers. Enable
+the installed surface libraries once from their opt-in entry in your client
+route; registration is synchronous and libraries load only on mount:
+
+```ts
+import { enableSandboxTerminal } from "@opengeni/react/terminal";
+import { enableCodeEditor } from "@opengeni/react/editor";
+
+enableSandboxTerminal();
+enableCodeEditor({
+  javascript: async () =>
+    (await import("@codemirror/lang-javascript")).javascript({ jsx: true, typescript: true }),
+});
+```
+
+Include only the setup entries and grammar loaders for packages you installed.
+For direct VNC, use `enableDesktopViewer()` from `@opengeni/react/desktop`.
+Highlighted diffs use `enablePierreDiffs()` from `@opengeni/react/diffs`.
+Optional terminal WebGL uses
+`enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") })`;
+without that addon, the DOM renderer remains available. Root component imports
+still work after setup. See the [React peer setup](../packages/react/README.md#optional-peer-dependencies).
+
 ## 2. Provider And Trust Boundary
 
 Wrap the tree once in `OpenGeniProvider`, giving it an OpenGeni client and the

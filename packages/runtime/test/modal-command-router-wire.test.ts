@@ -11,6 +11,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { Sandbox } from "modal";
+import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
+import { isModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal";
 import {
   MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
@@ -154,6 +158,67 @@ function wire() {
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
 
+test("both pinned SDK distributions dispatch ambiguous Start once without transient replay", async () => {
+  const sdkServer = new Server();
+  let calls = 0;
+  sdkServer.addService(
+    { start: definition("TaskExecStart", "Start", "Empty") } as ServiceDefinition,
+    {
+      start(_call: unknown, callback: (error: unknown) => void) {
+        calls++;
+        callback({
+          code: status.UNAVAILABLE,
+          details:
+            "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443",
+        });
+      },
+    },
+  );
+  const port = await new Promise<number>((resolve, reject) =>
+    sdkServer.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) =>
+      error ? reject(error) : resolve(boundPort),
+    ),
+  );
+  const cjs = createRequire(import.meta.url)("modal") as { Sandbox: typeof Sandbox };
+  try {
+    for (const SandboxClass of [Sandbox, cjs.Sandbox]) {
+      const sdk = new SandboxClass(
+        {
+          profile: { serverUrl: "http://localhost" },
+          logger: { debug: () => {}, warn: () => {} },
+          cpClient: {
+            taskGetCommandRouterAccess: async () => ({
+              url: `https://127.0.0.1:${port}`,
+              jwt: "test-token",
+            }),
+          },
+        } as never,
+        "sb-sdk-test",
+        { taskId: "task-test" },
+      );
+      const before = calls;
+      try {
+        const error = await sdk.exec(["true"]).catch((failure) => failure);
+        expect(error).toMatchObject({
+          name: "CommandStartOutcomeUnknownError",
+          taskId: "task-test",
+          cause: {
+            name: "ClientError",
+            path: `/${service}/TaskExecStart`,
+            code: status.UNAVAILABLE,
+          },
+        });
+        expect(calls - before).toBe(1);
+        expect(isModalCommandStartOutcomeUnknownError(error)).toBe(true);
+      } finally {
+        sdk.detach();
+      }
+    }
+  } finally {
+    sdkServer.forceShutdown();
+  }
+});
+
 test("real no-port DNS target never dispatches Start; the client readiness gate proves it", async () => {
   const host = "task-notarealtask2707.w.modal.host";
   // grpc-js accepts a no-port authority and reports a resolver error without
@@ -192,7 +257,7 @@ test("real no-port DNS target never dispatches Start; the client readiness gate 
   } finally {
     client.close();
   }
-});
+}, 15_000);
 
 test("an accepting TLS server cannot authorize replay by returning DNS-shaped text", async () => {
   const client = wire();
@@ -203,8 +268,11 @@ test("an accepting TLS server cannot authorize replay by returning DNS-shaped te
       .catch((error) => error);
     expect(startCalls - before).toBe(1);
     expect(failure).toMatchObject({
-      code: status.UNAVAILABLE,
-      details: "Name resolution failed for target dns:task-spoof.w.modal.host:443",
+      name: "CommandStartOutcomeUnknownError",
+      cause: {
+        code: status.UNAVAILABLE,
+        details: "Name resolution failed for target dns:task-spoof.w.modal.host:443",
+      },
     });
     expect(failure).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
   } finally {
@@ -244,7 +312,8 @@ test("authenticated Start rejection is typed separately from transport uncertain
       throw new Error("Expected ambiguous failure");
     } catch (error) {
       expect(error).not.toBeInstanceOf(ModalCommandStartRejectedError);
-      expect((error as { code: number }).code).toBe(status.UNAVAILABLE);
+      expect(error).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
+      expect((error as Error).cause).toMatchObject({ code: status.UNAVAILABLE });
     }
   } finally {
     client.close();
@@ -349,7 +418,10 @@ test("an ambiguous start is sent exactly once", async () => {
   try {
     await expect(
       client.start({ ...identity(), commandArgs: ["true"], workdir: "/workspace", env: {} }),
-    ).rejects.toMatchObject({ code: status.UNAVAILABLE });
+    ).rejects.toMatchObject({
+      name: "CommandStartOutcomeUnknownError",
+      cause: { code: status.UNAVAILABLE },
+    });
     expect(startCalls - before).toBe(1);
   } finally {
     client.close();

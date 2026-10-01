@@ -245,6 +245,36 @@ describe("timeline annotations", () => {
     }
   });
 
+  test("offers Add note for a selection made before the selection controls mount", async () => {
+    let captured: DraftTimelineAnnotation | null = null;
+    const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+    const rendered = await renderComponent(<MessageTimeline items={[item]} />);
+    try {
+      const source = rendered.container.querySelector<HTMLElement>(
+        `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+      );
+      expect(source).not.toBeNull();
+      selectText(firstTextNode(source!), 6, 10);
+      source!.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+      expect(addNoteButton()).toBeUndefined();
+
+      // The transcript can be selected while the lazy selection module loads.
+      // Its eventual mount must observe that selection without another gesture.
+      await rendered.rerender(
+        <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+      );
+      await waitFor(() => Boolean(addNoteButton()), "early selection was missed");
+      expect(addNoteButton()?.textContent).toContain("beta");
+      await act(async () => addNoteButton()?.click());
+      expect(captured).toMatchObject({
+        quote: "beta",
+        source: { eventId: SOURCE_EVENT_ID, startOffset: 6, endOffset: 10 },
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("rejects a selection spanning two timeline messages", async () => {
     const first = userItem("00000000-0000-4000-8000-000000000511", "first", 1);
     const second = userItem("00000000-0000-4000-8000-000000000512", "second", 2);
@@ -548,6 +578,8 @@ describe("timeline annotations", () => {
     selectText(firstTextNode(source!), 6, 10);
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
     await flush();
+    expect(addNoteButton()).toBeUndefined();
+    await rendered.rerender(<MessageTimeline items={[{ ...item }]} onAnnotate={() => undefined} />);
     expect(addNoteButton()).toBeUndefined();
     await rendered.unmount();
   });

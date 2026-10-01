@@ -6,7 +6,15 @@ import {
   type DesktopRfbLike,
   type DesktopStreamCapability,
 } from "@opengeni/sdk";
-import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { desktopViewerPeers } from "../lib/workbench-peers";
 import { type DesktopWebSocketFactory, useRelayFrameStream } from "./use-relay-frame-stream";
 
 export type UseDesktopStreamOptions = {
@@ -17,7 +25,7 @@ export type UseDesktopStreamOptions = {
   /** Read-only by default (v1 ruling H). interactive only when cap.mode allows. */
   interactive?: boolean | undefined;
   scaleViewport?: boolean | undefined;
-  /** Custom RFB factory (tests / a WebRTC swap). Defaults to a lazy @novnc/novnc. */
+  /** Custom RFB factory. Otherwise call enableDesktopViewer() on the desktop subpath. */
   rfbFactory?: DesktopRfbFactory | undefined;
   /** Additional WebSocket protocols for an authenticated placement proxy. */
   webSocketProtocols?: string[] | undefined;
@@ -34,29 +42,6 @@ export type UseDesktopStreamResult = {
   /** Synchronous input on the already-open RFB authority. */
   sendKey?: ((keysym: number, code: string, down?: boolean) => boolean) | undefined;
 };
-
-/** Lazy-load @novnc/novnc's RFB as the default factory. Imported inside the
- *  connect effect so SSR / non-desktop bundles never pull the DOM-only lib.
- *  @novnc/novnc ships no types and a single `export default class RFB`. The
- *  specifier is STATIC (`import("@novnc/novnc")`) so Vite can pre-bundle and
- *  resolve it — a runtime-string indirection with `@vite-ignore` (the previous
- *  approach) hands the browser a bare specifier and throws
- *  "Failed to resolve module specifier '@novnc/novnc'". The dynamic form keeps
- *  it out of the SSR / non-desktop critical path while staying resolvable. */
-async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
-  const mod = (await import("@novnc/novnc")) as unknown as {
-    default: new (
-      t: HTMLElement,
-      u: string,
-      o: {
-        credentials?: { password?: string | undefined } | undefined;
-        wsProtocols?: string[] | undefined;
-      },
-    ) => DesktopRfbLike;
-  };
-  const RFB = mod.default;
-  return (target, url, opts) => new RFB(target, url, opts);
-}
 
 /**
  * Drive the noVNC RFB lifecycle from a `DesktopStreamCapability`, using the
@@ -87,6 +72,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
     webSocketProtocols,
     webSocketFactory,
   } = options;
+  const peerRevision = useSyncExternalStore(
+    desktopViewerPeers.subscribe,
+    desktopViewerPeers.revision,
+    desktopViewerPeers.revision,
+  );
+  const factoryRevision = rfbFactory ? 0 : peerRevision;
 
   // The self-hosted PNG-frame path. Always invoked (rules of hooks); dormant
   // unless `transport === "relay-frames"`, in which case it owns the surface.
@@ -188,7 +179,7 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
 
     void (async () => {
       try {
-        const factory = rfbFactoryRef.current ?? (await defaultRfbFactory());
+        const factory = rfbFactoryRef.current ?? (await desktopViewerPeers.load());
         if (disposed) return;
         const socketUrl = desktopSocketUrl({ url });
         setBoth(nextDesktopState(stateRef.current, { type: "negotiated" }));
@@ -232,11 +223,11 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
     };
     // ONLY a real transport change reconnects: a fresh url (rotation), a new
     // credential (RFB password OR bearer subprotocol), the transport flipping,
-    // or an explicit manual reconnect
+    // a newly registered default peer loader, or an explicit manual reconnect
     // (`nonce`). `interactive`/`scaleViewport`/`mode`/`rfbFactory` are read via
     // refs and applied live below — they must never re-open the socket.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, token, transport, webSocketProtocolsKey, nonce]);
+  }, [url, token, transport, webSocketProtocolsKey, nonce, factoryRevision]);
 
   // Apply take-control / return-control to the OPEN connection in place. noVNC
   // honours `viewOnly` live, so flipping it neither blinks the surface nor drops

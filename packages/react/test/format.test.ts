@@ -3,6 +3,7 @@ import {
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
   CREDIT_EXHAUSTION_MESSAGE,
   composerSubmissionErrorMessage,
+  composerSubmissionCanRetry,
   formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
@@ -147,12 +148,35 @@ describe("composerSubmissionErrorMessage", () => {
 
     expect(error.code).toBe("payment_required");
     expect(composerSubmissionErrorMessage(error)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(composerSubmissionCanRetry(error)).toBe(false);
+    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("free");
+    expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("Codex");
   });
 
   test("passes unrelated submission errors through", () => {
     expect(composerSubmissionErrorMessage(new Error("network unavailable"))).toBe(
       "network unavailable",
     );
+    expect(composerSubmissionCanRetry(new Error("network unavailable"))).toBe(true);
+  });
+
+  test("recognizes retained legacy credit errors without their API object", () => {
+    const legacy = new Error("OpenGeni API 402: insufficient OpenGeni credits");
+    expect(composerSubmissionErrorMessage(legacy)).toBe(COMPOSER_PAYMENT_REQUIRED_MESSAGE);
+    expect(composerSubmissionCanRetry(legacy)).toBe(false);
+  });
+
+  test("allowance refusals require an admin change, but transient throttles remain retryable", () => {
+    const allowance = new OpenGeniApiError(402, "", {
+      code: "allowance_exhausted",
+      retryable: false,
+      outcomeUnknown: false,
+      displayMessage: "Member allowance exhausted",
+    });
+    expect(composerSubmissionCanRetry(allowance)).toBe(false);
+    expect(composerSubmissionErrorMessage(allowance)).toContain("workspace admin");
+    expect(composerSubmissionCanRetry(new OpenGeniApiError(429, "rate limited"))).toBe(true);
+    expect(composerSubmissionCanRetry(new OpenGeniApiError(503, "unavailable"))).toBe(true);
   });
 });
 

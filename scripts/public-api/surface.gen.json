@@ -1066,7 +1066,8 @@
       "path": "/v1/workspaces/:workspaceId",
       "sdk": [
         "OpenGeniClient.getWorkspace",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "workspacePath"
       ],
       "request": [],
       "response": [
@@ -2981,6 +2982,18 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/credential-provider/test",
+      "sdk": [
+        "createSessionProxyHandler",
+        "testWorkspaceCredentialProvider"
+      ],
+      "request": [],
+      "response": [
+        "TestWorkspaceCredentialProviderResponse"
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/default-rig",
       "sdk": [
@@ -3678,6 +3691,17 @@
       "request": [],
       "response": [
         "WorkspaceInferenceControlResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/inherited-integrations",
+      "sdk": [
+        "getWorkspaceInheritedIntegrations"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceInheritedIntegrationsResponse"
       ]
     },
     {
@@ -5512,6 +5536,32 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/session-imports",
+      "sdk": [
+        "importArchivedSession"
+      ],
+      "request": [
+        "ImportArchivedSessionRequest"
+      ],
+      "response": [
+        "ImportArchivedSessionResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/session-imports/:importId/events",
+      "sdk": [
+        "appendArchivedSessionEvents"
+      ],
+      "request": [
+        "AppendArchivedSessionEventsRequest"
+      ],
+      "response": [
+        "AppendArchivedSessionEventsResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/session-message-search",
       "sdk": [
@@ -5612,6 +5662,19 @@
       ],
       "response": [
         "SwapActiveSandboxResponse"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/agent",
+      "sdk": [
+        "OpenGeniClient.updateSessionAgent"
+      ],
+      "request": [
+        "UpdateSessionAgentRequest"
+      ],
+      "response": [
+        "Session"
       ]
     },
     {
@@ -7414,6 +7477,17 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/test",
+      "sdk": [
+        "testWorkspaceWebhook"
+      ],
+      "request": [],
+      "response": [
+        "TestWorkspaceWebhookResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/workspace-state",
       "sdk": [
@@ -7448,6 +7522,33 @@
       ],
       "response": [
         "EnsureWorkspaceResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/external/:source/:externalId/session-imports",
+      "sdk": [
+        "OpenGeniClient.connectTransport",
+        "importExternalWorkspaceArchivedSession"
+      ],
+      "request": [
+        "ImportArchivedSessionRequest"
+      ],
+      "response": [
+        "ImportArchivedSessionResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/external/:source/:externalId/session-imports/:importId/events",
+      "sdk": [
+        "appendExternalWorkspaceArchivedSessionEvents"
+      ],
+      "request": [
+        "AppendArchivedSessionEventsRequest"
+      ],
+      "response": [
+        "AppendArchivedSessionEventsResponse"
       ]
     },
     {
@@ -7541,6 +7642,7 @@
       "sandbox.operation.completed",
       "sandbox.operation.failed",
       "sandbox.operation.started",
+      "session.agent.updated",
       "session.command.backgrounded",
       "session.command.finished",
       "session.context.cleared",
@@ -7832,6 +7934,91 @@
         "$.role": "string?"
       }
     },
+    "AgentCapabilities": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\",\"2\"]",
+        "$|0": "const=[\"\\\"all\\\"\"]",
+        "$|1": "const=[\"\\\"none\\\"\"]",
+        "$|2": "object",
+        "$|2.artifacts": "boolean?",
+        "$|2.browser": "boolean?",
+        "$|2.from": "ref(AgentCapabilityStartingPoint)!",
+        "$|2.goals": "boolean?",
+        "$|2.humanInput": "boolean?",
+        "$|2.knowledge": "boolean?",
+        "$|2.media": "boolean?",
+        "$|2.schedules": "boolean?",
+        "$|2.skills": "ref(AgentSkillsCapability)?",
+        "$|2.subagents": "boolean?",
+        "$|2.webSearch": "boolean?",
+        "$|2.workspaceAdmin": "boolean?",
+        "$|2.workspaceConnectors": "boolean?",
+        "$|2.workspaceFiles": "boolean?"
+      }
+    },
+    "AgentCapabilityId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"artifacts\\\"\",\"\\\"browser\\\"\",\"\\\"goals\\\"\",\"\\\"humanInput\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"schedules\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"webSearch\\\"\",\"\\\"workspaceAdmin\\\"\",\"\\\"workspaceConnectors\\\"\",\"\\\"workspaceFiles\\\"\"]"
+      }
+    },
+    "AgentCapabilityStartingPoint": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"all\\\"\",\"\\\"none\\\"\"]"
+      }
+    },
+    "AgentConfigRequest": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(AgentCapabilities)?",
+        "$.identity": "string? null",
+        "$.instructions": "string?",
+        "$.renderer": "ref(AgentRenderer)?"
+      }
+    },
+    "AgentEffectiveTools": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(ResolvedAgentCapabilities)!",
+        "$.mcpServers": "array!",
+        "$.mcpServers[]": "object",
+        "$.mcpServers[].capability": "union!=[\"0\",\"1\",\"2\"]",
+        "$.mcpServers[].capability|0": "ref(AgentCapabilityId)",
+        "$.mcpServers[].capability|1": "const=[\"\\\"runtime\\\"\"]",
+        "$.mcpServers[].capability|2": "const=[\"\\\"product\\\"\"]",
+        "$.mcpServers[].id": "string!",
+        "$.mcpServers[].toolsKnown": "boolean!",
+        "$.mediaToolsKnown": "boolean?",
+        "$.tools": "array!",
+        "$.tools[]": "object",
+        "$.tools[].capability": "union!=[\"0\",\"1\",\"2\",\"3\"]",
+        "$.tools[].capability|0": "ref(AgentCapabilityId)",
+        "$.tools[].capability|1": "const=[\"\\\"runtime\\\"\"]",
+        "$.tools[].capability|2": "const=[\"\\\"sandbox\\\"\"]",
+        "$.tools[].capability|3": "const=[\"\\\"product\\\"\"]",
+        "$.tools[].name": "string!",
+        "$.tools[].source": "enum!=[\"\\\"first_party\\\"\",\"\\\"hosted\\\"\",\"\\\"mcp\\\"\",\"\\\"runtime\\\"\",\"\\\"sandbox\\\"\"]",
+        "$.tools[].visibility": "enum?=[\"\\\"search\\\"\",\"\\\"upfront\\\"\"]",
+        "$.unavailable": "array!",
+        "$.unavailable[]": "ref(AgentCapabilityId)"
+      }
+    },
     "AgentInstructionReceipt": {
       "io": [
         "output"
@@ -7940,6 +8127,35 @@
         "$.ownerKey": "string!",
         "$.settings": "ref(AgentLearningOverrides)!",
         "$.version": "integer!"
+      }
+    },
+    "AgentPromptModuleId": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+      }
+    },
+    "AgentRenderer": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"markdown\\\"\",\"\\\"opengeni\\\"\"]"
+      }
+    },
+    "AgentSkillsCapability": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\",\"2\"]",
+        "$|0": "const=[\"\\\"read\\\"\"]",
+        "$|1": "const=[\"\\\"manage\\\"\"]",
+        "$|2": "const=[\"false\"]"
       }
     },
     "AgentTopologyPageResponse": {
@@ -8092,7 +8308,7 @@
         "$.providerDomain": "string!",
         "$.revisionId": "string!",
         "$.serverId": "string!",
-        "$.source": "ref(IntegrationSource)!",
+        "$.source": "ref(IntegrationSourceProjection)!",
         "$.sourceUrl": "string! null",
         "$.tools": "array!",
         "$.tools[]": "ref(ApiIntegrationToolPreview)",
@@ -8164,6 +8380,30 @@
         "$.workspaceId": "string! null"
       }
     },
+    "AppendArchivedSessionEventsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.batchId": "string!",
+        "$.events": "array!",
+        "$.events[]": "ref(ArchivedSessionImportEvent)",
+        "$.offset": "integer!"
+      }
+    },
+    "AppendArchivedSessionEventsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.importId": "string!",
+        "$.nextOffset": "integer!",
+        "$.replayed": "boolean!",
+        "$.sessionId": "string!"
+      }
+    },
     "ApplySessionGoalRevisionRequest": {
       "io": [
         "input"
@@ -8185,6 +8425,19 @@
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.role": "string?"
+      }
+    },
+    "ArchivedSessionImportEvent": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.payload": "object!",
+        "$.payload{}": "unknown",
+        "$.turnId": "string? null",
+        "$.type": "enum!=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"artifact.created\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"user.message\\\"\"]"
       }
     },
     "ArtifactCatalogItem": {
@@ -8584,6 +8837,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
         "$.firstPartyMcpPermissions": "array?",
@@ -9867,6 +10121,14 @@
       ],
       "shape": {
         "$": "object",
+        "$.agentConfig": "object!",
+        "$.agentConfig.capabilities": "array!",
+        "$.agentConfig.capabilities[]": "object",
+        "$.agentConfig.capabilities[].available": "boolean!",
+        "$.agentConfig.capabilities[].id": "ref(AgentCapabilityId)!",
+        "$.agentConfig.capabilities[].reason": "string?",
+        "$.agentConfig.defaultForNewSessions": "boolean!",
+        "$.agentConfig.enabled": "boolean!",
         "$.allowedModels": "array!",
         "$.allowedModels[]": "string",
         "$.allowedReasoningEfforts": "array!",
@@ -9922,6 +10184,13 @@
         "$.firstPartyMcpTools.allowed[]": "ref(FirstPartyMcpToolName)",
         "$.firstPartyMcpTools.default": "array!",
         "$.firstPartyMcpTools.default[]": "ref(FirstPartyMcpToolName)",
+        "$.legacyModelFallback": "object?",
+        "$.legacyModelFallback.availability": "object!",
+        "$.legacyModelFallback.availability.checkedAt": "string! null",
+        "$.legacyModelFallback.availability.reason": "enum! null=[\"\\\"credential_not_ready\\\"\",\"\\\"missing_credential\\\"\",\"\\\"needs_reauth\\\"\",\"\\\"not_entitled\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider_unhealthy\\\"\",\"\\\"unsupported\\\"\"]",
+        "$.legacyModelFallback.availability.selectable": "const!=[\"false\"]",
+        "$.legacyModelFallback.availability.status": "const!=[\"\\\"unavailable\\\"\"]",
+        "$.legacyModelFallback.id": "string!",
         "$.managedAuthSessionSetMode": "enum!=[\"\\\"broker\\\"\",\"\\\"dual\\\"\",\"\\\"legacy\\\"\"]",
         "$.mcpServers": "array!",
         "$.mcpServers[]": "object",
@@ -9956,6 +10225,7 @@
         "$.aliases": "array?",
         "$.aliases[]": "string",
         "$.api": "enum!=[\"\\\"anthropic-messages\\\"\",\"\\\"chat\\\"\",\"\\\"responses\\\"\"]",
+        "$.availability": "ref(ModelAvailabilityV1)?",
         "$.billing": "ref(ModelBillingAttributionV1)?",
         "$.capabilities": "ref(ModelCapabilitiesV1)?",
         "$.contextWindowTokens": "integer?",
@@ -11551,6 +11821,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.agentAccess": "enum?=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.agentLearning": "ref(AgentLearningOverrides)?",
         "$.bundledSkillIds": "array?",
@@ -11625,6 +11896,7 @@
         "$.activeTurnId": "string! null",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
+        "$.agent": "ref(ResolvedAgentConfig)! null",
         "$.agentAccess": "enum!=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
@@ -11653,6 +11925,7 @@
         "$.effectiveControl": "ref(EffectiveSessionControl)!",
         "$.effectiveMaxNestedAgentDepth": "integer!",
         "$.effectiveToolPolicy": "ref(SessionEffectiveToolPolicy)?",
+        "$.effectiveTools": "ref(AgentEffectiveTools)? null",
         "$.environmentId": "string! null",
         "$.failureDiagnostics": "object? null",
         "$.failureDiagnostics.eventId": "string!",
@@ -11666,6 +11939,7 @@
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.hasSchedules": "boolean?",
         "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
         "$.initialMessage": "string!",
         "$.initialTurnId": "string! null",
         "$.inputWait": "object? null",
@@ -13810,6 +14084,32 @@
         "$|outcome=cancelled.outcome": "const!=[\"\\\"cancelled\\\"\"]"
       }
     },
+    "ImportArchivedSessionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.events": "array?",
+        "$.events[]": "ref(ArchivedSessionImportEvent)",
+        "$.importId": "string!",
+        "$.title": "string!",
+        "$.visibility": "enum?=[\"\\\"user_private\\\"\",\"\\\"workspace_shared\\\"\"]"
+      }
+    },
+    "ImportArchivedSessionResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.created": "boolean!",
+        "$.importId": "string!",
+        "$.nextOffset": "integer!",
+        "$.session": "ref(Session)!"
+      }
+    },
     "ImportLegacyWorkspaceInstructionPolicyDraftRequest": {
       "io": [
         "input"
@@ -13887,6 +14187,30 @@
         "$.labels": "array!",
         "$.labels[]": "string",
         "$.metric": "string!"
+      }
+    },
+    "InlineOpenApiDocumentSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.baseUrl": "string?",
+        "$.document": "string!",
+        "$.kind": "const!=[\"\\\"openapi_document\\\"\"]",
+        "$.sourceKey": "string!"
+      }
+    },
+    "InlineOpenApiDocumentSourceEcho": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.baseUrl": "string?",
+        "$.documentSha256": "string!",
+        "$.kind": "const!=[\"\\\"openapi_document\\\"\"]",
+        "$.sourceKey": "string!"
       }
     },
     "InsightsBillingPath": {
@@ -14122,6 +14446,8 @@
         "$": "object",
         "$.allowedTools": "array?",
         "$.allowedTools[]": "string",
+        "$.autoApprovedTools": "array?",
+        "$.autoApprovedTools[]": "string",
         "$.connectionId": "string?",
         "$.displayName": "string?",
         "$.expectedContentSha256": "string!",
@@ -14129,7 +14455,7 @@
         "$.expectedRevisionId": "string!",
         "$.instanceKey": "string?",
         "$.ownership": "ref(ConnectionOwnership)?",
-        "$.source": "ref(IntegrationSource)!"
+        "$.source": "ref(IntegrationSourceInput)!"
       }
     },
     "InstallLibrarySkillRequest": {
@@ -14303,6 +14629,36 @@
         "$.summary": "string!"
       }
     },
+    "IntegrationEndpointTestResult": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.credentials": "object! null",
+        "$.credentials.authNeeded": "array!",
+        "$.credentials.authNeeded[]": "object",
+        "$.credentials.authNeeded[].message": "string! null",
+        "$.credentials.authNeeded[].providerDomain": "string! null",
+        "$.credentials.authNeeded[].reason": "string!",
+        "$.credentials.environment": "array!",
+        "$.credentials.environment[]": "string",
+        "$.credentials.expiresAt": "string! null",
+        "$.credentials.files": "array!",
+        "$.credentials.files[]": "string",
+        "$.credentials.git": "array!",
+        "$.credentials.git[]": "string",
+        "$.credentials.mcp": "array!",
+        "$.credentials.mcp[]": "string",
+        "$.credentials.status": "enum!=[\"\\\"auth_needed\\\"\",\"\\\"not_applicable\\\"\",\"\\\"ok\\\"\"]",
+        "$.durationMs": "integer!",
+        "$.error": "string! null",
+        "$.ok": "boolean!",
+        "$.request": "string!",
+        "$.responseBody": "string! null",
+        "$.status": "integer! null"
+      }
+    },
     "IntegrationFacetBindingSummary": {
       "io": [
         "output"
@@ -14417,7 +14773,6 @@
     },
     "IntegrationSource": {
       "io": [
-        "input",
         "output"
       ],
       "shape": {
@@ -14437,6 +14792,54 @@
         "$|kind=auto.baseUrl": "string?",
         "$|kind=auto.kind": "const!=[\"\\\"auto\\\"\"]",
         "$|kind=auto.url": "string!"
+      }
+    },
+    "IntegrationSourceInput": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"kind=auto\",\"kind=definition\",\"kind=graphql\",\"kind=openapi\",\"kind=openapi_document\"]",
+        "$|kind=definition": "object",
+        "$|kind=definition.definitionId": "string!",
+        "$|kind=definition.kind": "const!=[\"\\\"definition\\\"\"]",
+        "$|kind=openapi": "object",
+        "$|kind=openapi.baseUrl": "string?",
+        "$|kind=openapi.kind": "const!=[\"\\\"openapi\\\"\"]",
+        "$|kind=openapi.url": "string!",
+        "$|kind=graphql": "object",
+        "$|kind=graphql.endpoint": "string!",
+        "$|kind=graphql.kind": "const!=[\"\\\"graphql\\\"\"]",
+        "$|kind=graphql.name": "string?",
+        "$|kind=auto": "object",
+        "$|kind=auto.baseUrl": "string?",
+        "$|kind=auto.kind": "const!=[\"\\\"auto\\\"\"]",
+        "$|kind=auto.url": "string!",
+        "$|kind=openapi_document": "ref(InlineOpenApiDocumentSource)"
+      }
+    },
+    "IntegrationSourceProjection": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"kind=auto\",\"kind=definition\",\"kind=graphql\",\"kind=openapi\",\"kind=openapi_document\"]",
+        "$|kind=definition": "object",
+        "$|kind=definition.definitionId": "string!",
+        "$|kind=definition.kind": "const!=[\"\\\"definition\\\"\"]",
+        "$|kind=openapi": "object",
+        "$|kind=openapi.baseUrl": "string?",
+        "$|kind=openapi.kind": "const!=[\"\\\"openapi\\\"\"]",
+        "$|kind=openapi.url": "string!",
+        "$|kind=graphql": "object",
+        "$|kind=graphql.endpoint": "string!",
+        "$|kind=graphql.kind": "const!=[\"\\\"graphql\\\"\"]",
+        "$|kind=graphql.name": "string?",
+        "$|kind=auto": "object",
+        "$|kind=auto.baseUrl": "string?",
+        "$|kind=auto.kind": "const!=[\"\\\"auto\\\"\"]",
+        "$|kind=auto.url": "string!",
+        "$|kind=openapi_document": "ref(InlineOpenApiDocumentSourceEcho)"
       }
     },
     "IntegrationWorkspaceFilter": {
@@ -15949,6 +16352,8 @@
         "$.content": "string!",
         "$.estimatedTokens": "integer!",
         "$.id": "ref(ModelContextInstructionLayerId)!",
+        "$.modules": "array?",
+        "$.modules[]": "ref(ModelContextInstructionModule)",
         "$.title": "string!",
         "$.utf8Bytes": "integer!"
       }
@@ -15958,7 +16363,17 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
+        "$": "enum=[\"\\\"builtin_skills\\\"\",\"\\\"code_search\\\"\",\"\\\"codemode\\\"\",\"\\\"genesis_title\\\"\",\"\\\"git_bindings\\\"\",\"\\\"identity\\\"\",\"\\\"operational_contract\\\"\",\"\\\"persona_and_core\\\"\",\"\\\"sandbox_filesystem\\\"\",\"\\\"sandbox_preamble\\\"\",\"\\\"sdk_capability_instructions\\\"\",\"\\\"sent_system_instructions\\\"\",\"\\\"session_instructions\\\"\",\"\\\"skill_catalog\\\"\",\"\\\"workspace_governance\\\"\",\"\\\"workspace_memory\\\"\"]"
+      }
+    },
+    "ModelContextInstructionModule": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.chars": "integer!",
+        "$.id": "ref(AgentPromptModuleId)!"
       }
     },
     "ModelContextSkill": {
@@ -16279,6 +16694,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.agentLearning": "ref(AgentLearningOverrides)?",
         "$.excludedMcpServerIds": "array?",
         "$.excludedMcpServerIds[]": "string",
@@ -17655,7 +18071,7 @@
         "$": "object",
         "$.connectionId": "string?",
         "$.ownership": "ref(ConnectionOwnership)?",
-        "$.source": "ref(IntegrationSource)!"
+        "$.source": "ref(IntegrationSourceInput)!"
       }
     },
     "PreviewOrganizationUserSetupRequest": {
@@ -18115,6 +18531,51 @@
         "$": "object",
         "$.variableSets": "array!",
         "$.variableSets[]": "ref(VariableSetAttachmentMetadata)"
+      }
+    },
+    "ResolvedAgentCapabilities": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.artifacts": "boolean!",
+        "$.browser": "boolean!",
+        "$.goals": "boolean!",
+        "$.humanInput": "boolean!",
+        "$.knowledge": "boolean!",
+        "$.media": "boolean!",
+        "$.schedules": "boolean!",
+        "$.skills": "ref(AgentSkillsCapability)!",
+        "$.subagents": "boolean!",
+        "$.webSearch": "boolean!",
+        "$.workspaceAdmin": "boolean!",
+        "$.workspaceConnectors": "boolean!",
+        "$.workspaceFiles": "boolean!"
+      }
+    },
+    "ResolvedAgentConfig": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(ResolvedAgentCapabilities)!",
+        "$.from": "ref(AgentCapabilityStartingPoint)!",
+        "$.identity": "string! null",
+        "$.renderer": "ref(AgentRenderer)!",
+        "$.source": "ref(ResolvedAgentConfigSource)!",
+        "$.unavailable": "array!",
+        "$.unavailable[]": "ref(AgentCapabilityId)",
+        "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ResolvedAgentConfigSource": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"deployment_default\\\"\",\"\\\"inherited\\\"\",\"\\\"legacy_conversion\\\"\",\"\\\"request\\\"\",\"\\\"workspace_default\\\"\"]"
       }
     },
     "ResourceRef": {
@@ -18804,6 +19265,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "unknown?",
         "$.connectionAccounts": "array?",
@@ -18837,6 +19299,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.agent": "ref(AgentConfigRequest)?",
         "$.approvalTimeoutSeconds": "integer?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
@@ -19050,6 +19513,7 @@
         "$.activeTurnId": "string! null",
         "$.activelyWorking": "boolean!",
         "$.admissionBlock": "ref(SessionAdmissionBlock)? null",
+        "$.agent": "ref(ResolvedAgentConfig)! null",
         "$.agentAccess": "enum!=[\"\\\"session\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
         "$.archiveVersion": "integer!",
         "$.archived": "boolean!",
@@ -19078,6 +19542,7 @@
         "$.effectiveControl": "ref(EffectiveSessionControl)!",
         "$.effectiveMaxNestedAgentDepth": "integer!",
         "$.effectiveToolPolicy": "ref(SessionEffectiveToolPolicy)?",
+        "$.effectiveTools": "ref(AgentEffectiveTools)? null",
         "$.environmentId": "string! null",
         "$.failureDiagnostics": "object? null",
         "$.failureDiagnostics.eventId": "string!",
@@ -19091,6 +19556,7 @@
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.hasSchedules": "boolean?",
         "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
         "$.initialMessage": "string!",
         "$.inputWait": "object? null",
         "$.inputWait.deadlineAt": "string!",
@@ -19404,7 +19870,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
+        "$": "enum=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.model.request\\\"\",\"\\\"agent.model.usage\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"agent.updated\\\"\",\"\\\"artifact.created\\\"\",\"\\\"codex.account.selection.changed\\\"\",\"\\\"codex.account.switched\\\"\",\"\\\"codex.capacity.resumed\\\"\",\"\\\"codex.capacity.superseded\\\"\",\"\\\"codex.capacity.waiting\\\"\",\"\\\"codex.credential.selected\\\"\",\"\\\"codex.fleet.decision\\\"\",\"\\\"credential.auth_needed\\\"\",\"\\\"fs.changed\\\"\",\"\\\"git.changed\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.continuation\\\"\",\"\\\"goal.held\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.rewrite.proposed\\\"\",\"\\\"goal.rewrite.rejected\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"instruction.confirmation.recovered\\\"\",\"\\\"knowledge.confirmation.recovered\\\"\",\"\\\"knowledge.source.failed\\\"\",\"\\\"knowledge.source.prepared\\\"\",\"\\\"machine.link.lost\\\"\",\"\\\"machine.link.restored\\\"\",\"\\\"machine.op.failed\\\"\",\"\\\"machine.op.recovered\\\"\",\"\\\"machine.runner.restarted\\\"\",\"\\\"memory.corrected\\\"\",\"\\\"memory.saved\\\"\",\"\\\"recording.available\\\"\",\"\\\"recording.failed\\\"\",\"\\\"recording.started\\\"\",\"\\\"rig.setup.completed\\\"\",\"\\\"rig.setup.failed\\\"\",\"\\\"rig.setup.skipped\\\"\",\"\\\"rig.setup.started\\\"\",\"\\\"sandbox.box.created\\\"\",\"\\\"sandbox.box.lost\\\"\",\"\\\"sandbox.box.snapshot\\\"\",\"\\\"sandbox.box.terminated\\\"\",\"\\\"sandbox.command.output.delta\\\"\",\"\\\"sandbox.env.drift\\\"\",\"\\\"sandbox.operation.completed\\\"\",\"\\\"sandbox.operation.failed\\\"\",\"\\\"sandbox.operation.started\\\"\",\"\\\"session.agent.updated\\\"\",\"\\\"session.command.backgrounded\\\"\",\"\\\"session.command.finished\\\"\",\"\\\"session.context.cleared\\\"\",\"\\\"session.context.compacted\\\"\",\"\\\"session.context.compaction.requested\\\"\",\"\\\"session.context.compaction.skipped\\\"\",\"\\\"session.context.compaction.started\\\"\",\"\\\"session.control.paused\\\"\",\"\\\"session.control.resumed\\\"\",\"\\\"session.control.steer_requested\\\"\",\"\\\"session.created\\\"\",\"\\\"session.event.envelope_omitted\\\"\",\"\\\"session.humanInput.requested\\\"\",\"\\\"session.mcp.approval_policy.updated\\\"\",\"\\\"session.model_settings.updated\\\"\",\"\\\"session.personal_resources.attached\\\"\",\"\\\"session.queue.changed\\\"\",\"\\\"session.queue.history\\\"\",\"\\\"session.queue.prompt.cancelled\\\"\",\"\\\"session.realtime.ended\\\"\",\"\\\"session.realtime.started\\\"\",\"\\\"session.requiresAction\\\"\",\"\\\"session.route.reconciled\\\"\",\"\\\"session.runtime.configured\\\"\",\"\\\"session.status.changed\\\"\",\"\\\"session.title_set\\\"\",\"\\\"session.tool_policy.updated\\\"\",\"\\\"session.variable_sets.updated\\\"\",\"\\\"session.visibility.changed\\\"\",\"\\\"session.wait.finished\\\"\",\"\\\"session.wait.started\\\"\",\"\\\"stream.closed\\\"\",\"\\\"stream.opened\\\"\",\"\\\"stream.revoked\\\"\",\"\\\"stream.url.rotated\\\"\",\"\\\"system.update.cancelled\\\"\",\"\\\"system.update.delivered\\\"\",\"\\\"system.update.pending\\\"\",\"\\\"system.update.settled\\\"\",\"\\\"system.update.superseded\\\"\",\"\\\"terminal.pty.exited\\\"\",\"\\\"terminal.pty.output.delta\\\"\",\"\\\"terminal.pty.started\\\"\",\"\\\"tool.auth_needed\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.capacity_waiting\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.event.rejected_late\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.queued\\\"\",\"\\\"turn.recovery.requested\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.startup.phase.completed\\\"\",\"\\\"turn.startup.phase.failed\\\"\",\"\\\"turn.startup.phase.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"usage.exhausted\\\"\",\"\\\"usage.period_reset\\\"\",\"\\\"usage.threshold_reached\\\"\",\"\\\"user.approvalDecision\\\"\",\"\\\"user.humanInputResponse\\\"\",\"\\\"user.message\\\"\",\"\\\"user.pause\\\"\",\"\\\"workspace.inference.paused\\\"\",\"\\\"workspace.inference.resumed\\\"\",\"\\\"workspace.revision.captured\\\"\",\"\\\"workspace.revision.degraded\\\"\"]"
       }
     },
     "SessionGoal": {
@@ -19569,6 +20035,17 @@
         "$.turnId": "string!",
         "$.updatedAt": "string!",
         "$.workspaceId": "string!"
+      }
+    },
+    "SessionImportedArchive": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.importId": "string!",
+        "$.importedAt": "string!",
+        "$.readOnly": "const!=[\"true\"]"
       }
     },
     "SessionLineageResponse": {
@@ -20873,6 +21350,26 @@
         "$.wallTimeSeconds": "number!"
       }
     },
+    "TestWorkspaceCredentialProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.lane": "enum!=[\"\\\"organization\\\"\",\"\\\"workspace\\\"\"]",
+        "$.result": "ref(IntegrationEndpointTestResult)!",
+        "$.url": "string!"
+      }
+    },
+    "TestWorkspaceWebhookResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.result": "ref(IntegrationEndpointTestResult)!"
+      }
+    },
     "TimelineAnnotation": {
       "io": [
         "output"
@@ -21758,6 +22255,16 @@
         "$.variableSetId": "string? null"
       }
     },
+    "UpdateSessionAgentRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.agent": "ref(AgentConfigRequest)!",
+        "$.expectedVersion": "integer!"
+      }
+    },
     "UpdateSessionArchiveRequest": {
       "io": [
         "input"
@@ -22000,6 +22507,7 @@
         "$.maxNestedAgentDepth": "integer? null",
         "$.memoryEnabled": "boolean?",
         "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)?",
+        "$.sessionAgentDefaults": "ref(WorkspaceAgentDefaults)? null",
         "$.sessionDefaults": "ref(WorkspaceSessionDefaults)?",
         "$.sessionToolDefaults": "ref(WorkspaceSessionToolDefaultsPatch)?",
         "$.slackOrchestrationNotices": "ref(WorkspaceSlackOrchestrationNoticeSettings)?",
@@ -22610,6 +23118,17 @@
         "$.updatedAt": "string!"
       }
     },
+    "WorkspaceAgentDefaults": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.capabilities": "ref(AgentCapabilities)?",
+        "$.identity": "string? null",
+        "$.renderer": "ref(AgentRenderer)?"
+      }
+    },
     "WorkspaceAllowance": {
       "io": [
         "output"
@@ -22932,6 +23451,25 @@
         "$.revision": "integer!",
         "$.state": "ref(ScheduledTaskStatus)!",
         "$.wakeCount": "integer!"
+      }
+    },
+    "WorkspaceInheritedIntegrationsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.credentialProvider": "object! null",
+        "$.credentialProvider.timeoutMs": "integer!",
+        "$.credentialProvider.updatedAt": "string!",
+        "$.credentialProvider.url": "string!",
+        "$.webhooks": "array!",
+        "$.webhooks[]": "object",
+        "$.webhooks[].description": "string! null",
+        "$.webhooks[].eventTypes": "array!",
+        "$.webhooks[].eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.webhooks[].id": "string!",
+        "$.webhooks[].url": "string!"
       }
     },
     "WorkspaceInsightsResponse": {
@@ -23967,6 +24505,12 @@
       "ActivateWorkspaceLearningPolicyRevisionRequest": "type",
       "AddDocumentRequest": "type",
       "AddWorkspaceMemberRequest": "type",
+      "AgentCapabilities": "type",
+      "AgentCapabilityId": "type",
+      "AgentCapabilityToggles": "type",
+      "AgentConfigErrorCode": "type",
+      "AgentConfigRequest": "type",
+      "AgentEffectiveTools": "type",
       "AgentInstructionReceipt": "type",
       "AgentInstructionReviewItem": "type",
       "AgentInstructionReviewListResponse": "type",
@@ -23980,6 +24524,9 @@
       "AgentLearningOverrides": "type",
       "AgentLearningSettingsRecord": "type",
       "AgentMessageCompletedPayload": "type",
+      "AgentPromptModuleId": "type",
+      "AgentRenderer": "type",
+      "AgentSkillsCapability": "type",
       "AgentTextDeltaPayload": "type",
       "AgentToolCallCreatedPayload": "type",
       "AgentToolCallOutputPayload": "type",
@@ -23994,6 +24541,7 @@
       "ApiIntegrationToolPreview": "type",
       "ApiIntegrationUninstallPreview": "type",
       "ApiKey": "type",
+      "ApiKeyConnectionCredential": "type",
       "applyUrlRotation": "value",
       "ApplyWorkspaceSkillRevisionRequest": "type",
       "ApproveSlackUserLinkAccessRequest": "type",
@@ -24122,6 +24670,7 @@
       "CapabilityUnavailableReason": "type",
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
+      "Chats": "type",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
@@ -24129,6 +24678,7 @@
       "ClaudeUsageWindow": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
+      "ClientAgentConfig": "type",
       "ClientAuthConfig": "type",
       "ClientConfig": "type",
       "ClientModel": "type",
@@ -24240,6 +24790,7 @@
       "ComputerUseCapability": "type",
       "ConfigureOrganizationRecoveryPolicyRequest": "type",
       "ConfirmExternalIdentityLinkRequest": "type",
+      "ConnectionCredentialPlacement": "type",
       "ConnectionKind": "type",
       "ConnectionMetadata": "type",
       "ConnectionOwnership": "type",
@@ -24368,6 +24919,8 @@
       "EffectiveControlBlocker": "type",
       "EffectiveControlResumeOption": "type",
       "EffectiveSessionControl": "type",
+      "EMPTY_FINAL_REPLY_NOTICE": "value",
+      "EmptyFinalReplyCompletion": "type",
       "EnableCapabilityRequest": "type",
       "encodeCodexRealtimeV3DelegationContextAppend": "value",
       "encodeCodexRealtimeV3SessionContextAppend": "value",
@@ -24508,6 +25061,7 @@
       "HumanInputResponse": "type",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InitiatingHuman": "type",
+      "InlineOpenApiDocumentSource": "type",
       "InsightsBillingPath": "type",
       "InsightsDepthBucket": "type",
       "InsightsFloorSession": "type",
@@ -24533,6 +25087,7 @@
       "InstallSkillRequest": "type",
       "IntegrationClientMetadata": "type",
       "IntegrationDefinitionSummary": "type",
+      "IntegrationEndpointTestResult": "type",
       "IntegrationFacetBindingSummary": "type",
       "IntegrationFacetDefinitionSummary": "type",
       "IntegrationFacetKind": "type",
@@ -24541,6 +25096,8 @@
       "IntegrationFacetStatus": "type",
       "IntegrationInstanceFacetsResponse": "type",
       "IntegrationSource": "type",
+      "IntegrationSourceInput": "type",
+      "IntegrationSourceProjection": "type",
       "IntegrationWorkspaceFilter": "type",
       "INTERACTION_PROTOCOL_VERSION": "value",
       "InteractionAssociation": "type",
@@ -24687,6 +25244,7 @@
       "ModelContextContributionSource": "type",
       "ModelContextInstructionLayer": "type",
       "ModelContextInstructionLayerId": "type",
+      "ModelContextInstructionModule": "type",
       "ModelContextSkill": "type",
       "ModelContextSkillKind": "type",
       "ModelContextSnapshot": "type",
@@ -24729,7 +25287,9 @@
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
+      "OPENGENI_TEST_REQUEST_NIL_ID": "value",
       "OPENGENI_WEBHOOK_HEADERS": "value",
+      "OPENGENI_WEBHOOK_TEST_EVENT_TYPE": "value",
       "OpenGeniAllowanceExhaustedError": "value",
       "OpenGeniApiContractMismatchError": "value",
       "OpenGeniApiError": "value",
@@ -24748,6 +25308,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSetupError": "value",
       "OpenGeniSignatureError": "value",
       "OpenGeniSiteBridgeCancelMessage": "type",
       "OpenGeniSiteBridgeConnectMessage": "type",
@@ -24928,6 +25489,8 @@
       "ReplacePersonalGitHubRepositorySelectionsRequest": "type",
       "ReportAuthRunRequest": "type",
       "RepositoryResourceRef": "type",
+      "ResolvedAgentCapabilities": "type",
+      "ResolvedAgentConfig": "type",
       "ResolveInteractionInterventionRequest": "type",
       "ResolveVariableSetAttachmentsRequest": "type",
       "ResolveVariableSetAttachmentsResponse": "type",
@@ -25013,6 +25576,7 @@
       "Session": "type",
       "SESSION_EVENT_TYPES": "value",
       "SESSION_SCOPE_HEADER": "value",
+      "SessionApprovalRequest": "type",
       "SessionBackgroundCommand": "type",
       "SessionBackgroundCommandActivity": "type",
       "SessionBackgroundCommandListResponse": "type",
@@ -25182,6 +25746,8 @@
       "TerminalPtyOutputDeltaPayload": "type",
       "TerminalPtyStartedPayload": "type",
       "terminalSocketUrl": "value",
+      "TestWorkspaceCredentialProviderResponse": "type",
+      "TestWorkspaceWebhookResponse": "type",
       "TimelineAnnotation": "type",
       "TimelineAnnotationSource": "type",
       "TimelineAnnotationSourceEventType": "type",
@@ -25224,6 +25790,7 @@
       "ttydInputFrame": "value",
       "ttydResizeFrame": "value",
       "TtydServerCommand": "value",
+      "turnCompletedWithEmptyFinalReply": "value",
       "TurnInitiator": "type",
       "TurnInitiatorContext": "type",
       "UninstallApiIntegrationRequest": "type",
@@ -25252,6 +25819,7 @@
       "UpdatePrReviewRepositoryBindingRequest": "type",
       "UpdateRigRequest": "type",
       "UpdateScheduledTaskRequest": "type",
+      "UpdateSessionAgentRequest": "type",
       "UpdateSessionArchiveRequest": "type",
       "UpdateSessionAttentionRequest": "type",
       "UpdateSessionChannelRequest": "type",
@@ -25318,6 +25886,7 @@
       "Workspace": "type",
       "WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS": "value",
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
+      "WorkspaceAgentDefaults": "type",
       "WorkspaceAllowance": "type",
       "WorkspaceAllowanceConfig": "type",
       "WorkspaceAllowanceState": "type",
@@ -25350,6 +25919,7 @@
       "WorkspaceGatewayCustomModel": "type",
       "WorkspaceGatewayCustomModelsResponse": "type",
       "WorkspaceInferenceControlResponse": "type",
+      "WorkspaceInheritedIntegrationsResponse": "type",
       "WorkspaceInsightsResponse": "type",
       "WorkspaceInsightsSnapshot": "type",
       "WorkspaceInstructionPolicyActivationEvent": "type",
@@ -25420,6 +25990,7 @@
       "WorkspaceStateGetOptions": "type",
       "WorkspaceStateGovernanceDriftStatus": "type",
       "WorkspaceStateResponse": "type",
+      "WorkspaceTestWebhookEvent": "type",
       "WorkspaceTranscriptionPolicy": "type",
       "WorkspaceTranscriptionTarget": "type",
       "WorkspaceUsageResponse": "type",
@@ -25512,6 +26083,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSetupError": "value",
       "OpenGeniStreamError": "value",
       "OpenGeniToolCallError": "value",
       "OpenGeniToolCallOptions": "type",
@@ -25561,6 +26133,7 @@
       "ChatResolution": "type",
       "ChatResolve": "type",
       "ChatRespondInput": "type",
+      "Chats": "type",
       "ChatSendOptions": "type",
       "chatSessionId": "value",
       "ChatSessionListOptions": "type",
@@ -25588,6 +26161,7 @@
       "OpenGeni": "value",
       "OpenGeniChatError": "value",
       "OpenGeniOptions": "type",
+      "OpenGeniSetupError": "value",
       "parseChatChunkStream": "value",
       "respondInputFromBody": "value",
       "responsesBlocks": "value",
@@ -25638,6 +26212,7 @@
       "OpenGeniSecureContextRequiredError": "value",
       "OpenGeniSecureContextRequiredReason": "type",
       "OpenGeniSessionListCursorError": "value",
+      "OpenGeniSetupError": "value",
       "OpenGeniStreamError": "value",
       "OpenGeniToolCallError": "value",
       "OpenGeniToolCallOptions": "type",
@@ -26223,6 +26798,18 @@
       "WorkspaceRealtimeModelCatalogItem": "type",
       "WorkspaceRealtimeModelCatalogResponse": "type"
     },
+    "@opengeni/sdk/session-history-import": {
+      "appendArchivedSessionEvents": "value",
+      "AppendArchivedSessionEventsRequest": "type",
+      "AppendArchivedSessionEventsResponse": "type",
+      "appendExternalWorkspaceArchivedSessionEvents": "value",
+      "ArchivedSessionImportEvent": "type",
+      "importArchivedSession": "value",
+      "ImportArchivedSessionRequest": "type",
+      "ImportArchivedSessionResponse": "type",
+      "importExternalWorkspaceArchivedSession": "value",
+      "SessionImportedArchive": "type"
+    },
     "@opengeni/sdk/session-proxy": {
       "artifactViewerCapability": "value",
       "createSessionProxyHandler": "value",
@@ -26280,6 +26867,47 @@
       "SITE_BROWSER_RUNTIME": "value",
       "SITE_CLIENT_SCRIPT_PATH": "value"
     },
+    "@opengeni/sdk/tenant-workspaces": {
+      "createWorkspaceIdResolver": "value",
+      "WorkspaceIdOptions": "type",
+      "WorkspaceIdResolverOptions": "type",
+      "WorkspaceIdTarget": "type"
+    },
+    "@opengeni/sdk/usage-allowances": {
+      "AllowanceExhaustedRefusal": "type",
+      "clearWorkspaceAllowance": "value",
+      "ClearWorkspaceAllowanceRequest": "type",
+      "ClearWorkspaceAllowanceResponse": "type",
+      "getAllUsage": "value",
+      "getMyUsage": "value",
+      "GetMyUsageRequest": "type",
+      "getUsage": "value",
+      "GetUsageRequest": "type",
+      "getWorkspaceAllowance": "value",
+      "getWorkspaceAllowanceState": "value",
+      "grantWorkspaceCredits": "value",
+      "GrantWorkspaceCreditsRequest": "type",
+      "MemberAllowance": "type",
+      "MemberAllowanceDefault": "type",
+      "MemberAllowanceRule": "type",
+      "MemberAllowanceUsage": "type",
+      "setMemberAllowance": "value",
+      "SetMemberAllowanceRequest": "type",
+      "setWorkspaceAllowance": "value",
+      "SetWorkspaceAllowanceRequest": "type",
+      "UsageAllowanceMemberTarget": "type",
+      "UsageAllowancePeriod": "type",
+      "usageAllowanceQuery": "value",
+      "UsageAllowanceRequestClient": "type",
+      "UsageAllowanceStatus": "type",
+      "UsageAllowanceWindow": "type",
+      "WorkspaceAllowance": "type",
+      "WorkspaceAllowanceConfig": "type",
+      "WorkspaceAllowanceState": "type",
+      "WorkspaceAllowanceUsage": "type",
+      "WorkspaceCreditGrant": "type",
+      "WorkspaceUsageResponse": "type"
+    },
     "@opengeni/sdk/workspace-integrations": {
       "createOrganizationWebhook": "value",
       "CreateOrganizationWebhookRequest": "type",
@@ -26297,8 +26925,10 @@
       "GetOrganizationCredentialProviderResponse": "type",
       "getOrganizationWebhook": "value",
       "GetWorkspaceCredentialProviderResponse": "type",
+      "getWorkspaceInheritedIntegrations": "value",
       "getWorkspaceWebhook": "value",
       "InitiatingHuman": "type",
+      "IntegrationEndpointTestResult": "type",
       "IntegrationWorkspaceFilter": "type",
       "listOrganizationWebhookDeliveries": "value",
       "ListOrganizationWebhookDeliveriesResponse": "type",
@@ -26309,7 +26939,9 @@
       "OPENGENI_DELIVERY_ID_HEADER": "value",
       "OPENGENI_EVENT_ID_HEADER": "value",
       "OPENGENI_SIGNATURE_HEADER": "value",
+      "OPENGENI_TEST_REQUEST_NIL_ID": "value",
       "OPENGENI_WEBHOOK_HEADERS": "value",
+      "OPENGENI_WEBHOOK_TEST_EVENT_TYPE": "value",
       "OpenGeniSignatureError": "value",
       "OrganizationCredentialProvider": "type",
       "OrganizationWebhook": "type",
@@ -26330,6 +26962,10 @@
       "RotateWorkspaceWebhookSecretResponse": "type",
       "SessionWorkspaceWebhookEvent": "type",
       "signOpenGeniPayload": "value",
+      "testWorkspaceCredentialProvider": "value",
+      "TestWorkspaceCredentialProviderResponse": "type",
+      "testWorkspaceWebhook": "value",
+      "TestWorkspaceWebhookResponse": "type",
       "updateOrganizationWebhook": "value",
       "UpdateOrganizationWebhookRequest": "type",
       "UpdateWorkspaceWebhookRequest": "type",
@@ -26338,7 +26974,9 @@
       "verifyWebhookEvent": "value",
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
       "WorkspaceCredentialProvider": "type",
+      "WorkspaceInheritedIntegrationsResponse": "type",
       "WorkspaceSandboxImages": "type",
+      "WorkspaceTestWebhookEvent": "type",
       "WorkspaceUsageWebhookEvent": "type",
       "WorkspaceWebhook": "type",
       "WorkspaceWebhookDelivery": "type",
@@ -26353,6 +26991,8 @@
       "ActivityRailProps": "type",
       "advancedSourceSummary": "value",
       "AgentMessageItem": "type",
+      "AllowanceLabels": "type",
+      "AllowanceScope": "type",
       "answersFromDrafts": "value",
       "AnthropicMark": "value",
       "appendFinalTranscript": "value",
@@ -26388,6 +27028,9 @@
       "ClientOverride": "type",
       "cn": "value",
       "CodeEditor": "value",
+      "CodeEditorLanguage": "type",
+      "CodeEditorLanguages": "type",
+      "CodeEditorPeers": "type",
       "CodeEditorProps": "type",
       "CodexAccountsClientLike": "type",
       "coerceReasoningEffortForModel": "value",
@@ -26651,7 +27294,11 @@
       "QueueSurfaceProps": "type",
       "rawTypeOf": "value",
       "ReasoningItem": "type",
+      "registerCodeEditor": "value",
+      "registerDesktopViewer": "value",
       "registerPierreDiffs": "value",
+      "registerSandboxTerminal": "value",
+      "RenderAllowanceExhausted": "type",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
       "retainedImageId": "value",
@@ -26668,6 +27315,7 @@
       "SandboxGitFileDiff": "type",
       "SandboxItem": "type",
       "SandboxTerminal": "value",
+      "SandboxTerminalPeers": "type",
       "SandboxTerminalProps": "type",
       "SandboxWorkspace": "value",
       "SandboxWorkspaceProps": "type",
@@ -26935,6 +27583,7 @@
       "WORKBENCH_TAB_TERMINAL": "value",
       "WorkbenchChanges": "value",
       "WorkbenchChangesProps": "type",
+      "WorkbenchPeerLoader": "type",
       "WorkerItem": "type",
       "WorkspaceDock": "value",
       "WorkspaceDockProps": "type",
@@ -27320,10 +27969,28 @@
       "useConnect": "value"
     },
     "@opengeni/react/connect.css": {},
+    "@opengeni/react/desktop": {
+      "DesktopViewer": "value",
+      "DesktopViewerProps": "type",
+      "enableDesktopViewer": "value",
+      "registerDesktopViewer": "value",
+      "useDesktopStream": "value",
+      "UseDesktopStreamOptions": "type",
+      "UseDesktopStreamResult": "type"
+    },
     "@opengeni/react/diffs": {
       "enablePierreDiffs": "value",
       "PierreDiffsLoader": "type",
       "registerPierreDiffs": "value"
+    },
+    "@opengeni/react/editor": {
+      "CodeEditor": "value",
+      "CodeEditorLanguage": "type",
+      "CodeEditorLanguages": "type",
+      "CodeEditorProps": "type",
+      "enableCodeEditor": "value",
+      "languageForPath": "value",
+      "registerCodeEditor": "value"
     },
     "@opengeni/react/interaction": {
       "AttachedBrowsersClient": "type",
@@ -27616,6 +28283,8 @@
       "WorkerItem": "type"
     },
     "@opengeni/react/session-ui": {
+      "AllowanceLabels": "type",
+      "AllowanceScope": "type",
       "ApprovalSurface": "value",
       "ApprovalSurfaceMessages": "type",
       "ApprovalSurfaceProps": "type",
@@ -27624,8 +28293,12 @@
       "BUILT_IN_TURN_SUMMARY_FACET_IDS": "value",
       "BuiltInTurnSummaryFacetId": "type",
       "chainLinkResolvers": "value",
+      "createDefaultToolRegistry": "value",
       "createOlderHistoryLoadReceipt": "value",
+      "createToolRegistry": "value",
+      "CreateToolRegistryOptions": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
+      "defaultToolRegistry": "value",
       "GenieLoadingOptions": "type",
       "HumanInputAnswerDraft": "type",
       "HumanInputForm": "value",
@@ -27646,10 +28319,13 @@
       "OpenGeniLinkResolution": "type",
       "OpenGeniLinkResolver": "type",
       "OpenGeniLinkTarget": "type",
+      "OpenGeniProvider": "value",
+      "OpenGeniProviderProps": "type",
       "OpenGeniViewerTarget": "type",
       "parseOpenGeniLink": "value",
       "QueueSurface": "value",
       "QueueSurfaceProps": "type",
+      "RenderAllowanceExhausted": "type",
       "SessionChrome": "value",
       "SessionChromeAgentsSignal": "type",
       "sessionChromeGoalPillExplanation": "value",
@@ -27670,6 +28346,10 @@
       "StartupTimings": "value",
       "TimelineRow": "value",
       "TimelineSearchTarget": "type",
+      "ToolRegistry": "type",
+      "ToolRegistryEntry": "type",
+      "ToolRenderer": "type",
+      "ToolRendererProps": "type",
       "TurnSummaryContext": "type",
       "TurnSummaryFacet": "type",
       "TurnSummaryFacetConfiguration": "type",
@@ -27694,8 +28374,51 @@
     "@opengeni/react/styles.css": {
       "default": "value"
     },
+    "@opengeni/react/terminal": {
+      "enableSandboxTerminal": "value",
+      "registerSandboxTerminal": "value",
+      "SandboxTerminal": "value",
+      "SandboxTerminalProps": "type",
+      "XtermTheme": "type"
+    },
     "@opengeni/react/tokens.css": {
       "default": "value"
+    },
+    "@opengeni/react/usage": {
+      "allowanceLabels": "value",
+      "AllowanceLabels": "type",
+      "allowanceResetSentence": "value",
+      "AllowanceScope": "type",
+      "DEFAULT_ALLOWANCE_LABELS": "value",
+      "DEFAULT_USAGE_LIMIT_NOTICE_LABELS": "value",
+      "DEFAULT_USAGE_MEMBER_LIST_LABELS": "value",
+      "DEFAULT_USAGE_METER_LABELS": "value",
+      "describeMemberLimit": "value",
+      "formatAllowanceDate": "value",
+      "RenderAllowanceExhausted": "type",
+      "summarizeUsage": "value",
+      "UsageAmountFormat": "type",
+      "UsageClientLike": "type",
+      "UsageLimitNotice": "value",
+      "UsageLimitNoticeLabels": "type",
+      "UsageLimitNoticeProps": "type",
+      "UsageLimitNoticeView": "value",
+      "UsageMemberIdentity": "type",
+      "UsageMemberList": "value",
+      "UsageMemberListLabels": "type",
+      "UsageMemberListProps": "type",
+      "UsageMeter": "value",
+      "UsageMeterBaseProps": "type",
+      "UsageMeterLabels": "type",
+      "UsageMeterProps": "type",
+      "UsageMeterView": "value",
+      "UsageMeterViewProps": "type",
+      "usagePercentLabel": "value",
+      "UsageReading": "type",
+      "UsageSummary": "type",
+      "useUsage": "value",
+      "UseUsageOptions": "type",
+      "UseUsageResult": "type"
     }
   },
   "sdkMembers": {
@@ -27944,7 +28667,8 @@
       "organizationId",
       "sessions",
       "source",
-      "workspaceId"
+      "workspaceId",
+      "workspaceIdFor"
     ],
     "OpenGeniAllowanceExhaustedError": [
       "resetsAt",
@@ -28519,6 +29243,7 @@
       "updateRig",
       "updateScheduledTask",
       "updateSession",
+      "updateSessionAgent",
       "updateSessionArchive",
       "updateSessionAttention",
       "updateSessionChannel",

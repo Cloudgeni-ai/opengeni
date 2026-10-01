@@ -737,10 +737,9 @@ impl<P: Platform + 'static> Supervisor<P> {
         } = match connect {
             Ok(connection) => connection,
             Err(e @ SupervisorError::Authentication(_)) => {
-                // A CLEAR auth denial (not a panic): log it loudly so the operator
-                // knows a re-enroll may be needed, then treat it as a (slow) retry —
-                // a re-enroll can rotate the bearer in place and the next attempt
-                // re-presents it.
+                // Renewal runs independently and the file watcher adopts fresh
+                // credentials. Explicit reconnect is recovery only when the
+                // existing grant/key cannot authorize automatic renewal.
                 let reconnect_command = rejected_bearer_reconnect_command(
                     link.api_url.as_deref(),
                     &link.creds.workspace_id,
@@ -748,7 +747,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 error!(
                     connection_id = %link.connection_id,
                     error = %e,
-                    "control plane rejected the enrollment bearer; run `{reconnect_command}` to replace the rejected credential (the agent will keep retrying in the meantime)"
+                    "control plane rejected the enrollment bearer; automatic renewal and reconnect will retry. If renewal cannot authorize the existing grant, reconnect explicitly with `{reconnect_command}`"
                 );
                 return ConnectionOutcome::Disconnected(e.to_string());
             }
@@ -1247,6 +1246,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let agent_id = link.creds.agent_id.clone();
         let engine = self.engine.clone();
         let update_drain = self.update_drain.clone();
+        let browser_control = link.platform.browser_control_backend();
         let shutdown = self.shutdown.clone();
         // Process-global ownership is intentional. Credential rotation or one
         // transport generation ending must not cancel a verified binary swap.
@@ -1282,7 +1282,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // accepted work remains, preserving its independent lifetime.
             let pending = update_drain.snapshot();
             let admission = engine.admission_snapshot();
-            let busy_code = match pending {
+            let mut busy_code = match pending {
                 None => Some("update_state_unavailable"),
                 Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
                 Some(pending)
@@ -1296,6 +1296,15 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
                 Some(_) => None,
             };
+            if busy_code.is_none() {
+                if let Some(backend) = browser_control {
+                    busy_code = match backend.is_idle().await {
+                        Ok(true) => None,
+                        Ok(false) => Some("update_busy_work"),
+                        Err(_) => Some("update_state_unavailable"),
+                    };
+                }
+            }
             if let Some(code) = busy_code {
                 // Reopen admission before publishing the terminal receipt so a
                 // caller observing failure can immediately continue ordinary work.
@@ -2109,6 +2118,122 @@ fn running_binary_sha256() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // real update router, progress receipts, and admission recovery
+    async fn update_defers_live_or_unreadable_interaction_controllers() {
+        use opengeni_agent_platform::{
+            BrowserControlBackend, BrowserControlEndpoint, NativePlatform, PlatformError,
+            PlatformResult,
+        };
+        use std::sync::atomic::AtomicU8;
+
+        struct InteractionProof(AtomicU8);
+        #[async_trait::async_trait]
+        impl BrowserControlBackend for InteractionProof {
+            async fn is_idle(&self) -> PlatformResult<bool> {
+                match self.0.load(Ordering::Acquire) {
+                    0 => Ok(false),
+                    _ => Err(PlatformError::os("fixture controller unavailable")),
+                }
+            }
+            async fn ensure(
+                &self,
+                _: &v1::BrowserControlEnsureRequest,
+            ) -> PlatformResult<BrowserControlEndpoint> {
+                Err(PlatformError::os("unused fixture ensure"))
+            }
+            async fn resolve(&self, _: &str, _: &str) -> PlatformResult<BrowserControlEndpoint> {
+                Err(PlatformError::os("unused fixture resolve"))
+            }
+        }
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP interaction update regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let client =
+            it::connect_with_retry(&format!("nats://127.0.0.1:{port}"), Duration::from_secs(5))
+                .await;
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(InteractionProof(AtomicU8::new(0)));
+        let definition = SupervisorLink::new(
+            "interaction-update",
+            Arc::new(
+                NativePlatform::with_root(directory.path()).with_browser_control(backend.clone()),
+            ),
+            it::test_credentials(&format!("nats://127.0.0.1:{port}")),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = client.subscribe("audit.interaction.in").await.unwrap();
+        let mut replies = client.subscribe("audit.interaction.out").await.unwrap();
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+        client.flush().await.unwrap();
+        for (state, code) in [(0, "update_busy_work"), (1, "update_state_unavailable")] {
+            backend.0.store(state, Ordering::Release);
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let request = ControlRequest {
+                request_id: "interaction-update".into(),
+                epoch: 0,
+                resource_policy: None,
+                op: Some(v1::control_request::Op::AgentUpdateApply(
+                    v1::AgentUpdateApplyRequest {
+                        operation_id: operation_id.clone(),
+                        target_version: "0.1.0".into(),
+                        channel: "stable".into(),
+                        expected_current_version: "0.0.0".into(),
+                        expected_current_sha256: String::new(),
+                        release_base_url: "http://127.0.0.1:1".into(),
+                    },
+                )),
+            };
+            assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 0);
+            assert_eq!(supervisor.update_drain.snapshot().unwrap().uploads, 0);
+            let before = supervisor.engine.admission_snapshot();
+            client
+                .publish_with_reply(
+                    "audit.interaction.in",
+                    "audit.interaction.out",
+                    request.encode_to_vec().into(),
+                )
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut tasks = JoinSet::new();
+            supervisor
+                .route_message(&link, &client, message, &mut tasks)
+                .await;
+            let reply = tokio::time::timeout(Duration::from_secs(5), replies.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(ControlResponse::decode(reply.payload.as_ref())
+                .unwrap()
+                .error
+                .is_none());
+            assert!(
+                it::wait_for_event(&mut events, Duration::from_secs(5), |event| {
+                    matches!(&event.event, Some(Event::AgentUpdateProgress(progress))
+                    if progress.operation_id == operation_id
+                        && progress.stage == v1::AgentUpdateStage::Failed as i32
+                        && progress.error_code == code && progress.retryable)
+                })
+                .await
+            );
+            assert_eq!(supervisor.engine.admission_snapshot(), before);
+            assert!(!supervisor.shutdown.is_requested());
+            let continuation = supervisor
+                .update_drain
+                .reserve_work(None)
+                .expect("deferred update reopens admission");
+            drop(continuation);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn update_drain_reserves_unpolled_routed_work() {

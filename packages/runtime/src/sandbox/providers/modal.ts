@@ -15,10 +15,14 @@ import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
 import { ModalCommandControl } from "./modal-command-control";
-import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartNotDispatchedError,
+} from "./modal-command-router-wire";
 import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
+import { hasModalCommandStartBoundary } from "./modal-command-start-errors";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -263,11 +267,16 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
     try {
       const record = current.value as Record<string, unknown>;
       if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
+      if (hasModalCommandStartBoundary(current.value, "outcome-unknown")) return false;
+      if (current.value instanceof ModalCommandStartNotDispatchedError) return false;
       if (hasContradictoryModalHttpStatus(record)) return false;
 
       // This instance is created only by the client's readiness gate before
       // Start dispatch; an RPC's own status or details never enters this path.
-      if (current.value instanceof ModalCommandStartPreDispatchUnavailableError) {
+      if (
+        current.value instanceof ModalCommandStartPreDispatchUnavailableError ||
+        hasModalCommandStartBoundary(current.value, "pre-dispatch-unavailable")
+      ) {
         matchingLeaves += 1;
         continue;
       }
@@ -302,6 +311,38 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
   }
 
   return matchingLeaves > 0;
+}
+
+/** Any typed ambiguous Start in a bounded wrapper graph vetoes generic provider
+ * retries. Setup/probe calls have no retained command handle to replay safely. */
+export function isModalCommandStartOutcomeUnknownError(error: unknown): boolean {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
+  const seen = new WeakSet<object>();
+  for (
+    let inspected = 0;
+    pending.length && inspected < MODAL_TASK_EXEC_START_ERROR_MAX_NODES;
+    inspected++
+  ) {
+    const { depth, value } = pending.shift()!;
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    if (hasModalCommandStartBoundary(value, "outcome-unknown")) return true;
+    if (depth >= MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH) continue;
+    try {
+      const record = value as Record<string, unknown>;
+      for (const key of ["cause", "error"] as const)
+        if (record[key] !== undefined) pending.push({ depth: depth + 1, value: record[key] });
+      if (Array.isArray(record.errors))
+        for (const nested of record.errors.slice(
+          0,
+          MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS,
+        ))
+          pending.push({ depth: depth + 1, value: nested });
+    } catch {
+      // Unknown wrappers never establish dispatch proof.
+    }
+  }
+  return false;
 }
 
 /**

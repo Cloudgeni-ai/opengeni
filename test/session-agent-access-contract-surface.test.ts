@@ -152,6 +152,25 @@ function samplePathname(path: string): string {
 }
 
 describe("agent-access scope stays enforced at every session entry point", () => {
+  test("import-ID appends resolve the importer before using the canonical target-session seam", async () => {
+    const routes = await read("apps/api/src/routes/session-history-imports.ts");
+    expect(routes).toContain("await appendArchivedSessionEventsForRequest(");
+    const core = await read("packages/core/src/application/archived-session-imports.ts");
+    expect(core).toContain("grantHasAgentAttemptAuthority(grant)");
+    const append = core.slice(
+      core.indexOf("export async function appendArchivedSessionEventsForRequest("),
+    );
+    expect(append).toContain("getArchivedSessionImportId(");
+    expect(append).toContain('operation: "session.append"');
+    expect(append).toContain('surface: "core"');
+    const lookup = append.indexOf("getArchivedSessionImportId(");
+    const authorization = append.indexOf("await requireSessionAuthorization(");
+    const mutation = append.indexOf("return appendArchivedSessionEvents(");
+    expect(lookup).toBeGreaterThan(0);
+    expect(authorization).toBeGreaterThan(lookup);
+    expect(mutation).toBeGreaterThan(authorization);
+  });
+
   test("message search is an authorized list projection even when narrowed to one session", async () => {
     const source = await read(SESSION_ROUTES);
     const start = source.indexOf('app.get("/v1/workspaces/:workspaceId/session-message-search"');
@@ -332,7 +351,7 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     }
   });
 
-  test("browser and computer inventories are filtered through the seam for agent attempts", async () => {
+  test("browser and computer inventories use source-session access for every caller", async () => {
     for (const file of [
       "apps/api/src/routes/browser-sessions.ts",
       "apps/api/src/routes/computer-sessions.ts",
@@ -344,7 +363,8 @@ describe("agent-access scope stays enforced at every session entry point", () =>
       );
     }
     const filter = await read("apps/api/src/interaction-agent-access.ts");
-    expect(filter).toContain("grantHasAgentAttemptAuthority(grant)");
+    expect(filter).not.toContain("grantHasAgentAttemptAuthority");
+    expect(filter).toContain('entry.relationship === "created"');
     expect(filter).toContain('operation: "session.read"');
   });
 });

@@ -2,15 +2,17 @@ import { type RefObject, useEffect, useState } from "react";
 
 /** Where a floating timeline pill sits along its edge of the conversation. */
 export type TimelinePillPlacement = "start" | "center" | "end";
+export type TimelinePillPosition = { placement: TimelinePillPlacement; offsetY: number };
 
 const RECHECK_MS = 1000;
 
 /**
- * Floating pills (Jump to latest, Latest question) sit over the scrolling
- * conversation. Slide one sideways, never up or down, when its spot would cover
+ * Floating pills (Jump to latest, Back to your message) sit over the scrolling
+ * conversation. Prefer sliding one sideways when its spot would cover
  * a control: a link, a button, or the label and chevron of a full-width row
  * such as the active turn's "Working" header. Plain prose may sit under a pill;
- * controls may not. Only the pill moves — the scroller's size, padding, and
+ * controls may not. The top contextual pill can also move below a toolbar when
+ * no horizontal slot fits. Only the pill moves — the scroller's size, padding, and
  * scroll position never change — so timeline anchoring stays untouched.
  */
 export function useTimelinePillPlacement({
@@ -18,41 +20,57 @@ export function useTimelinePillPlacement({
   scrollerRef,
   active,
   preference,
+  allowDownwardFallback = false,
 }: {
   pillRef: RefObject<HTMLElement | null>;
   scrollerRef: RefObject<HTMLElement | null>;
   active: boolean;
   /** Placements in order of preference; the first is the resting position. */
   preference: readonly TimelinePillPlacement[];
-}): TimelinePillPlacement {
-  const [placement, setPlacement] = useState<TimelinePillPlacement>(preference[0]!);
+  allowDownwardFallback?: boolean;
+}): TimelinePillPosition {
+  const [position, setPosition] = useState<TimelinePillPosition>({
+    placement: preference[0]!,
+    offsetY: 0,
+  });
   const key = preference.join(",");
 
   useEffect(() => {
     if (!active) {
-      setPlacement(preference[0]!);
+      setPosition({ placement: preference[0]!, offsetY: 0 });
       return;
     }
     const scroller = scrollerRef.current;
     if (!scroller) return;
     let frame = 0;
-    let current: TimelinePillPlacement = preference[0]!;
-    let choose: typeof import("./timeline-pill-geometry").choosePlacement | null = null;
+    let current: TimelinePillPosition = { placement: preference[0]!, offsetY: 0 };
+    let geometry: typeof import("./timeline-pill-geometry") | null = null;
     let disposed = false;
-    void import("./timeline-pill-geometry").then((geometry) => {
+    void import("./timeline-pill-geometry").then((loaded) => {
       if (disposed) return;
-      choose = geometry.choosePlacement;
+      geometry = loaded;
       schedule();
     });
     const evaluate = () => {
       frame = 0;
       const pill = pillRef.current;
       const frameElement = pill?.offsetParent;
-      if (!choose || !pill || !(frameElement instanceof HTMLElement)) return;
-      const next = choose(pill, frameElement, scroller, preference, current);
-      if (next !== current) {
+      if (!geometry || !pill || !(frameElement instanceof HTMLElement)) return;
+      const next = allowDownwardFallback
+        ? geometry.chooseQuestionPosition(pill, frameElement, scroller, preference, current)
+        : {
+            placement: geometry.choosePlacement(
+              pill,
+              frameElement,
+              scroller,
+              preference,
+              current.placement,
+            ),
+            offsetY: 0,
+          };
+      if (next.placement !== current.placement || next.offsetY !== current.offsetY) {
         current = next;
-        setPlacement(next);
+        setPosition(next);
       }
     };
     const schedule = () => {
@@ -75,7 +93,7 @@ export function useTimelinePillPlacement({
     };
     // `key` stands in for the preference array's contents.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, key, pillRef, scrollerRef]);
+  }, [active, key, pillRef, scrollerRef, allowDownwardFallback]);
 
-  return active ? placement : preference[0]!;
+  return active ? position : { placement: preference[0]!, offsetY: 0 };
 }

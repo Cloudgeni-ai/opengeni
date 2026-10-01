@@ -19,6 +19,86 @@ import { CdpConnection } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
+const chromiumE2e =
+  process.env.OPENGENI_BROWSERD_E2E === "1" || process.env.OPENGENI_BROWSERD_HEADED_E2E === "1"
+    ? test
+    : test.skip;
+
+e2e(
+  "replaces existing editable text and honors select-all on the browser platform",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-replace-text-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `replace_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      let observation = await driver.start(
+        dataUrl(`<!doctype html>
+        <input aria-label="Input" value="first">
+        <textarea aria-label="Textarea">first</textarea>
+        <div contenteditable role="textbox" aria-label="Rich text">first</div>
+        <output></output>
+        <script>
+          document.addEventListener('input', event => {
+            document.querySelector('output').textContent = 'Received: ' +
+              (event.target.value ?? event.target.textContent);
+          });
+        </script>`),
+      );
+      for (const name of ["Input", "Textarea", "Rich text"]) {
+        const locator = { kind: "role", role: "textbox", name } as const;
+        for (const value of ["replacement", "", "Norwegian æøå 🦊"]) {
+          observation = await driver.dispatch(
+            command(observation, {
+              type: "fill",
+              locator,
+              value,
+            }),
+          );
+          expect(names(observation)).toContain(`Received: ${value}`.trimEnd());
+        }
+        observation = await driver.dispatch(
+          command(observation, {
+            type: "press",
+            locator,
+            key: "Mod+A",
+          }),
+        );
+        observation = await driver.dispatch(
+          command(observation, {
+            type: "type",
+            locator,
+            text: "selected replacement",
+          }),
+        );
+        expect(names(observation)).toContain("Received: selected replacement");
+      }
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
 
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
@@ -893,6 +973,87 @@ e2e(
   60_000,
 );
 
+e2e(
+  "a popup closing during a click stays uncertain without losing its parent or replaying input",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-popup-close-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        return new Response(
+          new URL(request.url).pathname === "/popup"
+            ? '<title>Popup</title><button onclick="window.close()">Close popup</button>'
+            : '<title>Parent</title><input aria-label="Draft" value="unsaved draft"><button onclick="window.open(&quot;/popup&quot;)">Open popup</button>',
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `close_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const browserSessionId = randomUUID(),
+      controllerGeneration = randomUUID();
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const parent = await driver.start(String(server.url));
+      await controller.run(
+        command(parent, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Open popup", exact: true },
+        }),
+      );
+      let popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+      for (let n = 0; !popup && n < 40; n++) {
+        await Bun.sleep(25);
+        popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+      }
+      expect(popup).toBeDefined();
+      const observed = await driver.observe(popup!.id);
+      const close = command(observed, {
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Close popup", exact: true },
+      });
+      const receipt = await controller.run(close);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      expect(await controller.run(close)).toEqual(receipt);
+      expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
+      const retained = await driver.observe(parent.target.id);
+      expect(retained.target.targetGeneration).toBe(parent.target.targetGeneration);
+      expect(retained.target.documentGeneration).toBe(parent.target.documentGeneration);
+      expect(
+        await driver.readDom(parent.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "input" },
+          expectedTargetGeneration: parent.target.targetGeneration,
+          expectedDocumentGeneration: parent.target.documentGeneration!,
+          expectedFrameId: parent.frameId!,
+        }),
+      ).toMatchObject({ kind: "element", value: "unsaved draft" });
+    } finally {
+      server.stop(true);
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  40_000,
+);
+
 function command(
   observation: BrowserObservation,
   action: BrowserActionCommand["action"],
@@ -1134,6 +1295,18 @@ headedE2e(
           { value: "blocked", label: "Blocked", selected: false, disabled: true },
         ],
       });
+      // Keyboard users can open the same popup and explicitly read its focused
+      // options even on controllers whose input observation mode is click-only.
+      await driver.dispatch({
+        ...command(view, { type: "press", key: "Escape" }),
+        observationMode: "none",
+      });
+      await driver.dispatch({
+        ...command(view, { type: "press", key: "Alt+ArrowDown" }),
+        observationMode: "none",
+      });
+      view = await driver.observe(view.target.id);
+      expect(focused(view)?.native?.data).toMatchObject({ kind: "native-select", multiple: false });
       const ref = view.focusedRef!;
       await expect(
         driver.dispatch(
@@ -1211,3 +1384,122 @@ headedE2e(
   },
   60000,
 );
+
+for (const mode of [
+  "scroll",
+  "small semantic target",
+  "small coordinate target",
+  "removed target",
+] as const) {
+  chromiumE2e(
+    `completes native drag lifecycle with ${mode}`,
+    async () => {
+      const directory = await mkdtemp("/tmp/ogb-drag-");
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: `drag_${randomUUID().slice(0, 8)}`,
+        sessionName: "s",
+        socketDirectory: join(directory, "s"),
+        profileDirectory: join(directory, "profile"),
+        downloadDirectory: join(directory, "downloads"),
+        screenshotDirectory: join(directory, "screenshots"),
+        headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        binary: await resolvePinnedAgentBrowserBinary(
+          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+            : {},
+        ),
+      });
+      const driver = new AgentBrowserDriver({
+        browserSessionId: randomUUID(),
+        controllerGeneration: randomUUID(),
+        runner,
+        foregroundManagedTabs: true,
+      });
+      let cdp: CdpConnection | null = null;
+      try {
+        const initial = await driver.start(
+          dataUrl(`<!doctype html>
+          <style>
+            body{margin:0} button{position:absolute;left:100px;width:100px;padding:0;border:0}
+            #source{top:100px;height:40px} #destination{top:${mode === "scroll" ? 1400 : 600}px;height:10px}
+          </style>
+          <button id="source" draggable="true">Source</button>
+          <button id="destination">Destination</button>
+          <script>
+            globalThis.events=[];globalThis.moved=false;
+            source.addEventListener('dragstart',e=>{
+              events.push('start');e.dataTransfer.setData('text/plain','source');
+              ${mode === "removed target" ? "destination.remove();" : ""}
+            });
+            source.addEventListener('dragend',()=>events.push('end'));
+            destination.addEventListener('dragover',e=>e.preventDefault());
+            destination.addEventListener('drop',e=>{
+              e.preventDefault();events.push('drop');globalThis.moved=true;
+            });
+          </script>`),
+        );
+        const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+        cdp = await CdpConnection.connect(endpoint.cdpUrl);
+        const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: initial.target.id,
+          flatten: true,
+        });
+        const options = { sessionId: attached.sessionId };
+        await cdp.send(
+          "Emulation.setDeviceMetricsOverride",
+          {
+            width: 800,
+            height: 720,
+            deviceScaleFactor: 1,
+            mobile: false,
+          },
+          options,
+        );
+        const page = await driver.observe(initial.target.id);
+        const action = command(
+          page,
+          mode === "small coordinate target"
+            ? {
+                type: "pointer",
+                action: "drag",
+                x: 150,
+                y: 120,
+                endX: 150,
+                endY: 605,
+              }
+            : {
+                type: "drag",
+                from: { kind: "role", role: "button", name: "Source", exact: true },
+                to: { kind: "role", role: "button", name: "Destination", exact: true },
+              },
+        );
+        if (mode === "removed target") {
+          await expect(driver.dispatch(action)).rejects.toThrow();
+        } else {
+          await driver.dispatch(action);
+        }
+        const result = await cdp.send<{ result: { value: unknown } }>(
+          "Runtime.evaluate",
+          {
+            expression: "({events,moved,scrolled:scrollY>0})",
+            returnByValue: true,
+          },
+          options,
+        );
+        expect(result.result.value).toEqual({
+          events: mode === "removed target" ? ["start", "end"] : ["start", "drop", "end"],
+          moved: mode !== "removed target",
+          scrolled: mode === "scroll",
+        });
+      } finally {
+        cdp?.close();
+        await driver.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+}

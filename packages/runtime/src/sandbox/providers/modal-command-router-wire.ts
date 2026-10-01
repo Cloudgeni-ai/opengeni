@@ -1,5 +1,6 @@
 import { Client, Metadata, credentials, status, type ServiceError } from "@grpc/grpc-js";
 import protobuf from "protobufjs";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
 
 // Narrow wire projection of Modal 0.9.0's task_command_router.proto. The public
@@ -61,6 +62,24 @@ export class ModalCommandStartPreDispatchUnavailableError extends Error {
     this.name = "ModalCommandStartPreDispatchUnavailableError";
   }
 
+  /** The supplied operation must contain only read-only preparation, never
+   * Start itself. Its transport failure therefore proves non-dispatch. */
+  static async beforeDispatch<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    try {
+      return await operation();
+    } catch (error) {
+      signal?.throwIfAborted();
+      const code = (error as Partial<ServiceError> | null)?.code;
+      if (
+        error instanceof Error &&
+        (code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED)
+      )
+        throw new ModalCommandStartPreDispatchUnavailableError(error);
+      throw error;
+    }
+  }
+
   static async ensureReady(client: Client, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     await new Promise<void>((resolve, reject) => {
@@ -78,6 +97,17 @@ export class ModalCommandStartPreDispatchUnavailableError extends Error {
       client.waitForReady(Date.now() + 5_000, finish);
       if (signal?.aborted) abort();
     });
+  }
+}
+
+/** Local cancellation/closure before Start dispatch. This permits exact
+ * never-started reservation settlement, NOT another launch or turn recovery. */
+export class ModalCommandStartNotDispatchedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Modal command Start was never dispatched", {
+      cause,
+    });
+    this.name = "ModalCommandStartNotDispatchedError";
   }
 }
 
@@ -170,12 +200,18 @@ export class ModalCommandRouterWire {
   }
 
   async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
-    if (this.closed) throw new Error("Modal command router is closed");
     try {
+      if (this.closed) throw new Error("Modal command router is closed");
       await ModalCommandStartPreDispatchUnavailableError.ensureReady(this.client, signal);
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Modal command router is closed");
     } catch (error) {
-      if (this.closed) throw new Error("Modal command router is closed", { cause: error });
-      throw error;
+      if (this.closed)
+        throw new ModalCommandStartNotDispatchedError(
+          new Error("Modal command router is closed", { cause: error }),
+        );
+      if (error instanceof ModalCommandStartPreDispatchUnavailableError) throw error;
+      throw new ModalCommandStartNotDispatchedError(error);
     }
     try {
       await this.unary(
@@ -202,7 +238,7 @@ export class ModalCommandRouterWire {
         ].includes(code)
       )
         throw new ModalCommandStartRejectedError(code, error);
-      throw error;
+      throw new ModalCommandStartOutcomeUnknownError(request.taskId, request.execId, error);
     }
   }
 

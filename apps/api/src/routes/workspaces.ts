@@ -24,6 +24,7 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  AgentConfigError,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
@@ -41,6 +42,7 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
+import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   createWorkspace,
@@ -132,6 +134,7 @@ import {
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   sandboxImageAllowlist,
+  agentConfigDeploymentPolicy,
   type Settings,
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
@@ -470,6 +473,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid workspace settings patch",
       });
     }
+    if (
+      parsed.data.sessionAgentDefaults !== undefined &&
+      !agentConfigDeploymentPolicy(deps.settings).admissionEnabled
+    ) {
+      throw new AgentConfigError(
+        "agent_config_not_enabled",
+        "agent configuration is not enabled on this deployment",
+      );
+    }
     const requestedImage = parsed.data.defaultSandboxImage;
     if (requestedImage && !sandboxImageAllowlist(deps.settings).includes(requestedImage)) {
       throw new HTTPException(422, {
@@ -508,11 +520,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const catalogSettings = deps.resolveCatalogSettings();
     const [
       connectionModelRestrictions,
       resolvedCatalog,
       policy,
       codexSubscriptionActive,
+      codexModelAvailability,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
       workspaceGatewayCustomModels,
@@ -525,9 +539,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
-      deps.resolveCatalogSettings(),
+      catalogSettings,
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      catalogSettings.then(({ settings }) =>
+        loadWorkspaceCodexModelAvailability(deps.db, settings, workspaceId),
+      ),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
       listWorkspaceGatewayCustomModels(deps.db, {
@@ -596,6 +613,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionModelRestrictions,
       settings: resolvedCatalog.settings,
       policy,
+      observations: codexModelAvailability,
       codexSubscriptionActive,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,

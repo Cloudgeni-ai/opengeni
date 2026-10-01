@@ -1,5 +1,11 @@
 # @opengeni/xai-subscription
 
+## 0.1.5
+
+### Patch Changes
+
+- 6a97313: Publish grok-4.7 as the SuperGrok subscription model so it matches the model the published `@opengeni/config` already expects.
+
 ## 0.1.4
 
 ### Patch Changes

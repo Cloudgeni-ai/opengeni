@@ -245,8 +245,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/crypto-random-uuid.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/developer-settings.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/organization-workspace-administration.browser.e2e.ts": [
     "opengeni-web",
+    "@opengeni/testing",
+  ],
+  "test/e2e/usage-allowances.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
     "@opengeni/testing",
   ],
   "test/e2e/custom-api-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -273,6 +280,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/composer-pane.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
+  "test/e2e/composer-focus-handoff.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/composer-keyboard.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",

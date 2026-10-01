@@ -1,4 +1,5 @@
 import { measureMcpPhase } from "@opengeni/observability";
+import { createMcpTransportLogger } from "./mcp-transport-logger";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -101,6 +102,9 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  resolveAgentToolFamilies,
+  resolveAgentMediaToolSurface,
+  type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
   type AttemptToolResult as AttemptToolResultValue,
@@ -268,6 +272,33 @@ import { z } from "zod";
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
+  composeModularAgentInstructions,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptResources,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
+export {
+  AGENT_PROMPT_MODULES,
+  DEFAULT_AGENT_IDENTITY,
+  INSTRUCTION_PRECEDENCE,
+  SESSION_INSTRUCTIONS_PREAMBLE,
+  composeModularAgentInstructions,
+  composeOperationalContract,
+  identityFromLegacyTemplate,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptContext,
+  type AgentPromptResources,
+  type ComposeModularAgentInstructionsInput,
+  type ModularInstructionLayer,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
+import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionSummaryOutputTokens,
@@ -280,7 +311,9 @@ import {
 import {
   createSandboxClient,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
+  renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setOpenSandboxApplyDiff,
@@ -461,6 +494,7 @@ export {
   MultiProviderModelProvider,
   OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  ResponsesStreamingTerminalError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
@@ -1998,6 +2032,8 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Durable router use survives capability and tool-policy changes. */
+  toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2215,6 +2251,24 @@ export type BuildAgentOptions = {
    * metadata no longer enters the prompt-cache-critical system instructions.
    */
   persistentSessionSettings?: PersistentSessionSettings;
+  /**
+   * The session's frozen agent configuration. Absent or null keeps the legacy
+   * instructions byte-for-byte and the historical tool/provider request surface;
+   * a configuration selects the modular composer (identity, base behavior,
+   * runtime mechanics, capability modules) and gates tool families.
+   */
+  agentConfig?: ResolvedAgentConfig | null;
+  /**
+   * Modular composer only: the workspace identity tier (explicit workspace
+   * default identity, else the legacy `agentInstructions` persona). Unlike
+   * `instructionsTemplate`, workspace governance never drops it.
+   */
+  workspaceAgentIdentity?: string;
+  /**
+   * Modular composer only: resource facts for module selection. Derived from
+   * the build resources and options when omitted.
+   */
+  agentPromptResources?: AgentPromptResources;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -2251,62 +2305,10 @@ export type BuildAgentOptions = {
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
-/**
- * Operator-facing metadata for the workspace environment attached to a run.
- * Surfaced verbatim in the agent instructions: the description is where
- * operators document how the exported credentials are meant to be used
- * (e.g. which variable holds a deploy key and how to clone with it), so an
- * agent must not have to rediscover that by enumerating `env` and guessing.
- * Only metadata belongs here — never variable values.
- */
-export type WorkspaceEnvironmentContext = {
-  name: string;
-  description?: string | null;
-  variableNames?: string[];
-};
-
 /** @deprecated Persistent display metadata is no longer model-visible. */
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
-
-/**
- * The rig a session rides (M3): its name + the active version pinned onto the
- * session. Surfaced verbatim in the non-bypassable CORE instructions so the
- * agent understands its sandbox is a disposable fork of a shared, versioned
- * machine definition and how to promote a durable change. Absent for rig-less
- * sessions (the block never renders).
- */
-export type RigInstructionsContext = {
-  name: string;
-  version: number;
-};
-
-export function rigInstructions(rig: RigInstructionsContext): string[] {
-  return [
-    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
-    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
-    "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
-    "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
-  ];
-}
-
-export function workspaceEnvironmentInstructions(
-  environment: WorkspaceEnvironmentContext,
-): string[] {
-  const lines = [
-    `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
-  ];
-  const variableNames = (environment.variableNames ?? []).filter((name) => name.length > 0);
-  if (variableNames.length > 0) {
-    lines.push(`Exported environment variables: ${[...variableNames].sort().join(", ")}.`);
-  }
-  const description = environment.description?.trim();
-  if (description) {
-    lines.push(`Environment notes from the operator: ${description}`);
-  }
-  return lines;
-}
 
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
@@ -2325,6 +2327,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
+    "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
     'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
     "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
@@ -2405,10 +2408,84 @@ function gitBindingDiscoveryApplies(
   return [...bindingsByProvider.values()].some((ids) => ids.size > 1);
 }
 
+/**
+ * Resource facts for modular module selection. Every input is a session- or
+ * turn-level fact, so the composed prefix changes only when they change.
+ */
+export function agentPromptResourcesFor(
+  settings: Settings,
+  resources: readonly ResourceRef[],
+  options: Pick<
+    BuildAgentOptions,
+    | "activeSandboxBackend"
+    | "fileResourceDownloads"
+    | "gitCredentialBindings"
+    | "gitTokenSeed"
+    | "gitTokenSeeds"
+    | "workspaceEnvironment"
+    | "rig"
+  >,
+): AgentPromptResources {
+  const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const connectedMachine = backend === "selfhosted";
+  const managedSandbox = backend !== "none" && !connectedMachine;
+  const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
+  return {
+    managedSandbox,
+    connectedMachine,
+    // A Connected Machine never receives platform clones.
+    repositories: managedSandbox && resources.some((resource) => resource.kind === "repository"),
+    gitCredentials:
+      managedSandbox &&
+      (Boolean(options.gitTokenSeed) ||
+        gitTokenSeeds.length > 0 ||
+        (options.gitCredentialBindings?.length ?? 0) > 0),
+    attachments:
+      (managedSandbox || connectedMachine) &&
+      (resources.some((resource) => resource.kind === "file") ||
+        (options.fileResourceDownloads?.length ?? 0) > 0),
+    ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
+    ...(options.rig ? { rig: options.rig } : {}),
+  };
+}
+
+function inspectModularAgentInstructions(
+  settings: Settings,
+  config: ResolvedAgentConfig,
+  options: BuildAgentOptions,
+): PersistentAgentInstructionInspection {
+  const identity = resolveAgentIdentity({
+    sessionIdentity: config.identity,
+    workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
+    deploymentTemplate: settings.agentInstructionsTemplate,
+  });
+  const composed = composeModularAgentInstructions({
+    capabilities: config.capabilities,
+    renderer: config.renderer,
+    identity,
+    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
+    ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
+      ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
+      : {}),
+    ...(options.skillCatalog && !options.skillCatalogInHistory
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+      : {}),
+    workspaceGovernance: options.workspaceGovernance,
+    workspaceMemory: options.workspaceMemory,
+    sessionInstructions: options.sessionInstructions,
+  });
+  return { layers: composed.layers, composed: composed.composed };
+}
+
 export function inspectPersistentAgentInstructions(
   settings: Settings,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  if (options.agentConfig) {
+    return inspectModularAgentInstructions(settings, options.agentConfig, options);
+  }
   const personaAndCore = composeAgentInstructions(
     options.instructionsTemplate ?? settings.agentInstructionsTemplate,
     options.workspaceEnvironment,
@@ -2682,6 +2759,10 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (resolveAgentToolFamilies(options.agentConfig).skills === false) {
+    const { skillActivations: _disabledActivations, ...withoutSkills } = options;
+    options = { ...withoutSkills, skillCatalog: [] };
+  }
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   }
@@ -2715,12 +2796,24 @@ export function buildOpenGeniAgent(
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+    ...(options.agentConfig && !options.agentPromptResources
+      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
   // resolved provider's api/window/web-search instead.
-  const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
+  const toolFamilies = resolveAgentToolFamilies(options.agentConfig, {
+    hasSkills: (skillCatalog?.length ?? 0) > 0,
+    webSearch: options.hostedWebSearch ?? settings.webSearchEnabled,
+    humanInput: options.humanInputEnabled !== false,
+  });
+  const hostedWebSearch = toolFamilies.webSearch;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image: options.imageGeneration?.kind ?? null,
+    video: Boolean(options.videoGeneration),
+  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -2742,28 +2835,29 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
-  if (options.imageGeneration?.kind === "native_hosted") {
+  if (mediaTools.hosted.includes("image_generation")) {
     hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
   }
-  const providerImageGenerationTool =
-    options.imageGeneration?.kind === "provider_adapter"
-      ? agentTool({
-          name: "generate_image",
-          description:
-            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
-          parameters: GenerateImageToolInput,
-          errorFunction: null,
-          execute: async (input, _context, details) => {
-            const toolCallId = details?.toolCall?.callId;
-            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
-            if (options.imageGeneration?.kind !== "provider_adapter") {
-              throw new Error("Image-generation adapter changed during execution");
-            }
-            return await options.imageGeneration.execute(input, { toolCallId });
-          },
-        })
-      : null;
-  const videoGenerationCapabilityTool = options.videoGeneration
+  const providerImageGenerationTool = mediaTools.runtime.includes("generate_image")
+    ? agentTool({
+        name: "generate_image",
+        description:
+          "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
+        parameters: GenerateImageToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+          if (options.imageGeneration?.kind !== "provider_adapter") {
+            throw new Error("Image-generation adapter changed during execution");
+          }
+          return await options.imageGeneration.execute(input, { toolCallId });
+        },
+      })
+    : null;
+  const videoGenerationCapabilityTool = mediaTools.runtime.includes(
+    "get_video_generation_capabilities",
+  )
     ? agentTool({
         name: "get_video_generation_capabilities",
         description:
@@ -2777,7 +2871,7 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
-  const videoGenerationTool = options.videoGeneration
+  const videoGenerationTool = mediaTools.runtime.includes("generate_video")
     ? agentTool({
         name: "generate_video",
         description:
@@ -2793,54 +2887,53 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
-  const humanInputTool =
-    options.humanInputEnabled === false
-      ? null
-      : agentTool({
-          name: HUMAN_INPUT_TOOL_NAME,
-          description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
-          parameters: RequestHumanInputToolInput,
-          needsApproval: true,
-          inputGuardrails: [
-            {
-              name: "validate_human_input_request",
-              run: async ({ toolCall }) => {
-                let input: unknown;
-                try {
-                  input = JSON.parse(toolCall.arguments);
-                } catch {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                  );
-                }
-                if (!RequestHumanInputToolInput.safeParse(input).success) {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                  );
-                }
-                return ToolGuardrailFunctionOutputFactory.allow();
-              },
+  const humanInputTool = !toolFamilies.humanInput
+    ? null
+    : agentTool({
+        name: HUMAN_INPUT_TOOL_NAME,
+        description:
+          "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
+        parameters: RequestHumanInputToolInput,
+        needsApproval: true,
+        inputGuardrails: [
+          {
+            name: "validate_human_input_request",
+            run: async ({ toolCall }) => {
+              let input: unknown;
+              try {
+                input = JSON.parse(toolCall.arguments);
+              } catch {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                );
+              }
+              if (!RequestHumanInputToolInput.safeParse(input).success) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                );
+              }
+              return ToolGuardrailFunctionOutputFactory.allow();
             },
-          ],
-          // A missing/mismatched durable response is a protocol integrity failure,
-          // not model-visible tool output the agent may reason past.
-          errorFunction: null,
-          execute: (_input, _context, details) => {
-            const settled = options.humanInputResponse;
-            if (!settled) {
-              throw new Error("Human-input tool resumed without a durable response");
-            }
-            const resumedCallId = details?.toolCall?.callId;
-            if (resumedCallId && resumedCallId !== settled.toolCallId) {
-              throw new Error("Human-input response does not belong to the resumed tool call");
-            }
-            return JSON.stringify({
-              requestId: settled.requestId,
-              ...settled.response,
-            });
           },
-        });
+        ],
+        // A missing/mismatched durable response is a protocol integrity failure,
+        // not model-visible tool output the agent may reason past.
+        errorFunction: null,
+        execute: (_input, _context, details) => {
+          const settled = options.humanInputResponse;
+          if (!settled) {
+            throw new Error("Human-input tool resumed without a durable response");
+          }
+          const resumedCallId = details?.toolCall?.callId;
+          if (resumedCallId && resumedCallId !== settled.toolCallId) {
+            throw new Error("Human-input response does not belong to the resumed tool call");
+          }
+          return JSON.stringify({
+            requestId: settled.requestId,
+            ...settled.response,
+          });
+        },
+      });
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -2849,7 +2942,9 @@ export function buildOpenGeniAgent(
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const embeddedSkillReadTool =
-    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+    toolFamilies.allowsFunctionTool("skill_read") &&
+    !hostSuppliedSkillCatalog &&
+    skillComposition.artifacts.length > 0
       ? agentTool({
           name: "skill_read",
           description:
@@ -3110,11 +3205,13 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport = options.lazyToolTransport;
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
   if (!transport) return;
   const enabled =
     transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled) return;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -3144,6 +3241,8 @@ function maybeInstallLazyToolTransport(
       }
       return identities;
     },
+    options.agentConfig != null,
+    options.toolRouterInHistory === true,
   );
 }
 
@@ -3876,6 +3975,15 @@ function buildAgentCapabilitiesFromComposition(
       // readiness proof, which reaches bounded same-turn recovery.
       execCommandErrorFunction: (_context, error) => {
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        if (isRoutingMutationOutcomeUnknownError(error)) {
+          // The outer physical fence must retain the exact process before
+          // rendering uncertainty. Platform/setup calls still throw normally.
+          if (toolCancellation) throw error;
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        }
+        if (isModalCommandStartOutcomeUnknownError(error)) {
+          return "Managed sandbox command start outcome unknown. The command may have executed. Do not blindly retry it; inspect the existing sandbox state before taking further action.";
+        }
         const details = error instanceof Error ? error.toString() : String(error);
         return `An error occurred while running the tool. Please try again. Error: ${details}`;
       },
@@ -6314,6 +6422,7 @@ type McpPublicErrorFields = {
 };
 
 type McpPublicFailureCode =
+  | "mcp_cleanup_failed"
   | "mcp_connect_failed"
   | "mcp_close_failed"
   | "mcp_transport_failed"
@@ -6674,27 +6783,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
 }
 
 function mcpTransportLogger(serverId: string) {
-  const logFailure = (_message: string, ...args: unknown[]) => {
-    let error: unknown;
-    for (let index = args.length - 1; index >= 0; index -= 1) {
-      if (args[index] instanceof Error) {
-        error = args[index];
-        break;
-      }
-    }
-    console.warn(
-      "[mcp] transport operation failed",
-      mcpErrorFields(error, "mcp_transport_failed", serverId),
-    );
-  };
-  return {
-    namespace: "opengeni:mcp-transport",
-    debug: () => undefined,
-    error: logFailure,
-    warn: logFailure,
-    dontLogModelData: true,
-    dontLogToolData: true,
-  };
+  return createMcpTransportLogger(serverId, mcpErrorFields);
 }
 
 async function mcpServerRequestInit(
@@ -8270,6 +8359,8 @@ function bindModelVisibleContextCapture(
         body,
         ...(unavailableReason ? { unavailableReason } : {}),
         requestIndex: index ?? nextModelContextCaptureIndex(agent),
+        persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
+        genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
       }),
     );
   };
