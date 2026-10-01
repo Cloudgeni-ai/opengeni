@@ -75,6 +75,8 @@ export type SessionWorkflowClient = {
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
+    /** Server-frozen caller ceiling for this run, independent of task ownership. */
+    credentialRestriction?: "developer_setup";
     triggerType?: Extract<
       ScheduledTaskTriggerType,
       "manual" | "initial" | "provider_event" | "retry" | "repair"

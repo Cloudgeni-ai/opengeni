@@ -236,6 +236,7 @@ export async function createTemporalWorkflowClient(
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
       initiator,
+      credentialRestriction,
       triggerType = "manual",
     }) => {
       // Deterministic workflowId (derived from the trigger token by the
@@ -256,6 +257,7 @@ export async function createTemporalWorkflowClient(
               triggerType,
               agentRunUsageIdempotencyKey,
               initiator,
+              ...(credentialRestriction ? { credentialRestriction } : {}),
             },
           ],
         });

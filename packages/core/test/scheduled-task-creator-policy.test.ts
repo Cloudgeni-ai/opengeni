@@ -12,7 +12,11 @@ import type { SessionCommandActor } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import { requireAccessGrantAuthorization, type AccessGrantAuthorization } from "../src/access";
-import { frozenScheduledTaskCreatorPolicy } from "../src/domain/scheduled-tasks";
+import {
+  frozenScheduledTaskCreatorPolicy,
+  triggerScheduledTaskForGrant,
+} from "../src/domain/scheduled-tasks";
+import type { SessionWorkflowClient } from "../src/dependencies";
 import { planScheduledTaskOpenGeniTools } from "../src/domain/scheduled-task-access";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
@@ -79,6 +83,29 @@ function frozen(
     authorization,
     actor: callingActor,
   });
+}
+
+async function manuallyTrigger(callingGrant: AccessGrant, suppliedRestriction = false) {
+  track(spyOn(db, "scheduledTaskMutationOwnerMatches").mockResolvedValue(true));
+  const database = { transaction: async (run: (tx: never) => Promise<void>) => run({} as never) };
+  let accepted: Parameters<SessionWorkflowClient["triggerScheduledTask"]>[0] | undefined;
+  await triggerScheduledTaskForGrant(
+    database as never,
+    callingGrant,
+    {
+      triggerScheduledTask: async (input) => {
+        accepted = input;
+      },
+    } as SessionWorkflowClient,
+    {
+      task: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } as never,
+      agentRunUsageIdempotencyKey: "manual-fixture",
+      triggerWorkflowId: "manual-fixture",
+      initiator: { kind: "subject", subjectId: callingGrant.subjectId },
+      ...(suppliedRestriction ? { credentialRestriction: "developer_setup" as const } : {}),
+    },
+  );
+  return accepted;
 }
 
 function origin(restricted: "turn" | "session" | "neither") {
@@ -189,6 +216,11 @@ describe("scheduled task frozen setup restriction", () => {
           actor: null,
         }),
       ).toEqual(expected);
+      // Ownerless and same-human native tasks need the caller ceiling on the
+      // accepted manual run even when their durable creator policy is absent.
+      expect((await manuallyTrigger(authorization.grant))?.credentialRestriction).toBe(
+        "developer_setup",
+      );
     },
   );
 
@@ -289,5 +321,30 @@ describe("scheduled task frozen setup restriction", () => {
     await expect(frozen(undefined, actor)).rejects.toMatchObject({ status: 403 });
     turn.mockResolvedValue({ id: crypto.randomUUID(), metadata: {} } as never);
     await expect(frozen(undefined, actor)).rejects.toMatchObject({ status: 403 });
+  });
+
+  test.each(["turn", "session", "neither"] as const)(
+    "manual runs inherit exact %s source provenance without trusting caller fields",
+    async (source) => {
+      origin(source);
+      const caller: AccessGrant = {
+        ...grant,
+        metadata: {
+          sessionId: actor.sessionId,
+          turnId: actor.turnId,
+          attemptId: actor.attemptId,
+          executionGeneration: actor.executionGeneration,
+        },
+      };
+      expect((await manuallyTrigger(caller, true))?.credentialRestriction).toBe(
+        source === "neither" ? undefined : "developer_setup",
+      );
+    },
+  );
+
+  test("ordinary manual service remains unrestricted and cannot forge a caller ceiling", async () => {
+    expect(
+      (await manuallyTrigger({ ...grant, principalKind: "service" }, true))?.credentialRestriction,
+    ).toBeUndefined();
   });
 });

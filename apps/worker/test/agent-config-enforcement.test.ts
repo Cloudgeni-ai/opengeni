@@ -113,10 +113,12 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   const mcp = startTestMcpServer({
     toolsForAuthorization: () => [...FIRST_PARTY_MCP_TOOL_NAMES],
     validateAuthorization: async (authorization) => {
-      if (authorization?.startsWith("Bearer ogd_")) {
-        delegatedPayloads.push(
-          await verifyDelegatedAccessToken("test-delegation-secret", authorization.slice(7)),
+      if (authorization?.startsWith("Bearer ")) {
+        const payload = await verifyDelegatedAccessToken(
+          "test-delegation-secret",
+          authorization.slice(7),
         );
+        if (payload) delegatedPayloads.push(payload);
       }
       return true;
     },

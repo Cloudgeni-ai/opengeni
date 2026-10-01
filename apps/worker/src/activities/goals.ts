@@ -13,6 +13,7 @@ import {
 import {
   evaluateWorkspaceModelPolicy,
   mergeToolRefs,
+  readTurnExecutionPolicyV1,
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -21,6 +22,7 @@ import {
   enqueueSessionWorkflowWakeIfRunnable,
   getWorkspaceModelPolicy,
   getSessionGoal,
+  getSessionTurn,
   materializeGoalContinuation,
   requireSession,
 } from "@opengeni/db";
@@ -35,6 +37,7 @@ import {
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
 import { agentRunAdmissionDenial } from "./agent-run-admission";
+import { turnCredentialRestriction } from "./agent-turn/credential-restriction";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -115,6 +118,14 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       latencyMode: continuationLatencyMode,
       latencyModeSource: "continuation",
     });
+    const continuationPolicy = {
+      model: continuationModel,
+      reasoningEffort: continuationReasoningEffort,
+      latencyMode: continuationLatencyMode,
+      turnExecutionPolicy,
+      tools: withFirstPartyTools(settings, session.tools),
+      sandboxBackend: session.sandboxBackend,
+    };
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -131,6 +142,23 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
       admission: async (tx, causalTurn) => {
+        // The materializer selects this exact causal row under its session/goal
+        // locks and freezes policy only after admission returns. Never infer
+        // credential authority from the generated continuation's payload.
+        const sourceTurn = causalTurn
+          ? await getSessionTurn(tx, input.workspaceId, causalTurn.id)
+          : null;
+        if (causalTurn && (!sourceTurn || sourceTurn.sessionId !== input.sessionId)) {
+          throw new Error("Goal continuation source turn is unavailable");
+        }
+        const sourcePolicy = readTurnExecutionPolicyV1(sourceTurn?.metadata);
+        const credentialRestriction = turnCredentialRestriction(
+          sourcePolicy.kind === "valid" ? sourcePolicy.policy : turnExecutionPolicy,
+          session.metadata,
+        );
+        continuationPolicy.turnExecutionPolicy = credentialRestriction
+          ? { ...turnExecutionPolicy, credentialRestriction }
+          : turnExecutionPolicy;
         const budgetBlocked = modelPolicyBlocked
           ? null
           : await goalRunBudgetBlocked(
@@ -149,14 +177,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
             : (budgetBlocked?.pausedReason ?? "limits"),
         };
       },
-      policy: {
-        model: continuationModel,
-        reasoningEffort: continuationReasoningEffort,
-        latencyMode: continuationLatencyMode,
-        turnExecutionPolicy,
-        tools: withFirstPartyTools(settings, session.tools),
-        sandboxBackend: session.sandboxBackend,
-      },
+      policy: continuationPolicy,
       // Long-wait guidance is only given when `wait_for_input` is actually in this
       // session's effective first-party selection (the same source the worker
       // signs into the delegated token and the API uses to register tools), so

@@ -1,10 +1,142 @@
 import { describe, expect, test } from "bun:test";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import {
+  metadataWithTurnExecutionPolicyV1,
+  ServiceTurnInitiatorContext,
+} from "@opengeni/contracts";
+import { testSettings } from "@opengeni/testing";
 import {
   clipAgentProvenanceHops,
   contextForCausalTurn,
+  contextWithFrozenCredentialRestrictions,
+  frozenCredentialRestriction,
+  frozenInitiatorForCommandActor,
   frozenScheduledOccurrenceInitiator,
   UNATTRIBUTED_LEGACY_INITIATOR,
 } from "../src/turn-initiator";
+
+describe("frozen setup credential provenance", () => {
+  test("public service context cannot forge or overwrite the protected restriction", () => {
+    expect(
+      ServiceTurnInitiatorContext.safeParse({ credentialRestriction: "developer_setup" }).success,
+    ).toBe(false);
+    expect(ServiceTurnInitiatorContext.safeParse({ credentialRestriction: "full" }).success).toBe(
+      false,
+    );
+    expect(ServiceTurnInitiatorContext.safeParse({ job: "normal-host-provenance" }).success).toBe(
+      true,
+    );
+  });
+
+  test("private coalesced lineage preserves any restricted source, including the last sender", () => {
+    const context = { updateIds: ["normal", "setup"] };
+    expect(
+      contextWithFrozenCredentialRestrictions(context, [
+        {},
+        { credentialRestriction: "developer_setup" },
+      ]),
+    ).toEqual({
+      ...context,
+      credentialRestriction: "developer_setup",
+    });
+    expect(contextWithFrozenCredentialRestrictions(context, [null, undefined, {}])).toBe(context);
+    expect(
+      contextWithFrozenCredentialRestrictions(
+        { ...context, credentialRestriction: "developer_setup" },
+        [{}],
+      ).credentialRestriction,
+    ).toBe("developer_setup");
+  });
+
+  test("malformed protected ceilings fail closed rather than downgrading", () => {
+    for (const credentialRestriction of [null, undefined, false, "full"]) {
+      expect(() => frozenCredentialRestriction({ credentialRestriction })).toThrow(
+        "Malformed frozen credential restriction",
+      );
+    }
+  });
+
+  test("a causal continuation preserves setup scope outside clipped diagnostic hops", () => {
+    const context = contextForCausalTurn(
+      {},
+      {
+        initiator: { kind: "service", subjectId: "host" },
+        context: {
+          credentialRestriction: "developer_setup",
+          via: Array.from({ length: 40 }, () => ({ kind: "agent" })),
+        },
+      },
+      { sessionId: "source", turnId: "source-turn" },
+    );
+    expect(context.credentialRestriction).toBe("developer_setup");
+    expect(context.viaTruncated).toBe(true);
+  });
+
+  test.each(["turn", "session", "none"] as const)(
+    "exact source %s policy capture retains its ceiling",
+    async (source) => {
+      const settings = testSettings();
+      const policy = resolveTurnExecutionPolicyV1(settings, {
+        modelId: "scripted-model",
+        requestedModelId: null,
+        modelSource: "session",
+        reasoningEffort: "high",
+        reasoningSource: "session",
+      });
+      let selectedMetadata = false;
+      const fakeDb = {
+        select: (selection: Record<string, unknown>) => {
+          selectedMetadata = Object.hasOwn(selection, "metadata");
+          const query = {
+            from: () => query,
+            innerJoin: () => query,
+            where: () => query,
+            limit: async () => [
+              {
+                initiatorKind: "service",
+                initiatorSubjectId: "host:setup",
+                initiatorContext: { job: "source" },
+                initiatingHumanSubjectId: null,
+                metadata: metadataWithTurnExecutionPolicyV1(
+                  {},
+                  {
+                    ...policy,
+                    ...(source === "turn"
+                      ? { credentialRestriction: "developer_setup" as const }
+                      : {}),
+                  },
+                ),
+                sessionMetadata: metadataWithTurnExecutionPolicyV1(
+                  {},
+                  {
+                    ...policy,
+                    ...(source === "session"
+                      ? { credentialRestriction: "developer_setup" as const }
+                      : {}),
+                  },
+                ),
+              },
+            ],
+          };
+          return query;
+        },
+      };
+      const frozen = await frozenInitiatorForCommandActor(fakeDb as never, "workspace", {
+        type: "agent_attempt",
+        sessionId: "source",
+        turnId: "source-turn",
+        attemptId: "attempt",
+        executionGeneration: 1,
+      });
+      expect(selectedMetadata).toBe(true);
+      expect(frozen.context.credentialRestriction).toBe(
+        source === "none" ? undefined : "developer_setup",
+      );
+      expect(frozen.context.job).toBe("source");
+      expect(frozen.initiatingHumanSubjectId).toBeNull();
+    },
+  );
+});
 
 describe("accepted scheduled service provenance", () => {
   const scheduler = {

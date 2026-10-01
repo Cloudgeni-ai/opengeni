@@ -8750,6 +8750,7 @@
         "$.agent": "ref(AgentConfigRequest)?",
         "$.bundledSkillIds": "array?",
         "$.bundledSkillIds[]": "ref(BundledSkillId)",
+        "$.credentialRestriction": "const?=[\"\\\"developer_setup\\\"\"]",
         "$.firstPartyMcpPermissions": "array?",
         "$.firstPartyMcpPermissions[]": "ref(Permission)",
         "$.firstPartyMcpTools": "array?",

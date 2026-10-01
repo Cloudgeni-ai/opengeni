@@ -2676,6 +2676,11 @@ export async function sendAgentMessageInTransaction(
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
@@ -2717,6 +2722,9 @@ export async function sendAgentMessageInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:
@@ -2933,6 +2941,11 @@ export async function steerAgentSessionInTransaction(
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -3009,6 +3022,9 @@ export async function steerAgentSessionInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:

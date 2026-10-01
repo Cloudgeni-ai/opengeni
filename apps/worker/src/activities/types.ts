@@ -436,6 +436,7 @@ export type DispatchScheduledTaskRunInput = {
       triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
       agentRunUsageIdempotencyKey?: never;
       initiator?: never;
+      credentialRestriction?: never;
     }
   | {
       triggerType: Extract<
@@ -445,6 +446,8 @@ export type DispatchScheduledTaskRunInput = {
       agentRunUsageIdempotencyKey: string;
       /** Exact identity used by the API-side charge for this same trigger. */
       initiator: TurnInitiator;
+      /** Trusted API-side caller ceiling for this occurrence, not the schedule. */
+      credentialRestriction?: "developer_setup";
     }
 );
 
