@@ -25781,6 +25781,13 @@ export async function acquireCodexCredentialLease<
         input.workspaceId,
         "share",
       );
+      // Lease FKs need the workspace identity. Take it before any session/turn
+      // locks, matching capacity and connection-use lifecycle writers; a late
+      // FK request can otherwise wait behind a workspace writer needing our turn.
+      await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "already_locked",
+      });
       // Rotation row -> durable turn is the common allocator/waiter lock order.
       // Fail closed before taking a credential: the turn and allocator must be
       // inside exactly the same RLS-scoped workspace/account. A downstream
