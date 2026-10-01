@@ -311,6 +311,7 @@ import {
 import {
   createSandboxClient,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
   renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
@@ -3979,6 +3980,9 @@ function buildAgentCapabilitiesFromComposition(
           // rendering uncertainty. Platform/setup calls still throw normally.
           if (toolCancellation) throw error;
           return renderRoutingMutationOutcomeUnknownToolResult(error);
+        }
+        if (isModalCommandStartOutcomeUnknownError(error)) {
+          return "Managed sandbox command start outcome unknown. The command may have executed. Do not blindly retry it; inspect the existing sandbox state before taking further action.";
         }
         const details = error instanceof Error ? error.toString() : String(error);
         return `An error occurred while running the tool. Please try again. Error: ${details}`;

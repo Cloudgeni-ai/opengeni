@@ -1,5 +1,6 @@
 import { Client, Metadata, credentials, status, type ServiceError } from "@grpc/grpc-js";
 import protobuf from "protobufjs";
+import { CommandStartOutcomeUnknownError } from "modal";
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
 
 // Narrow wire projection of Modal 0.9.0's task_command_router.proto. The public
@@ -59,6 +60,24 @@ export class ModalCommandStartPreDispatchUnavailableError extends Error {
   private constructor(cause: Error) {
     super("Modal command router was not ready before Start dispatch", { cause });
     this.name = "ModalCommandStartPreDispatchUnavailableError";
+  }
+
+  /** The supplied operation must contain only read-only preparation, never
+   * Start itself. Its transport failure therefore proves non-dispatch. */
+  static async beforeDispatch<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    try {
+      return await operation();
+    } catch (error) {
+      signal?.throwIfAborted();
+      const code = (error as Partial<ServiceError> | null)?.code;
+      if (
+        error instanceof Error &&
+        (code === status.UNAVAILABLE || code === status.DEADLINE_EXCEEDED)
+      )
+        throw new ModalCommandStartPreDispatchUnavailableError(error);
+      throw error;
+    }
   }
 
   static async ensureReady(client: Client, signal?: AbortSignal): Promise<void> {
@@ -219,7 +238,7 @@ export class ModalCommandRouterWire {
         ].includes(code)
       )
         throw new ModalCommandStartRejectedError(code, error);
-      throw error;
+      throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error);
     }
   }
 

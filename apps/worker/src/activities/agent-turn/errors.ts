@@ -18,6 +18,7 @@ import {
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
   ResponsesStreamingTerminalError,
@@ -1150,6 +1151,14 @@ function baseAgentRunFailurePayload(
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
       retryable: true,
+    };
+  }
+  if (isModalCommandStartOutcomeUnknownError(error)) {
+    return {
+      error:
+        "A managed sandbox command may have started, but its acknowledgement was lost. Automatic replay is disabled; inspect the sandbox state before retrying.",
+      code: "sandbox_command_start_outcome_unknown",
+      retryable: false,
     };
   }
   if (

@@ -16,7 +16,10 @@ import {
   type CodexLeaseAccountStatus,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { maxTurnsExceededRunState } from "@opengeni/runtime";
+import {
+  maxTurnsExceededRunState,
+  isModalTaskExecStartPreDispatchUnavailableError,
+} from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
   authoritativeCodexCapacityResetAt,
@@ -1660,6 +1663,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     !!attempt.turnId &&
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
+  const earlyCommandStartUnavailable =
+    isModalTaskExecStartPreDispatchUnavailableError(error) &&
+    !attempt.modelRequestStarted &&
+    !eventing.turnStartedPublished &&
+    !!attempt.turnId &&
+    !!attempt.triggerEventId &&
+    attempt.executionGeneration > 0;
+  const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
   let failure = (
     earlyDefinitionMismatch
       ? { error: error.message, code: error.code, retryable: true }
@@ -1670,7 +1681,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   ) as ReturnType<typeof agentRunFailurePayload>;
   if (
     attempt.turnId &&
-    (earlyDefinitionMismatch ||
+    (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
     const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
@@ -1681,7 +1692,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     });
     try {
       if (recoveryResult.status === "recovering") {
-        if (!earlyDefinitionMismatch) {
+        if (!earlyRecoverableSetup) {
           await flushRuntimeBatcher();
           await historySink.reconcileConversationTruth({ requireDurable: true });
         }
@@ -1712,15 +1723,19 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
-      if (earlyDefinitionMismatch) {
+      if (earlyRecoverableSetup) {
         // Setup has no eventing sink yet. Carry only the fixed, safe diagnostic
         // through Temporal into exact-attempt workflow failure settlement.
         control.activityStatus = "failed";
         control.turnMetricOutcome = "failed";
         control.activityError = error;
         throw ApplicationFailure.create({
-          message: `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`,
-          type: "TurnExecutionPolicyDefinitionMismatchError",
+          message: earlyDefinitionMismatch
+            ? `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`
+            : failure.error,
+          type: earlyDefinitionMismatch
+            ? "TurnExecutionPolicyDefinitionMismatchError"
+            : "SandboxCommandStartUnavailableError",
           nonRetryable: true,
         });
       }

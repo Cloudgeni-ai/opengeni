@@ -5,6 +5,7 @@ import {
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
 import type { SandboxDirectoryEntry } from "@openai/agents/sandbox";
+import { createRequire } from "node:module";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -21,7 +22,11 @@ import {
 } from "./modal-command-router-wire";
 import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
-import type { ModalClient } from "modal";
+import {
+  CommandStartPreDispatchUnavailableError,
+  CommandStartOutcomeUnknownError,
+  type ModalClient,
+} from "modal";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -219,6 +224,9 @@ const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
 const MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH = 8;
 const MODAL_TASK_EXEC_START_ERROR_MAX_NODES = 64;
 const MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS = 32;
+// The pinned SDK ships ESM and CJS constructors. Accept either genuine local
+// boundary type, never names/details supplied by a server or diagnostic text.
+const modalCjsStartErrors = createRequire(import.meta.url)("modal") as typeof import("modal");
 
 function modalHttpStatus(value: unknown): number | null {
   if (typeof value !== "number" && typeof value !== "string") return null;
@@ -266,12 +274,21 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
     try {
       const record = current.value as Record<string, unknown>;
       if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
+      if (
+        current.value instanceof CommandStartOutcomeUnknownError ||
+        current.value instanceof modalCjsStartErrors.CommandStartOutcomeUnknownError
+      )
+        return false;
       if (current.value instanceof ModalCommandStartNotDispatchedError) return false;
       if (hasContradictoryModalHttpStatus(record)) return false;
 
       // This instance is created only by the client's readiness gate before
       // Start dispatch; an RPC's own status or details never enters this path.
-      if (current.value instanceof ModalCommandStartPreDispatchUnavailableError) {
+      if (
+        current.value instanceof ModalCommandStartPreDispatchUnavailableError ||
+        current.value instanceof CommandStartPreDispatchUnavailableError ||
+        current.value instanceof modalCjsStartErrors.CommandStartPreDispatchUnavailableError
+      ) {
         matchingLeaves += 1;
         continue;
       }
@@ -306,6 +323,42 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
   }
 
   return matchingLeaves > 0;
+}
+
+/** Any typed ambiguous Start in a bounded wrapper graph vetoes generic provider
+ * retries. Setup/probe calls have no retained command handle to replay safely. */
+export function isModalCommandStartOutcomeUnknownError(error: unknown): boolean {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
+  const seen = new WeakSet<object>();
+  for (
+    let inspected = 0;
+    pending.length && inspected < MODAL_TASK_EXEC_START_ERROR_MAX_NODES;
+    inspected++
+  ) {
+    const { depth, value } = pending.shift()!;
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    if (
+      value instanceof CommandStartOutcomeUnknownError ||
+      value instanceof modalCjsStartErrors.CommandStartOutcomeUnknownError
+    )
+      return true;
+    if (depth >= MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH) continue;
+    try {
+      const record = value as Record<string, unknown>;
+      for (const key of ["cause", "error"] as const)
+        if (record[key] !== undefined) pending.push({ depth: depth + 1, value: record[key] });
+      if (Array.isArray(record.errors))
+        for (const nested of record.errors.slice(
+          0,
+          MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS,
+        ))
+          pending.push({ depth: depth + 1, value: nested });
+    } catch {
+      // Unknown wrappers never establish dispatch proof.
+    }
+  }
+  return false;
 }
 
 /**
