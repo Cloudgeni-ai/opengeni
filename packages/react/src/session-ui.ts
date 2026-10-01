@@ -13,6 +13,8 @@ export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
+export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export {
   OpenGeniLinkProvider,
   chainLinkResolvers,

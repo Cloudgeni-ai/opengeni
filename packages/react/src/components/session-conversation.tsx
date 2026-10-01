@@ -64,6 +64,13 @@ export type SessionConversationProps = ClientOverride & {
   /** Product-specific tool-call renderers; defaults to the built-in registry. */
   toolRegistry?: MessageTimelineProps["toolRegistry"];
   /**
+   * Replace the "usage limit reached" row for an `allowance_exhausted`
+   * refusal, for example to link your own plan or admin page.
+   */
+  renderAllowanceExhausted?: MessageTimelineProps["renderAllowanceExhausted"];
+  /** Replace the words of the default "usage limit reached" row. */
+  allowanceExhaustedLabels?: MessageTimelineProps["allowanceExhaustedLabels"];
+  /**
    * File attachments in the composer. Defaults to true; the attach control
    * appears only when the deployment's client config enables file uploads.
    */
@@ -99,6 +106,8 @@ function Conversation({
   onOpenArtifact,
   renderInteractiveBlock,
   toolRegistry,
+  renderAllowanceExhausted,
+  allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
   modelPicker,
   userMessageDisclosureLabels,
@@ -203,6 +212,8 @@ function Conversation({
             : (renderInteractiveBlock ?? defaultInteractiveBlock)
         }
         userMessageDisclosureLabels={userMessageDisclosureLabels}
+        renderAllowanceExhausted={renderAllowanceExhausted}
+        allowanceExhaustedLabels={allowanceExhaustedLabels}
         className="min-h-0 flex-1"
         {...(toolRegistry ? { toolRegistry } : {})}
         events={feed.events}

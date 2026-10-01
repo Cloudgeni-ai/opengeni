@@ -106,6 +106,10 @@ pub struct BrowserControlEndpoint {
 /// crates depend only on this narrow capability, never on Bun/browserd details.
 #[async_trait]
 pub trait BrowserControlBackend: Send + Sync {
+    /// Proves every owned browser/computer controller is idle before restart.
+    /// Unavailable or incompatible state must fail closed, never mean idle.
+    async fn is_idle(&self) -> PlatformResult<bool>;
+
     /// Ensures the exact authority scope and attached-browser generation is live.
     async fn ensure(
         &self,

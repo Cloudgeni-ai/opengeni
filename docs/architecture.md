@@ -28,8 +28,8 @@ verified active-turn user. Task notes coordinate; linking never merges users.
 Skill removal deletes scoped heads/revisions with exact approval and Learning
 enforcement, preserving conversation context.
 
-Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
-retain catalog floors but grant no capabilities or credentials.
+`mcpApprovalPolicies` requires session-control authority. Frozen policies
+retain catalog floors, granting no capabilities/credentials.
 
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
@@ -51,9 +51,8 @@ retain that turn snapshot, never mutable session state. See
 
 ## 3. Core invariants
 
-Hosted tool-call `status` survives persistence and Codex replay; function/message
-annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
-[model providers](model-providers.md).
+Hosted tool-call `status` survives replay; other annotations are stripped
+(`packages/codex/src/hosted-call-status.ts`).
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -99,23 +98,21 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 Temporal coordinates execution; activities read Postgres obligations, not signals.
 Conversation, goals, queues, usage and provider/tool transcripts stay outside
-workflow history; streams use ordinary events.
+workflow history.
 
-Canonical: `apps/worker/src/workflows/session.ts` and
+Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Control observation is not settlement: unavailable scoped reads and owned
-attempts retain bounded, signal-interruptible waits without marking work idle,
-revoking writers, or dispatching successors. Temporal metadata cannot prove
-physical-writer quiescence.
+Control observation is not settlement: unavailable reads/owned attempts keep
+bounded, interruptible waits without marking idle, revoking writers or dispatching
+successors; Temporal metadata never proves writer quiescence.
 
 Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
-effects. Updates form atomic batches; resumed attempts append batches, preserving
-ordered, exactly-once history.
+A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
+attempts append atomic batches: ordered, exactly-once history.
 
 `wait_for_input` ends execution after tool-batch settlement, preserving trusted
 wait authority and immutable same-turn deadlines. Command results remain durable;
@@ -193,15 +190,18 @@ unless review is configured; human-owned constraints remain. Goals never live
 in `Agent.instructions` or solely workflow memory.
 Generic caps cannot replace lifecycle fixes.
 
+Empty finals after goal completion get one handoff, then a typed notice.
+See [run lifecycle](run-lifecycle.md).
+
 Non-transient preclaim rejection parks accepted work behind a durable admission
 block. Resume/Send/Steer rechecks without granting authority; operational outages
 retain backoff.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
-Reports default to chat; requested or large ones use native documents authored
-via the Documents Skill; goal/artifact domains validate persisted
-requirements/current inspection proof. See [`goals.md`](goals.md).
+Reports default to chat; large ones use native documents (Documents Skill).
+Goal/artifact domains validate requirements/inspection proof.
+See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 
@@ -352,7 +352,8 @@ parsing, defaults, validation, and derived runtime configuration.
 Catalog membership, selectability, and cost have separate authorities. Deployment
 membership uses `code` or an operator-owned database singleton; workspace policy,
 connection readiness/permissions, organization assignments, and provider health
-determine selectability. Deployment cost policy sets `free`/`credits` independently
+determine selectability; `/v1/config/client` and session create share one
+resolver. Deployment cost policy sets `free`/`credits` independently
 of upstream settlement. Workspace Gateway, OpenRouter, Anthropic API, and Claude
 subscription rows are provider-qualified overlays, separate from deployment
 catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
@@ -379,6 +380,8 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
+Managed updates fence new work until commands, uploads and owned browser/computer
+controllers are idle; missing proof defers the update.
 Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
@@ -581,12 +584,9 @@ Canonical: `packages/contracts/src/work-claims.ts`,
 
 ### 3.12 Usage allowances constrain debits, not authority
 
-Org admins set budgets; workspace admins split members.
-Counters permit overshoot, not reservations. Shares oversubscribe
-included credits plus remaining grants. Default-off
-`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers support enforcement.
-Private FORCE-RLS storage preserves older binaries' data-schema inventory for
-rolling deployment.
+Org admins set budgets; workspace admins split members. Counters permit
+overshoot, not reservations; shares may oversubscribe. Default-off
+`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ---
@@ -1589,11 +1589,9 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
 - **RLS is a real boundary.** Standalone runtime roles are non-owner,
   non-superuser, and non-bypass. Missing or mismatched tenant context fails
   closed.
-- **Allowance attribution never widens visibility.** Source lifecycle triggers
-  mirror frozen payer facts into content-free FORCE-RLS receipts. Owner
-  capabilities read receipts, not private source content; existing visibility
-  policies stay unchanged. Receipts grant no authority and survive source
-  retention for late settlement, cascading with the workspace.
+- **Allowance attribution never widens visibility.** Triggers mirror frozen
+  payer facts into content-free FORCE-RLS receipts that owners read instead of
+  private sources. Receipts grant no authority and outlive source retention.
 - **Human, service, API-key, and agent identities are distinct.** Provenance is
   not authority. Personal-resource execution requires the exact permitted
   human snapshot; worker identity never substitutes for it.
@@ -1736,7 +1734,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Startup loading, per-turn activity rows, timing diagnostics | `packages/react/src/timeline/activity-rail.tsx`, `projection.ts`, `apps/web/src/components/session/inspector.tsx` | [`design/genie-loading.md`](design/genie-loading.md) |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/`, `.agents/skills/opengeni-client/` | [`product-integration.md`](product-integration.md), [`embedding-workbench.md`](embedding-workbench.md), [`workspace-integrations.md`](workspace-integrations.md) |
-| Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
+| Workspace/member usage allowances | `packages/contracts/src/usage-allowances.ts`, `packages/db/src/usage-allowances.ts`, `apps/api/src/routes/usage-allowances.ts`, `packages/react/src/usage.ts` | §3.12 and [`usage-allowances.md`](usage-allowances.md) |
 | Organization/workspace callbacks | `packages/db/src/workspace-integrations.ts`, `apps/api/src/routes/workspace-integrations.ts`, `apps/api/src/routes/organization-integrations.ts`, `apps/api/src/workspace-webhook-dispatch.ts`, `apps/worker/src/activities/workspace-credential-provider.ts` | [`workspace-integrations.md`](workspace-integrations.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 

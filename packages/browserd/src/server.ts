@@ -312,6 +312,15 @@ export class BrowserControlServer {
       if (request.method === "PUT") return await this.addAllowedOrigins(request);
       throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
+    if (segments.length === 2 && segments[0] === "v1" && segments[1] === "runtime") {
+      this.requireAdmin(request);
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return success({
+        idle: this.supervisor.isIdle() && (this.computerSupervisor?.isIdle() ?? true),
+      });
+    }
     if (segments[0] === "v1" && segments[1] === "computer-sessions") {
       if (!this.computerSupervisor) {
         throw new ProtocolError("unsupported", "computer controller is unavailable", 422);

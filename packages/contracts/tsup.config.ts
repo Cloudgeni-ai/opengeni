@@ -31,6 +31,7 @@ export default defineConfig({
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",
+    "src/session-final-reply.ts",
     "src/site-session-http.ts",
     "src/slack-bot-scopes.ts",
     "src/editable-artifacts.ts",

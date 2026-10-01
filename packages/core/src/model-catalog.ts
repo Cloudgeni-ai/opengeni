@@ -491,6 +491,23 @@ function modelDefinitionRunnable(model: ConfiguredModel): boolean {
   );
 }
 
+/**
+ * Stable fresh-selection admission, independent of transient observations.
+ * Missing catalog membership is handled by the caller's lookup. Resolver-based
+ * deployment credentials (Azure AD/managed identity) are resolved at execution;
+ * absent, stale or failed observations cannot make their definition uncreatable.
+ */
+export function isWorkspaceModelAdmissible(selection: WorkspaceModelSelection): boolean {
+  if (!modelDefinitionRunnable(selection.model) || !selection.policyAllowed) return false;
+  const source = selection.model.credentialSource;
+  if (source.kind === "deployment") {
+    return source.mechanism !== "api_key" || selection.credentialReadiness.status === "ready";
+  }
+  // Connected subscriptions and workspace/organization connections have a
+  // durable active/reauth prerequisite, unlike deployment credential resolvers.
+  return selection.credentialReadiness.status === "ready";
+}
+
 function observedCredentialReadiness(input: {
   observation: ModelCredentialReadinessObservation | undefined;
   basis: "connection" | "resolver";

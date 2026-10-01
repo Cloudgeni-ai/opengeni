@@ -160,7 +160,7 @@ export default defineConfig({
               // keep those tiny parsers here instead of a separate startup
               // request.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|developer-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|workspace-management-location|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|developer-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
             },
@@ -215,7 +215,9 @@ export default defineConfig({
               // session workbench into startup. The personal-workspace badge and
               // session title contract must not carry settings-only dependencies.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              // The usage-limit gauge and allowance wording are drawn by the
+              // conversation's refusal row and by the lazy usage pages.
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -245,11 +247,42 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The workspace paused banner (rail and settings) and the React
+              // provider (workspace routes). Pinned so the settings-only pages
+              // pinned above can't reshuffle them into a direct session load.
+              name: "workspace-chrome",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]rail[\\/]workspace-paused-banner\.tsx|lib[\\/]workspace-timer\.ts)|packages[\\/]react[\\/]src[\\/]provider\.tsx)$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // The composer's "+" menu primitives are called at module scope
+              // (lazyComposerPanel) by pickers on the composer and session
+              // graphs. Keep them in a leaf chunk (React, icons and class
+              // helpers only) so no chunk cycle can evaluate a caller first.
+              name: "composer-menu-primitives",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:composer-menu\.tsx|menu-styles\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Budget pages, Workspace settings > Usage and the member slider
+              // (with its Radix primitive, used nowhere else; it must not join
+              // the shared UI runtime). Only reached from lazy settings routes.
+              name: "usage-allowances",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]usage[\\/](?!usage-entry\.)[\w-]+\.tsx?|lib[\\/]usage-allowances\.ts)|packages[\\/]react[\\/]src[\\/]components[\\/]usage-member-list\.tsx|@radix-ui(?:\+|[\\/])react-slider(?:@|[\\/]).*)$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // Model, API-key, and managed-access settings pages plus the shared
               // settings frame are reached only from lazy settings routes. Pin
               // them so entry-aware merging cannot co-locate one of them with a
               // session-used helper and make the management surface reachable
-              // from a direct session load. Connection access renders a Models
+              // from a direct session load. The default sandbox environment row is
+              // settings-only too; left to entry-aware grouping it can share a
+              // chunk with the workspace paused banner and pull this chunk (via
+              // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
               // Organization provider connections and Codex subscriptions are imported by the Models
@@ -258,7 +291,7 @@ export default defineConfig({
               // (settings-pages <-> organization-models-section) that leaves
               // React undefined when the section evaluates.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
