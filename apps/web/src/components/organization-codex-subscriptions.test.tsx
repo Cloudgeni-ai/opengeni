@@ -129,6 +129,7 @@ GlobalRegistrator.register();
 const { OrgCodexAccountPage, reachesWorkspace } =
   await import("./models/organization-codex-models");
 const { useOrganizationCodexSubscriptions } = await import("./organization-codex-subscriptions");
+const { modelsScopeLabels } = await import("./models/models-ui");
 
 afterAll(() => {
   mock.restore();
@@ -152,7 +153,7 @@ function Harness({ accountId }: { accountId: string }) {
       accountId={open}
       places={{
         organizationName: "Acme",
-        scopeLabel: "Everyone in Acme",
+        scope: modelsScopeLabels("Acme", false),
         openAccount: () => undefined,
         openConnect: () => undefined,
         openAccess: () => undefined,

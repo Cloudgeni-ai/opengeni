@@ -1,6 +1,7 @@
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { KeyRoundIcon, PlusIcon, UserIcon } from "lucide-react";
+import { KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { toast } from "sonner";
 
 import {
   PROVIDER_CONNECTION_CONFIGS,
@@ -36,9 +37,18 @@ import {
 } from "@/components/models/codex-models";
 import { CodexProviderSwitchRow } from "@/components/models/codex-provider-switch-row";
 import {
+  ConnectAudienceFields,
+  EVERYONE,
+  applyConnectAudience,
+  audienceBlockedReason,
+  useOrganizationWorkspaces,
+  type ConnectAudience,
+} from "@/components/models/connect-audience";
+import {
   ModelsFormPage,
   ProviderTile,
   modelsScopeLabels,
+  organizationReachLabel,
   useModelsNavigation,
   type ModelsScopeLabels,
 } from "@/components/models/models-ui";
@@ -69,11 +79,10 @@ import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { ListRow, RowList } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
 import {
@@ -93,10 +102,12 @@ import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
    defaults and each provider's settings. Connect, Allowed models, each
    account and "Models it can serve" are their own pages.
 
-   Organization owners and admins connect for everyone by default and manage
-   the organization's accounts from here (Primary, Available in, Models it
-   can serve); "Only this workspace" is the secondary choice. Everyone else
-   sees the list read-only, with who can add to it.
+   Organization owners and admins connect organization accounts: every
+   workspace can use one by default, or only the workspaces chosen while
+   connecting (its "Available in", editable later on its page). Owning an
+   account by this workspace instead is under Advanced. They manage the
+   organization's accounts from here (Primary, Available in, Models it can
+   serve). Everyone else sees the list read-only, with who can add to it.
 
    All provider data lives here so moving between these pages never re-reads
    a provider or drops a sign-in that is still going.
@@ -227,9 +238,10 @@ export function WorkspaceModelsPage({
   };
   const orgCodexPlaces: OrgCodexPlaces = {
     organizationName,
-    scopeLabel: labels.organization,
+    scope: labels,
     openAccount: (id) => nav.openAccount(accountKey("codex", id, true)),
-    openConnect: () => nav.openView("connect-org:codex"),
+    openConnect: (id) =>
+      nav.openView("connect-org:codex", id ? accountKey("codex", id, true) : undefined),
     openAccess: (id) => nav.openView("model-access", accountKey("codex", id, true)),
     backToList,
   };
@@ -247,7 +259,8 @@ export function WorkspaceModelsPage({
     organizationName,
     scope: labels,
     openAccount: (id) => nav.openAccount(accountKey("supergrok", id, true)),
-    openConnect: () => nav.openView("connect-org:supergrok"),
+    openConnect: (id) =>
+      nav.openView("connect-org:supergrok", id ? accountKey("supergrok", id, true) : undefined),
     openAccess: (id) => nav.openView("model-access", accountKey("supergrok", id, true)),
     backToList,
   };
@@ -261,6 +274,14 @@ export function WorkspaceModelsPage({
 
   const key = accountKeyOf(account);
   const step = connectStepOf(view);
+  // Which workspaces can use what is being connected, per provider, kept
+  // while moving between the connect pages.
+  const [audiences, setAudiences] = useState<Partial<Record<string, ConnectAudience>>>({});
+  const orgWorkspaces = useOrganizationWorkspaces(
+    client,
+    orgId,
+    organizationAdmin && Boolean(step),
+  );
   const pageKey = `${view ?? ""}|${account ?? ""}`;
   const root = useFocusOnNavigation(pageKey, {
     onList: pageKey === "|",
@@ -271,6 +292,10 @@ export function WorkspaceModelsPage({
   // for its owners and admins; an organization URL opened by anyone else
   // shows the list instead.
   const organizationPage = Boolean(key?.organization || step?.organization);
+  // A connected organization key is replaced on its own step, not connected anew.
+  const orgStepReplaces = (provider: string) =>
+    (GATEWAYS as readonly string[]).includes(provider) &&
+    orgGateways[provider as GatewayId].connected;
   let page: ReactNode;
   if (organizationPage && !organizationAdmin) {
     page = (
@@ -305,7 +330,7 @@ export function WorkspaceModelsPage({
       <ConnectPickerPage
         target="organization"
         title="Connect account"
-        subtitle={`Everyone in ${organizationName} can use what you connect here.`}
+        subtitle={`Connect it once for ${organizationName}, then choose which workspaces can use it.`}
         codexAvailable
         grok={orgGrok.unavailable ? "not_enabled" : "available"}
         gateways={orgGateways}
@@ -313,15 +338,6 @@ export function WorkspaceModelsPage({
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect-org:${provider}`)}
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
-        workspaceOnly={
-          canManageConnections ? (
-            <WorkspaceOnlyRow
-              workspaceName={workspaceName}
-              personal={personal}
-              onOpen={() => nav.openView("connect-workspace")}
-            />
-          ) : null
-        }
       />
     ) : (
       <ConnectPickerPage
@@ -362,18 +378,125 @@ export function WorkspaceModelsPage({
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider))}
       />
     );
-  } else if (step?.organization) {
+  } else if (step && organizationAdmin && !account && !orgStepReplaces(step.provider)) {
+    // A new account: choose which workspaces can use it, then sign in or
+    // paste the key. "Owned by this workspace" (Advanced) connects through
+    // this workspace's own page instead.
     const provider = step.provider;
-    page =
-      provider === "codex" ? (
-        <OrgCodexConnectPage codex={orgCodex} places={orgCodexPlaces} onClose={backToList} />
-      ) : provider === "supergrok" ? (
+    const accessKind =
+      provider === "codex" || provider === "supergrok" ? provider : ORGANIZATION_KIND[provider];
+    const audience: ConnectAudience =
+      audiences[provider] ?? (step.organization ? EVERYONE : { kind: "workspace" });
+    const ownedHere = workspaceOwnedChoice(provider, {
+      canManageConnections,
+      personal,
+      workspaceName,
+      organizationName,
+    });
+    const signingIn =
+      provider === "codex"
+        ? Boolean(orgCodex.pending || codex.pending)
+        : provider === "supergrok"
+          ? Boolean(orgGrok.pending || grok.pending)
+          : false;
+    const fields = (
+      <ConnectAudienceFields
+        kind={accessKind}
+        organizationName={organizationName}
+        here={{ id: workspaceId, name: workspaceName, personal }}
+        workspaces={orgWorkspaces.workspaces}
+        value={audience.kind === "workspace" && !ownedHere ? EVERYONE : audience}
+        onChange={(next) => setAudiences((current) => ({ ...current, [provider]: next }))}
+        workspaceOwned={ownedHere}
+        disabled={signingIn}
+      />
+    );
+    const blockedReason = audienceBlockedReason(audience);
+    const limitAfterConnect = async (connectionId: string | null, isNew: boolean) => {
+      if (!connectionId || !isNew) return;
+      const applied = await applyConnectAudience(
+        client,
+        { organizationId: orgId, kind: accessKind, connectionId },
+        audience,
+      );
+      if (!applied) {
+        toast.error("Connected, but it couldn't be limited to those workspaces", {
+          description: "Every workspace can use it until you change Available in on its page.",
+        });
+      }
+    };
+    if (audience.kind === "workspace" && ownedHere) {
+      page =
+        provider === "codex" ? (
+          <CodexConnectPage
+            codex={codex}
+            places={codexPlaces}
+            onClose={backToList}
+            fields={fields}
+          />
+        ) : provider === "supergrok" ? (
+          <SuperGrokConnectPage
+            grok={grok}
+            places={grokPlaces}
+            onClose={backToList}
+            fields={fields}
+          />
+        ) : (
+          <ProviderConnectPage
+            key={provider}
+            state={gateways[provider]}
+            onClose={backToList}
+            onConnected={() => nav.openAccount(accountKey("gateway", provider))}
+            fields={fields}
+          />
+        );
+    } else if (provider === "codex") {
+      const existing = new Set(orgCodex.accounts.map((each) => each.id));
+      page = (
+        <OrgCodexConnectPage
+          codex={orgCodex}
+          places={orgCodexPlaces}
+          onClose={backToList}
+          fields={fields}
+          blockedReason={blockedReason}
+          onAccountConnected={(id) => limitAfterConnect(id, !existing.has(id ?? ""))}
+        />
+      );
+    } else if (provider === "supergrok") {
+      const existing = new Set(orgGrok.accounts.map((each) => each.id));
+      page = (
         <SuperGrokConnectPage
           grok={orgGrok}
           places={orgGrokPlaces}
           onClose={backToList}
-          footerStart={`Everyone in ${organizationName} can use it. You can limit it on the account page.`}
+          fields={fields}
+          blockedReason={blockedReason}
+          onAccountConnected={(id) => limitAfterConnect(id, !existing.has(id ?? ""))}
         />
+      );
+    } else {
+      page = (
+        <ProviderConnectPage
+          key={`org:${provider}`}
+          state={orgGateways[provider]}
+          onClose={backToList}
+          onConnected={() => nav.openAccount(accountKey("gateway", provider, true))}
+          fields={fields}
+          blockedReason={blockedReason}
+          afterSave={() => limitAfterConnect("current", true)}
+          footerStart={false}
+        />
+      );
+    }
+  } else if (step?.organization) {
+    // Signing an organization account in again, or replacing its key.
+    const provider = step.provider;
+    const back = account ? () => nav.openAccount(account) : backToList;
+    page =
+      provider === "codex" ? (
+        <OrgCodexConnectPage codex={orgCodex} places={orgCodexPlaces} onClose={back} />
+      ) : provider === "supergrok" ? (
+        <SuperGrokConnectPage grok={orgGrok} places={orgGrokPlaces} onClose={back} />
       ) : (
         <ProviderConnectPage
           key={`org:${provider}`}
@@ -384,11 +507,6 @@ export function WorkspaceModelsPage({
               : backToList()
           }
           onConnected={() => nav.openAccount(accountKey("gateway", provider, true))}
-          footerStart={
-            personal
-              ? `Everyone in ${organizationName} can use it in shared workspaces. Personal workspaces use their own keys.`
-              : `Everyone in ${organizationName} can use it. You can limit it on the account page.`
-          }
         />
       );
   } else if (step) {
@@ -464,11 +582,11 @@ export function WorkspaceModelsPage({
     );
   } else if (key?.provider === "gateway") {
     page = key.organization ? (
-      <ProviderConnectionPage
+      <OrganizationGatewayPage
         state={orgGateways[key.id]}
-        scopeName={labels.organization}
+        labels={labels}
         onBack={backToList}
-        onConnect={() => nav.openView(`connect-org:${key.id}`)}
+        onConnect={() => nav.openView(`connect-org:${key.id}`, account)}
         onEditAccess={() => nav.openView("model-access", account)}
       />
     ) : (
@@ -543,7 +661,7 @@ export function WorkspaceModelsPage({
               credits={credits}
               workspaceId={workspaceId}
               workspaceName={workspaceName}
-              scope={labels.organization}
+              scope={labels.everyone}
             />
             <CodexAccountRows codex={codex} places={codexPlaces} organization={codexPool} />
             <SuperGrokAccountRows grok={grok} places={grokPlaces} organization={grokPool} />
@@ -677,7 +795,7 @@ function OrganizationGatewayRow({
   return (
     <ProviderConnectionRow
       state={state}
-      scope={labels.organization}
+      scope={organizationReachLabel(labels, access.data)}
       setAside={
         reaches === false
           ? workspace.personal
@@ -686,6 +804,32 @@ function OrganizationGatewayRow({
           : null
       }
       onOpen={onOpen}
+    />
+  );
+}
+
+/** An organization key's page, tagged with where it's available. */
+function OrganizationGatewayPage({
+  state,
+  labels,
+  onBack,
+  onConnect,
+  onEditAccess,
+}: {
+  state: ProviderConnection;
+  labels: ModelsScopeLabels;
+  onBack: () => void;
+  onConnect: () => void;
+  onEditAccess: () => void;
+}) {
+  const access = useConnectionAccess({ ...state.accessTarget, enabled: state.connected });
+  return (
+    <ProviderConnectionPage
+      state={state}
+      scopeName={organizationReachLabel(labels, access.data)}
+      onBack={onBack}
+      onConnect={onConnect}
+      onEditAccess={onEditAccess}
     />
   );
 }
@@ -746,42 +890,41 @@ function workspaceOnlySubtitle({
     : `Choose what pays for models in ${workspaceName}. Only owners and admins of ${organizationName} can connect for everyone.`;
 }
 
-/** The secondary choice on Connect account: connect for this workspace only. */
-function WorkspaceOnlyRow({
-  workspaceName,
-  personal,
-  onOpen,
-}: {
-  workspaceName: string;
-  personal: boolean;
-  onOpen: () => void;
-}) {
-  return (
-    <Section title="Only this workspace" className="mt-8">
-      <SettingRowGroup>
-        <SettingNavRow
-          label={
-            personal
-              ? "Connect for your Personal workspace only"
-              : `Connect for ${workspaceName} only`
-          }
-          description={
-            personal
-              ? "Only you use it. API keys for your own chats go here. A Codex account connected here replaces the organization's in your Personal workspace."
-              : "For separate billing or keys for one team. A Codex account connected here replaces the organization's Codex accounts in this workspace."
-          }
-          onOpen={onOpen}
-        />
-      </SettingRowGroup>
-    </Section>
-  );
+/**
+ * The Advanced choice on a connect step: own the account by this workspace
+ * instead of the organization. Only where it is genuinely needed, and never
+ * where the API refuses it (SuperGrok in a Personal workspace).
+ */
+function workspaceOwnedChoice(
+  provider: string,
+  where: {
+    canManageConnections: boolean;
+    personal: boolean;
+    workspaceName: string;
+    organizationName: string;
+  },
+): { description: string } | null {
+  if (!where.canManageConnections) return null;
+  const organization = possessive(where.organizationName);
+  const here = where.personal ? "your Personal workspace" : where.workspaceName;
+  if (provider === "codex") {
+    return {
+      description: `${where.personal ? "Only you use it" : `Only ${here} uses it`}, and ${organization} Codex accounts are set aside there. Needed for Codex Apps, redeeming usage limit resets, or a team that pays with its own ChatGPT plan.`,
+    };
+  }
+  if (provider === "supergrok") {
+    return where.personal
+      ? null
+      : { description: `Only ${here} uses it. For a team that pays with its own SuperGrok plan.` };
+  }
+  return {
+    description: where.personal
+      ? "Only you use it. Organization API keys can't be used in Personal workspaces, so a key for your own chats is connected here."
+      : `Only ${here} uses it. For a team with its own key and bill, or models just for this workspace.`,
+  };
 }
 
-/**
- * For people who can't add accounts: who can, in one calm line. In a DEV
- * build it also shows where "Connect just for me" will go, clearly marked as
- * a preview; it is never a working control.
- */
+/** For people who can't add accounts: who can, in one calm line. */
 function WhoCanConnect({
   organizationName,
   personal,
@@ -796,26 +939,6 @@ function WhoCanConnect({
           ? `Only owners and admins of ${organizationName} can add accounts for everyone.`
           : `Only owners and admins of ${organizationName}, and admins of this workspace, can add accounts. Ask one of them to connect a subscription or an API key.`}
       </p>
-      {import.meta.env.DEV ? <ConnectJustForMePreview /> : null}
-    </div>
-  );
-}
-
-/** DEV only: where phase 2's "Connect just for me" goes. Not a working control. */
-function ConnectJustForMePreview() {
-  return (
-    <div
-      data-testid="connect-just-for-me-preview"
-      className="flex min-w-0 items-center gap-3 border-t border-border pt-3"
-    >
-      <UserIcon aria-hidden="true" className="size-4 shrink-0 text-fg-muted" />
-      <div className="min-w-0 flex-1">
-        <p className="m-0 text-sm font-medium text-fg">Connect just for me</p>
-        <p className="m-0 text-xs leading-4.5 text-fg-muted">
-          Your own subscription or key, for work you start in any workspace.
-        </p>
-      </div>
-      <MetaChip>Preview: coming soon</MetaChip>
     </div>
   );
 }
@@ -936,7 +1059,6 @@ export function ConnectPickerPage({
   onClose,
   onPick,
   onOpenConnected,
-  workspaceOnly,
 }: {
   /** Who what's connected is for: everyone in the organization, or this workspace. */
   target: "organization" | "workspace";
@@ -959,8 +1081,6 @@ export function ConnectPickerPage({
   onPick: (provider: ConnectChoice) => void;
   /** Opens a provider that is already connected. */
   onOpenConnected?: ((provider: GatewayId) => void) | undefined;
-  /** The secondary choice under the list: connect for this workspace only. */
-  workspaceOnly?: ReactNode;
 }) {
   const keysSkipPersonal = target === "organization" && personal;
   const choices: {
@@ -1005,7 +1125,7 @@ export function ConnectPickerPage({
               id === "anthropic" || id === "claude_subscription"
                 ? gateways[id]!.config.summary
                 : `Pay per token through ${gateways[id]!.config.title}`,
-            note: keysSkipPersonal ? "Used in shared workspaces" : undefined,
+            note: keysSkipPersonal ? "Not used in Personal workspaces" : undefined,
             connected: gateways[id]!.connected,
           }),
         )
@@ -1057,7 +1177,6 @@ export function ConnectPickerPage({
             )}
           </RowList>
         )}
-        {workspaceOnly}
       </div>
     </DetailPage>
   );

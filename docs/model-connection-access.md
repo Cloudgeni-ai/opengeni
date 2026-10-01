@@ -58,11 +58,18 @@ to a different provider or payment source.
 In the web app, Settings > Models is one page in the workspace's settings
 (there is no separate organization Models page; its old URL redirects). It
 shows one row per account this workspace can use, each tagged by who it is for
-("Everyone in <organization>", "This workspace only", "Only you"). Organization
-owners and admins connect for the whole organization by default, with "Only
-this workspace" as a secondary choice, and also see the organization's
-accounts that don't reach this workspace, muted with the reason. Each
-account's own page carries "Available in" and "Models it can serve"
+("Everyone in <organization>", "Selected workspaces", "Shared by
+<organization>" when the viewer can't read the policy, "This workspace only",
+"Only you"). Organization owners and admins connect organization accounts:
+the connect step asks which workspaces can use it, every workspace by default
+or "Only selected workspaces" (shared workspaces plus one all-or-nothing
+"Personal workspaces" choice, shown off with its reason for organization API
+keys), and saves that as the account's "Available in" right after connecting
+(`apps/web/src/components/models/connect-audience.tsx`; the connect routes
+take no policy, so it is a second request). Owning the account by the
+workspace instead is under Advanced. They also see the organization's accounts
+that don't reach this workspace, muted with the reason. Each account's own
+page carries "Available in" and "Models it can serve"
 (`apps/web/src/components/connection-access-settings.tsx`), edited on a form
 page. In a workspace the per-account model list shows only once an account is
 limited; the workspace-wide "Allowed models" row (the workspace policy) is the

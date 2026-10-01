@@ -1,4 +1,5 @@
 import { ClaudeMark, AnthropicMark, OpenRouterMark, GrokMark } from "@opengeni/react";
+import type { ModelConnectionAccessResponse } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState, type ComponentProps, type SVGProps } from "react";
 
@@ -64,12 +65,17 @@ export function ProviderTile({
 }
 
 /**
- * Who an account is for, as the one tag on its row and page: the whole
- * organization, this workspace, or only the person who connected it.
+ * Who an account is for, as the one tag on its row and page: the
+ * organization's workspaces (all, or the ones it was limited to), this
+ * workspace, or only the person who connected it.
  */
 export interface ModelsScopeLabels {
-  /** "Everyone in Acme". */
+  /** "Shared by Acme": an organization account whose "Available in" this viewer can't read. */
   organization: string;
+  /** "Everyone in Acme": an organization account every workspace can use. */
+  everyone: string;
+  /** "Selected workspaces": an organization account limited to some workspaces. */
+  selected: string;
   /** "This workspace only", or "Personal workspace only". */
   workspace: string;
   /** "Only you". */
@@ -78,10 +84,28 @@ export interface ModelsScopeLabels {
 
 export function modelsScopeLabels(organizationName: string, personal: boolean): ModelsScopeLabels {
   return {
-    organization: `Everyone in ${organizationName}`,
+    organization: `Shared by ${organizationName}`,
+    everyone: `Everyone in ${organizationName}`,
+    selected: "Selected workspaces",
     workspace: personal ? "Personal workspace only" : "This workspace only",
     user: "Only you",
   };
+}
+
+/**
+ * The tag of an organization account, from its "Available in": everyone, or
+ * selected workspaces. "Shared by Acme" until the policy is known.
+ */
+export function organizationReachLabel(
+  labels: ModelsScopeLabels,
+  access: ModelConnectionAccessResponse | null | undefined,
+): string {
+  if (!access) return labels.organization;
+  const { policy, personalWorkspacesSupported } = access;
+  return policy.allowedWorkspaces === null &&
+    (!personalWorkspacesSupported || policy.allowPersonalWorkspaces)
+    ? labels.everyone
+    : labels.selected;
 }
 
 /** "Not in use", in the usage column of an account new work here doesn't use. */

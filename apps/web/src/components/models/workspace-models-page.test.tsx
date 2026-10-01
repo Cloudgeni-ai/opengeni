@@ -120,7 +120,7 @@ const client = {
   requestJson: mock(
     async (_method: string, _path: string, _body?: unknown): Promise<unknown> => ({}),
   ),
-  getModelConnectionAccess: mock(async () => {
+  getModelConnectionAccess: mock(async (): Promise<unknown> => {
     throw new Error("must not read access for this account");
   }),
   listSuperGrokAccounts: mock(
@@ -149,6 +149,18 @@ const client = {
     allowedModels: null,
   })),
   getOrganizationModelProviderConnection: mock(async (): Promise<unknown> => null),
+  upsertOrganizationModelProviderConnection: mock(
+    async (): Promise<unknown> => ({ id: "org-key", status: "active", version: 1 }),
+  ),
+  getOrganizationAdministrationOverview: mock(async () => ({
+    organization: { id: "organization-a", name: "Acme" },
+    roles: [],
+    workspaces: [
+      { id: "workspace-a", name: "Design preview" },
+      { id: "workspace-b", name: "Platform" },
+    ],
+  })),
+  updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
   listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
   listOrganizationSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
@@ -482,9 +494,10 @@ describe("Models list", () => {
       // This workspace's account, then the organization's pool, muted.
       expect(view.container.querySelectorAll("[data-slot=list-row]")).toHaveLength(2);
       expect(text).toContain("Not in use");
-      // Every account says who it is for.
+      // Every account says who it is for. Without organization rights the
+      // organization's "Available in" can't be read, so it says who shares it.
       expect(text).toContain("This workspace only");
-      expect(text).toContain("Everyone in Acme");
+      expect(text).toContain("Shared by Acme");
     } finally {
       await cleanup(view);
     }
@@ -812,13 +825,13 @@ describe("Codex account page", () => {
     };
     const view = await render();
     try {
-      expect(view.container.textContent).toContain("Everyone in Acme");
+      expect(view.container.textContent).toContain("Shared by Acme");
       await act(async () =>
         view.container.querySelector<HTMLElement>("[data-row-action]")!.click(),
       );
       await flush();
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Everyone in Acme");
+      expect(text).toContain("Shared by Acme");
       expect(text).toContain("Managed by the owners and admins of Acme.");
       // No green "Connected", no "Organization" chip, no aside repeating the header.
       expect(text).not.toContain("Connected");
@@ -952,6 +965,13 @@ describe("OpenGeni credits", () => {
   });
 });
 
+const openPolicy = {
+  allowedModels: null,
+  allowedWorkspaces: null,
+  allowPersonalWorkspaces: true,
+  version: 2,
+};
+
 describe("One Models page for the organization and the workspace", () => {
   const orgAccounts = {
     accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
@@ -970,9 +990,12 @@ describe("One Models page for the organization and the workspace", () => {
   test("owners and admins see the organization's accounts, set aside here, and open their page", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
-    client.getModelConnectionAccess.mockImplementation(async () => {
-      throw new Error("the reason is known without reading access");
-    });
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: true,
+    }));
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
@@ -992,7 +1015,7 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("Connect account connects for everyone first, with this workspace as its own page", async () => {
+  test("Connect account connects for the organization, every workspace by default", async () => {
     organizationAdmin = true;
     routeOrganizationReads();
     const view = await render();
@@ -1001,29 +1024,114 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
       expect(view.container.textContent).toContain(
-        "Everyone in Acme can use what you connect here.",
+        "Connect it once for Acme, then choose which workspaces can use it.",
       );
+      // No peer "this workspace only" choice on the picker any more.
+      expect(view.container.textContent).not.toContain("Connect for Design preview only");
       const codexRow = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")]
         .find((row) => row.textContent?.includes("Codex"))!
         .querySelector<HTMLElement>("[data-row-action]")!;
       await act(async () => codexRow.click());
       await flush();
-      // The organization's Connect Codex, not this workspace's.
-      expect(view.container.textContent).toContain(
+      const text = view.container.textContent ?? "";
+      // The organization's Connect Codex, every workspace chosen.
+      expect(text).toContain(
         "Sign in with the ChatGPT account whose plan pays for work across Acme.",
       );
-      expect(view.container.textContent).not.toContain(
-        "Use this account instead of the organization's subscriptions?",
-      );
-      await act(async () => navigateTo({ view: "connect" }));
+      expect(text).toContain("Which workspaces can use it");
+      expect(text).toContain("All workspaces in Acme");
+      expect(text).toContain("including new ones and everyone's Personal workspace");
+      expect(
+        view.container.querySelector<HTMLElement>('[data-slot=choice-card][data-state="checked"]')
+          ?.textContent,
+      ).toContain("All workspaces in Acme");
+      // Owning it by this workspace is tucked under Advanced.
+      expect(text).toContain("Advanced");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Only selected workspaces lists the organization's workspaces and Personal workspaces as one choice", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:codex" }));
       await flush();
-      await act(async () => button(view.container, /Connect for Design preview only/)!.click());
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
+      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      await act(async () => selected.click());
       await flush();
-      expect(view.container.querySelector("h1")?.textContent).toBe(
-        "Connect for Design preview only",
-      );
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Design preview (this workspace)");
+      expect(text).toContain("Platform");
+      expect(text).toContain("Personal workspaces");
+      expect(text).toContain("It's all of them or none.");
+      // Admins only ever see shared workspaces here, never someone's Personal one.
+      expect(client.getOrganizationAdministrationOverview).toHaveBeenCalledWith("organization-a");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("an organization key can't be offered to Personal workspaces, and its choice is saved after connecting", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:openrouter" }));
+      await flush();
       expect(view.container.textContent).toContain(
-        "For a team that needs its own billing or keys.",
+        "Organization API keys can't be used in Personal workspaces.",
+      );
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=choice-card]"),
+      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      await act(async () => selected.click());
+      await flush();
+      const personal = [
+        ...view.container.querySelectorAll<HTMLElement>("[role=checkbox], input[type=checkbox]"),
+      ].find((box) => box.closest("div")?.textContent?.includes("Personal workspaces"));
+      expect(
+        personal?.hasAttribute("disabled") || personal?.getAttribute("aria-disabled") === "true",
+      ).toBe(true);
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="OpenRouter API key"], input[aria-label*="OpenRouter"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          "sk-or-test",
+        );
+        const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+        const props = (
+          input as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLInputElement }) => void }
+          >
+        )[reactPropsKey ?? ""];
+        props?.onChange?.({ target: input });
+      });
+      await act(async () => button(view.container, "Connect OpenRouter")!.click());
+      await flush();
+      await flush();
+      expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalled();
+      expect(client.updateModelConnectionAccess).toHaveBeenCalledWith(
+        {
+          scope: "organizations",
+          scopeId: "organization-a",
+          kind: "openrouter",
+          connectionId: "current",
+        },
+        { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: false },
       );
     } finally {
       await cleanup(view);
@@ -1056,8 +1164,6 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).toContain(
         "Only owners and admins of Acme, and admins of this workspace, can add accounts.",
       );
-      // The phase 2 preview is DEV only and never a control.
-      expect(view.container.querySelector("[data-testid=connect-just-for-me-preview]")).toBeNull();
       expect(client.requestJson).not.toHaveBeenCalledWith(
         "GET",
         "/v1/organizations/organization-a/codex/accounts",

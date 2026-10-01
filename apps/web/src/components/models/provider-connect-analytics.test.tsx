@@ -9,6 +9,7 @@ import {
   ReplaceKeyDialog,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
+import { modelsScopeLabels } from "./models-ui";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.
@@ -77,11 +78,7 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   const places: SuperGrokPlaces = {
     scopeName: "Local",
     organizationName: "Organization",
-    scope: {
-      organization: "Everyone in Organization",
-      workspace: "This workspace only",
-      user: "Only you",
-    },
+    scope: modelsScopeLabels("Organization", false),
     openAccount: () => undefined,
     openConnect: () => undefined,
     openAccess: () => undefined,

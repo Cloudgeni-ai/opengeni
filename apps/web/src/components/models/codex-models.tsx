@@ -32,6 +32,7 @@ import {
   ModelsFormPage,
   NOT_IN_USE,
   ProviderTile,
+  organizationReachLabel,
   RenameAccountDialog,
   resetsLabel,
   type ModelsScopeLabels,
@@ -269,12 +270,12 @@ export function CodexAccountRows({
         {organization.codex.accounts.map((account) => {
           const live = sharedInUse.find((candidate) => candidate.id === account.id);
           return live ? (
-            <CodexRow
+            <SharedCodexInUseRow
               key={account.id}
               codex={codex}
               account={live}
               places={places}
-              onOpen={() => organization.openAccount(account.id)}
+              organization={organization}
             />
           ) : (
             <SharedCodexSetAsideRow
@@ -323,6 +324,35 @@ export function CodexAccountRows({
   );
 }
 
+/** An organization account new work here uses, tagged with where it's available. */
+function SharedCodexInUseRow({
+  codex,
+  account,
+  places,
+  organization,
+}: {
+  codex: CodexSubscriptions;
+  account: CodexAccount;
+  places: CodexPlaces;
+  organization: OrganizationCodexPool;
+}) {
+  const access = useConnectionAccess({
+    client: organization.codex.client,
+    organizationId: organization.codex.organizationId,
+    kind: "codex",
+    connectionId: account.id,
+  });
+  return (
+    <CodexRow
+      codex={codex}
+      account={account}
+      places={places}
+      scopeLabel={organizationReachLabel(places.scope, access.data)}
+      onOpen={() => organization.openAccount(account.id)}
+    />
+  );
+}
+
 /**
  * An organization account new work here doesn't use, with the plain reason:
  * this workspace has its own accounts, or the account isn't available here.
@@ -346,7 +376,6 @@ function SharedCodexSetAsideRow({
     organizationId: organization.codex.organizationId,
     kind: "codex",
     connectionId: account.id,
-    enabled: !ownInUse,
   });
   const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
   const reason = ownInUse
@@ -358,7 +387,11 @@ function SharedCodexSetAsideRow({
     <ListRow
       leading={<ProviderTile provider="codex" size="lg" />}
       title={codexAccountName(account)}
-      meta={[places.scope.organization, planLabel(account.plan, "ChatGPT"), reason]}
+      meta={[
+        organizationReachLabel(places.scope, access.data),
+        planLabel(account.plan, "ChatGPT"),
+        reason,
+      ]}
       cells={{ usage: NOT_IN_USE }}
       menu={menu}
       indicator={
@@ -597,11 +630,14 @@ function CodexRow({
   codex,
   account,
   places,
+  scopeLabel,
   onOpen,
 }: {
   codex: CodexSubscriptions;
   account: CodexAccount;
   places: CodexPlaces;
+  /** Overrides the tag, for an organization account whose "Available in" is known. */
+  scopeLabel?: string | undefined;
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
@@ -617,7 +653,7 @@ function CodexRow({
       title={codexAccountName(account)}
       titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
       meta={[
-        organizationAccount ? places.scope.organization : places.scope.workspace,
+        scopeLabel ?? (organizationAccount ? places.scope.organization : places.scope.workspace),
         planLabel(account.plan, "ChatGPT"),
         account.appsDesignated ? "Codex Apps" : null,
         // Resets can only be redeemed on the account's own page, which org accounts don't have here.
@@ -1067,11 +1103,17 @@ export function CodexConnectPage({
   places,
   onClose,
   footerStart,
+  fields,
+  blockedReason,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
   onClose: () => void;
   footerStart?: ReactNode;
+  /** Fields above the sign-in, such as which workspaces can use the account. */
+  fields?: ReactNode;
+  /** Why the sign-in can't start yet (a choice above is incomplete). */
+  blockedReason?: string | null;
 }) {
   const source = codex.source;
   // Connecting while the organization's pool is in use asks which to use.
@@ -1095,9 +1137,11 @@ export function CodexConnectPage({
       onClose={onClose}
       submitLabel={signingIn ? "Open ChatGPT again" : "Sign in with ChatGPT"}
       pendingLabel="Opening ChatGPT…"
-      submitDisabled={!codex.canManage || codex.busy || connected}
+      submitDisabled={!codex.canManage || codex.busy || connected || Boolean(blockedReason)}
       disabledReason={
-        codex.canManage ? undefined : "Only people who can manage connections can add an account."
+        codex.canManage
+          ? (blockedReason ?? undefined)
+          : "Only people who can manage connections can add an account."
       }
       footerStart={footerStart}
       onSubmit={async () => {
@@ -1122,6 +1166,7 @@ export function CodexConnectPage({
       }}
     >
       <FieldStack>
+        {fields}
         {askSource ? (
           <ChoiceCards
             label="Use this account instead of the organization's subscriptions?"

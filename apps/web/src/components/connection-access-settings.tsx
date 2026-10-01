@@ -327,14 +327,21 @@ export function ConnectionAccessFormPage({
             {data.personalWorkspacesSupported ? (
               <CheckboxField
                 label="Personal workspaces"
-                description="Everyone's private Personal workspace can use it too."
+                description="Everyone's private Personal workspace, yours too. It's all of them or none."
                 disabled={disabled}
                 checked={draft.allowPersonalWorkspaces}
                 onCheckedChange={(checked) =>
                   setDraft({ ...draft, allowPersonalWorkspaces: checked })
                 }
               />
-            ) : null}
+            ) : (
+              <CheckboxField
+                label="Personal workspaces"
+                description="Organization API keys can't be used in Personal workspaces."
+                disabled
+                checked={false}
+              />
+            )}
           </div>
         ) : null}
         <div className="flex min-w-0 flex-col gap-3">
@@ -404,7 +411,7 @@ export function ConnectionAccessFormPage({
       title={organization ? `Where ${name} can be used` : `Models ${name} can serve`}
       description={
         organization
-          ? "Only these workspaces can use it for new work, and only for these models. Work already running keeps going."
+          ? "Only these workspaces can use it for new work, and only for these models. Work already running keeps going. The organization's owners and admins can see and change it wherever it's used."
           : "New work, including chats pinned to this account, can only use these models. Work already running keeps going."
       }
       backLabel={name}

@@ -1431,11 +1431,20 @@ export function ProviderConnectPage({
   onClose,
   onConnected,
   footerStart,
+  fields,
+  blockedReason,
+  afterSave,
 }: {
   state: ProviderConnection;
   onClose: () => void;
   onConnected: () => void;
   footerStart?: ReactNode;
+  /** Fields above the key, such as which workspaces can use it. */
+  fields?: ReactNode;
+  /** Why the key can't be saved yet (a choice above is incomplete). */
+  blockedReason?: string | null;
+  /** Runs once the key is saved, before its page opens (the form stays pending). */
+  afterSave?: (() => Promise<void>) | undefined;
 }) {
   const { config } = state;
   const [key, setKey] = useState("");
@@ -1459,10 +1468,10 @@ export function ProviderConnectPage({
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
-      submitDisabled={!key.trim() || !state.canManageConnection}
+      submitDisabled={!key.trim() || !state.canManageConnection || Boolean(blockedReason)}
       disabledReason={
         state.canManageConnection
-          ? undefined
+          ? (blockedReason ?? undefined)
           : "Only people who can manage connections can add a key."
       }
       footerStart={
@@ -1471,10 +1480,15 @@ export function ProviderConnectPage({
           ? "Shared with your organization’s workspaces. You can limit access on the account page."
           : undefined)
       }
-      onSubmit={async () => await state.saveKey(key)}
+      onSubmit={async () => {
+        const saved = await state.saveKey(key);
+        if (saved) await afterSave?.();
+        return saved;
+      }}
       onSubmitted={onConnected}
     >
       <FieldStack>
+        {fields}
         <Field
           label={config.credentialLabelText ?? "API key"}
           hint={`${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`}

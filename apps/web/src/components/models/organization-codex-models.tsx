@@ -8,7 +8,13 @@ import {
   ConnectionAccessRows,
   useConnectionAccess,
 } from "@/components/connection-access-settings";
-import { ModelsFormPage, ProviderTile, RenameAccountDialog } from "@/components/models/models-ui";
+import {
+  ModelsFormPage,
+  ProviderTile,
+  RenameAccountDialog,
+  organizationReachLabel,
+  type ModelsScopeLabels,
+} from "@/components/models/models-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { Button } from "@/components/ui/button";
@@ -47,11 +53,12 @@ export function reachesWorkspace(
 export interface OrgCodexPlaces {
   organizationName: string;
   openAccount: (accountId: string) => void;
-  openConnect: () => void;
+  /** Opens the connect step; with an account, to sign that account in again. */
+  openConnect: (reconnectAccountId?: string) => void;
   openAccess: (accountId: string) => void;
   backToList: () => void;
-  /** "Everyone in Acme": who the account is for, in the header meta. */
-  scopeLabel: string;
+  /** The tags for who an account is for; its page says everyone or selected workspaces. */
+  scope: ModelsScopeLabels;
 }
 
 export function OrgCodexAccountPage({
@@ -124,7 +131,7 @@ function OrgCodexAccountDetail({
         meta={[
           planLabel(account.plan, "ChatGPT"),
           account.email && account.email !== name ? account.email : null,
-          places.scopeLabel,
+          organizationReachLabel(places.scope, access.data),
         ]}
         actions={
           <MoreMenu label={`More actions for ${name}`}>
@@ -150,7 +157,7 @@ function OrgCodexAccountDetail({
                   type="button"
                   size="sm"
                   variant="default"
-                  onClick={places.openConnect}
+                  onClick={() => places.openConnect(account.id)}
                   className="rounded-[10px] pointer-coarse:h-11"
                 >
                   Sign in again
@@ -264,10 +271,19 @@ export function OrgCodexConnectPage({
   codex,
   places,
   onClose,
+  fields,
+  blockedReason,
+  onAccountConnected,
 }: {
   codex: OrganizationCodexSubscriptions;
   places: OrgCodexPlaces;
   onClose: () => void;
+  /** Fields above the sign-in, such as which workspaces can use the account. */
+  fields?: ReactNode;
+  /** Why the sign-in can't start yet (a choice above is incomplete). */
+  blockedReason?: string | null;
+  /** Runs once the account is connected, before its page opens, even if this page was left. */
+  onAccountConnected?: ((accountId: string | null) => Promise<void> | void) | undefined;
 }) {
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
@@ -285,28 +301,31 @@ export function OrgCodexConnectPage({
       onClose={onClose}
       submitLabel={signingIn ? "Open ChatGPT again" : "Sign in with ChatGPT"}
       pendingLabel="Opening ChatGPT…"
-      submitDisabled={codex.busy || connected}
+      submitDisabled={codex.busy || connected || Boolean(blockedReason)}
+      disabledReason={blockedReason ?? undefined}
       onSubmit={async () => {
         if (signingIn && codex.pending) {
           window.open(codex.pending.verificationUri, "_blank", "noopener,noreferrer");
           return false;
         }
         await codex.connect({
-          onConnected: (accountId) => {
-            if (!active.current) return;
-            setConnected(true);
-            if (accountId) places.openAccount(accountId);
-            else places.backToList();
-          },
+          onConnected: (accountId) =>
+            void (async () => {
+              await onAccountConnected?.(accountId);
+              if (!active.current) return;
+              setConnected(true);
+              if (accountId) places.openAccount(accountId);
+              else places.backToList();
+            })(),
         });
         return false;
       }}
     >
       <FieldStack>
+        {fields}
         <p className="text-sm text-fg-muted">
           ChatGPT opens in a new tab and asks for a code, which shows here. Opengeni never sees your
-          password. Everyone in {places.organizationName} can use it until you limit it on the
-          account page.
+          password.
         </p>
         {codex.pending ? (
           <CodexDeviceCodePanel
