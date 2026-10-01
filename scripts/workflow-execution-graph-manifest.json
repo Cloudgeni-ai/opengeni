@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "c1e75f5ecc6c26961cb86a508744e41e1db43eeae9b2decad7c4e038a9a8b447"
+      "sha256": "6af530fe2177486a6660a4fa5384fdca3b686584865df91324f25bc30c49e6b1"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -54,7 +54,7 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "8d13c059295343b1238467af8ddec4cf750cdef48ac3e62c645a36839a21fdb8"
+      "sha256": "a1e47042ec795b4f9ebe00ebffceafa739709a41d88905bc35228eea9ea25a9b"
     },
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
@@ -70,7 +70,7 @@
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "e5b2603dbdeec1a5fe59a8e746f63acfab066f1b2cd3903e3f64cc6238e8f88c"
+      "sha256": "73b7039e8c1a1c98959ac06889ce29d30ec28f6e89b8fe3c69dd5f3ebadfbab3"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
@@ -82,7 +82,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "768babbcc762a889b872aa8548766196aa6cdb93682a5d223689ef70a0cf50b0"
+      "sha256": "374bf8dc74ce8cd3aefcc5a700f404655b00a3559d8d9f5eb7243f1644f94cfe"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -658,6 +658,12 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
+      "step": "Frozen Version PR effective registry export closure",
+      "sha256": "1879765b67e4e6ba9cb3b709ef4326f69900717ee7e562a017adf20b0221c9e1"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
       "step": "Install dependencies",
       "sha256": "fb4b6b8c7c9a00df764a5355b27033e20df9cf1b10c2af60979b8487fb762cd3"
     },
@@ -702,6 +708,12 @@
       "job": "package-contracts",
       "step": "React Native Metro to Hermes session bundle",
       "sha256": "9cf92763ca740af1fd88793a21615322f6955f480ffdfda9aa05fa7cc65acfbe"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
+      "step": "Registry dependency export guard regression",
+      "sha256": "ab247cd4f72383efbfae8b89f434f58df96167b4df33ec6fa9744e1c10e49177"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -917,7 +929,13 @@
       "workflow": ".github/workflows/publish-packages.yml",
       "job": "publish",
       "step": "Verify publishable closure",
-      "sha256": "c18d0e2815c7263404fd08bd381f6afc66620c8bbba61f13828a0f6f6b22eda4"
+      "sha256": "26ce5505f5f67cfd0a8e473f918cc3aff4f986be892cf61626bfe7c06c34e45b"
+    },
+    {
+      "workflow": ".github/workflows/publish-packages.yml",
+      "job": "publish",
+      "step": "Verify registry dependency exports from packed and published packages",
+      "sha256": "7986bbc8ce65680397fe7eaa11add0cbf0778bf62bf0e45fef71547b85d7dc18"
     },
     {
       "workflow": ".github/workflows/reconcile-production-packages.yml",
@@ -1192,6 +1210,12 @@
     {
       "workflow": ".github/workflows/release-embedded.yml",
       "job": "release",
+      "step": "Verify registry dependency exports from packed and published packages",
+      "sha256": "618c275ccf6d73f0317519b893998532c78e28e1e7bc428a8016d97a6d790858"
+    },
+    {
+      "workflow": ".github/workflows/release-embedded.yml",
+      "job": "release",
       "step": "Write complete source-bound BOM",
       "sha256": "7a81f29fa28868f56925bdcca5c2193b5e8e09b518a79b19a24e835eaaf58439"
     },
@@ -1344,6 +1368,12 @@
       "job": "publish",
       "step": "Validate release identity and acceptance receipts",
       "sha256": "b6c628ae3ce619cc5b25e78c5913185f73efdb9e87bd2063ae0704e82db7bba4"
+    },
+    {
+      "workflow": ".github/workflows/release.yml",
+      "job": "publish",
+      "step": "Verify registry dependency exports from packed and published packages",
+      "sha256": "cfec609fd7e86448a7df37dc3feab8ca8b037dfdb17ca5d0b23ee04cf0f4e8cd"
     },
     {
       "workflow": ".github/workflows/release.yml",

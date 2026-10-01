@@ -572,6 +572,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
 
       - name: Restore the controller after source publication
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -598,6 +599,11 @@ jobs:
           OPENGENI_RELEASE_PACKAGE_PHASE: verify
           OPENGENI_RELEASE_PACKAGE_RECEIPT: ${{ github.workspace }}/evidence/release-packages-verified.json
         run: cd .release/controller && bun scripts/verify-release-packages.ts
+
+      - name: Verify registry dependency exports from packed and published packages
+        run: |
+          bun run test:registry-dependency-exports --candidate
+          bun run test:registry-dependency-exports --published-source
 
       - name: Verify complete package evidence
         env:

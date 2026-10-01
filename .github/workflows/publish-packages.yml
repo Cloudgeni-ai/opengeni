@@ -136,6 +136,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
 
       - name: Reconcile exact registry package identity
         env:

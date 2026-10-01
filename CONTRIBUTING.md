@@ -106,12 +106,27 @@ Two publish-coherence rules learned the hard way (all versions are 0.x):
 `bun run test:publish-consumer` proves a local release train: its sibling tarballs
 and overrides intentionally do not prove compatibility with published dependencies.
 Build packages, then run `bun run test:effective-dependency-exports` before
-publication. This stages the selected consumer dependency closure and exposes
-ordinary npm range resolution through a read-only loopback registry: existing
-exact versions use integrity-checked npm tarballs, while genuinely new versions
-use the cut's candidate tarballs. Existing versions must match all shipped local
-files (JSON key ordering is normalized); changed bytes without a new version
-fail. No workspace links or install overrides substitute an invalid range.
+publication with Node/npm available. Candidate packing uses `npm pack` with
+scripts disabled to preserve publication file/ignore semantics. This stages
+the selected consumer dependency closure and exposes ordinary npm range
+resolution through a read-only loopback registry: existing dependency versions
+use integrity-checked immutable npm tarballs, while genuinely new versions use
+the cut's candidate tarballs and their pending stable `latest` tags. Each root
+consumer installs its locally packed candidate, including when that root's
+version already exists on npm, so registry root bytes cannot hide local imports.
+Shipped source, semantic manifest, and non-generated asset drift without a new
+version fail. Order-insensitive JSON metadata is normalized; conditional
+`exports`/`imports` order is preserved. No workspace links or install overrides
+substitute an invalid range.
+
+Generated `dist` `.js`/`.d.ts` files and matching maps outside asset subtrees are
+not required to be byte-identical to a published build: the current tsup entry
+expansion can depend on filesystem ordering even for identical source. This does
+not assert compiled runtime equivalence or replace a reproducible-build check. The export
+proof instead runs the actual local root build against immutable published
+dependency bytes. Source drift is only detectable for source files actually
+shipped in the package; extending generated-output or build-input provenance
+checks is separate work.
 Frozen Version PR CI and stable publication run this effective guard before any
 publish. Ordinary PRs run the hermetic regression because pending changesets do
 not yet represent frozen package versions.
@@ -122,16 +137,19 @@ sibling candidates, links, or overrides. Build packages first. `--published-sour
 instead installs exact workspace versions from npm; `--published` checks current
 `latest`, or use `--package @opengeni/react@7.4.0` to reproduce a historical failure.
 
-The stable package-publication workflow additionally runs registry-only candidate
-and exact-published modes **after** registry reconciliation. These postpublication
-checks fail on an incoherent published closure but do not undo an npm publish.
+Every stable publication route uses the shared `release:publish` prepublication
+guard with its admitted publication set. The stable workflows additionally run
+registry-only candidate and exact-published modes **after** registry reconciliation.
+These postpublication checks fail on an incoherent published closure but do not
+undo an npm publish.
 Running a registry-only candidate before its prerequisite versions are published
 fails intentionally, so this is not a pre-publication gate for an unpublished
 release train. Ordinary CI runs the hermetic missing-export regression.
 
 Both modes test normal resolution and the lowest **published** compatible version
-of each direct `@opengeni/*` runtime dependency. Browser Vite builds retain all
-exports of the selected client entrypoints; Node imports cover the Connect,
+of each direct `@opengeni/*` runtime dependency; the effective mode also admits
+genuinely new versions from the intended publication set. Browser Vite builds
+retain all exports of the selected client entrypoints; Node imports cover the Connect,
 contracts, SDK, and Codemode profiles. Initial coverage is bounded to the explicit
 profiles in `scripts/test-registry-dependency-exports.ts`: not every package,
 subpath, conditional export, intermediate semver version, optional peer behavior,
