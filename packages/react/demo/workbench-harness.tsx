@@ -8,10 +8,11 @@ import {
 } from "@opengeni/react";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
-import "./workbench-peers";
+import { enableWorkbenchDemoPeers } from "./workbench-peers";
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
+enableWorkbenchDemoPeers();
 
 /* ----------------------------------------------------------------------------
    M5 workbench harness (static, fixture-driven) — the Changes tab (windowed

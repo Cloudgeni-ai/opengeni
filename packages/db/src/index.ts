@@ -11,7 +11,11 @@ export {
   readSessionFileAttachments,
   type SessionAttachmentReadAccess,
 } from "./session-file-attachments";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  sessionCreateConnectionSelectionFailure,
+} from "./mcp-account-bindings";
+export { SessionCreateConnectionSelectionUnavailableError } from "./mcp-account-bindings";
 import {
   childTerminalResultFinalAnswer,
   childTerminalResultFinalAnswerSequences,
@@ -20578,11 +20582,13 @@ export class SessionVariableSetSelectionUnavailableError extends Error {
   }
 }
 
-async function translateSessionVariableSetSelectionCreateError(
+async function translateSessionCreateError(
   db: Database,
   input: SessionCreateInput,
   error: unknown,
 ): Promise<never> {
+  const connectionFailure = sessionCreateConnectionSelectionFailure(error);
+  if (connectionFailure) throw connectionFailure;
   if (!isSessionVariableSetSelectionFkViolation(error) || !input.subjectId) throw error;
 
   // The failed create transaction, including its session row and projection
@@ -33724,7 +33730,8 @@ function metadataWithAgentLearningCreateIdentity(
 
 const SESSION_CREATE_AGENT_CONFIG_METADATA_KEY = "_opengeni_session_create_agent_config_v1";
 
-function metadataWithAgentConfigCreateIdentity(
+/** Canonical creation metadata shared with strict generated-session admission. */
+export function metadataWithAgentConfigCreateIdentity(
   metadata: Record<string, unknown>,
   config: ResolvedAgentConfig | null | undefined,
 ): Record<string, unknown> {
@@ -34359,7 +34366,7 @@ export async function createSession(db: Database, input: SessionCreateInput): Pr
         ),
     );
   } catch (error) {
-    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+    return await translateSessionCreateError(db, input, error);
   }
   if (result.denied) {
     // Throw only after withRlsContext's outer transaction commits the denial.
@@ -34396,7 +34403,7 @@ export async function createSessionWithIdempotencyKeyResult(
         ),
     );
   } catch (error) {
-    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+    return await translateSessionCreateError(db, input, error);
   }
 }
 
@@ -45395,6 +45402,11 @@ export interface AcquireLeaseInput {
   // durable capture-and-drain rotation, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
+  /** Deployment/workspace pins select only a cold-create image. Reuse preserves
+   * the existing warming/warm/draining group's image under the lease row lock.
+   * Omission retains required image matching for explicit image changes (B3).
+   * Capture, rotation, epoch and rig-version fences remain independent. */
+  imagePolicy?: "require_match" | "new_creates_only";
   /** Direct control of an already-owned interaction instance. Admit only that
    * live provider, retaining its image across deployment changes. Never spawn
    * or rotate a replacement for this request. Capture/rotation fences still apply. */
@@ -47056,7 +47068,7 @@ async function acquireLeaseOnce(
 
         // -- SHARED STATE CONFLICT (B3 image + M3 rig): a LIVE box (warm/draining/warming)
         // was created under a specific image AND rig version. If this run resolves a
-        // DIFFERENT image OR a DIFFERENT rig version (each checked only when both sides are
+        // DIFFERENT required image OR a DIFFERENT rig version (each checked only when both sides are
         // known), the one shared filesystem cannot serve both. Under the held row lock we
         // count the OTHER holders (not this exact (kind, holderId) — an idempotent retry of
         // our own holder is not a rival):
@@ -47068,11 +47080,13 @@ async function acquireLeaseOnce(
         //   - OTHER holders present: REFUSE. Throw — recreating would yank the running
         //     filesystem out from under the other sessions. Image conflict is reported first
         //     so its (pre-rig) error is unchanged for the image-only case.
-        // Each axis is enforced only when BOTH sides are known; a cold row / a legacy null /
+        // Deployment pins (new_creates_only) retain the live image instead. Each required
+        // axis is enforced only when BOTH sides are known; a cold row / a legacy null /
         // an unset input never conflicts (the selfhosted path passes neither; a rig-less run
         // passes no rigVersionId, so it never stamps or conflicts on rig).
         const imageConflict =
           input.retainedInstanceId === undefined &&
+          input.imagePolicy !== "new_creates_only" &&
           image !== null &&
           row.image !== null &&
           row.image !== image;
@@ -47149,7 +47163,8 @@ async function acquireLeaseOnce(
         // -- cold: WIN the cold->warming CAS (C1). Exactly one winner under the
         // held row lock; concurrent arrivals serialize behind us and see warming.
         // The image (B3) is (re-)stamped on the CAS so the box the spawner cold-creates
-        // records the image it runs — for a fresh cold row or a solo-recreate above.
+        // records the image it runs — for a fresh cold row or a successor after
+        // rotation/reaping. Deployment pins do not relabel a reused live box.
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
           // An audited system decision to continue on an EMPTY workspace makes
@@ -86060,6 +86075,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./codemode-operations";
 export * from "./browser-sessions";
+export * from "./browser-deadline-checkpoints";
 export * from "./computer-sessions";
 export * from "./browser-identities";
 export * from "./browser-state-artifacts";

@@ -420,6 +420,10 @@ recovery of the same turn, not creation or charging of another continuation.
   a goal that the user paused. Only a goal paused by the continuation ceiling
   (`max_auto_continuations`) is resumed by new input, because that pause is
   pacing rather than intent.
+- Terminal sessions skip catalog/model validation entirely. An eligible goal
+  whose inherited model is missing, retired, or disallowed pauses visibly with
+  `limits` and a model-specific rationale. It never silently chooses another
+  model or retries a deterministic selection error through Temporal.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
   no model polling or synthetic human message is used.

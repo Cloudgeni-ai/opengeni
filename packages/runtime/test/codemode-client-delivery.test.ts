@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -16,6 +16,8 @@ import {
   type ManagedCodemodeClient,
 } from "../src/sandbox/codemode-client";
 import { withCodemodeTokenEnvironment } from "../src/sandbox/codemode-token";
+import { ModalCommandStartPreDispatchUnavailableError } from "../src/sandbox/providers/modal-command-router-wire";
+import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
 
 // Emulate the managed workspace beneath a private host directory. CI runners
 // are intentionally unprivileged and must never need to create /workspace.
@@ -48,7 +50,12 @@ async function shell(cmd: string, environment: Record<string, string> = {}) {
   return { stdout, stderr, exitCode };
 }
 
-function fileSession(corrupt = false, failDelete = false, staged: string[] = []) {
+function fileSession(
+  corrupt = false,
+  failDelete = false,
+  staged: string[] = [],
+  deleted: string[] = [],
+) {
   return {
     createEditor: () => ({
       createFile: async ({ path, diff }: { path: string; diff: string }) => {
@@ -57,10 +64,22 @@ function fileSession(corrupt = false, failDelete = false, staged: string[] = [])
         await writeFile(path, diff.slice(1) + (corrupt ? "corrupt" : "\n"));
       },
       deleteFile: async ({ path }: { path: string }) => {
+        deleted.push(path);
         if (failDelete) throw new Error("provider delete unavailable");
         await rm(path, { force: true });
       },
     }),
+  };
+}
+
+function cleanupClient(release: string): ManagedCodemodeClient {
+  return {
+    version: 1,
+    files: {
+      ogtool: `#!/usr/bin/env node\nconsole.log(${JSON.stringify(release)});\n`,
+      "client.mjs": `export const release = ${JSON.stringify(release)};\n`,
+      "package.json": '{"type":"commonjs"}\n',
+    },
   };
 }
 
@@ -148,17 +167,171 @@ describe("managed release-owned Codemode delivery", () => {
       await installManagedCodemodeClient(fileSession(false, true, staged) as never, client, shell);
       expect(staged).toHaveLength(1);
       expect(await Bun.file(staged[0]!).exists()).toBe(false);
-      await rm(directory, { recursive: true, force: true });
-      await expect(
-        installManagedCodemodeClient(
-          fileSession(false, true, staged) as never,
-          client,
-          async (cmd) => (cmd.includes("rmSync") ? { exitCode: 1 } : await shell(cmd)),
-        ),
-      ).rejects.toThrow("staging cleanup failed");
-      expect(staged).toHaveLength(2);
     } finally {
       await rm(directory, { recursive: true, force: true });
+      for (const path of staged) await rm(path, { force: true });
+    }
+  });
+
+  test.each(["nonzero", "throw", "diagnostic-throw"] as const)(
+    "verified install stays usable when both cleanup paths fail (%s)",
+    async (cleanupFailure) => {
+      const client = cleanupClient(`cleanup-${cleanupFailure}`);
+      const directory = managedCodemodeClientDirectory(client);
+      const staged: string[] = [];
+      const deleted: string[] = [];
+      const commands: string[] = [];
+      const warning = spyOn(console, "warn").mockImplementation(() => {
+        if (cleanupFailure === "diagnostic-throw") throw new Error("private logging detail");
+      });
+      try {
+        await installManagedCodemodeClient(
+          fileSession(false, true, staged, deleted) as never,
+          client,
+          async (cmd) => {
+            commands.push(cmd);
+            if (cmd.includes("rmSync")) {
+              if (cleanupFailure !== "nonzero") throw new Error("private command detail");
+              return { exitCode: 1, stderr: "private command output" };
+            }
+            return await shell(cmd);
+          },
+        );
+        expect(staged).toHaveLength(1);
+        expect(staged[0]).toMatch(new RegExp(`^${dirname(directory)}/stage-[a-f0-9-]{36}\\.json$`));
+        expect(deleted).toEqual(staged);
+        // Only immutable release bytes are staged, never per-attempt tokens.
+        expect(JSON.parse(await readFile(staged[0]!, "utf8"))).toEqual(client);
+        expect(commands).toHaveLength(3); // probe, install+verify, exact cleanup; no replay.
+        const cleanupScript = `require('node:fs').rmSync(${JSON.stringify(staged[0])}, {force: true})`;
+        expect(commands[2]).toBe(`node -e '${cleanupScript.replace(/'/g, "'\\''")}'`);
+        expect(warning.mock.calls).toEqual([
+          [
+            "Managed Codemode client staging cleanup failed; installation result preserved",
+            { stageFile: staged[0]!.split("/").at(-1), installation: "verified" },
+          ],
+        ]);
+        const result = await shell(
+          [...managedCodemodeClientEnvironment(directory), "ogtool"].join("\n"),
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.trim()).toBe(`cleanup-${cleanupFailure}`);
+        const warmCommands: string[] = [];
+        await installManagedCodemodeClient({} as never, client, async (cmd) => {
+          warmCommands.push(cmd);
+          return await shell(cmd);
+        });
+        expect(warmCommands).toHaveLength(1); // verified warm reuse requires no ingress.
+      } finally {
+        warning.mockRestore();
+        await rm(directory, { recursive: true, force: true });
+        for (const path of staged) await rm(path, { force: true });
+      }
+    },
+  );
+
+  for (const phase of ["ingress", "install"] as const) {
+    test.each([
+      "ordinary",
+      "pre-dispatch",
+      "outcome-unknown",
+      "undefined",
+      "diagnostic-throw",
+    ] as const)(
+      `preserves the exact %s ${phase} failure when both cleanup paths fail`,
+      async (kind) => {
+        const cause = new Error("private original failure detail");
+        const original =
+          kind === "pre-dispatch"
+            ? await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+                waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+                  callback(cause),
+              } as never).catch((error) => error)
+            : kind === "outcome-unknown"
+              ? new RoutingMutationOutcomeUnknownError("execCommand", "uncertain install", {
+                  cause,
+                })
+              : kind === "undefined"
+                ? undefined
+                : cause;
+        const client = cleanupClient(`${phase}-${kind}`);
+        const staged: string[] = [];
+        const deleted: string[] = [];
+        const commands: string[] = [];
+        const editor = fileSession(false, true, staged, deleted).createEditor();
+        const warning = spyOn(console, "warn").mockImplementation(() => {
+          if (kind === "diagnostic-throw") throw new Error("private logging detail");
+        });
+        try {
+          await expect(
+            installManagedCodemodeClient(
+              {
+                createEditor: () => ({
+                  ...editor,
+                  createFile: async (input: Parameters<typeof editor.createFile>[0]) => {
+                    if (phase === "ingress") {
+                      staged.push(input.path);
+                      throw original;
+                    }
+                    await editor.createFile(input);
+                  },
+                }),
+              } as never,
+              client,
+              async (cmd) => {
+                commands.push(cmd);
+                if (cmd.includes("rmSync")) throw new Error("private cleanup failure detail");
+                if (commands.length === 1) return { exitCode: 1 };
+                throw original;
+              },
+            ),
+          ).rejects.toBe(original);
+          expect(staged).toHaveLength(1);
+          expect(deleted).toEqual(staged);
+          expect(commands).toHaveLength(phase === "ingress" ? 2 : 3);
+          expect(commands.at(-1)).toContain(JSON.stringify(staged[0]));
+          expect(warning.mock.calls).toEqual([
+            [
+              "Managed Codemode client staging cleanup failed; installation result preserved",
+              { stageFile: staged[0]!.split("/").at(-1), installation: "failed" },
+            ],
+          ]);
+        } finally {
+          warning.mockRestore();
+          for (const path of staged) await rm(path, { force: true });
+        }
+      },
+    );
+  }
+
+  test("integrity failure stays fatal even when both cleanup paths fail", async () => {
+    const client = cleanupClient("corrupted-with-cleanup-failure");
+    const staged: string[] = [];
+    const commands: string[] = [];
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    let installOutput = "";
+    try {
+      await expect(
+        installManagedCodemodeClient(
+          fileSession(true, true, staged) as never,
+          client,
+          async (cmd) => {
+            commands.push(cmd);
+            if (cmd.includes("rmSync")) return { exitCode: 1 };
+            const result = await shell(cmd);
+            if (commands.length === 2) installOutput = result.stderr;
+            return result;
+          },
+        ),
+      ).rejects.toThrow("Managed Codemode client delivery failed");
+      expect(installOutput).toContain("Codemode client transfer integrity failure");
+      expect(await Bun.file(`${managedCodemodeClientDirectory(client)}/ogtool`).exists()).toBe(
+        false,
+      );
+      expect(commands).toHaveLength(3);
+      expect(warning).toHaveBeenCalledTimes(1);
+    } finally {
+      warning.mockRestore();
       for (const path of staged) await rm(path, { force: true });
     }
   });

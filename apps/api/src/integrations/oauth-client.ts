@@ -571,6 +571,7 @@ async function startMcpOAuthWithinDeadline(
     requested: context.payload.requestedScopes,
     challenged: discovery.challenge.scope,
     supported: discovery.prm.scopesSupported,
+    authorizationServerScopesSupported: stringArray(discovery.as.raw.scopes_supported),
   });
   const client = await deadline.run("client_registration", (signal) =>
     registerOAuthClient(
@@ -2666,6 +2667,7 @@ export function chooseMcpAuthorizeScopes(input: {
   requested: string[] | undefined;
   challenged: string[] | undefined;
   supported: string[];
+  authorizationServerScopesSupported?: string[];
 }): string[] {
   const profile = builtInOAuthProfileFor({ mcpUrl: input.mcpUrl }) ?? DEFAULT_OAUTH_PROFILE;
   return chooseProfileAuthorizeScopes(profile, input);
@@ -2677,11 +2679,17 @@ function chooseProfileAuthorizeScopes(
     requested: string[] | undefined;
     challenged: string[] | undefined;
     supported: string[];
+    authorizationServerScopesSupported?: string[];
   },
 ): string[] {
-  return profile.requestedScopes
-    ? [...profile.requestedScopes]
-    : chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
+  // Reviewed profiles keep their exact scope contract. A generic long-running
+  // connector also needs the AS-advertised refresh grant: the MCP resource's
+  // challenge often advertises only its resource permission (e.g. mcp:use).
+  if (profile.requestedScopes) return [...profile.requestedScopes];
+  const scopes = chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
+  return input.authorizationServerScopesSupported?.includes("offline_access")
+    ? uniqueStrings([...scopes, "offline_access"])
+    : scopes;
 }
 
 function grantedScopes(scopeText: string | undefined, fallback: string[]): string[] {
