@@ -487,15 +487,6 @@ const effectiveBudgets = {
     // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
     // Keep the established 1.5 KiB allowance; other caps stay fixed.
     wholeKibEnvelope(2_531_746, 1.5 * kib),
-    // Usage allowance UI: the conversation's structured "usage limit reached"
-    // row (host labels/render hook), the shared allowance wording, and the
-    // composer notice and account-menu usage row as two lazy boundaries; the
-    // gauge icon is pinned to session-shared-primitives. Session-page usage
-    // surfaces and the budget pages/member slider live in two lazy chunks.
-    // Main bb2f7ea7f measures 2,533,099 raw / 714,130 gzip across 39 files; this
-    // change 2,533,772 / 713,028 across 38 (Bun 1.4 macOS/arm64). Keep the
-    // established 1.5 KiB headroom; gzip and every other cap stay fixed.
-    wholeKibEnvelope(2_533_772, 1.5 * kib),
     // Launch sign-up attribution: memory-only first-touch capture at boot and
     // attributed sign-up/social request bodies in the shared API helper. Base
     // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /

@@ -151,7 +151,7 @@ export default defineConfig({
               // keep those tiny parsers here instead of a separate startup
               // request.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|workspace-management-location|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
             },
@@ -238,6 +238,15 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The workspace paused banner (rail and settings) and the React
+              // provider (workspace routes). Pinned so the settings-only pages
+              // pinned above can't reshuffle them into a direct session load.
+              name: "workspace-chrome",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]rail[\\/]workspace-paused-banner\.tsx|lib[\\/]workspace-timer\.ts)|packages[\\/]react[\\/]src[\\/]provider\.tsx)$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The account-menu usage row and the composer's limit notice load
               // on every session page (behind usage-entry's lazy boundaries).
               // Keep them, the member-facing React usage pieces and the SDK
@@ -262,13 +271,14 @@ export default defineConfig({
               // them so entry-aware merging cannot co-locate one of them with a
               // session-used helper and make the management surface reachable
               // from a direct session load. The default sandbox environment row
-              // is settings-only too; left to entry-aware grouping it can share a
+              // and the Developer page (webhooks) are settings-only too; left to
+              // entry-aware grouping either can share a
               // chunk with the workspace paused banner and pull this chunk (via
               // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|workspace-developer-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

@@ -329,19 +329,21 @@ describe("web bundle budget policy", () => {
     expect(wholeKibEnvelope(713_634, 1.5 * KIB) - 713_634).toBeGreaterThanOrEqual(1.5 * KIB);
   });
 
-  test("bounds the usage-allowance UI growth and keeps its pages lazy", () => {
+  test("keeps usage allowance pages lazy without a session-graph envelope", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
-    // The refusal row, shared wording and two lazy usage boundaries only; the
-    // budget pages, meters and slider live in the lazy usage-allowances chunk.
-    expect(source).toContain("wholeKibEnvelope(2_533_772, 1.5 * kib)");
-    // Gzip stays under the existing cap; no new gzip envelope.
-    expect(source).not.toContain("wholeKibEnvelope(716_165");
-    expect(wholeKibEnvelope(2_533_772, 1.5 * KIB) - 2_533_772).toBeGreaterThanOrEqual(1.5 * KIB);
+    // The usage UI fits the existing caps: the session graph carries only the
+    // refusal row and two lazy usage boundaries. Keep it that way.
+    expect(source).not.toContain("Usage allowance UI:");
     const vite = readFileSync(new URL("../apps/web/vite.config.ts", import.meta.url), "utf8");
     expect(vite).toContain('name: "usage-allowances"');
     expect(vite).toContain('name: "usage-surfaces"');
     // Session-page usage surfaces must not share a chunk with budget pages.
     expect(vite).toContain("(?!usage-entry\\.|usage-surfaces\\.)");
     expect(vite).toContain("react-slider");
+    // Settings-only rows stay out of the paused banner/provider chunk that
+    // direct workspace and session loads import.
+    expect(vite).toContain('name: "workspace-chrome"');
+    expect(vite).toContain("default-sandbox-environment-row");
+    expect(vite).toContain("workspace-developer-settings");
   });
 });

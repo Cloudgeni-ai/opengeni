@@ -1,5 +1,4 @@
-import { OpenGeniAllowanceExhaustedError, OpenGeniApiError } from "@opengeni/sdk";
-import { DEFAULT_ALLOWANCE_LABELS } from "../usage/allowance-copy";
+import { OpenGeniApiError } from "@opengeni/sdk";
 
 const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -112,6 +111,12 @@ export function tryParseJson(text: string): unknown {
 export const CREDIT_EXHAUSTION_MESSAGE =
   "Out of Opengeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
 
+/** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
+export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE =
+  "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.";
+export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE =
+  "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.";
+
 /**
  * Actionable composer copy for an edge rejection before a turn is accepted.
  * Unlike an in-flight credit exhaustion, this path has not consumed the
@@ -122,18 +127,11 @@ export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
 
 export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
-    const labels = DEFAULT_ALLOWANCE_LABELS;
-    const workspace =
-      error instanceof OpenGeniAllowanceExhaustedError && error.scope === "workspace";
-    const resetsAt = error instanceof OpenGeniAllowanceExhaustedError ? error.resetsAt : null;
-    return [
-      `${workspace ? labels.workspaceLimitReachedTitle : labels.memberLimitReachedTitle}.`,
-      workspace ? labels.workspaceRemedy : labels.memberRemedy,
-      resetsAt ? labels.resets(labels.formatDate(resetsAt)) : "",
-      "Your draft is preserved.",
-    ]
-      .filter(Boolean)
-      .join(" ");
+    // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
+    // so this startup-path helper adds no SDK or wording imports.
+    return (error as { scope?: unknown }).scope === "workspace"
+      ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
+      : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
   }
   return error instanceof OpenGeniApiError &&
     error.status === 402 &&

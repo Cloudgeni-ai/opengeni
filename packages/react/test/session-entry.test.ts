@@ -113,9 +113,7 @@ describe("session-only entry", () => {
     // Vite transforms the optional resolver even when this fixture tree-shakes
     // its invocation; production browser tests verify its on-click chunk load.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/latest-question.ts"))).toBe(true);
-    // The shared allowance wording backs the composer's typed refusal message.
-    expect(reactSources.some((id) => id.endsWith("/src/usage/allowance-copy.ts"))).toBe(true);
-    expect(reactSources.length).toBe(24);
+    expect(reactSources.length).toBe(23);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);
