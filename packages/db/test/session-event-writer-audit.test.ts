@@ -106,6 +106,10 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/archived-session-imports.ts#appendTimeline": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/index.ts#switchSessionCodexAccount": {
     inserts: 1,
     contract: "canonical",
@@ -371,6 +375,7 @@ const callerOwnedControlWriters = new Set([
 ]);
 
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
+  appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
@@ -470,6 +475,50 @@ const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
 const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
 // Links finished preview sessions to their seeded schedule runs (metadata only).
 const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
+const ARCHIVED_IMPORT_PATH = "packages/db/src/archived-session-imports.ts";
+const ARCHIVED_IMPORT_WRITER = `${ARCHIVED_IMPORT_PATH}#appendTimeline`;
+
+/** Inert imports have no turns/attempts. Only these two activity-gated callers
+ * may delegate a timeline write after owning the workspace/session/cursor prefix. */
+function expectArchivedImportBoundary(source: string): void {
+  const sourceFile = parseSourceFile(ARCHIVED_IMPORT_PATH, source);
+  const functions = new Map<string, FunctionLikeDeclaration>();
+  const visit = (node: t.Node): void => {
+    if (isFunctionDeclaration(node) && node.id) functions.set(node.id.name, node);
+    forEachChild(node, visit);
+  };
+  visit(sourceFile.program);
+  for (const caller of expectedOwnedSuffixCallers.appendTimeline!) {
+    const functionNode = functions.get(caller)!;
+    expect(functionNode, caller).toBeDefined();
+    expect(functionCalls(functionNode, "withWorkspaceSubjectSessionActivityRls"), caller).toBe(
+      true,
+    );
+    const locks = callPositions(functionNode, "lockSessionEventWriteRows");
+    const writes = callPositions(functionNode, "appendTimeline");
+    expect(locks, caller).toHaveLength(1);
+    expect(writes, caller).toHaveLength(1);
+    expect(locks[0], caller).toBeLessThan(writes[0]!);
+    expect(
+      functionCallHasProperty(functionNode, "lockSessionEventWriteRows", "sessionIds"),
+      caller,
+    ).toBe(true);
+  }
+  expect(source).toContain("row.importedArchiveImportId !== input.importId");
+  expect(source).toContain("row.importedArchiveSubjectId !== input.subjectId");
+  expect(source).toContain("importedArchiveImportId: payload.importId");
+  expect(source).toContain("turnAssociation: null");
+  const migration = readFileSync(
+    join(repoRoot, "packages/db/drizzle/0559_archived_session_imports.sql"),
+    "utf8",
+  );
+  expect(migration).toContain("sessions_imported_archive_inert_check");
+  expect(migration).toContain("MESSAGE = 'SESSION_IMPORTED_READ_ONLY'");
+  // Attempts require a real turn; the import boundary refuses those roots.
+  expect(migration).toContain("CREATE TRIGGER session_turns_imported_archive_guard");
+  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turns");
+  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_history_items");
+}
 
 /** The DEV-only seed may only write to this worktree's loopback dev stack. */
 function expectDevSeedGuards(source: string): void {
@@ -965,6 +1014,12 @@ describe("session_events writer inventory", () => {
         const key = `${file}#${enclosing.name}`;
         if (checked.has(key)) return;
         checked.add(key);
+        if (key === ARCHIVED_IMPORT_WRITER) {
+          // The unbranded suffix receives the create hook's Database handle;
+          // its closed caller inventory and import boundary are pinned below.
+          expectArchivedImportBoundary(source);
+          return;
+        }
         if (key === "packages/db/src/skill-config-migration.ts#migrateLegacySkillConfigurations") {
           // The parser-backed maintenance migration cannot use the runtime
           // Drizzle activity handle. Its only writer updates dormant Skill
