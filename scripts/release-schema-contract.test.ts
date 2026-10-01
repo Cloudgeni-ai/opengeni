@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0562_accepted_preference_snapshot_recovery.sql",
+          (migration) => migration.path === "0563_accepted_preference_snapshot_recovery.sql",
         )
-          ? "0562_accepted_preference_snapshot_recovery.sql"
+          ? "0563_accepted_preference_snapshot_recovery.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0561_scheduled_session_agent_identity.sql",
               )
@@ -536,7 +536,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0561_scheduled_session_agent_identity.sql",
     );
     const acceptedPreferenceSnapshotRecovery = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0562_accepted_preference_snapshot_recovery.sql",
+      (migration) => migration.path === "0563_accepted_preference_snapshot_recovery.sql",
     );
     const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0540_external_workspace_member_permission_updates.sql",
@@ -1260,7 +1260,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0561_scheduled_session_agent_identity.sql" }
         : {}),
       ...(acceptedPreferenceSnapshotRecovery
-        ? { latestMigration: "0562_accepted_preference_snapshot_recovery.sql" }
+        ? { latestMigration: "0563_accepted_preference_snapshot_recovery.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -1313,7 +1313,7 @@ describe("release schema contract", () => {
             "0559_session_agent_config.sql",
             "0560_archived_session_imports.sql",
             "0561_scheduled_session_agent_identity.sql",
-            "0562_accepted_preference_snapshot_recovery.sql",
+            "0563_accepted_preference_snapshot_recovery.sql",
           ].includes(migration.path),
       ),
     };
@@ -2625,9 +2625,9 @@ describe("release schema contract", () => {
     // remove forward migrations. Archives follow the agent configuration step.
     expect(unfilteredSourceContract.latestMigration).toBe(
       unfilteredSourceContract.migrations.some(
-        (migration) => migration.path === "0562_accepted_preference_snapshot_recovery.sql",
+        (migration) => migration.path === "0563_accepted_preference_snapshot_recovery.sql",
       )
-        ? "0562_accepted_preference_snapshot_recovery.sql"
+        ? "0563_accepted_preference_snapshot_recovery.sql"
         : unfilteredSourceContract.migrations.some(
               (migration) => migration.path === "0561_scheduled_session_agent_identity.sql",
             )
@@ -2840,7 +2840,7 @@ describe("release schema contract", () => {
       "0559_session_agent_config.sql",
       "0560_archived_session_imports.sql",
       "0561_scheduled_session_agent_identity.sql",
-      "0562_accepted_preference_snapshot_recovery.sql",
+      "0563_accepted_preference_snapshot_recovery.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3393,7 +3393,7 @@ describe("release schema contract", () => {
       "0559_session_agent_config.sql",
       "0560_archived_session_imports.sql",
       "0561_scheduled_session_agent_identity.sql",
-      "0562_accepted_preference_snapshot_recovery.sql",
+      "0563_accepted_preference_snapshot_recovery.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
