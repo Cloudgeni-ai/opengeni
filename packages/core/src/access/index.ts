@@ -11,6 +11,8 @@ import {
   type AccessContext,
   type AccessGrant,
   type OrganizationApiKeyAccess,
+  OPENGENI_USER_ACTIVITY_ACTIVE,
+  OPENGENI_USER_ACTIVITY_HEADER,
   Permission,
   type Workspace,
 } from "@opengeni/contracts";
@@ -803,14 +805,27 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
-      // Presence counts people, so only this verified browser-session branch
-      // reports it. Open SSE streams re-enter here on every reauthorization.
-      deps.userPresence?.touch(context.subjectId);
+      recordUserPresence(c, deps, context.subjectId);
       return context;
     }
   }
 
   return null;
+}
+
+/**
+ * Presence counts people, so only the verified managed browser-session branch
+ * reports it, and only for a request the console marked as human activity (a
+ * visible tab with recent interaction). Each request counts once: an SSE
+ * stream's periodic reauthorization reuses its original request.
+ */
+const presenceRecordedRequests = new WeakSet<Request>();
+function recordUserPresence(c: Context, deps: AccessDeps, subjectId: string): void {
+  if (!deps.userPresence) return;
+  if (c.req.header(OPENGENI_USER_ACTIVITY_HEADER) !== OPENGENI_USER_ACTIVITY_ACTIVE) return;
+  if (presenceRecordedRequests.has(c.req.raw)) return;
+  presenceRecordedRequests.add(c.req.raw);
+  deps.userPresence.touch(subjectId);
 }
 
 async function apiKeyAccessContext(

@@ -1212,11 +1212,22 @@ free text is exported: a connection to a domain outside the fixed provider list 
 of delivered facts belongs to the sink; the outbox keeps only undelivered and recently acknowledged
 rows, like the other kinds.
 
-`user.active` comes from server-side presence: the API records each managed person's authenticated
-browser activity (requests and open session/workspace streams) in
-`opengeni_private.user_activity_presence`, throttled and batched off the request path, and the
-first activity of each UTC day writes the fact. Count DAU/WAU/MAU at the sink as distinct
-`fact.subjectId` per day/week/month. API keys, services, agents and embedded hosts never produce it.
+`user.active` comes from server-side presence. A person counts as active when an API request from
+a canonical managed browser session carries `x-opengeni-user-activity: active`, which the web
+console sends only while its tab is visible and the person loaded, focused or interacted with it
+within the last 5 minutes (`OPENGENI_USER_ACTIVITY_*` in `packages/contracts/src/product-analytics.ts`).
+An idle open tab, background polling, and event streams (including their periodic
+reauthorization) never count; each request counts at most once. The API records presence in
+`opengeni_private.user_activity_presence`, at most once per person per minute per process and
+batched off the request path, and the first activity of each UTC day writes the fact. Count
+DAU/WAU/MAU at the sink as distinct `fact.subjectId` per day/week/month. API keys, services,
+agents and embedded hosts never produce it.
+
+Grant classes for `credits.granted`: `signup_trial` is the verified-signup trial grant
+(`source_type = 'verified_signup_trial'`); `coupon` is a fully discounted Stripe checkout
+(`source_type = 'stripe_checkout_coupon'`); `manual` is an operator grant, which the ops
+manual-credit-grant workflow writes as `type = 'manual_credit_grant'` with
+`source_type = 'operator_adjustment'`; anything else is `other`.
 
 Capture starts when the first lifecycle consumer registers, so earlier product history is missing
 until an operator runs the one-time backfill once a consumer is registered:
@@ -1227,17 +1238,22 @@ OPENGENI_MIGRATIONS_DATABASE_URL=<migration owner URL> bun run db:backfill-lifec
 #   bun run db:backfill-lifecycle-facts auth.sign_up member.joined --batch-size=200
 ```
 
-It calls `opengeni_host_export.backfill_product_lifecycle_facts(source, batch)` until every source
-reports completion, one short transaction per batch. Each batch opens the owner-only FORCE-RLS
-window on exactly its source tables (with a 3 second lock timeout; rerun on a lock timeout), so run
-it as the migration owner, preferably at low traffic. Backfilled facts keep the original source
-timestamp as `occurredAt` and reuse the live trigger's deterministic fact id, so an overlap with
-live capture or a repeated run never produces a second fact, and a completed source is a durable
-no-op (`opengeni_private.product_lifecycle_backfill_progress`). Limits: sign-ins only exist for
-sessions that are still stored; email-password verification time is approximated by the account's
-last update; `user.active` history is approximated from days on which the person started a turn;
-`connection.revoked` covers connections still stored as revoked (deleted connections are gone);
-both new kinds only backfill rows older than the moment migration 0561 started their live capture.
+It calls `opengeni_private.backfill_product_lifecycle_facts(source, batch)` until every source
+reports completion; the function refuses any login other than the migration owner (or a member of
+it). The first call for a source reads its source tables once into a private queue, taking only
+ACCESS SHARE locks: FORCE RLS stays on, and the owner reads through SELECT-only policies that open
+only while a capability row bound to that exact backend transaction exists. Every later call is
+its own short transaction that enqueues one primary-key page of that queue, so total work is
+linear and no source table is altered or locked against writers. Backfilled facts keep the
+original source timestamp as `occurredAt` and reuse the live trigger's deterministic fact id, so
+an overlap with live capture or a repeated run never produces a second fact, and a completed source
+is a durable no-op (`opengeni_private.product_lifecycle_backfill_progress`). Limits: sign-ins only
+exist for sessions that are still stored; email-password verification time is approximated by the
+account's last update; `user.active` history is approximated from the UTC days on which a stored
+browser session was created or refreshed; `connection.revoked` covers connections still stored as
+revoked (deleted connections are gone). Both new kinds only backfill rows older than the moment
+their live capture began: migration 0561, or the first lifecycle consumer registration when that
+came later.
 
 ### EventBus
 

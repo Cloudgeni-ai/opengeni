@@ -9,6 +9,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 
+import { OPENGENI_USER_ACTIVITY_ACTIVE, OPENGENI_USER_ACTIVITY_HEADER } from "@opengeni/contracts";
 import { createUserPresenceRecorder } from "@opengeni/core";
 
 import { createApp } from "../src/app";
@@ -192,12 +193,25 @@ describe("product lifecycle facts from managed auth", () => {
       ["organization.setup", "created", organizationId],
       ["auth.sign_in", "email", null],
     ]);
-    // An authenticated browser request records server-side presence once per
-    // throttle window, and the first activity of the UTC day is one
-    // `user.active` fact. A repeat within the window writes nothing new.
+    // A request the console did not mark as human activity (background
+    // polling, an idle tab, a stream) records no presence.
+    const idle = await app.request("/v1/workspaces", {
+      headers: requestHeaders(cookiePairs(signIn)),
+    });
+    expect(idle.status).toBe(200);
+    await userPresence.flush();
+    expect(
+      await shared.admin`
+        select 1 from opengeni_private.user_activity_presence where subject_id = ${subjectId}`,
+    ).toHaveLength(0);
+    // An active browser request records presence once per throttle window,
+    // and the first activity of the UTC day is one `user.active` fact.
     for (let index = 0; index < 3; index += 1) {
       const workspaces = await app.request("/v1/workspaces", {
-        headers: requestHeaders(cookiePairs(signIn)),
+        headers: {
+          ...requestHeaders(cookiePairs(signIn)),
+          [OPENGENI_USER_ACTIVITY_HEADER]: OPENGENI_USER_ACTIVITY_ACTIVE,
+        },
       });
       expect(workspaces.status).toBe(200);
       await userPresence.flush();

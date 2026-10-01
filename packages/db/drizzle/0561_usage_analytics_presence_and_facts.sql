@@ -489,45 +489,73 @@ END $grants$;
 -- One-time historical backfill of lifecycle facts.
 --
 -- Capture starts when the first lifecycle consumer registers, so product
--- history before that moment is missing from the export. An operator (the
--- migration owner or the host-export role) calls
--- `opengeni_host_export.backfill_product_lifecycle_facts(source, batch)` per
--- source until it reports `completed`; see `bun run db:backfill-lifecycle-facts`.
+-- history before that moment is missing from the export. The migration owner
+-- calls `opengeni_private.backfill_product_lifecycle_facts(source, batch)` per
+-- source until it reports completion; see `bun run db:backfill-lifecycle-facts`.
 --
 -- Every backfilled fact uses the same type, attribute rules and deterministic
 -- dedupe key as its live trigger, so its fact id equals the id live capture
 -- would have produced: an overlap with live capture conflicts in the outbox
--- (and carries the same idempotency key at the sink). The original source
--- timestamp becomes `occurredAt`. Progress is a durable keyset cursor per
--- source, so a re-run after completion enqueues nothing. Facts introduced by
--- this migration whose key could differ from live capture
--- (`connection.revoked`, `user.active`) only backfill source rows older than
--- the moment this migration started live capture for them.
+-- and carries the same idempotency key at the sink. The original source
+-- timestamp becomes `occurredAt`.
+--
+-- The first call for a source materializes its candidate facts once into a
+-- private queue with one read of the source tables (ACCESS SHARE locks only);
+-- every batch then pages that queue by its primary key. Source tables are never
+-- altered at runtime: FORCE RLS stays on, and the owner reads them through
+-- SELECT-only policies that open only while a transaction-local capability
+-- row (backend pid + transaction id) written by the backfill itself exists.
+-- Facts introduced by this migration whose source key could differ from live
+-- capture (`connection.revoked`, `user.active`) only backfill rows older than
+-- the moment their live capture really began: this migration, or the first
+-- lifecycle consumer registration when that came later.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS opengeni_private.product_lifecycle_backfill_progress (
   source text PRIMARY KEY,
   live_capture_from timestamptz,
-  cursor_at timestamptz NOT NULL DEFAULT '-infinity',
-  cursor_id text NOT NULL DEFAULT '',
+  materialized_at timestamptz,
+  materialized bigint NOT NULL DEFAULT 0,
+  cursor_seq bigint NOT NULL DEFAULT 0,
   scanned bigint NOT NULL DEFAULT 0,
   enqueued bigint NOT NULL DEFAULT 0,
   completed_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-ALTER TABLE opengeni_private.product_lifecycle_backfill_progress ENABLE ROW LEVEL SECURITY;
-ALTER TABLE opengeni_private.product_lifecycle_backfill_progress FORCE ROW LEVEL SECURITY;
-REVOKE ALL ON TABLE opengeni_private.product_lifecycle_backfill_progress FROM PUBLIC;
+CREATE TABLE IF NOT EXISTS opengeni_private.product_lifecycle_backfill_queue (
+  source text NOT NULL,
+  seq bigint GENERATED ALWAYS AS IDENTITY,
+  fact_type text NOT NULL,
+  attribute text,
+  subject_id text,
+  account_id uuid,
+  workspace_id uuid,
+  dedupe_key text NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  PRIMARY KEY (source, seq)
+);
+CREATE TABLE IF NOT EXISTS opengeni_private.lifecycle_backfill_read_capabilities (
+  backend_pid integer NOT NULL,
+  transaction_id xid8 NOT NULL,
+  PRIMARY KEY (backend_pid, transaction_id)
+);
 DO $policies$
-DECLARE owner_role text := current_user;
+DECLARE owner_role text := current_user; table_name text;
 BEGIN
-  DROP POLICY IF EXISTS usage_analytics_owner
-    ON opengeni_private.product_lifecycle_backfill_progress;
-  EXECUTE format(
-    'CREATE POLICY usage_analytics_owner ON opengeni_private.product_lifecycle_backfill_progress '
-      'USING (current_user = %L) WITH CHECK (current_user = %L)',
-    owner_role, owner_role
-  );
+  FOREACH table_name IN ARRAY ARRAY[
+    'product_lifecycle_backfill_progress', 'product_lifecycle_backfill_queue',
+    'lifecycle_backfill_read_capabilities'
+  ] LOOP
+    EXECUTE format('ALTER TABLE opengeni_private.%I ENABLE ROW LEVEL SECURITY', table_name);
+    EXECUTE format('ALTER TABLE opengeni_private.%I FORCE ROW LEVEL SECURITY', table_name);
+    EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM PUBLIC', table_name);
+    EXECUTE format('DROP POLICY IF EXISTS usage_analytics_owner ON opengeni_private.%I', table_name);
+    EXECUTE format(
+      'CREATE POLICY usage_analytics_owner ON opengeni_private.%I '
+        'USING (current_user = %L) WITH CHECK (current_user = %L)',
+      table_name, owner_role, owner_role
+    );
+  END LOOP;
 END $policies$;
 INSERT INTO opengeni_private.product_lifecycle_backfill_progress (source, live_capture_from)
 SELECT source.name,
@@ -540,8 +568,72 @@ FROM unnest(ARRAY[
 ]) AS source(name)
 ON CONFLICT (source) DO NOTHING;
 
+-- The read capability: true only inside the exact backend transaction that
+-- wrote its row. Only the owner-run backfill writes rows, and removes its row
+-- before returning, so no runtime role can ever make this true.
+CREATE OR REPLACE FUNCTION opengeni_private.lifecycle_backfill_read_active()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+  SELECT EXISTS (
+    SELECT 1 FROM opengeni_private.lifecycle_backfill_read_capabilities capability
+    WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+      AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+  )
+$function$;
+
+-- SELECT-only owner reads of each FORCE-RLS source table while the capability
+-- is active. Restrictive SELECT policies on those tables admit the same
+-- capability, so their existing tenant rules are otherwise unchanged. The
+-- capability is evaluated once per statement (an InitPlan), not per row.
+DO $policies$
+DECLARE
+  target_schema text := current_schema();
+  table_name text;
+  restrictive record;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'canonical_human_login_bindings', 'self_service_organization_setup_receipts',
+    'additional_organization_creation_receipts', 'codex_subscription_credentials',
+    'xai_subscription_credentials', 'organization_model_provider_connections',
+    'organization_model_provider_connection_operations', 'credit_ledger_entries',
+    'connections', 'scheduled_tasks', 'skill_source_bindings',
+    'preference_registry_preferences', 'slack_bot_user_links', 'enrollments',
+    'organization_memberships'
+  ] LOOP
+    IF to_regclass(format('%I.%I', target_schema, table_name)) IS NULL THEN
+      CONTINUE;
+    END IF;
+    EXECUTE format('DROP POLICY IF EXISTS lifecycle_backfill_read ON %I.%I',
+      target_schema, table_name);
+    EXECUTE format(
+      'CREATE POLICY lifecycle_backfill_read ON %I.%I AS PERMISSIVE FOR SELECT '
+        'USING ((SELECT opengeni_private.lifecycle_backfill_read_active()))',
+      target_schema, table_name
+    );
+    FOR restrictive IN
+      SELECT policy.polname, pg_get_expr(policy.polqual, policy.polrelid) AS qual
+      FROM pg_policy policy
+      WHERE policy.polrelid = format('%I.%I', target_schema, table_name)::regclass
+        AND NOT policy.polpermissive
+        AND policy.polcmd IN ('r', '*')
+        AND policy.polqual IS NOT NULL
+    LOOP
+      IF position('lifecycle_backfill_read_active' IN restrictive.qual) = 0 THEN
+        EXECUTE format(
+          'ALTER POLICY %I ON %I.%I USING ((%s) OR (SELECT opengeni_private.lifecycle_backfill_read_active()))',
+          restrictive.polname, target_schema, table_name, restrictive.qual
+        );
+      END IF;
+    END LOOP;
+  END LOOP;
+END $policies$;
+
 DO $migration$
-DECLARE target_schema text := current_schema();
+DECLARE target_schema text := current_schema(); owner_role text := current_user;
 BEGIN
   -- enqueue_product_lifecycle_fact with an explicit occurrence time. Same
   -- gate, validation, subject reduction and deterministic id.
@@ -568,6 +660,13 @@ BEGIN
       v_initiator jsonb;
       v_inserted integer;
     BEGIN
+      -- Only capture triggers and the owner-run backfill (which holds the
+      -- transaction-local capability) may write facts; a direct call from a
+      -- runtime role is refused, so no tenant can forge a fact.
+      IF pg_trigger_depth() = 0 AND NOT opengeni_private.lifecycle_backfill_read_active() THEN
+        RAISE EXCEPTION 'lifecycle facts are written only by capture triggers'
+          USING ERRCODE = '42501';
+      END IF;
       SELECT c.lifecycle_facts_enabled INTO v_enabled
       FROM %1$I.host_export_config c WHERE c.id = 1
       FOR SHARE;
@@ -625,12 +724,12 @@ BEGIN
     END $function$;
   $create$, target_schema);
 
-  -- The operator backfill. Each source query yields
-  -- (sort_at, sort_id, fact_type, attribute, subject_id, account_id,
-  -- workspace_id, dedupe_key, occurred_at) with the live trigger's exact
-  -- attribute and dedupe-key rules.
+  -- The owner-only operator backfill. Each source query yields
+  -- (fact_type, attribute, subject_id, account_id, workspace_id, dedupe_key,
+  -- occurred_at) with the live trigger's exact attribute and dedupe-key rules;
+  -- $1 is the live-capture boundary for the two new kinds.
   EXECUTE format($create$
-    CREATE OR REPLACE FUNCTION opengeni_host_export.backfill_product_lifecycle_facts(
+    CREATE OR REPLACE FUNCTION opengeni_private.backfill_product_lifecycle_facts(
       p_source text,
       p_batch_size integer DEFAULT 500
     ) RETURNS TABLE (
@@ -646,17 +745,22 @@ BEGIN
     DECLARE
       v_enabled boolean;
       v_progress opengeni_private.product_lifecycle_backfill_progress%%ROWTYPE;
-      v_tables text[];
-      v_table text;
+      v_registered_at timestamptz;
+      v_boundary timestamptz;
       v_query text;
       v_row record;
+      v_materialized bigint;
       v_scanned integer := 0;
       v_enqueued integer := 0;
-      v_last_at timestamptz;
-      v_last_id text;
+      v_last_seq bigint;
     BEGIN
-      IF p_batch_size IS NULL OR p_batch_size NOT BETWEEN 1 AND 5000 THEN
-        RAISE EXCEPTION 'backfill batch size must be between 1 and 5000'
+      -- Operator-only: the login must be (a member of) the migration owner.
+      IF NOT pg_has_role(session_user, %2$L, 'MEMBER') THEN
+        RAISE EXCEPTION 'the lifecycle backfill runs only as the migration owner'
+          USING ERRCODE = '42501';
+      END IF;
+      IF p_batch_size IS NULL OR p_batch_size NOT BETWEEN 1 AND 10000 THEN
+        RAISE EXCEPTION 'backfill batch size must be between 1 and 10000'
           USING ERRCODE = '22023';
       END IF;
       SELECT c.lifecycle_facts_enabled INTO v_enabled
@@ -677,233 +781,228 @@ BEGIN
         RETURN;
       END IF;
 
-      v_tables := CASE p_source
-        WHEN 'auth.sign_in' THEN ARRAY['canonical_human_login_bindings']
-        WHEN 'organization.setup' THEN ARRAY[
-          'self_service_organization_setup_receipts', 'additional_organization_creation_receipts'
-        ]
-        WHEN 'model.connected' THEN ARRAY[
-          'codex_subscription_credentials', 'xai_subscription_credentials',
-          'organization_model_provider_connections',
-          'organization_model_provider_connection_operations'
-        ]
-        WHEN 'credits.purchased' THEN ARRAY['credit_ledger_entries']
-        WHEN 'credits.granted' THEN ARRAY['credit_ledger_entries']
-        WHEN 'connection.created' THEN ARRAY['connections']
-        WHEN 'connection.revoked' THEN ARRAY['connections']
-        WHEN 'scheduled_task.created' THEN ARRAY['scheduled_tasks']
-        WHEN 'skill.installed' THEN ARRAY[
-          'skill_source_bindings', 'preference_registry_preferences'
-        ]
-        WHEN 'slack.user_linked' THEN ARRAY['slack_bot_user_links']
-        WHEN 'machine.enrolled' THEN ARRAY['enrollments']
-        WHEN 'member.joined' THEN ARRAY['organization_memberships']
-        WHEN 'user.active' THEN ARRAY['session_turns']
-        ELSE ARRAY[]::text[]
-      END;
+      -- Transaction-local capability for this call only: it opens the
+      -- SELECT-only source policies and lets enqueue_product_lifecycle_fact_at
+      -- accept backfill writes. It is removed before returning.
+      INSERT INTO opengeni_private.lifecycle_backfill_read_capabilities (
+        backend_pid, transaction_id
+      ) VALUES (pg_backend_pid(), pg_current_xact_id())
+      ON CONFLICT DO NOTHING;
 
-      v_query := CASE p_source
-        WHEN 'auth.sign_up' THEN $q$
-          SELECT first.created_at AS sort_at, first.user_id::text AS sort_id,
-            'auth.sign_up'::text AS fact_type,
-            opengeni_private.product_lifecycle_auth_method(first.provider_id) AS attribute,
-            'user:' || first.user_id AS subject_id, NULL::uuid AS account_id,
-            NULL::uuid AS workspace_id, first.user_id::text AS dedupe_key,
-            first.created_at AS occurred_at
-          FROM (
-            SELECT DISTINCT ON (identity.user_id) identity.user_id, identity.provider_id,
-              identity.created_at
-            FROM %1$I.auth_identities identity
-            ORDER BY identity.user_id, identity.created_at, identity.id
-          ) first
-        $q$
-        WHEN 'auth.email_verified' THEN $q$
-          SELECT verified.at, verified.id, 'auth.email_verified', NULL::text,
-            'user:' || verified.id, NULL::uuid, NULL::uuid, verified.id, verified.at
-          FROM (
+      IF v_progress.materialized_at IS NULL THEN
+        -- Live capture of the new kinds began at this migration or at the
+        -- first lifecycle consumer registration, whichever came later.
+        SELECT min(consumer.created_at) INTO v_registered_at
+        FROM %1$I.host_export_consumers consumer
+        WHERE consumer.export_kind = 'lifecycle_fact';
+        v_boundary := CASE WHEN v_progress.live_capture_from IS NULL THEN 'infinity'::timestamptz
+          ELSE greatest(v_progress.live_capture_from, coalesce(v_registered_at, '-infinity'))
+        END;
+        v_query := CASE p_source
+          WHEN 'auth.sign_up' THEN $q$
+            SELECT 'auth.sign_up',
+              opengeni_private.product_lifecycle_auth_method(first.provider_id),
+              'user:' || first.user_id, NULL::uuid, NULL::uuid, first.user_id::text,
+              first.created_at
+            FROM (
+              SELECT DISTINCT ON (identity.user_id) identity.user_id, identity.provider_id,
+                identity.created_at
+              FROM %1$I.auth_identities identity
+              ORDER BY identity.user_id, identity.created_at, identity.id
+            ) first
+          $q$
+          WHEN 'auth.email_verified' THEN $q$
             -- A social provider verified the address at creation; a verified
             -- email-password account is dated by its last update (approximate).
-            SELECT person.id::text AS id, coalesce((
-              SELECT CASE WHEN identity.provider_id <> 'credential' THEN person.created_at END
-              FROM %1$I.auth_identities identity
-              WHERE identity.user_id = person.id
-              ORDER BY identity.created_at, identity.id
-              LIMIT 1
-            ), person.updated_at) AS at
+            SELECT 'auth.email_verified', NULL::text, 'user:' || person.id, NULL::uuid,
+              NULL::uuid, person.id::text, coalesce((
+                SELECT CASE WHEN identity.provider_id <> 'credential' THEN person.created_at END
+                FROM %1$I.auth_identities identity
+                WHERE identity.user_id = person.id
+                ORDER BY identity.created_at, identity.id
+                LIMIT 1
+              ), person.updated_at)
             FROM %1$I.auth_users person
             WHERE person.email_verified
-          ) verified
-        $q$
-        WHEN 'auth.sign_in' THEN $q$
-          -- Discarded session-set provider sessions are created already expired.
-          SELECT session.created_at, session.id::text, 'auth.sign_in',
-            opengeni_private.product_lifecycle_auth_method(coalesce(binding.provider_id, (
-              SELECT min(identity.provider_id) FROM %1$I.auth_identities identity
-              WHERE identity.user_id = session.user_id HAVING count(*) = 1
-            ))),
-            'user:' || session.user_id, NULL::uuid, NULL::uuid, session.id::text,
-            session.created_at
-          FROM %1$I.auth_sessions session
-          LEFT JOIN %1$I.canonical_human_login_bindings binding
-            ON binding.id = session.login_binding_id
-          WHERE session.expires_at > session.created_at + interval '1 minute'
-        $q$
-        WHEN 'organization.setup' THEN $q$
-          SELECT receipt.created_at, receipt.account_id::text, 'organization.setup',
-            'created', 'user:' || receipt.auth_user_id, receipt.account_id, NULL::uuid,
-            receipt.account_id::text, receipt.created_at
-          FROM %1$I.self_service_organization_setup_receipts receipt
-          UNION ALL
-          SELECT receipt.created_at, receipt.account_id::text, 'organization.setup',
-            'additional', receipt.actor_subject_id, receipt.account_id, NULL::uuid,
-            receipt.account_id::text, receipt.created_at
-          FROM %1$I.additional_organization_creation_receipts receipt
-        $q$
-        WHEN 'model.connected' THEN $q$
-          SELECT credential.created_at, 'codex:' || credential.id, 'model.connected',
-            'codex', credential.connected_by_subject_id, credential.account_id,
-            credential.workspace_id, credential.id::text, credential.created_at
-          FROM %1$I.codex_subscription_credentials credential
-          UNION ALL
-          SELECT credential.created_at, 'xai:' || credential.id, 'model.connected',
-            'supergrok', credential.connected_by_subject_id, credential.account_id,
-            credential.workspace_id, credential.id::text, credential.created_at
-          FROM %1$I.xai_subscription_credentials credential
-          UNION ALL
-          -- A provider row is connected by its first operation and by every
-          -- operation that reactivates it after a revoke, as the live trigger.
-          SELECT operation.created_at, 'provider:' || operation.id, 'model.connected',
-            operation.provider_kind, NULL::text, operation.account_id, NULL::uuid,
-            connection.id::text || ':' || operation.operation_id::text,
-            operation.created_at
-          FROM (
-            SELECT candidate.*, lag(candidate.result_status) OVER (
-              PARTITION BY candidate.account_id, candidate.provider_kind
-              ORDER BY candidate.created_at, candidate.id
-            ) AS previous_status
-            FROM %1$I.organization_model_provider_connection_operations candidate
-          ) operation
-          JOIN %1$I.organization_model_provider_connections connection
-            ON connection.account_id = operation.account_id
-            AND connection.provider_kind = operation.provider_kind
-          WHERE operation.result_status = 'active'
-            AND operation.previous_status IS DISTINCT FROM 'active'
-        $q$
-        WHEN 'credits.purchased' THEN $q$
-          SELECT entry.created_at, entry.id::text, 'credits.purchased', NULL::text,
-            NULL::text, entry.account_id, NULL::uuid, entry.id::text, entry.created_at
-          FROM %1$I.credit_ledger_entries entry
-          WHERE entry.type = 'credit_topup'
-        $q$
-        WHEN 'credits.granted' THEN $q$
-          -- The trial grant ran as its new owner, whose id is its source id.
-          SELECT entry.created_at, entry.id::text, 'credits.granted',
-            opengeni_private.credit_grant_class(entry.type, entry.source_type),
-            CASE WHEN entry.source_type = 'verified_signup_trial'
-              THEN 'user:' || entry.source_id END,
-            entry.account_id, NULL::uuid, entry.id::text, entry.created_at
-          FROM %1$I.credit_ledger_entries entry
-          WHERE entry.type IN ('grant', 'manual_credit_grant') AND entry.amount_micros > 0
-        $q$
-        WHEN 'connection.created' THEN $q$
-          SELECT connection.created_at, connection.id::text, 'connection.created',
-            opengeni_private.product_lifecycle_connection_class(connection.provider_domain),
-            connection.created_by_subject_id, connection.account_id, connection.workspace_id,
-            connection.id::text, connection.created_at
-          FROM %1$I.connections connection
-        $q$
-        WHEN 'connection.revoked' THEN $q$
-          SELECT connection.updated_at, connection.id::text, 'connection.revoked',
-            opengeni_private.product_lifecycle_connection_class(connection.provider_domain),
-            connection.updated_by_subject_id, connection.account_id, connection.workspace_id,
-            connection.id::text || ':revoked:' || connection.version::text,
-            connection.updated_at
-          FROM %1$I.connections connection
-          WHERE connection.status = 'revoked' AND connection.updated_at < $4
-        $q$
-        WHEN 'scheduled_task.created' THEN $q$
-          SELECT task.created_at, task.id::text, 'scheduled_task.created', NULL::text,
-            task.created_by_subject_id, task.account_id, task.workspace_id, task.id::text,
-            task.created_at
-          FROM %1$I.scheduled_tasks task
-        $q$
-        WHEN 'skill.installed' THEN $q$
-          SELECT preference.created_at, binding.preference_id::text, 'skill.installed',
-            NULL::text, preference.created_by_subject_id, binding.account_id,
-            binding.workspace_id, binding.preference_id::text, preference.created_at
-          FROM %1$I.skill_source_bindings binding
-          JOIN %1$I.preference_registry_preferences preference
-            ON preference.account_id = binding.account_id
-            AND preference.id = binding.preference_id
-        $q$
-        WHEN 'slack.user_linked' THEN $q$
-          SELECT link.created_at, link.id::text, 'slack.user_linked', NULL::text,
-            link.subject_id, link.account_id, link.workspace_id, link.id::text, link.created_at
-          FROM %1$I.slack_bot_user_links link
-        $q$
-        WHEN 'machine.enrolled' THEN $q$
-          SELECT enrollment.created_at, enrollment.id::text, 'machine.enrolled', NULL::text,
-            NULL::text, enrollment.account_id, enrollment.workspace_id, enrollment.id::text,
-            enrollment.created_at
-          FROM %1$I.enrollments enrollment
-        $q$
-        WHEN 'member.joined' THEN $q$
-          -- A provisioning row never became a member; the founder is covered
-          -- by organization.setup.
-          SELECT membership.created_at, membership.id::text, 'member.joined', NULL::text,
-            membership.subject_id, membership.account_id, NULL::uuid, membership.id::text,
-            membership.created_at
-          FROM %1$I.organization_memberships membership
-          WHERE membership.status <> 'provisioning'
-            AND EXISTS (
-              SELECT 1 FROM %1$I.organization_memberships earlier
-              WHERE earlier.account_id = membership.account_id
-                AND earlier.id <> membership.id
-                AND earlier.subject_id <> membership.subject_id
-                AND earlier.created_at <= membership.created_at
-            )
-        $q$
-        WHEN 'user.active' THEN $q$
-          -- Approximation: a day on which the person started a turn.
-          SELECT min(turn.created_at), turn.initiating_human_subject_id || ':'
-              || ((turn.created_at AT TIME ZONE 'UTC')::date)::text,
-            'user.active', NULL::text, turn.initiating_human_subject_id, NULL::uuid,
-            NULL::uuid, turn.initiating_human_subject_id || ':'
-              || ((turn.created_at AT TIME ZONE 'UTC')::date)::text,
-            min(turn.created_at)
-          FROM %1$I.session_turns turn
-          WHERE turn.initiating_human_subject_id ~ '^user:[A-Za-z0-9_-]{8,128}$'
-            AND turn.created_at < $4
-          GROUP BY turn.initiating_human_subject_id, (turn.created_at AT TIME ZONE 'UTC')::date
-        $q$
-        ELSE NULL
-      END;
-      IF v_query IS NULL THEN
-        RAISE EXCEPTION 'unknown lifecycle backfill source' USING ERRCODE = '22023';
+          $q$
+          WHEN 'auth.sign_in' THEN $q$
+            -- Discarded session-set provider sessions are created already expired.
+            SELECT 'auth.sign_in',
+              opengeni_private.product_lifecycle_auth_method(coalesce(binding.provider_id, (
+                SELECT min(identity.provider_id) FROM %1$I.auth_identities identity
+                WHERE identity.user_id = session.user_id HAVING count(*) = 1
+              ))),
+              'user:' || session.user_id, NULL::uuid, NULL::uuid, session.id::text,
+              session.created_at
+            FROM %1$I.auth_sessions session
+            LEFT JOIN %1$I.canonical_human_login_bindings binding
+              ON binding.id = session.login_binding_id
+            WHERE session.expires_at > session.created_at + interval '1 minute'
+          $q$
+          WHEN 'organization.setup' THEN $q$
+            SELECT 'organization.setup', 'created', 'user:' || receipt.auth_user_id,
+              receipt.account_id, NULL::uuid, receipt.account_id::text, receipt.created_at
+            FROM %1$I.self_service_organization_setup_receipts receipt
+            UNION ALL
+            SELECT 'organization.setup', 'additional', receipt.actor_subject_id,
+              receipt.account_id, NULL::uuid, receipt.account_id::text, receipt.created_at
+            FROM %1$I.additional_organization_creation_receipts receipt
+          $q$
+          WHEN 'model.connected' THEN $q$
+            SELECT 'model.connected', 'codex', credential.connected_by_subject_id,
+              credential.account_id, credential.workspace_id, credential.id::text,
+              credential.created_at
+            FROM %1$I.codex_subscription_credentials credential
+            UNION ALL
+            SELECT 'model.connected', 'supergrok', credential.connected_by_subject_id,
+              credential.account_id, credential.workspace_id, credential.id::text,
+              credential.created_at
+            FROM %1$I.xai_subscription_credentials credential
+            UNION ALL
+            -- A provider row is connected by its first operation and by every
+            -- operation that reactivates it after a revoke, as the live trigger.
+            SELECT 'model.connected', operation.provider_kind, NULL::text,
+              operation.account_id, NULL::uuid,
+              connection.id::text || ':' || operation.operation_id::text,
+              operation.created_at
+            FROM (
+              SELECT candidate.*, lag(candidate.result_status) OVER (
+                PARTITION BY candidate.account_id, candidate.provider_kind
+                ORDER BY candidate.created_at, candidate.id
+              ) AS previous_status
+              FROM %1$I.organization_model_provider_connection_operations candidate
+            ) operation
+            JOIN %1$I.organization_model_provider_connections connection
+              ON connection.account_id = operation.account_id
+              AND connection.provider_kind = operation.provider_kind
+            WHERE operation.result_status = 'active'
+              AND operation.previous_status IS DISTINCT FROM 'active'
+          $q$
+          WHEN 'credits.purchased' THEN $q$
+            SELECT 'credits.purchased', NULL::text, NULL::text, entry.account_id, NULL::uuid,
+              entry.id::text, entry.created_at
+            FROM %1$I.credit_ledger_entries entry
+            WHERE entry.type = 'credit_topup'
+          $q$
+          WHEN 'credits.granted' THEN $q$
+            -- The trial grant ran as its new owner, whose id is its source id.
+            SELECT 'credits.granted',
+              opengeni_private.credit_grant_class(entry.type, entry.source_type),
+              CASE WHEN entry.source_type = 'verified_signup_trial'
+                THEN 'user:' || entry.source_id END,
+              entry.account_id, NULL::uuid, entry.id::text, entry.created_at
+            FROM %1$I.credit_ledger_entries entry
+            WHERE entry.type IN ('grant', 'manual_credit_grant') AND entry.amount_micros > 0
+          $q$
+          WHEN 'connection.created' THEN $q$
+            SELECT 'connection.created',
+              opengeni_private.product_lifecycle_connection_class(connection.provider_domain),
+              connection.created_by_subject_id, connection.account_id,
+              connection.workspace_id, connection.id::text, connection.created_at
+            FROM %1$I.connections connection
+          $q$
+          WHEN 'connection.revoked' THEN $q$
+            SELECT 'connection.revoked',
+              opengeni_private.product_lifecycle_connection_class(connection.provider_domain),
+              connection.updated_by_subject_id, connection.account_id,
+              connection.workspace_id,
+              connection.id::text || ':revoked:' || connection.version::text,
+              connection.updated_at
+            FROM %1$I.connections connection
+            WHERE connection.status = 'revoked' AND connection.updated_at < $1
+          $q$
+          WHEN 'scheduled_task.created' THEN $q$
+            SELECT 'scheduled_task.created', NULL::text, task.created_by_subject_id,
+              task.account_id, task.workspace_id, task.id::text, task.created_at
+            FROM %1$I.scheduled_tasks task
+          $q$
+          WHEN 'skill.installed' THEN $q$
+            SELECT 'skill.installed', NULL::text, preference.created_by_subject_id,
+              binding.account_id, binding.workspace_id, binding.preference_id::text,
+              preference.created_at
+            FROM %1$I.skill_source_bindings binding
+            JOIN %1$I.preference_registry_preferences preference
+              ON preference.account_id = binding.account_id
+              AND preference.id = binding.preference_id
+          $q$
+          WHEN 'slack.user_linked' THEN $q$
+            SELECT 'slack.user_linked', NULL::text, link.subject_id, link.account_id,
+              link.workspace_id, link.id::text, link.created_at
+            FROM %1$I.slack_bot_user_links link
+          $q$
+          WHEN 'machine.enrolled' THEN $q$
+            SELECT 'machine.enrolled', NULL::text, NULL::text, enrollment.account_id,
+              enrollment.workspace_id, enrollment.id::text, enrollment.created_at
+            FROM %1$I.enrollments enrollment
+          $q$
+          WHEN 'member.joined' THEN $q$
+            -- A provisioning row never became a member; the founder is covered
+            -- by organization.setup.
+            SELECT 'member.joined', NULL::text, membership.subject_id,
+              membership.account_id, NULL::uuid, membership.id::text, membership.created_at
+            FROM %1$I.organization_memberships membership
+            WHERE membership.status <> 'provisioning'
+              AND EXISTS (
+                SELECT 1 FROM %1$I.organization_memberships earlier
+                WHERE earlier.account_id = membership.account_id
+                  AND earlier.id <> membership.id
+                  AND earlier.subject_id <> membership.subject_id
+                  AND earlier.created_at <= membership.created_at
+              )
+          $q$
+          WHEN 'user.active' THEN $q$
+            -- Approximation from stored browser sessions: the UTC days on
+            -- which a person signed in or a session was refreshed.
+            SELECT 'user.active', NULL::text, 'user:' || activity.user_id, NULL::uuid,
+              NULL::uuid, 'user:' || activity.user_id || ':' || activity.day::text,
+              min(activity.at)
+            FROM (
+              SELECT session.user_id, session.created_at AS at,
+                (session.created_at AT TIME ZONE 'UTC')::date AS day
+              FROM %1$I.auth_sessions session
+              WHERE session.expires_at > session.created_at + interval '1 minute'
+              UNION ALL
+              SELECT session.user_id, session.updated_at,
+                (session.updated_at AT TIME ZONE 'UTC')::date
+              FROM %1$I.auth_sessions session
+              WHERE session.expires_at > session.created_at + interval '1 minute'
+            ) activity
+            WHERE activity.at < $1
+              AND ('user:' || activity.user_id) ~ '^user:[A-Za-z0-9_-]{8,128}$'
+            GROUP BY activity.user_id, activity.day
+          $q$
+          ELSE NULL
+        END;
+        IF v_query IS NULL THEN
+          RAISE EXCEPTION 'unknown lifecycle backfill source' USING ERRCODE = '22023';
+        END IF;
+
+        -- One read of the source tables, ACCESS SHARE only, under the
+        -- transaction-local read capability opened above.
+        EXECUTE
+          'INSERT INTO opengeni_private.product_lifecycle_backfill_queue ('
+            || 'source, fact_type, attribute, subject_id, account_id, workspace_id, '
+            || 'dedupe_key, occurred_at) '
+            || 'SELECT $2, candidate.* FROM (' || v_query || ') AS candidate('
+            || 'fact_type, attribute, subject_id, account_id, workspace_id, dedupe_key, '
+            || 'occurred_at) ORDER BY candidate.occurred_at, candidate.dedupe_key'
+          USING v_boundary, p_source;
+        GET DIAGNOSTICS v_materialized = ROW_COUNT;
+        UPDATE opengeni_private.product_lifecycle_backfill_progress progress
+        SET materialized_at = clock_timestamp(), materialized = v_materialized,
+            updated_at = clock_timestamp()
+        WHERE progress.source = p_source;
       END IF;
 
-      -- FORCE ROW LEVEL SECURITY binds this owner too, so open the owner-only
-      -- window on exactly the source tables for this transaction. Runtime
-      -- roles stay policy-bound; the window closes before returning and rolls
-      -- back with any failure. A short lock timeout keeps a busy table from
-      -- queueing production writers behind the backfill.
-      PERFORM set_config('lock_timeout', '3s', true);
-      FOREACH v_table IN ARRAY v_tables LOOP
-        EXECUTE format('ALTER TABLE %%I.%%I NO FORCE ROW LEVEL SECURITY', %1$L, v_table);
-      END LOOP;
-
-      FOR v_row IN EXECUTE
-        'SELECT * FROM (' || v_query || ') AS source_rows('
-          || 'sort_at, sort_id, fact_type, attribute, subject_id, account_id, '
-          || 'workspace_id, dedupe_key, occurred_at) '
-          || 'WHERE (source_rows.sort_at, source_rows.sort_id) > ($1, $2) '
-          || 'ORDER BY source_rows.sort_at, source_rows.sort_id LIMIT $3'
-        USING v_progress.cursor_at, v_progress.cursor_id, p_batch_size,
-          coalesce(v_progress.live_capture_from, 'infinity'::timestamptz)
+      -- One primary-key page of the private queue.
+      FOR v_row IN
+        SELECT queued.* FROM opengeni_private.product_lifecycle_backfill_queue queued
+        WHERE queued.source = p_source
+        ORDER BY queued.seq
+        LIMIT p_batch_size
       LOOP
         v_scanned := v_scanned + 1;
-        v_last_at := v_row.sort_at;
-        v_last_id := v_row.sort_id;
+        v_last_seq := v_row.seq;
         IF opengeni_private.enqueue_product_lifecycle_fact_at(
           v_row.fact_type, v_row.attribute, v_row.subject_id, v_row.account_id,
           v_row.workspace_id, v_row.dedupe_key, v_row.occurred_at
@@ -911,14 +1010,17 @@ BEGIN
           v_enqueued := v_enqueued + 1;
         END IF;
       END LOOP;
+      IF v_last_seq IS NOT NULL THEN
+        DELETE FROM opengeni_private.product_lifecycle_backfill_queue queued
+        WHERE queued.source = p_source AND queued.seq <= v_last_seq;
+      END IF;
 
-      FOREACH v_table IN ARRAY v_tables LOOP
-        EXECUTE format('ALTER TABLE %%I.%%I FORCE ROW LEVEL SECURITY', %1$L, v_table);
-      END LOOP;
+      DELETE FROM opengeni_private.lifecycle_backfill_read_capabilities capability
+      WHERE capability.backend_pid = pg_backend_pid()
+        AND capability.transaction_id = pg_current_xact_id();
 
       UPDATE opengeni_private.product_lifecycle_backfill_progress progress
-      SET cursor_at = coalesce(v_last_at, progress.cursor_at),
-          cursor_id = coalesce(v_last_id, progress.cursor_id),
+      SET cursor_seq = coalesce(v_last_seq, progress.cursor_seq),
           scanned = progress.scanned + v_scanned,
           enqueued = progress.enqueued + v_enqueued,
           completed_at = CASE WHEN v_scanned < p_batch_size THEN clock_timestamp() END,
@@ -926,30 +1028,73 @@ BEGIN
       WHERE progress.source = p_source;
       RETURN QUERY SELECT p_source, v_enqueued, v_scanned, v_scanned < p_batch_size;
     END $function$;
-  $create$, target_schema);
+  $create$, target_schema, owner_role);
 END $migration$;
+
+-- The fact writers stay executable by runtime roles (the runtime posture
+-- requires EXECUTE on every private routine, so revoking it would make older
+-- binaries unready during a rolling deploy), but each refuses a direct call:
+-- writes come only from capture triggers and the owner-run backfill.
 REVOKE ALL ON FUNCTION opengeni_private.enqueue_product_lifecycle_fact_at(
   text, text, text, uuid, uuid, text, timestamptz
 ) FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_host_export.backfill_product_lifecycle_facts(text, integer)
+REVOKE ALL ON FUNCTION opengeni_private.backfill_product_lifecycle_facts(text, integer)
   FROM PUBLIC;
--- Host-export roles that already manage consumers may run the backfill;
--- provisionRoles converges roles created later (EXECUTE on that schema).
+DO $migration$
+DECLARE target_schema text := current_schema();
+BEGIN
+  -- 0532's writer, unchanged apart from refusing calls outside a trigger.
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_private.enqueue_product_lifecycle_fact(
+      p_fact_type text,
+      p_attribute text,
+      p_subject_id text,
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_dedupe_key text
+    ) RETURNS boolean
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    BEGIN
+      IF pg_trigger_depth() = 0 THEN
+        RAISE EXCEPTION 'lifecycle facts are written only by capture triggers'
+          USING ERRCODE = '42501';
+      END IF;
+      RETURN opengeni_private.enqueue_product_lifecycle_fact_at(
+        p_fact_type, p_attribute, p_subject_id, p_account_id, p_workspace_id,
+        p_dedupe_key, clock_timestamp()
+      );
+    END $function$;
+  $create$);
+END $migration$;
+REVOKE ALL ON FUNCTION opengeni_private.enqueue_product_lifecycle_fact(
+  text, text, text, uuid, uuid, text
+) FROM PUBLIC;
+
+-- Existing runtime roles keep EXECUTE on every new private routine so the
+-- runtime posture of running binaries is unchanged; provisionRoles converges
+-- roles created later.
 DO $grants$
 DECLARE recipient record;
 BEGIN
   FOR recipient IN
-    SELECT DISTINCT r.rolname
-    FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-      CROSS JOIN LATERAL aclexplode(p.proacl) acl
+    SELECT DISTINCT r.rolname FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(c.relacl) acl
       JOIN pg_roles r ON r.oid = acl.grantee
-    WHERE n.nspname = 'opengeni_host_export'
-      AND p.proname = 'register_host_export_consumer'
-      AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner
+    WHERE n.nspname = current_schema() AND c.relname = 'sessions'
+      AND acl.privilege_type = 'INSERT' AND acl.grantee <> c.relowner
   LOOP
     EXECUTE format(
-      'GRANT EXECUTE ON FUNCTION opengeni_host_export.backfill_product_lifecycle_facts(text, integer) TO %I',
+      'GRANT EXECUTE ON FUNCTION '
+        'opengeni_private.credit_grant_class(text, text), '
+        'opengeni_private.observe_credit_grant(), '
+        'opengeni_private.lifecycle_backfill_read_active(), '
+        'opengeni_private.enqueue_product_lifecycle_fact(text, text, text, uuid, uuid, text), '
+        'opengeni_private.enqueue_product_lifecycle_fact_at(text, text, text, uuid, uuid, text, timestamptz), '
+        'opengeni_private.backfill_product_lifecycle_facts(text, integer) TO %I',
       recipient.rolname
     );
   END LOOP;

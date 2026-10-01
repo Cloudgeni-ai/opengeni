@@ -570,6 +570,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
+      "X-OpenGeni-User-Activity",
     ],
     exposeHeaders: [
       "Accept-Ranges",

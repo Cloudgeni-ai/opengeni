@@ -4,6 +4,7 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 
 import {
@@ -153,12 +154,9 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
     }
     expect(String(refused)).toContain("no enabled lifecycle_fact consumer");
 
-    // The revocation above happened before this deployment's live capture
-    // of connection.revoked began; mark that boundary after the history.
-    await owned.admin`
-      update opengeni_private.product_lifecycle_backfill_progress
-      set live_capture_from = clock_timestamp()
-      where source in ('connection.revoked', 'user.active')`;
+    // The migration predates this history, but no consumer was registered,
+    // so the revocation above was never captured live: the backfill's
+    // boundary for the new kinds is the consumer registration.
     await registerHostExportConsumer(exporter.db, {
       kind: "lifecycle_fact",
       consumerId: "backfill-test",
@@ -235,10 +233,121 @@ describe("product lifecycle fact backfill (real PostgreSQL)", () => {
     expect(again.every((result) => result.enqueued === 0 && result.scanned === 0)).toBe(true);
     await owned.admin`
       update opengeni_private.product_lifecycle_backfill_progress
-      set cursor_at = '-infinity', cursor_id = '', completed_at = null`;
+      set materialized_at = null, cursor_seq = 0, completed_at = null`;
     const restarted = await backfillProductLifecycleFacts(ownerSql, { batchSize: 50 });
     expect(restarted.reduce((sum, result) => sum + result.enqueued, 0)).toBe(0);
     expect(restarted.reduce((sum, result) => sum + result.scanned, 0)).toBeGreaterThan(5);
     expect(await lifecycleRows()).toHaveLength(before);
+  });
+
+  test("runtime roles can neither forge facts nor run the backfill", async () => {
+    if (!owned || !client) return;
+    const attempts = [
+      sql`select opengeni_private.enqueue_product_lifecycle_fact(
+        'auth.sign_up', 'email', 'user:forged-subject-1', null, null, 'forged')`,
+      sql`select opengeni_private.enqueue_product_lifecycle_fact_at(
+        'auth.sign_up', 'email', 'user:forged-subject-1', null, null, 'forged', now())`,
+      sql`select * from opengeni_private.backfill_product_lifecycle_facts('auth.sign_up', 10)`,
+    ];
+    for (const attempt of attempts) {
+      let refused: unknown = null;
+      try {
+        await client.db.execute(attempt);
+      } catch (error) {
+        refused = error;
+      }
+      expect(refused).not.toBeNull();
+    }
+    const forged = await owned.admin`
+      select 1 from host_export_outbox
+      where export_kind = 'lifecycle_fact' and initiator ->> 'subjectId' = 'user:forged-subject-1'`;
+    expect(forged).toHaveLength(0);
+  });
+
+  test("a backfill batch holds only ACCESS SHARE on source tables", async () => {
+    if (!owned || !ownerSql) return;
+    await owned.admin`
+      update opengeni_private.product_lifecycle_backfill_progress
+      set materialized_at = null, cursor_seq = 0, completed_at = null
+      where source in ('connection.created', 'credits.granted', 'model.connected')`;
+    const reserved = await ownerSql.reserve();
+    const held: { relname: string; mode: string }[] = [];
+    try {
+      for (const source of ["connection.created", "credits.granted", "model.connected"]) {
+        await reserved`begin`;
+        const [backend] = await reserved<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        await reserved`
+          select * from opengeni_private.backfill_product_lifecycle_facts(${source}, 1)`;
+        // Observed from a second connection while the batch transaction is open.
+        held.push(
+          ...(await owned.admin<{ relname: string; mode: string }[]>`
+            select c.relname::text as relname, l.mode
+            from pg_locks l join pg_class c on c.oid = l.relation
+            where l.pid = ${backend!.pid} and l.locktype = 'relation'`),
+        );
+        await reserved`commit`;
+      }
+    } finally {
+      reserved.release();
+    }
+    const sourceTables = new Set([
+      "connections",
+      "credit_ledger_entries",
+      "codex_subscription_credentials",
+      "xai_subscription_credentials",
+      "organization_model_provider_connections",
+      "organization_model_provider_connection_operations",
+    ]);
+    expect(held.filter((lock) => sourceTables.has(lock.relname)).length).toBeGreaterThan(0);
+    for (const lock of held) {
+      expect(["AccessExclusiveLock", "ExclusiveLock", "ShareRowExclusiveLock"]).not.toContain(
+        lock.mode,
+      );
+      if (sourceTables.has(lock.relname)) expect(lock.mode).toBe("AccessShareLock");
+    }
+  });
+
+  test("batches page an index, so a large source drains in linear time", async () => {
+    if (!owned || !ownerSql || !client) return;
+    const [account] = await owned.admin<{ id: string }[]>`
+      select id::text from managed_accounts order by created_at limit 1`;
+    const rows = 50_000;
+    await owned.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        insert into credit_ledger_entries (
+          account_id, type, amount_micros, source_type, source_id, idempotency_key,
+          created_at, occurred_at
+        )
+        select ${account!.id}::uuid, 'credit_topup', 1000, 'stripe_checkout_session',
+          'cs_perf_' || n, 'backfill-perf:' || n,
+          now() - (n || ' seconds')::interval, now() - (n || ' seconds')::interval
+        from generate_series(1, ${rows}) as n`;
+    });
+    await owned.admin`
+      update opengeni_private.product_lifecycle_backfill_progress
+      set materialized_at = null, cursor_seq = 0, completed_at = null
+      where source = 'credits.purchased'`;
+    const durations: number[] = [];
+    let enqueued = 0;
+    for (;;) {
+      const started = performance.now();
+      const [batch] = await ownerSql<
+        { enqueued_count: number; scanned_count: number; backfill_completed: boolean }[]
+      >`select * from opengeni_private.backfill_product_lifecycle_facts('credits.purchased', 5000)`;
+      durations.push(performance.now() - started);
+      enqueued += Number(batch!.enqueued_count);
+      if (batch!.backfill_completed) break;
+    }
+    expect(enqueued).toBe(rows);
+    // The first call includes the one-pass materialization; later pages must
+    // not grow with the remaining backlog (no rescans of the source).
+    const pages = durations.slice(1, -1);
+    const firstPages = pages.slice(0, 3);
+    const lastPages = pages.slice(-3);
+    const average = (values: number[]) =>
+      values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+    expect(average(lastPages)).toBeLessThan(average(firstPages) * 3 + 250);
+    expect(durations.reduce((sum, value) => sum + value, 0)).toBeLessThan(120_000);
   });
 });

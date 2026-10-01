@@ -4,13 +4,15 @@ import postgres from "postgres";
  * One-time, operator-invoked backfill of product lifecycle facts captured
  * before the first `lifecycle_fact` consumer registered (migration 0561).
  *
- * Each source is drained in keyset batches through
- * `opengeni_host_export.backfill_product_lifecycle_facts`, one short
- * transaction per batch. Backfilled facts reuse the live trigger's
- * deterministic fact ids and keep their original timestamps, so an overlap
- * with live capture or a repeated run never adds a second fact. A completed
- * source is a durable no-op. Run as the migration owner (or the host-export
- * role) only after a lifecycle consumer is registered:
+ * Each source is drained through
+ * `opengeni_private.backfill_product_lifecycle_facts`: the first call reads
+ * the source tables once (ACCESS SHARE only) into a private queue, and every
+ * call then enqueues one primary-key page of it in its own short
+ * transaction. Backfilled facts reuse the live trigger's deterministic fact
+ * ids and keep their original timestamps, so an overlap with live capture or
+ * a repeated run never adds a second fact. A completed source is a durable
+ * no-op. Run as the migration owner only after a lifecycle consumer is
+ * registered:
  *
  *   OPENGENI_MIGRATIONS_DATABASE_URL=... bun run db:backfill-lifecycle-facts
  */
@@ -57,7 +59,7 @@ export async function backfillProductLifecycleFacts(
         { enqueued_count: number; scanned_count: number; backfill_completed: boolean }[]
       >`
         select enqueued_count, scanned_count, backfill_completed
-        from opengeni_host_export.backfill_product_lifecycle_facts(${source}, ${batchSize})`;
+        from opengeni_private.backfill_product_lifecycle_facts(${source}, ${batchSize})`;
       if (!row) throw new Error(`lifecycle backfill returned no row for ${source}`);
       total.enqueued += Number(row.enqueued_count);
       total.scanned += Number(row.scanned_count);
