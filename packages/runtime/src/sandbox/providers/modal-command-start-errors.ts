@@ -15,6 +15,7 @@ export type ModalCommandStartInvocation = Readonly<{
   sandboxId: string;
   taskId: string;
   execId: string;
+  pty?: boolean;
   /** Authenticated, bounded, read-only observation of these exact IDs. */
   observe: (
     signal?: AbortSignal,
@@ -71,6 +72,9 @@ export function getModalCommandStartInvocation(error: unknown): ModalCommandStar
         const taskId = modalCommandStartOwnData(descriptor, "taskId");
         const execId = modalCommandStartOwnData(descriptor, "execId");
         const observe = modalCommandStartOwnData(descriptor, "observe");
+        const ptyProperty = Object.getOwnPropertyDescriptor(descriptor, "pty");
+        if (ptyProperty && (!("value" in ptyProperty) || typeof ptyProperty.value !== "boolean"))
+          return null;
         if (
           typeof sandboxId !== "string" ||
           !sandboxId ||
@@ -81,13 +85,11 @@ export function getModalCommandStartInvocation(error: unknown): ModalCommandStar
           typeof observe !== "function"
         )
           return null;
-        if (
-          result &&
-          (result.sandboxId !== sandboxId || result.taskId !== taskId || result.execId !== execId)
-        )
-          return null;
+        // Repeated references to the same immutable descriptor are harmless;
+        // independently supplied descriptors are not interchangeable, even
+        // when their IDs match (PTY or observation authority may differ).
+        if (result && result !== descriptor) return null;
         result = descriptor as ModalCommandStartInvocation;
-        continue;
       }
       const nested: unknown[] = [
         modalCommandStartOwnData(value, "cause"),
@@ -95,10 +97,25 @@ export function getModalCommandStartInvocation(error: unknown): ModalCommandStar
       ].filter((child) => child !== undefined);
       const errors = modalCommandStartOwnData(value, "errors");
       if (errors !== undefined) {
-        if (!Array.isArray(errors) || errors.length > 32) return null;
-        for (let index = 0; index < errors.length; index++) {
-          if (modalCommandStartHasOwnAccessor(errors, String(index))) return null;
-          nested.push(modalCommandStartOwnData(errors, String(index)));
+        if (!Array.isArray(errors)) return null;
+        const length = modalCommandStartOwnData(errors, "length");
+        if (
+          typeof length !== "number" ||
+          !Number.isSafeInteger(length) ||
+          length < 1 ||
+          length > 32
+        )
+          return null;
+        for (let index = 0; index < length; index++) {
+          const property = Object.getOwnPropertyDescriptor(errors, String(index));
+          if (
+            !property ||
+            !("value" in property) ||
+            !property.value ||
+            typeof property.value !== "object"
+          )
+            return null;
+          nested.push(property.value);
         }
       }
       if (depth === 8 && nested.length) return null;
@@ -122,6 +139,7 @@ export function modalCommandStartRetainedError(error: unknown): unknown {
     sandboxId: invocation.sandboxId,
     taskId: invocation.taskId,
     execId: invocation.execId,
+    ...(invocation.pty === undefined ? {} : { pty: invocation.pty }),
     streams: { stdout: cursor(), stderr: cursor() },
   });
   return command.success ? new ProviderCommandStartOutcomeUnknownError(command.data, error) : error;

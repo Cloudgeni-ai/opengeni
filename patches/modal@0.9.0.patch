@@ -1,5 +1,5 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c182ee71d93 100644
+index e1794ee4..a13b2e62 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
 @@ -31,6 +31,8 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
@@ -43,15 +43,16 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
  var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    stub;
    channel;
-@@ -61900,6 +61927,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61900,6 +61927,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    jwtExp;
    jwtRefreshLock = Promise.resolve();
    logger;
 +  profile;
++  startCancellation = new AbortController();
    closed = false;
    static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
      let resp;
-@@ -61928,14 +61956,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61928,14 +61957,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "url",
        resp.url
      );
@@ -101,7 +102,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        "grpc.max_receive_message_length": 100 * 1024 * 1024,
        "grpc.max_send_message_length": 100 * 1024 * 1024,
        "grpc-node.flow_control_window": 64 * 1024 * 1024,
-@@ -61944,8 +62005,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61944,8 +62006,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "grpc.keepalive_permit_without_calls": 1
      };
      let channel;
@@ -112,7 +113,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          "Using insecure TLS (skip certificate verification) for task command router"
        );
        channel = (0, import_nice_grpc11.createChannel)(
-@@ -61960,40 +62021,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61960,46 +62022,23 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
          channelConfig
        );
      }
@@ -157,15 +158,24 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    }
    close() {
      if (this.closed) {
-@@ -62018,7 +62055,62 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       return;
+     }
+     this.closed = true;
++    this.startCancellation.abort(new ClientClosedError());
+     this.channel.close();
+   }
+   /** Run a unary RPC against the command router with the default retry policy. */
+@@ -62017,8 +62056,132 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       () => this.closed
      );
    }
 -  async execStart(request) {
-+  async execStart(request, options) {
 -    return await this.callUnary(() => this.stub.taskExecStart(request));
++  async execStart(request, options) {
 +    // All SDK consumers (including setup, hydration and filesystem helpers)
 +    // cross this boundary. Only local readiness failure proves non-dispatch.
-+    const signal = AbortSignal.any([...(options?.signal ? [options.signal] : []), AbortSignal.timeout(15000)]);
++    const signal = AbortSignal.any([this.startCancellation.signal, ...(options?.signal ? [options.signal] : []), AbortSignal.timeout(15000)]);
++    const invocation = this.adoptedInvocation(request, signal);
 +    let dispatched = false;
 +    try {
 +      return await awaitCommandStartOperation(() => this.callWithAuthRetry(async () => {
@@ -193,16 +203,84 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
 +      // Observe only the original IDs before a setup helper can unwind. A
 +      // successful Poll (even still-running) proves existence, not no effect.
 +      try {
-+        await this.observeExec(request.taskId, request.execId, signal);
-+        return;
++        await invocation.observe(signal);
++        const acknowledgement = {};
++        Object.defineProperty(acknowledgement, Symbol.for("opengeni.modal.command-start.adopted.v1"), { value: invocation });
++        return acknowledgement;
 +      } catch {
-+        throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error, {
-+          sandboxId: this.sandboxId, taskId: request.taskId, execId: request.execId,
-+          observe: (signal2, timeoutMs) => this.observeExec(request.taskId, request.execId, signal2, timeoutMs)
-+        });
++        throw invocation.unknown(error);
 +      }
 +    }
-   }
++  }
++  adoptedInvocation(request, owningSignal) {
++    const client = this;
++    const { taskId, execId } = request;
++    const cancellation = new AbortController();
++    const signal = AbortSignal.any([owningSignal, this.startCancellation.signal, cancellation.signal]);
++    let invocation;
++    const unknown = (cause) => {
++      try {
++        const boundary = cause && typeof cause === "object" ? Object.getOwnPropertyDescriptor(cause, Symbol.for("opengeni.modal.command-start.boundary.v1")) : void 0;
++        if (boundary?.value === "outcome-unknown" && boundary.writable === false && boundary.configurable === false && Object.getOwnPropertyDescriptor(cause, Symbol.for("opengeni.modal.command-start.invocation.v1"))?.value === invocation)
++          return cause;
++      } catch {}
++      const error = new CommandStartOutcomeUnknownError(taskId, execId, cause, invocation);
++      cancellation.abort(error);
++      return error;
++    };
++    invocation = Object.freeze({
++      sandboxId: this.sandboxId, taskId, execId, pty: Boolean(request.ptyInfo?.enabled),
++      observe: (signal2, timeoutMs) => client.observeExec(taskId, execId, signal2, timeoutMs),
++      unknown,
++      async wait() {
++        let failure;
++        for (let attempt = 0; attempt < 3; attempt++) {
++          try {
++            signal.throwIfAborted();
++            if (client.closed) throw new ClientClosedError();
++            const result = await client.stub.taskExecWait(TaskExecWaitRequest.create({ taskId, execId }), { timeoutMs: 1000, signal });
++            if (result.code !== void 0 || result.signal !== void 0) return result;
++            failure = new Error("Original invocation has no terminal observation");
++          } catch (error) {
++            failure = error;
++            if (signal.aborted || client.closed) break;
++          }
++        }
++        throw unknown(signal.aborted ? signal.reason : failure);
++      },
++      async *read(fileDescriptor) {
++        let offset = 0;
++        let failure;
++        for (let attempt = 0; attempt < 3; attempt++) {
++          try {
++            signal.throwIfAborted();
++            if (client.closed) throw new ClientClosedError();
++            const stream = client.stub.taskExecStdioRead(TaskExecStdioReadRequest.create({ taskId, execId, offset, fileDescriptor }), { timeoutMs: 1000, signal });
++            for await (const item of stream) {
++              signal.throwIfAborted();
++              offset += item.data.length;
++              yield item;
++            }
++            return;
++          } catch (error) {
++            failure = error;
++            if (signal.aborted || client.closed) break;
++          }
++        }
++        throw unknown(signal.aborted ? signal.reason : failure);
++      },
++      async write(offset, data, eof) {
++        try {
++          signal.throwIfAborted();
++          if (client.closed) throw new ClientClosedError();
++          return await client.stub.taskExecStdinWrite(TaskExecStdinWriteRequest.create({ taskId, execId, offset, data, eof }), { timeoutMs: 1000, signal });
++        } catch (error) {
++          throw unknown(signal.aborted ? signal.reason : error);
++        }
++      }
++    });
++    return invocation;
++  }
 +  async observeExec(taskId, execId, owningSignal, timeoutMs = 5000) {
 +    const budget = Math.max(1, Math.min(5000, timeoutMs));
 +    const signal = AbortSignal.any([...(owningSignal ? [owningSignal] : []), AbortSignal.timeout(budget)]);
@@ -219,10 +297,10 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
 +      }
 +    }
 +    throw failure;
-+  }
+   }
    async containerCreate(request) {
      return await this.callUnary(() => this.stub.taskContainerCreate(request));
-@@ -62229,15 +62321,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62229,15 +62392,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        throw err;
      }
    }
@@ -241,7 +319,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
            "task_id",
            this.taskId
          );
-@@ -62250,11 +62342,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62250,11 +62413,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            this.sandboxId,
            this.isV2
          );
@@ -268,7 +346,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        } catch (err) {
          error = err;
        }
-@@ -62265,11 +62370,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62265,11 +62441,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      }
    }
    async callWithAuthRetry(func) {
@@ -282,7 +360,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          return await func();
        }
        throw err;
-@@ -62291,6 +62397,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62291,6 +62468,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      while (true) {
        try {
          const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
@@ -290,7 +368,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          const request = TaskExecStdioReadRequest.create({
            taskId,
            execId,
-@@ -62312,7 +62419,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62312,7 +62490,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            return;
          } catch (err) {
            if (err instanceof import_nice_grpc11.ClientError && err.code === import_nice_grpc11.Status.UNAUTHENTICATED && !didAuthRetry) {
@@ -299,7 +377,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
              didAuthRetry = true;
              continue;
            }
-@@ -64396,7 +64503,20 @@ var Sandbox2 = class _Sandbox {
+@@ -64396,7 +64574,20 @@ var Sandbox2 = class _Sandbox {
        env: envDict,
        secrets: resolvableSecrets
      };
@@ -321,16 +399,27 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
      const execId = (0, import_uuid2.v4)();
      const request = buildTaskExecStartRequestProto(
        taskId,
-@@ -64405,7 +64525,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64405,7 +64596,8 @@ var Sandbox2 = class _Sandbox {
        execParams,
        containerId
      );
 -    await commandRouterClient.execStart(request);
-+    await commandRouterClient.execStart(request, { signal });
++    const acknowledgement = await commandRouterClient.execStart(request, { signal });
++    const invocation = Object.getOwnPropertyDescriptor(acknowledgement ?? {}, Symbol.for("opengeni.modal.command-start.adopted.v1"))?.value;
      this.#client.logger.debug(
        "Created ContainerProcess",
        "exec_id",
-@@ -64658,7 +64778,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64423,7 +64615,8 @@ var Sandbox2 = class _Sandbox {
+       execId,
+       commandRouterClient,
+       params,
+-      deadline
++      deadline,
++      invocation
+     );
+   }
+   async #getCommandRouter() {
+@@ -64658,7 +64851,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -339,7 +428,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64778,7 +64898,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64778,7 +64971,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -348,19 +437,125 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        wireTtlSeconds,
        params
      );
+@@ -64809,17 +65002,19 @@ var ContainerProcess2 = class {
+   #execId;
+   #commandRouterClient;
+   #deadline;
++  #invocation;
+   /** @ignore */
+-  constructor(taskId, execId, commandRouterClient, params, deadline) {
++  constructor(taskId, execId, commandRouterClient, params, deadline, invocation) {
+     this.#taskId = taskId;
+     this.#execId = execId;
+     this.#commandRouterClient = commandRouterClient;
+     this.#deadline = deadline ?? null;
++    this.#invocation = invocation;
+     const mode = params?.mode ?? "text";
+     const stdout = params?.stdout ?? "pipe";
+     const stderr = params?.stderr ?? "pipe";
+     this.stdin = toModalWriteStream(
+-      inputStreamCp(commandRouterClient, taskId, execId)
++      inputStreamCp(commandRouterClient, taskId, execId, invocation)
+     );
+     const stdoutStream = stdout === "ignore" ? ReadableStream.from([]) : streamConsumingIter(
+       outputStreamCp(
+@@ -64827,7 +65022,8 @@ var ContainerProcess2 = class {
+         taskId,
+         execId,
+         1 /* FILE_DESCRIPTOR_STDOUT */,
+-        this.#deadline
++        this.#deadline,
++        invocation
+       )
+     );
+     const stderrStream = stderr === "ignore" ? ReadableStream.from([]) : streamConsumingIter(
+@@ -64836,7 +65032,8 @@ var ContainerProcess2 = class {
+         taskId,
+         execId,
+         2 /* FILE_DESCRIPTOR_STDERR */,
+-        this.#deadline
++        this.#deadline,
++        invocation
+       )
+     );
+     if (mode === "text") {
+@@ -64858,12 +65055,12 @@ var ContainerProcess2 = class {
+    * Useful for when an stdin write has failed.
+    */
+   async closeStdin() {
+-    await this.#commandRouterClient.execStdinWrite(this.#taskId, this.#execId, 0, new Uint8Array(0), true).catch(() => {
++    await (this.#invocation ? this.#invocation.write(0, new Uint8Array(0), true) : this.#commandRouterClient.execStdinWrite(this.#taskId, this.#execId, 0, new Uint8Array(0), true)).catch(() => {
+     });
+   }
+   /** Wait for process completion and return the exit code. */
+   async wait() {
+-    const resp = await this.#commandRouterClient.execWait(
++    const resp = this.#invocation ? await this.#invocation.wait() : await this.#commandRouterClient.execWait(
+       this.#taskId,
+       this.#execId,
+       this.#deadline
+@@ -64945,7 +65142,11 @@ function inputStreamSb(cpClient, sandboxId) {
+     }
+   });
+ }
+-async function* outputStreamCp(commandRouterClient, taskId, execId, fileDescriptor, deadline) {
++async function* outputStreamCp(commandRouterClient, taskId, execId, fileDescriptor, deadline, invocation) {
++  if (invocation) {
++    for await (const batch of invocation.read(fileDescriptor === 1 ? 0 : 1)) yield batch.data;
++    return;
++  }
+   for await (const batch of commandRouterClient.execStdioRead(
+     taskId,
+     execId,
+@@ -64955,30 +65156,30 @@ async function* outputStreamCp(commandRouterClient, taskId, execId, fileDescript
+     yield batch.data;
+   }
+ }
+-function inputStreamCp(commandRouterClient, taskId, execId) {
++function inputStreamCp(commandRouterClient, taskId, execId, invocation) {
+   let offset = 0;
+   return new WritableStream({
+     async write(chunk) {
+       const data = encodeIfString(chunk);
+-      await commandRouterClient.execStdinWrite(
++      await (invocation ? invocation.write(offset, data, false) : commandRouterClient.execStdinWrite(
+         taskId,
+         execId,
+         offset,
+         data,
+         false
+         // eof
+-      );
++      ));
+       offset += data.length;
+     },
+     async close() {
+-      await commandRouterClient.execStdinWrite(
++      await (invocation ? invocation.write(offset, new Uint8Array(0), true) : commandRouterClient.execStdinWrite(
+         taskId,
+         execId,
+         offset,
+         new Uint8Array(0),
+         true
+         // eof
+-      );
++      ));
+     }
+   });
+ }
 diff --git a/dist/index.d.cts b/dist/index.d.cts
-index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9b7d410b8 100644
+index 9b2f092b..0c8e204d 100644
 --- a/dist/index.d.cts
 +++ b/dist/index.d.cts
-@@ -7825,6 +7825,8 @@ type SandboxExecParams = {
+@@ -7823,6 +7823,8 @@ type SandboxExperimentalFromNameParams = {
+ };
+ /** Optional parameters for {@link Sandbox#exec Sandbox.exec()}. */
  type SandboxExecParams = {
-+    /** Cancel Start and exact-ID observation; cancellation is not no-effect proof. */
++    /** Cancel Start and adopted continuation; cancellation is not no-effect proof. */
 +    signal?: AbortSignal;
      /** Specifies text or binary encoding for input and output streams. */
      mode?: StreamMode;
      /** Whether to pipe or ignore standard output. */
-     stdout?: StdioBehavior;
-     /** Whether to pipe or ignore standard error. */
 @@ -7848,6 +7850,12 @@ type SandboxTerminateParams = {
  };
  /** Optional parameters for {@link Sandbox#snapshotFilesystem Sandbox.snapshotFilesystem()}. */
@@ -404,18 +599,18 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9
 +
  export { AlreadyExistsError, App, type AppFromNameParams, AppService, ClientClosedError, CloudBucketMount, CloudBucketMountService, Cls, type ClsFromNameParams, ClsInstance, ClsService, type ClsWithBatchingParams, type ClsWithConcurrencyParams, type ClsWithOptionsParams, ContainerProcess, type FileInfo, type FileType, type FileWatchEvent, type FileWatchEventType, FunctionCall, type FunctionCallCancelParams, type FunctionCallGetParams, FunctionCallService, type FunctionFromNameParams, FunctionService, type FunctionStats, FunctionTimeoutError, type FunctionUpdateAutoscalerParams, type FunctionWithBatchingParams, type FunctionWithConcurrencyParams, type FunctionWithOptionsParams, Function_, Image, type ImageDeleteParams, type ImageDockerfileCommandsParams, type ImageFromNameParams, type ImagePublishParams, ImageService, InternalFailure, InvalidError, type LogLevel, type Logger, ModalClient, type ModalClientParams, type ModalReadStream, type ModalWriteStream, NotFoundError, Probe, type ProbeParams, type Profile, Proxy, type ProxyFromNameParams, ProxyService, Queue, type QueueClearParams, type QueueDeleteParams, QueueEmptyError, type QueueEphemeralParams, type QueueFromNameParams, QueueFullError, type QueueGetParams, type QueueIterateParams, type QueueLenParams, type QueuePutParams, QueueService, RemoteError, Retries, Sandbox, type SandboxCreateConnectCredentials, type SandboxCreateConnectTokenParams, type SandboxCreateParams, type SandboxExecParams, type SandboxExperimentalFromNameParams, type SandboxExperimentalListParams, SandboxFilesystem, SandboxFilesystemDirectoryNotEmptyError, SandboxFilesystemError, SandboxFilesystemFileTooLargeError, SandboxFilesystemIsADirectoryError, SandboxFilesystemNotADirectoryError, SandboxFilesystemNotFoundError, SandboxFilesystemPathAlreadyExistsError, SandboxFilesystemPermissionError, type SandboxFromNameParams, type SandboxListParams, type SandboxMountImageParams, type SandboxReloadVolumesParams, SandboxService, type SandboxSnapshotDirectoryParams, type SandboxSnapshotFilesystemParams, type SandboxTerminateParams, SandboxTimeoutError, type SandboxUpdateNetworkPolicyParams, Secret, type SecretDeleteParams, type SecretFromNameParams, type SecretFromObjectParams, SecretService, SidecarContainer, type SidecarCreateParams, type SidecarExecParams, type SidecarGetParams, type SidecarListParams, SidecarService, type SidecarTerminateParams, type StdioBehavior, type StreamMode, TimeoutError, Tunnel, Volume, type VolumeDeleteParams, type VolumeEphemeralParams, type VolumeFromNameParams, type VolumeMountOptionsParams, VolumeService, checkForRenamedParams };
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9b7d410b8 100644
+index 9b2f092b..0c8e204d 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
-@@ -7825,6 +7825,8 @@ type SandboxExecParams = {
+@@ -7823,6 +7823,8 @@ type SandboxExperimentalFromNameParams = {
+ };
+ /** Optional parameters for {@link Sandbox#exec Sandbox.exec()}. */
  type SandboxExecParams = {
-+    /** Cancel Start and exact-ID observation; cancellation is not no-effect proof. */
++    /** Cancel Start and adopted continuation; cancellation is not no-effect proof. */
 +    signal?: AbortSignal;
      /** Specifies text or binary encoding for input and output streams. */
      mode?: StreamMode;
      /** Whether to pipe or ignore standard output. */
-     stdout?: StdioBehavior;
-     /** Whether to pipe or ignore standard error. */
 @@ -7848,6 +7850,12 @@ type SandboxTerminateParams = {
  };
  /** Optional parameters for {@link Sandbox#snapshotFilesystem Sandbox.snapshotFilesystem()}. */
@@ -459,7 +654,7 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9
 +
  export { AlreadyExistsError, App, type AppFromNameParams, AppService, ClientClosedError, CloudBucketMount, CloudBucketMountService, Cls, type ClsFromNameParams, ClsInstance, ClsService, type ClsWithBatchingParams, type ClsWithConcurrencyParams, type ClsWithOptionsParams, ContainerProcess, type FileInfo, type FileType, type FileWatchEvent, type FileWatchEventType, FunctionCall, type FunctionCallCancelParams, type FunctionCallGetParams, FunctionCallService, type FunctionFromNameParams, FunctionService, type FunctionStats, FunctionTimeoutError, type FunctionUpdateAutoscalerParams, type FunctionWithBatchingParams, type FunctionWithConcurrencyParams, type FunctionWithOptionsParams, Function_, Image, type ImageDeleteParams, type ImageDockerfileCommandsParams, type ImageFromNameParams, type ImagePublishParams, ImageService, InternalFailure, InvalidError, type LogLevel, type Logger, ModalClient, type ModalClientParams, type ModalReadStream, type ModalWriteStream, NotFoundError, Probe, type ProbeParams, type Profile, Proxy, type ProxyFromNameParams, ProxyService, Queue, type QueueClearParams, type QueueDeleteParams, QueueEmptyError, type QueueEphemeralParams, type QueueFromNameParams, QueueFullError, type QueueGetParams, type QueueIterateParams, type QueueLenParams, type QueuePutParams, QueueService, RemoteError, Retries, Sandbox, type SandboxCreateConnectCredentials, type SandboxCreateConnectTokenParams, type SandboxCreateParams, type SandboxExecParams, type SandboxExperimentalFromNameParams, type SandboxExperimentalListParams, SandboxFilesystem, SandboxFilesystemDirectoryNotEmptyError, SandboxFilesystemError, SandboxFilesystemFileTooLargeError, SandboxFilesystemIsADirectoryError, SandboxFilesystemNotADirectoryError, SandboxFilesystemNotFoundError, SandboxFilesystemPathAlreadyExistsError, SandboxFilesystemPermissionError, type SandboxFromNameParams, type SandboxListParams, type SandboxMountImageParams, type SandboxReloadVolumesParams, SandboxService, type SandboxSnapshotDirectoryParams, type SandboxSnapshotFilesystemParams, type SandboxTerminateParams, SandboxTimeoutError, type SandboxUpdateNetworkPolicyParams, Secret, type SecretDeleteParams, type SecretFromNameParams, type SecretFromObjectParams, SecretService, SidecarContainer, type SidecarCreateParams, type SidecarExecParams, type SidecarGetParams, type SidecarListParams, SidecarService, type SidecarTerminateParams, type StdioBehavior, type StreamMode, TimeoutError, Tunnel, Volume, type VolumeDeleteParams, type VolumeEphemeralParams, type VolumeFromNameParams, type VolumeMountOptionsParams, VolumeService, checkForRenamedParams };
 diff --git a/dist/index.js b/dist/index.js
-index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d4571856673114 100644
+index 83068162..b5c8073b 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -1,5 +1,5 @@
@@ -501,15 +696,16 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
  var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    stub;
    channel;
-@@ -61828,6 +61853,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61828,6 +61853,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    jwtExp;
    jwtRefreshLock = Promise.resolve();
    logger;
 +  profile;
++  startCancellation = new AbortController();
    closed = false;
    static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
      let resp;
-@@ -61856,14 +61882,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61856,14 +61883,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "url",
        resp.url
      );
@@ -559,7 +755,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        "grpc.max_receive_message_length": 100 * 1024 * 1024,
        "grpc.max_send_message_length": 100 * 1024 * 1024,
        "grpc-node.flow_control_window": 64 * 1024 * 1024,
-@@ -61872,8 +61931,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61872,8 +61932,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "grpc.keepalive_permit_without_calls": 1
      };
      let channel;
@@ -570,7 +766,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          "Using insecure TLS (skip certificate verification) for task command router"
        );
        channel = createChannel2(
-@@ -61888,40 +61947,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61888,46 +61948,23 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
          channelConfig
        );
      }
@@ -615,15 +811,24 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
    }
    close() {
      if (this.closed) {
-@@ -61946,7 +61981,61 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       return;
+     }
+     this.closed = true;
++    this.startCancellation.abort(new ClientClosedError());
+     this.channel.close();
+   }
+   /** Run a unary RPC against the command router with the default retry policy. */
+@@ -61945,8 +61982,131 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       () => this.closed
      );
    }
 -  async execStart(request) {
-+  async execStart(request, options) {
 -    return await this.callUnary(() => this.stub.taskExecStart(request));
++  async execStart(request, options) {
 +    // All SDK consumers (including setup, hydration and filesystem helpers)
 +    // cross this boundary. Only local readiness failure proves non-dispatch.
-+    const signal = AbortSignal.any([...(options?.signal ? [options.signal] : []), AbortSignal.timeout(15000)]);
++    const signal = AbortSignal.any([this.startCancellation.signal, ...(options?.signal ? [options.signal] : []), AbortSignal.timeout(15000)]);
++    const invocation = this.adoptedInvocation(request, signal);
 +    let dispatched = false;
 +    try {
 +      return await awaitCommandStartOperation(() => this.callWithAuthRetry(async () => {
@@ -650,16 +855,84 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
 +      // Observe only the original IDs before a setup helper can unwind. A
 +      // successful Poll (even still-running) proves existence, not no effect.
 +      try {
-+        await this.observeExec(request.taskId, request.execId, signal);
-+        return;
++        await invocation.observe(signal);
++        const acknowledgement = {};
++        Object.defineProperty(acknowledgement, Symbol.for("opengeni.modal.command-start.adopted.v1"), { value: invocation });
++        return acknowledgement;
 +      } catch {
-+        throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error, {
-+          sandboxId: this.sandboxId, taskId: request.taskId, execId: request.execId,
-+          observe: (signal2, timeoutMs) => this.observeExec(request.taskId, request.execId, signal2, timeoutMs)
-+        });
++        throw invocation.unknown(error);
 +      }
 +    }
-   }
++  }
++  adoptedInvocation(request, owningSignal) {
++    const client = this;
++    const { taskId, execId } = request;
++    const cancellation = new AbortController();
++    const signal = AbortSignal.any([owningSignal, this.startCancellation.signal, cancellation.signal]);
++    let invocation;
++    const unknown = (cause) => {
++      try {
++        const boundary = cause && typeof cause === "object" ? Object.getOwnPropertyDescriptor(cause, Symbol.for("opengeni.modal.command-start.boundary.v1")) : void 0;
++        if (boundary?.value === "outcome-unknown" && boundary.writable === false && boundary.configurable === false && Object.getOwnPropertyDescriptor(cause, Symbol.for("opengeni.modal.command-start.invocation.v1"))?.value === invocation)
++          return cause;
++      } catch {}
++      const error = new CommandStartOutcomeUnknownError(taskId, execId, cause, invocation);
++      cancellation.abort(error);
++      return error;
++    };
++    invocation = Object.freeze({
++      sandboxId: this.sandboxId, taskId, execId, pty: Boolean(request.ptyInfo?.enabled),
++      observe: (signal2, timeoutMs) => client.observeExec(taskId, execId, signal2, timeoutMs),
++      unknown,
++      async wait() {
++        let failure;
++        for (let attempt = 0; attempt < 3; attempt++) {
++          try {
++            signal.throwIfAborted();
++            if (client.closed) throw new ClientClosedError();
++            const result = await client.stub.taskExecWait(TaskExecWaitRequest.create({ taskId, execId }), { timeoutMs: 1000, signal });
++            if (result.code !== void 0 || result.signal !== void 0) return result;
++            failure = new Error("Original invocation has no terminal observation");
++          } catch (error) {
++            failure = error;
++            if (signal.aborted || client.closed) break;
++          }
++        }
++        throw unknown(signal.aborted ? signal.reason : failure);
++      },
++      async *read(fileDescriptor) {
++        let offset = 0;
++        let failure;
++        for (let attempt = 0; attempt < 3; attempt++) {
++          try {
++            signal.throwIfAborted();
++            if (client.closed) throw new ClientClosedError();
++            const stream = client.stub.taskExecStdioRead(TaskExecStdioReadRequest.create({ taskId, execId, offset, fileDescriptor }), { timeoutMs: 1000, signal });
++            for await (const item of stream) {
++              signal.throwIfAborted();
++              offset += item.data.length;
++              yield item;
++            }
++            return;
++          } catch (error) {
++            failure = error;
++            if (signal.aborted || client.closed) break;
++          }
++        }
++        throw unknown(signal.aborted ? signal.reason : failure);
++      },
++      async write(offset, data, eof) {
++        try {
++          signal.throwIfAborted();
++          if (client.closed) throw new ClientClosedError();
++          return await client.stub.taskExecStdinWrite(TaskExecStdinWriteRequest.create({ taskId, execId, offset, data, eof }), { timeoutMs: 1000, signal });
++        } catch (error) {
++          throw unknown(signal.aborted ? signal.reason : error);
++        }
++      }
++    });
++    return invocation;
++  }
 +  async observeExec(taskId, execId, owningSignal, timeoutMs = 5000) {
 +    const budget = Math.max(1, Math.min(5000, timeoutMs));
 +    const signal = AbortSignal.any([...(owningSignal ? [owningSignal] : []), AbortSignal.timeout(budget)]);
@@ -676,10 +949,10 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
 +      }
 +    }
 +    throw failure;
-+  }
+   }
    async containerCreate(request) {
      return await this.callUnary(() => this.stub.taskContainerCreate(request));
-@@ -62157,15 +62246,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62157,15 +62317,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        throw err;
      }
    }
@@ -698,7 +971,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
            "task_id",
            this.taskId
          );
-@@ -62178,11 +62267,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62178,11 +62338,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            this.sandboxId,
            this.isV2
          );
@@ -725,7 +998,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        } catch (err) {
          error = err;
        }
-@@ -62193,11 +62295,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62193,11 +62366,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      }
    }
    async callWithAuthRetry(func) {
@@ -739,7 +1012,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          return await func();
        }
        throw err;
-@@ -62219,6 +62322,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62219,6 +62393,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      while (true) {
        try {
          const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
@@ -747,7 +1020,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          const request = TaskExecStdioReadRequest.create({
            taskId,
            execId,
-@@ -62240,7 +62344,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62240,7 +62415,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            return;
          } catch (err) {
            if (err instanceof ClientError10 && err.code === Status10.UNAUTHENTICATED && !didAuthRetry) {
@@ -756,7 +1029,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
              didAuthRetry = true;
              continue;
            }
-@@ -64324,7 +64428,19 @@ var Sandbox2 = class _Sandbox {
+@@ -64324,7 +64499,19 @@ var Sandbox2 = class _Sandbox {
        env: envDict,
        secrets: resolvableSecrets
      };
@@ -777,16 +1050,27 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
      const execId = uuidv42();
      const request = buildTaskExecStartRequestProto(
        taskId,
-@@ -64333,7 +64449,7 @@ var Sandbox = class _Sandbox {
+@@ -64333,7 +64520,8 @@ var Sandbox2 = class _Sandbox {
        execParams,
        containerId
      );
 -    await commandRouterClient.execStart(request);
-+    await commandRouterClient.execStart(request, { signal });
++    const acknowledgement = await commandRouterClient.execStart(request, { signal });
++    const invocation = Object.getOwnPropertyDescriptor(acknowledgement ?? {}, Symbol.for("opengeni.modal.command-start.adopted.v1"))?.value;
      this.#client.logger.debug(
        "Created ContainerProcess",
        "exec_id",
-@@ -64586,7 +64702,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64351,7 +64539,8 @@ var Sandbox2 = class _Sandbox {
+       execId,
+       commandRouterClient,
+       params,
+-      deadline
++      deadline,
++      invocation
+     );
+   }
+   async #getCommandRouter() {
+@@ -64586,7 +64775,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -795,7 +1079,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64706,7 +64822,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64706,7 +64895,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -804,7 +1088,113 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        wireTtlSeconds,
        params
      );
-@@ -64915,6 +65031,8 @@ function encodeIfString(chunk) {
+@@ -64737,17 +64926,19 @@ var ContainerProcess2 = class {
+   #execId;
+   #commandRouterClient;
+   #deadline;
++  #invocation;
+   /** @ignore */
+-  constructor(taskId, execId, commandRouterClient, params, deadline) {
++  constructor(taskId, execId, commandRouterClient, params, deadline, invocation) {
+     this.#taskId = taskId;
+     this.#execId = execId;
+     this.#commandRouterClient = commandRouterClient;
+     this.#deadline = deadline ?? null;
++    this.#invocation = invocation;
+     const mode = params?.mode ?? "text";
+     const stdout = params?.stdout ?? "pipe";
+     const stderr = params?.stderr ?? "pipe";
+     this.stdin = toModalWriteStream(
+-      inputStreamCp(commandRouterClient, taskId, execId)
++      inputStreamCp(commandRouterClient, taskId, execId, invocation)
+     );
+     const stdoutStream = stdout === "ignore" ? ReadableStream.from([]) : streamConsumingIter(
+       outputStreamCp(
+@@ -64755,7 +64946,8 @@ var ContainerProcess2 = class {
+         taskId,
+         execId,
+         1 /* FILE_DESCRIPTOR_STDOUT */,
+-        this.#deadline
++        this.#deadline,
++        invocation
+       )
+     );
+     const stderrStream = stderr === "ignore" ? ReadableStream.from([]) : streamConsumingIter(
+@@ -64764,7 +64956,8 @@ var ContainerProcess2 = class {
+         taskId,
+         execId,
+         2 /* FILE_DESCRIPTOR_STDERR */,
+-        this.#deadline
++        this.#deadline,
++        invocation
+       )
+     );
+     if (mode === "text") {
+@@ -64786,12 +64979,12 @@ var ContainerProcess2 = class {
+    * Useful for when an stdin write has failed.
+    */
+   async closeStdin() {
+-    await this.#commandRouterClient.execStdinWrite(this.#taskId, this.#execId, 0, new Uint8Array(0), true).catch(() => {
++    await (this.#invocation ? this.#invocation.write(0, new Uint8Array(0), true) : this.#commandRouterClient.execStdinWrite(this.#taskId, this.#execId, 0, new Uint8Array(0), true)).catch(() => {
+     });
+   }
+   /** Wait for process completion and return the exit code. */
+   async wait() {
+-    const resp = await this.#commandRouterClient.execWait(
++    const resp = this.#invocation ? await this.#invocation.wait() : await this.#commandRouterClient.execWait(
+       this.#taskId,
+       this.#execId,
+       this.#deadline
+@@ -64873,7 +65066,11 @@ function inputStreamSb(cpClient, sandboxId) {
+     }
+   });
+ }
+-async function* outputStreamCp(commandRouterClient, taskId, execId, fileDescriptor, deadline) {
++async function* outputStreamCp(commandRouterClient, taskId, execId, fileDescriptor, deadline, invocation) {
++  if (invocation) {
++    for await (const batch of invocation.read(fileDescriptor === 1 ? 0 : 1)) yield batch.data;
++    return;
++  }
+   for await (const batch of commandRouterClient.execStdioRead(
+     taskId,
+     execId,
+@@ -64883,30 +65080,30 @@ async function* outputStreamCp(commandRouterClient, taskId, execId, fileDescript
+     yield batch.data;
+   }
+ }
+-function inputStreamCp(commandRouterClient, taskId, execId) {
++function inputStreamCp(commandRouterClient, taskId, execId, invocation) {
+   let offset = 0;
+   return new WritableStream({
+     async write(chunk) {
+       const data = encodeIfString(chunk);
+-      await commandRouterClient.execStdinWrite(
++      await (invocation ? invocation.write(offset, data, false) : commandRouterClient.execStdinWrite(
+         taskId,
+         execId,
+         offset,
+         data,
+         false
+         // eof
+-      );
++      ));
+       offset += data.length;
+     },
+     async close() {
+-      await commandRouterClient.execStdinWrite(
++      await (invocation ? invocation.write(offset, new Uint8Array(0), true) : commandRouterClient.execStdinWrite(
+         taskId,
+         execId,
+         offset,
+         new Uint8Array(0),
+         true
+         // eof
+-      );
++      ));
+     }
+   });
+ }
+@@ -64915,6 +65112,8 @@ function encodeIfString(chunk) {
  }
  export {
    AlreadyExistsError,

@@ -60,11 +60,25 @@ async function routerFixture(
   allowPathValidation = false,
   observation: "unknown" | "terminal" | "running" | "hanging" | "not-found" = "unknown",
   hangingStart = false,
+  hangingWait = false,
+  hangingRead = false,
+  hangingWrite = false,
 ) {
   const server = new Server();
   const starts: Array<{ taskId: string; execId: string; commandArgs: string[] }> = [];
   const closes: unknown[] = [];
   const polls: Array<{ taskId: string; execId: string }> = [];
+  const waits: Array<{ taskId: string; execId: string }> = [];
+  const reads: Array<{ taskId: string; execId: string; fileDescriptor: number }> = [];
+  const writes: Array<{ taskId: string; execId: string; offset: unknown }> = [];
+  let startedWait: () => void = () => {};
+  const waitStarted = new Promise<void>((resolve) => {
+    startedWait = resolve;
+  });
+  let startedRead: () => void = () => {};
+  const readStarted = new Promise<void>((resolve) => {
+    startedRead = resolve;
+  });
   server.addService(
     {
       start: definition("TaskExecStart", "Start", "Empty"),
@@ -86,6 +100,9 @@ async function routerFixture(
         else callback(null, {});
       },
       read(call: any) {
+        reads.push(call.request);
+        startedRead();
+        if (hangingRead) return;
         const start = starts.find((candidate) => candidate.execId === call.request.execId);
         if (
           call.request.fileDescriptor === 0 &&
@@ -111,10 +128,16 @@ async function routerFixture(
           });
         else callback(null, observation === "running" ? {} : { code: 0 });
       },
-      wait(_call: any, callback: any) {
+      wait(call: any, callback: any) {
+        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        waits.push(call.request);
+        startedWait();
+        if (hangingWait) return;
         callback(null, { code: 0 });
       },
-      write(_call: any, callback: any) {
+      write(call: any, callback: any) {
+        writes.push(call.request);
+        if (hangingWrite) return;
         callback(null, {});
       },
       close(call: any, callback: any) {
@@ -132,7 +155,18 @@ async function routerFixture(
       error ? reject(error) : resolve(boundPort),
     ),
   );
-  return { server, starts, closes, polls, url: `https://127.0.0.1:${port}` };
+  return {
+    server,
+    starts,
+    closes,
+    polls,
+    waits,
+    reads,
+    writes,
+    waitStarted,
+    readStarted,
+    url: `https://127.0.0.1:${port}`,
+  };
 }
 
 function sdkSession(url: string, sdkModule: typeof import("modal") = { Sandbox } as never) {
@@ -456,6 +490,152 @@ test("owning cancellation during read-only router lookup prevents a late Start",
     f.server.forceShutdown();
   }
 });
+
+test("both distributions cancel the adopted hanging Wait inside the original setup continuation", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, true);
+    const { sandbox, session } = sdkSession(f.url, sdk);
+    installModalCommandStartRetention(session);
+    const controller = new AbortController();
+    const pending = withModalCommandStartSignal(controller.signal, () =>
+      session
+        .materializeEntry({ path: "original-setup", entry: { type: "dir" } })
+        .catch((failure) => failure),
+    );
+    try {
+      await f.waitStarted;
+      const started = Date.now();
+      controller.abort(new Error("owning continuation cancelled"));
+      const failure = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve("unsettled"), 500)),
+      ]);
+      expect(failure).not.toBe("unsettled");
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(failure).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        taskId: f.starts[0]!.taskId,
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(1);
+      expect(f.waits).toHaveLength(1);
+      expect(f.waits[0]!.execId).toBe(f.starts[0]!.execId);
+    } finally {
+      sandbox.detach();
+      await pending;
+      f.server.forceShutdown();
+    }
+  }
+});
+
+test("both distributions exhaust hanging adopted Waits under real transport bounds without replay", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, true);
+    const { sandbox } = sdkSession(f.url, sdk);
+    const started = Date.now();
+    try {
+      const process = await sandbox.exec(["original-wait"], { pty: true });
+      const failure = await process.wait().catch((error) => error);
+      expect(Date.now() - started).toBeLessThan(4500);
+      expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(true);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+        pty: true,
+      });
+      expect((f.starts[0] as any).ptyInfo.enabled).toBe(true);
+      expect(f.starts).toHaveLength(1);
+      expect(f.waits.length).toBeGreaterThan(0);
+      expect(f.waits.length).toBeLessThanOrEqual(3);
+      expect(new Set(f.waits.map((wait) => wait.execId))).toEqual(new Set([f.starts[0]!.execId]));
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
+test("both distributions bound adopted stdio continuation and preserve exact invocation uncertainty", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, false, true);
+    const { sandbox, session } = sdkSession(f.url, sdk);
+    installModalCommandStartRetention(session);
+    const started = Date.now();
+    try {
+      const failure = await session
+        .materializeEntry({ path: "original-stdio", entry: { type: "dir" } })
+        .catch((error) => error);
+      expect(Date.now() - started).toBeLessThan(4500);
+      expect(failure).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(1);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
+test("both distributions cancel setup blocked on adopted stderr without false EOF or a new Start", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, false, true);
+    const { sandbox, session } = sdkSession(f.url, sdk);
+    installModalCommandStartRetention(session);
+    const controller = new AbortController();
+    const pending = withModalCommandStartSignal(controller.signal, () =>
+      session
+        .materializeEntry({ path: "original-stderr", entry: { type: "dir" } })
+        .catch((failure) => failure),
+    );
+    try {
+      await f.readStarted;
+      const started = Date.now();
+      controller.abort(new Error("owning stdio continuation cancelled"));
+      const failure = await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve("unsettled"), 500)),
+      ]);
+      expect(failure).not.toBe("unsettled");
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(failure).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.waits).toHaveLength(0);
+      expect(f.reads.every((read) => read.execId === f.starts[0]!.execId)).toBe(true);
+    } finally {
+      sandbox.detach();
+      await pending;
+      f.server.forceShutdown();
+    }
+  }
+});
+
+test("both distributions send adopted stdin once and retain uncertainty on deadline", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(true, false, "running", false, false, false, true);
+    const { sandbox } = sdkSession(f.url, sdk);
+    const started = Date.now();
+    try {
+      const process = await sandbox.exec(["original-stdin"]);
+      const failure = await process.stdin.writeText("only once").catch((error) => error);
+      expect(Date.now() - started).toBeLessThan(2500);
+      expect(getModalCommandStartInvocation(failure)).toMatchObject({
+        execId: f.starts[0]!.execId,
+      });
+      expect(f.starts).toHaveLength(1);
+      expect(f.writes).toHaveLength(1);
+      expect(f.writes[0]!.execId).toBe(f.starts[0]!.execId);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 5_000);
 
 test("failed and NOT_FOUND original-ID observations retain immutable descriptors without replay", async () => {
   for (const observation of ["unknown", "not-found"] as const) {

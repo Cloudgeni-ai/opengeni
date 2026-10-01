@@ -97,6 +97,9 @@ test("invocation accessor preserves exact IDs through cause and AggregateError w
     getModalCommandStartInvocation(new AggregateError([error, sdkUnknown("other")])),
   ).toBeNull();
   expect(
+    getModalCommandStartInvocation(new AggregateError([error, sdkUnknown("original")])),
+  ).toBeNull();
+  expect(
     getModalCommandStartInvocation(
       new AggregateError([
         error,
@@ -140,6 +143,33 @@ test("oversized or deeply nested invocation graphs fail closed", () => {
       new AggregateError(Array.from({ length: 33 }, () => sdkUnknown("original"))),
     ),
   ).toBeNull();
+});
+
+test("a genuine SDK boundary cannot conceal a conflicting boundary in its own cause", () => {
+  const first = sdkUnknown("original");
+  Object.assign(first, { cause: sdkUnknown("other") });
+  expect(getModalCommandStartInvocation(first)).toBeNull();
+  expect(isModalCommandStartOutcomeUnknownError(first)).toBe(true);
+});
+
+test("sparse, undefined and accessor aggregate leaves fail closed without reading getters", () => {
+  const sparse = [sdkUnknown("original")];
+  sparse.length = 2;
+  expect(getModalCommandStartInvocation(new AggregateError(sparse))).toBeNull();
+  expect(
+    getModalCommandStartInvocation(new AggregateError([sdkUnknown("original"), undefined])),
+  ).toBeNull();
+  let calls = 0;
+  const accessor = [sdkUnknown("original")];
+  Object.defineProperty(accessor, "1", {
+    get() {
+      calls++;
+      return sdkUnknown("other");
+    },
+  });
+  const wrapper = Object.assign(new Error("wrapper"), { errors: accessor });
+  expect(getModalCommandStartInvocation(wrapper)).toBeNull();
+  expect(calls).toBe(0);
 });
 
 test("an unreadable alternative cause cannot hide another invocation or grant replay", async () => {
