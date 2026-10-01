@@ -1,10 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DEFAULT_FIRST_PARTY_MCP_PERMISSIONS } from "@opengeni/contracts";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  readTurnExecutionPolicyV1,
+  TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   bootstrapWorkspace,
   createDb,
   createScheduledTask,
+  createSession,
+  claimSessionWorkForAttempt,
   getScheduledTaskRunAcceptedExecution,
   getSession,
   listScheduledTaskRuns,
@@ -85,6 +91,7 @@ async function workspaceGrant() {
 async function generatedTask(
   grant: Awaited<ReturnType<typeof workspaceGrant>>,
   creatorPolicy: ScheduledTaskCreatorPolicy | null,
+  target?: { runMode: "existing_session" | "reusable_session"; targetSessionId?: string },
 ) {
   return await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -94,7 +101,8 @@ async function generatedTask(
     status: "active",
     schedule: { type: "manual" },
     temporalScheduleId: `scheduled-creator-${crypto.randomUUID()}`,
-    runMode: "new_session_per_run",
+    runMode: target?.runMode ?? "new_session_per_run",
+    ...(target?.targetSessionId ? { targetSessionId: target.targetSessionId } : {}),
     overlapPolicy: "allow_concurrent",
     agentConfig: {
       prompt: "Run with the creator's boundary",
@@ -129,7 +137,7 @@ async function dispatchGeneratedSession(
     workspaceId: grant.workspaceId,
     runId: run!.id,
   });
-  return { settings, session, accepted };
+  return { settings, session, accepted, result, run: run! };
 }
 
 describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
@@ -146,6 +154,10 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     expect(accepted?.resolvedFirstPartyMcpPermissions).toEqual([
       ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
     ]);
+    expect(
+      TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy).credentialRestriction,
+    ).toBeUndefined();
+    expect(readTurnExecutionPolicyV1(session.metadata)).toEqual({ kind: "absent" });
   }, 60_000);
 
   test("an agent-created task's generated session inherits the frozen creator boundary", async () => {
@@ -187,4 +199,66 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     expect(session.firstPartyMcpTools).toEqual(["set_session_title", "sessions_list"]);
     expect(session.firstPartyMcpPermissions).toEqual(["sessions:read"]);
   }, 60_000);
+
+  test.each(["new_session_per_run", "reusable_session", "existing_session"] as const)(
+    "%s dispatch freezes setup restriction into accepted runs and claimed turns",
+    async (runMode) => {
+      if (!available) return;
+      const grant = await workspaceGrant();
+      const { settings } = activities();
+      const targetSession =
+        runMode === "existing_session"
+          ? await createSession(client.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              initialMessage: "Existing schedule target",
+              resources: [],
+              tools: [],
+              metadata: {},
+              model: settings.openaiModel,
+              reasoningEffort: "low",
+              sandboxBackend: "none",
+            })
+          : null;
+      const task = await generatedTask(
+        grant,
+        {
+          firstPartyMcpTools: ["set_session_title", "scheduled_tasks_list"],
+          firstPartyMcpPermissions: ["sessions:read", "scheduled_tasks:manage"],
+          sessionPolicy: null,
+          credentialRestriction: "developer_setup",
+        },
+        runMode === "new_session_per_run"
+          ? undefined
+          : { runMode, ...(targetSession ? { targetSessionId: targetSession.id } : {}) },
+      );
+      const { session, accepted, result } = await dispatchGeneratedSession(grant, task.id);
+      const policy = TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy);
+      expect(policy.credentialRestriction).toBe("developer_setup");
+      if (runMode !== "existing_session") {
+        const initial = readTurnExecutionPolicyV1(session.metadata);
+        expect(initial.kind).toBe("valid");
+        if (initial.kind !== "valid") throw new Error("generated session policy missing");
+        expect(initial.policy).toEqual(policy);
+      } else {
+        expect(session.id).toBe(targetSession!.id);
+        // A restricted occurrence does not rewrite the target's original authority.
+        expect(session.metadata).toEqual({});
+      }
+      const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+        sessionId: session.id,
+        workflowId: result.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`unexpected claim: ${claimed.action}`);
+      const frozen = readTurnExecutionPolicyV1(claimed.turn.metadata);
+      expect(frozen.kind).toBe("valid");
+      if (frozen.kind !== "valid") throw new Error("scheduled accepted turn policy missing");
+      expect(frozen.policy.credentialRestriction).toBe("developer_setup");
+    },
+    60_000,
+  );
 });

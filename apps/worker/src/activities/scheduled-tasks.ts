@@ -10,6 +10,7 @@ import {
   SessionAgentAccess,
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
+  metadataWithTurnExecutionPolicyV1,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
@@ -124,6 +125,15 @@ type ScheduledTemporalActivityIdentity = {
   workflowExecution?: { workflowId: string; runId: string };
   activityId: string;
 };
+
+/** Preserve the frozen setup ceiling without changing legacy session metadata. */
+function scheduledSessionExecutionPolicyMetadata(policy: unknown): Record<string, unknown> {
+  if (policy === undefined || policy === null) return {};
+  const acceptedPolicy = TurnExecutionPolicyV1.parse(policy);
+  return acceptedPolicy.credentialRestriction
+    ? metadataWithTurnExecutionPolicyV1({}, acceptedPolicy)
+    : {};
+}
 
 export function scheduledTaskRunProducerKey(
   input: DispatchScheduledTaskRunInput,
@@ -993,23 +1003,29 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             }
           }
         : undefined;
-      const turnExecutionPolicy: TurnExecutionPolicyV1 = resolveTurnExecutionPolicyV1(settings, {
-        modelId: acceptedModel,
-        requestedModelId: generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
-        modelSource: generatedTarget
-          ? task.agentConfig.model
-            ? "explicit"
-            : "deployment"
-          : "session",
-        reasoningEffort: acceptedReasoningEffort,
-        reasoningSource: generatedTarget
-          ? task.agentConfig.reasoningEffort
-            ? "explicit"
-            : "deployment"
-          : "session",
-        latencyMode: acceptedLatencyMode,
-        latencyModeSource: generatedTarget ? "deployment" : "session",
-      });
+      const turnExecutionPolicy: TurnExecutionPolicyV1 = {
+        ...resolveTurnExecutionPolicyV1(settings, {
+          modelId: acceptedModel,
+          requestedModelId:
+            generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
+          modelSource: generatedTarget
+            ? task.agentConfig.model
+              ? "explicit"
+              : "deployment"
+            : "session",
+          reasoningEffort: acceptedReasoningEffort,
+          reasoningSource: generatedTarget
+            ? task.agentConfig.reasoningEffort
+              ? "explicit"
+              : "deployment"
+            : "session",
+          latencyMode: acceptedLatencyMode,
+          latencyModeSource: generatedTarget ? "deployment" : "session",
+        }),
+        ...(creatorPolicy?.credentialRestriction
+          ? { credentialRestriction: creatorPolicy.credentialRestriction }
+          : {}),
+      };
       const deferredEvents: Array<{
         sessionId: string;
         events: Awaited<ReturnType<typeof appendSessionEvents>>;
@@ -1268,6 +1284,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   : {}),
                 metadata: {
                   ...taskMetadata,
+                  ...scheduledSessionExecutionPolicyMetadata(turnExecutionPolicy),
                   model,
                   reasoningEffort,
                   scheduledTaskId: task.id,
@@ -2315,6 +2332,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
         : {}),
       metadata: {
         ...taskMetadata,
+        ...scheduledSessionExecutionPolicyMetadata(input.acceptedExecution.turnExecutionPolicy),
         model: input.acceptedExecution.resolvedModel,
         reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
         scheduledTaskId: task.id,
@@ -2445,6 +2463,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
     const expectedMetadata = {
       ...expectedTaskMetadata,
+      ...scheduledSessionExecutionPolicyMetadata(input.acceptedExecution.turnExecutionPolicy),
       model: input.acceptedExecution.resolvedModel,
       reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
       scheduledTaskId: task.id,

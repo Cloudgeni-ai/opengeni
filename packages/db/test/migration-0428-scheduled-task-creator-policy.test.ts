@@ -6,6 +6,7 @@ import {
   createDb,
   createScheduledTask,
   getScheduledTaskCreatorPolicy,
+  updateScheduledTask,
   type DbClient,
 } from "../src";
 
@@ -217,5 +218,58 @@ describe("0428 creator policy (real PostgreSQL)", () => {
         ),
       ).rejects.toMatchObject({ code: "23514" });
     }
+  });
+
+  test("setup restriction-only JSON preserves NULL defaults and is bound into the execution digest", async () => {
+    if (!shared) return;
+    const scope = await workspace();
+    const creatorPolicy = {
+      firstPartyMcpTools: null,
+      firstPartyMcpPermissions: null,
+      sessionPolicy: null,
+      credentialRestriction: "developer_setup" as const,
+    };
+    const task = await createScheduledTask(client.db, {
+      ...taskInput(scope, "setup API created"),
+      creatorPolicy,
+    });
+    expect(await getScheduledTaskCreatorPolicy(client.db, scope.workspaceId, task.id)).toEqual(
+      creatorPolicy,
+    );
+    const [row] = await admin<
+      Array<{
+        tools: unknown;
+        permissions: unknown;
+        policy: unknown;
+        stored: string;
+        recomputed: string;
+        stripped: string;
+      }>
+    >`
+      select creator_first_party_mcp_tools as tools,
+        creator_first_party_mcp_permissions as permissions,
+        creator_session_policy as policy,
+        task.execution_digest as stored,
+        scheduled_task_execution_digest(task) as recomputed,
+        encode(sha256(convert_to((
+          to_jsonb(task) - array[
+            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
+            'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
+            'creator_session_policy'
+          ]::text[]
+        )::text, 'UTF8')), 'hex') as stripped
+      from scheduled_tasks task where task.id = ${task.id}`;
+    expect(row!.tools).toBeNull();
+    expect(row!.permissions).toBeNull();
+    expect(row!.policy).toEqual({ credentialRestriction: "developer_setup" });
+    expect(row!.stored).toBe(row!.recomputed);
+    expect(row!.stored).not.toBe(row!.stripped);
+    await updateScheduledTask(client.db, scope.workspaceId, task.id, {
+      metadata: { credentialRestriction: null, creatorPolicy: null },
+      clonePersonalResourceAuthorityFromRevision: task.authorityRevision,
+    });
+    expect(await getScheduledTaskCreatorPolicy(client.db, scope.workspaceId, task.id)).toEqual(
+      creatorPolicy,
+    );
   });
 });

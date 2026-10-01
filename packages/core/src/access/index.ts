@@ -40,10 +40,30 @@ import { serviceInitiatorFromHeaders } from "./service-initiator";
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
+const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
+const developerSetupGrants = new WeakSet<AccessGrant>();
 
 /** Only canonical authentication can prove setup-key provenance. */
 export function isDeveloperSetupApiKeyContext(context: AccessContext): boolean {
-  return developerSetupApiKeyContexts.has(context);
+  return (
+    developerSetupApiKeyContexts.has(context) &&
+    accountScopedApiKeyWorkspaceAuthority(context) !== null
+  );
+}
+
+/** Provenance from canonical raw-key or verified restricted-token authentication. */
+export function isDeveloperSetupAuthorization(
+  authorization: AccessGrantAuthorization | undefined,
+): boolean {
+  return (
+    authorization !== undefined &&
+    developerSetupAuthorizations.get(authorization) === authorization.grant
+  );
+}
+
+/** Exact grant objects resolved under authenticated setup-only provenance. */
+export function isDeveloperSetupGrant(grant: AccessGrant): boolean {
+  return developerSetupGrants.has(grant);
 }
 
 /** Canonical authentication provenance, including the backing key of asUser. */
@@ -61,14 +81,10 @@ export function requireApiKeyDelegationContext(
   if (
     (hasPermission(permissions, "api_keys:manage") ||
       hasPermission(permissions, "members:manage")) &&
-    (developerSetupApiKeyContexts.has(context) ||
-      context.workspaceGrants.some(
-        (grant) =>
-          grant.principalKind === "agent_attempt" || grant.metadata?.sessionId !== undefined,
-      ))
+    developerSetupApiKeyContexts.has(context)
   ) {
     throw new HTTPException(403, {
-      message: "Setup keys and agent attempts cannot delegate API key management",
+      message: "Setup credentials cannot delegate API key management",
     });
   }
 }
@@ -400,6 +416,10 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  if (contextIntegrity && developerSetupApiKeyContexts.has(context)) {
+    developerSetupAuthorizations.set(authorization, grant);
+    developerSetupGrants.add(grant);
+  }
   if (
     contextIntegrity &&
     accountScopedApiKeyWorkspaceAuthority(context)?.accountId === grant.accountId &&
@@ -599,7 +619,7 @@ async function accessGrantAuthorization(
       workspaceId,
       principalKind ? { principalKind } : undefined,
     ));
-  if (grant && developerSetupApiKeyContexts.has(context)) {
+  if (grant && isDeveloperSetupApiKeyContext(context)) {
     const authority = accountScopedApiKeyWorkspaceAuthority(context);
     const workspace = await requireWorkspace(deps.db, workspaceId);
     if (!authority || workspace.accountId !== authority.accountId || workspace.kind !== "shared") {
@@ -1047,7 +1067,16 @@ async function delegatedAccessContext(
   if (!payload) {
     return null;
   }
-  return {
+  const restricted = payload.credentialRestriction === "developer_setup";
+  const workspacePermissions = restricted
+    ? payload.permissions.filter(
+        (permission) =>
+          permission !== "secrets:read" &&
+          permission !== "api_keys:manage" &&
+          !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission),
+      )
+    : payload.permissions;
+  const context: AccessContext = {
     mode,
     subjectId: payload.subjectId,
     ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
@@ -1056,7 +1085,7 @@ async function delegatedAccessContext(
         accountId: payload.accountId,
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-        permissions: payload.permissions,
+        permissions: restricted ? [] : payload.permissions,
       },
     ],
     workspaceGrants: [
@@ -1065,7 +1094,7 @@ async function delegatedAccessContext(
         accountId: payload.accountId,
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-        permissions: payload.permissions,
+        permissions: workspacePermissions,
         principalKind: payload.principalKind,
         // sessionId is worker-asserted (HMAC-signed token claim), not agent
         // controlled; it scopes session-bound MCP tools such as goal management.
@@ -1098,6 +1127,8 @@ async function delegatedAccessContext(
     defaultAccountId: payload.accountId,
     defaultWorkspaceId: payload.workspaceId,
   };
+  if (restricted) developerSetupApiKeyContexts.add(context);
+  return context;
 }
 
 function configuredSubject(c: Context): string {
