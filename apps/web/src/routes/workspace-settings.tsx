@@ -1,14 +1,13 @@
 // Workspace settings pages, rendered inside the settings shell
 // (components/settings/workspace-settings-shell.tsx): General, Access,
-// Models and API keys. The org/billing console lives at
-// Organization settings.
+// API keys and Developer. Models lives in Organization settings (a
+// workspace's Models URL redirects there), as does the org/billing console.
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
 import { lazy, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
 import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
@@ -43,7 +42,6 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
-import type { ModelsView } from "@/lib/models-route";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
 import { useOrganizationName } from "@/lib/use-organization-name";
@@ -59,8 +57,6 @@ import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 export function WorkspaceSettingsRoute({
   workspaceId,
   section,
-  modelsAccount,
-  modelsView,
   generalView,
   apiKey,
   access,
@@ -69,10 +65,6 @@ export function WorkspaceSettingsRoute({
   section: WorkspaceSettingsSection;
   /** Settings > General: the Agent defaults page, when open. */
   generalView?: "agent-defaults" | undefined;
-  /** Settings > Models: the account page that is open. */
-  modelsAccount?: string | undefined;
-  /** Settings > Models: the form page that is open. */
-  modelsView?: ModelsView | undefined;
   /** Settings > API keys: `new` or the key whose page is open. */
   apiKey?: string | undefined;
   /** Settings > Access: Add people or one person's custom permissions. */
@@ -95,8 +87,6 @@ export function WorkspaceSettingsRoute({
       workspaceId={workspaceId}
       section={section}
       generalView={generalView}
-      modelsAccount={modelsAccount}
-      modelsView={modelsView}
       apiKey={apiKey}
       access={access}
     />
@@ -121,16 +111,12 @@ function OperationalWorkspaceSettingsRoute({
   workspaceId,
   section,
   generalView,
-  modelsAccount,
-  modelsView,
   apiKey,
   access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
   generalView?: "agent-defaults" | undefined;
-  modelsAccount?: string | undefined;
-  modelsView?: ModelsView | undefined;
   apiKey?: string | undefined;
   access?: AccessSearch | undefined;
 }) {
@@ -143,12 +129,12 @@ function OperationalWorkspaceSettingsRoute({
   const organizationRole =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId)?.role ??
     null;
-  const canManageOrganizationModels =
+  const administersOrganization =
     (context.clientConfig.auth.mode === "managedSession" ||
       context.clientConfig.productAccessMode === "local") &&
     (organizationRole === "owner" || organizationRole === "admin");
   // The real name when known (an admin reads it from the organization overview).
-  const organizationName = useOrganizationName(accountId, canManageOrganizationModels);
+  const organizationName = useOrganizationName(accountId, administersOrganization);
   const organizationLabel = accountId
     ? (organizationName ?? orgLabel(accountId, context.accessContext.accountGrants))
     : "Organization";
@@ -163,20 +149,13 @@ function OperationalWorkspaceSettingsRoute({
     workspaceId,
     "members:manage",
   );
-  const canManageConnections = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "connections:write",
-  );
   const canAdministerWorkspace = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "workspace:admin",
   );
-  // canManageOrganizationModels (above) is the same rule as Organization settings >
-  // Models: owners and admins in an organization administrator session (or the single
-  // local user).
-  const [gatewayRevision, setGatewayRevision] = useState(0);
+  // Connections change on Organization > Models now; General reads them fresh on open.
+  const gatewayRevision = 0;
 
   return (
     <WorkspaceSettingsContent>
@@ -201,6 +180,7 @@ function OperationalWorkspaceSettingsRoute({
           organizationLabel={organizationLabel}
           personal={personal}
           canManageSettings={canManageSettings}
+          canAddAccounts={administersOrganization}
           gatewayRevision={gatewayRevision}
         />
       ) : null}
@@ -217,22 +197,6 @@ function OperationalWorkspaceSettingsRoute({
             />
           </Suspense>
         )
-      ) : null}
-
-      {section === "models" ? (
-        <WorkspaceModelsPage
-          key={`models:${workspaceId}`}
-          workspaceId={workspaceId}
-          workspaceName={activeWorkspace?.name ?? "this workspace"}
-          organizationId={accountId}
-          organizationName={organizationName ?? "your organization"}
-          canManageSettings={canManageSettings}
-          canManageConnections={canManageConnections}
-          canManageOrganizationModels={canManageOrganizationModels}
-          account={modelsAccount}
-          view={modelsView}
-          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-        />
       ) : null}
 
       {section === "api-keys" ? (
@@ -260,12 +224,15 @@ function WorkspaceGeneralSettings({
   organizationLabel,
   personal,
   canManageSettings,
+  canAddAccounts,
   gatewayRevision,
 }: {
   workspaceId: string;
   organizationLabel: string;
   personal: boolean;
   canManageSettings: boolean;
+  /** Organization owners and admins: the only people who add model accounts. */
+  canAddAccounts: boolean;
   gatewayRevision: number;
 }) {
   const context = useAppContext();
@@ -442,12 +409,15 @@ function WorkspaceGeneralSettings({
           workspaceId={workspaceId}
           canManage={canManageSettings}
           refreshKey={gatewayRevision}
-          onConnectGateway={() =>
-            void navigate({
-              to: "/workspaces/$workspaceId/settings",
-              params: { workspaceId },
-              search: { section: "models", view: "connect:vercel" },
-            })
+          onConnectGateway={
+            canAddAccounts
+              ? () =>
+                  void navigate({
+                    to: "/workspaces/$workspaceId/organization",
+                    params: { workspaceId },
+                    search: { section: "models", workspace: workspaceId, view: "connect:vercel" },
+                  })
+              : undefined
           }
         />
         <WorkspaceSandboxImageRow

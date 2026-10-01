@@ -42,6 +42,7 @@ mod capacity;
 mod cli;
 mod codemode;
 mod config;
+mod credential_renewal;
 mod dispatch;
 mod embedded_runtime;
 mod engine;
@@ -437,7 +438,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     });
 
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
+    let renewal = tokio::spawn(credential_renewal::run(api_url.to_string()));
     let supervisor_result = supervisor.run_with_updates(updates_rx).await;
+    renewal.abort();
     watcher.abort();
     if let Some(bridge) = browser_bridge {
         if let Err(error) = bridge.shutdown().await {

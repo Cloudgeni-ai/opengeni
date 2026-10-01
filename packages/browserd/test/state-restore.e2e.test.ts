@@ -68,13 +68,28 @@ e2e.each(["restart", "stop"] as const)(
         }),
       );
       expect(initialized.state).toBe("completed");
-      const ready = await waitForSemanticName(
+      let ready = await waitForSemanticName(
         supervisor,
         source,
         created.observation.target.id,
         "cookie=present local=present idb=present",
       );
       expect(semanticNames(ready)).toContain("cookie=present local=present idb=present");
+
+      const filled = await supervisor.action(
+        command(ready, {
+          type: "fill",
+          locator: { kind: "role", role: "textbox", name: "Draft", exact: true },
+          value: "unsubmitted-note",
+        }),
+      );
+      expect(filled.state).toBe("completed");
+      ready = await waitForSemanticName(
+        supervisor,
+        source,
+        created.observation.target.id,
+        "form=unsubmitted-note",
+      );
 
       const preview = await supervisor.action(
         command(ready, {
@@ -113,6 +128,18 @@ e2e.each(["restart", "stop"] as const)(
       });
       expect(uploaded).not.toBeNull();
       expect(captured.manifest.tabs.some((tab) => tab.url.startsWith("blob:"))).toBe(true);
+      if (afterCapture === "restart") {
+        const selected = (await supervisor.listTargets(source)).find((tab) => tab.selected)!;
+        // Profile capture reloads pages even when the same browser keeps running.
+        // It cannot be used as a lossless checkpoint of unfinished page work.
+        const restarted = await waitForSemanticName(
+          supervisor,
+          source,
+          selected.id,
+          "form=missing",
+        );
+        expect(semanticNames(restarted)).toContain("form=missing");
+      }
       await supervisor.endSession(source, { removeState: true });
 
       const restored = await supervisor.createSession({
@@ -140,6 +167,7 @@ e2e.each(["restart", "stop"] as const)(
         restored.observation.target.id,
         "cookie=present local=present idb=present",
       );
+      expect(semanticNames(observed)).toContain("form=missing");
       if (headlessShell) {
         expect(
           JSON.parse(
@@ -281,7 +309,12 @@ function identityFixture(): string {
     <button id="initialize">Initialize identity</button>
     <button id="preview">Open temporary preview</button>
     <p id="status">loading</p>
+    <label>Draft<input id="draft"></label><p id="draft-status">form=missing</p>
     <script>
+      const draft = document.getElementById('draft');
+      draft.oninput = () => {
+        document.getElementById('draft-status').textContent = 'form=' + (draft.value || 'missing');
+      };
       document.getElementById('preview').onclick = () => window.open(URL.createObjectURL(new Blob(['<!doctype html><title>Temporary preview</title><p>Preview bytes</p>'], {type:'text/html'})));
       const status = document.getElementById('status');
       const readIndexedDb = () => new Promise((resolve, reject) => {

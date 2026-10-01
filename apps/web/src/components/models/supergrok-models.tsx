@@ -1,5 +1,5 @@
 import type { SuperGrokAccount } from "@opengeni/sdk";
-import { CheckIcon, CircleCheckIcon, LoaderCircleIcon, PencilIcon, UnplugIcon } from "lucide-react";
+import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -7,8 +7,18 @@ import {
   ConnectionAccessRows,
   useConnectionAccess,
 } from "@/components/connection-access-settings";
-import { ModelsFormPage, ProviderTile, RenameAccountDialog } from "@/components/models/models-ui";
+import {
+  ModelsFormPage,
+  NOT_IN_USE,
+  ProviderTile,
+  organizationReachLabel,
+  RenameAccountDialog,
+  type ModelsScopeLabels,
+  useModelsListLabel,
+} from "@/components/models/models-ui";
+import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import {
   SuperGrokDeviceCodePanel,
   superGrokAccountName,
@@ -50,8 +60,11 @@ export interface SuperGrokPlaces {
   /** "Local" or the organization's name: where these accounts belong. */
   scopeName: string;
   organizationName: string;
+  /** Who each account is for: "Everyone in Acme", "This workspace only", "Only you". */
+  scope: ModelsScopeLabels;
   openAccount: (accountId: string) => void;
-  openConnect: () => void;
+  /** Opens the connect step; with an account, to sign that account in again. */
+  openConnect: (reconnectAccountId?: string) => void;
   openAccess: (accountId: string) => void;
   backToList: () => void;
 }
@@ -60,14 +73,14 @@ function needsReconnect(account: SuperGrokAccount): boolean {
   return account.status !== "active";
 }
 
-function planOf(account: SuperGrokAccount): string {
+export function planOf(account: SuperGrokAccount): string {
   const plan = account.plan ?? account.quota?.subscriptionTier;
   return plan
     ? `SuperGrok ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`
     : "SuperGrok plan";
 }
 
-function percentLeft(account: SuperGrokAccount): number | null {
+export function percentLeft(account: SuperGrokAccount): number | null {
   const used = account.quota?.usedPercent;
   return typeof used === "number" ? Math.max(0, Math.min(100, Math.round(100 - used))) : null;
 }
@@ -78,23 +91,50 @@ function accountStatus(account: SuperGrokAccount): "connected" | "paused" | "nee
   return "connected";
 }
 
+/**
+ * The organization's own SuperGrok accounts, for people who manage them: the
+ * rows show every one of them, in use here or not, and open their organization page.
+ */
+export interface OrganizationSuperGrokPool {
+  grok: SuperGrokSubscriptions;
+  workspace: { id: string; personal: boolean };
+  openAccount: (accountId: string) => void;
+}
+
 /** How many rows SuperGrok adds to the Accounts list once loaded. */
-export function superGrokListedCount(grok: SuperGrokSubscriptions): number {
+export function superGrokListedCount(
+  grok: SuperGrokSubscriptions,
+  organization: OrganizationSuperGrokPool | null = null,
+): number {
   if (grok.unavailable || grok.loading) return 0;
   if (grok.loadError || grok.pending) return 1;
-  return grok.accounts.length;
+  const own = grok.inherited ? 0 : grok.accounts.length;
+  const shared = organization
+    ? organization.grok.accounts.length
+    : grok.inherited
+      ? grok.accounts.length
+      : 0;
+  return own + shared;
+}
+
+/** Who a SuperGrok account is for, in the one tag its row and page carry. */
+function scopeOf(grok: SuperGrokSubscriptions, account: SuperGrokAccount, places: SuperGrokPlaces) {
+  if (grok.inherited || grok.organizationId) return places.scope.organization;
+  return account.scope === "user" ? places.scope.user : places.scope.workspace;
 }
 
 /** SuperGrok's rows in the Accounts list. Nothing when the deployment has it off. */
 export function SuperGrokAccountRows({
   grok,
   places,
+  organization = null,
 }: {
   grok: SuperGrokSubscriptions;
   places: SuperGrokPlaces;
+  organization?: OrganizationSuperGrokPool | null;
 }) {
   if (grok.unavailable) return null;
-  if (grok.loading) return <ListRowSkeleton count={1} />;
+  if (grok.loading || organization?.grok.loading) return <ListRowSkeleton count={1} />;
   if (grok.loadError) {
     return (
       <li className="col-span-full list-none px-3 py-3">
@@ -108,9 +148,45 @@ export function SuperGrokAccountRows({
       </li>
     );
   }
+  const own = grok.inherited ? [] : grok.accounts;
+  const shared = organization
+    ? organization.grok.accounts.map((account) => {
+        const live = grok.inherited
+          ? grok.accounts.find((candidate) => candidate.id === account.id)
+          : undefined;
+        return live ? (
+          <SharedSuperGrokInUseRow
+            key={account.id}
+            grok={grok}
+            account={live}
+            places={places}
+            organization={organization}
+          />
+        ) : (
+          <SharedSuperGrokSetAsideRow
+            key={account.id}
+            account={account}
+            organization={organization}
+            places={places}
+            ownInUse={own.length > 0}
+          />
+        );
+      })
+    : grok.inherited
+      ? grok.accounts.map((account) => (
+          <SuperGrokRow
+            key={account.id}
+            grok={grok}
+            account={account}
+            places={places}
+            onOpen={() => places.openAccount(account.id)}
+          />
+        ))
+      : [];
   return (
     <>
-      {grok.accounts.map((account) => (
+      {shared}
+      {own.map((account) => (
         <SuperGrokRow
           key={account.id}
           grok={grok}
@@ -125,10 +201,79 @@ export function SuperGrokAccountRows({
           title="Signing in to xAI…"
           meta={["Finish signing in to add the account"]}
           indicator="open"
-          onOpen={places.openConnect}
+          onOpen={() => places.openConnect()}
         />
       ) : null}
     </>
+  );
+}
+
+/** An organization SuperGrok account new work here uses, tagged with where it's available. */
+function SharedSuperGrokInUseRow({
+  grok,
+  account,
+  places,
+  organization,
+}: {
+  grok: SuperGrokSubscriptions;
+  account: SuperGrokAccount;
+  places: SuperGrokPlaces;
+  organization: OrganizationSuperGrokPool;
+}) {
+  const access = useConnectionAccess({
+    client: organization.grok.client,
+    organizationId: organization.grok.organizationId,
+    kind: "supergrok",
+    connectionId: account.id,
+  });
+  return (
+    <SuperGrokRow
+      grok={grok}
+      account={account}
+      places={places}
+      scopeLabel={organizationReachLabel(places.scope, access.data)}
+      onOpen={() => organization.openAccount(account.id)}
+    />
+  );
+}
+
+/** An organization SuperGrok account new work here doesn't use, with the plain reason. */
+function SharedSuperGrokSetAsideRow({
+  account,
+  organization,
+  places,
+  ownInUse,
+}: {
+  account: SuperGrokAccount;
+  organization: OrganizationSuperGrokPool;
+  places: SuperGrokPlaces;
+  /** This workspace has its own SuperGrok accounts, which new work uses instead. */
+  ownInUse: boolean;
+}) {
+  const access = useConnectionAccess({
+    client: organization.grok.client,
+    organizationId: organization.grok.organizationId,
+    kind: "supergrok",
+    connectionId: account.id,
+  });
+  const reaches = ownInUse ? true : reachesWorkspace(access.data, organization.workspace);
+  return (
+    <ListRow
+      leading={<ProviderTile provider="supergrok" size="lg" />}
+      title={superGrokAccountName(account)}
+      meta={[
+        organizationReachLabel(places.scope, access.data),
+        planOf(account),
+        ownInUse
+          ? "Set aside while this workspace has its own"
+          : reaches === false
+            ? `Not available in ${places.scopeName}`
+            : null,
+      ]}
+      cells={{ usage: NOT_IN_USE }}
+      indicator={needsReconnect(account) ? { kind: "attention", label: "Needs reconnect" } : "open"}
+      onOpen={() => organization.openAccount(account.id)}
+    />
   );
 }
 
@@ -137,11 +282,17 @@ export function superGrokSectionVisible(grok: SuperGrokSubscriptions): boolean {
   return !grok.unavailable && !grok.loading && grok.canManageAccounts && grok.accounts.length >= 2;
 }
 
-export function SuperGrokSettingRows({ grok }: { grok: SuperGrokSubscriptions }) {
+export function SuperGrokSettingRows({
+  grok,
+  label = "When several accounts are connected",
+}: {
+  grok: SuperGrokSubscriptions;
+  label?: string;
+}) {
   return (
     <SettingRowGroup>
       <SettingRow
-        label="When several accounts are connected"
+        label={label}
         description="Spread work sends new chats to the account with the most room left. Primary only uses the primary account."
         controlWidth="auto"
         control={
@@ -162,15 +313,18 @@ export function SuperGrokSettingRows({ grok }: { grok: SuperGrokSubscriptions })
   );
 }
 
-function SuperGrokRow({
+export function SuperGrokRow({
   grok,
   account,
   places,
+  scopeLabel,
   onOpen,
 }: {
   grok: SuperGrokSubscriptions;
   account: SuperGrokAccount;
   places: SuperGrokPlaces;
+  /** Overrides the tag, for an organization account whose "Available in" is known. */
+  scopeLabel?: string | undefined;
   onOpen: () => void;
 }) {
   const primary = grok.accounts.length > 1 && account.id === grok.activeAccountId;
@@ -181,11 +335,7 @@ function SuperGrokRow({
       leading={<ProviderTile provider="supergrok" size="lg" />}
       title={superGrokAccountName(account)}
       titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
-      meta={[
-        planOf(account),
-        grok.inherited ? `Shared by ${places.organizationName}` : null,
-        account.scope === "user" ? "Only you" : null,
-      ]}
+      meta={[scopeLabel ?? scopeOf(grok, account, places), planOf(account)]}
       cells={{
         usage: needsReconnect(account) ? null : status === "paused" ? (
           <StatusBadge status="paused" variant="dot" />
@@ -216,8 +366,9 @@ export function SuperGrokAccountPage({
   places: SuperGrokPlaces;
   client: OpenGeniBrowserClient;
 }) {
+  const listLabel = useModelsListLabel();
   const account = grok.accounts.find((candidate) => candidate.id === accountId) ?? null;
-  const back = { label: "Models", onClick: places.backToList };
+  const back = { label: listLabel, onClick: places.backToList };
   if (grok.loading) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -252,6 +403,7 @@ function SuperGrokAccountDetail({
   places: SuperGrokPlaces;
   client: OpenGeniBrowserClient;
 }) {
+  const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = superGrokAccountName(account);
@@ -267,16 +419,12 @@ function SuperGrokAccountDetail({
     connectionId: account.id,
     enabled: canEdit,
   });
-  const scopeLabel = grok.inherited
-    ? `Shared by ${places.organizationName}`
-    : account.scope === "user"
-      ? "Only you"
-      : organization
-        ? "Organization account"
-        : "This workspace";
+  const scopeLabel = grok.organizationId
+    ? organizationReachLabel(places.scope, access.data)
+    : scopeOf(grok, account, places);
   return (
     <DetailPage
-      back={{ label: "Models", onClick: places.backToList }}
+      back={{ label: listLabel, onClick: places.backToList }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader
@@ -301,7 +449,7 @@ function SuperGrokAccountDetail({
       />
       <DetailPageBody>
         {grok.inherited ? (
-          <ManagedNote>Managed by your organization.</ManagedNote>
+          <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
         ) : !canEdit ? (
           <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
         ) : null}
@@ -316,7 +464,7 @@ function SuperGrokAccountDetail({
                     type="button"
                     size="sm"
                     variant="default"
-                    onClick={places.openConnect}
+                    onClick={() => places.openConnect(account.id)}
                     className="rounded-[10px] pointer-coarse:h-11"
                   >
                     Sign in again
@@ -452,7 +600,7 @@ function SuperGrokAccountDetail({
   );
 }
 
-function formatReset(value: string): string {
+export function formatReset(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value
@@ -498,11 +646,20 @@ export function SuperGrokConnectPage({
   places,
   onClose,
   footerStart,
+  fields,
+  blockedReason,
+  onAccountConnected,
 }: {
   grok: SuperGrokSubscriptions;
   places: SuperGrokPlaces;
   onClose: () => void;
   footerStart?: ReactNode;
+  /** Fields above the sign-in, such as which workspaces can use the account. */
+  fields?: ReactNode;
+  /** Why the sign-in can't start yet (a choice above is incomplete). */
+  blockedReason?: string | null;
+  /** Runs once the account is connected, before its page opens, even if this page was left. */
+  onAccountConnected?: ((accountId: string | null) => Promise<void> | void) | undefined;
 }) {
   const organization = Boolean(grok.organizationId);
   const [scope, setScope] = useState<"workspace" | "user">("workspace");
@@ -520,31 +677,35 @@ export function SuperGrokConnectPage({
       title="Connect SuperGrok"
       description="Sign in with the xAI account whose SuperGrok plan should pay for Grok models."
       onClose={onClose}
-      submitLabel={signingIn ? "Open xAI again" : "Sign in with xAI"}
+      submitLabel="Sign in with xAI"
       pendingLabel="Opening xAI…"
-      submitAnalyticsAction={signingIn ? null : "connect_supergrok"}
-      submitDisabled={!grok.canManage || grok.busy || connected}
+      submitAnalyticsAction="connect_supergrok"
+      // While the code waits, the step holds its own actions.
+      footer={signingIn || connected ? false : undefined}
+      submitDisabled={!grok.canManage || grok.busy || connected || Boolean(blockedReason)}
       disabledReason={
-        grok.canManage ? undefined : "Only people who can manage connections can add an account."
+        grok.canManage
+          ? (blockedReason ?? undefined)
+          : "Only people who can manage connections can add an account."
       }
       footerStart={footerStart}
       onSubmit={async () => {
-        if (signingIn && grok.pending) {
-          window.open(grok.pending.verificationUri, "_blank", "noopener,noreferrer");
-          return false;
-        }
+        if (signingIn) return false;
         await grok.connect(scope, {
-          onConnected: (accountId) => {
-            if (!active.current) return;
-            setConnected(true);
-            if (accountId) places.openAccount(accountId);
-            else places.backToList();
-          },
+          onConnected: (accountId) =>
+            void (async () => {
+              await onAccountConnected?.(accountId);
+              if (!active.current) return;
+              setConnected(true);
+              if (accountId) places.openAccount(accountId);
+              else places.backToList();
+            })(),
         });
         return false;
       }}
     >
       <FieldStack>
+        {fields}
         {!organization ? (
           <ChoiceCards
             label="Who can use it"
@@ -564,38 +725,18 @@ export function SuperGrokConnectPage({
             />
           </ChoiceCards>
         ) : null}
-        {grok.pending ? (
-          <SuperGrokDeviceCodePanel
-            userCode={grok.pending.userCode}
-            verificationUri={grok.pending.verificationUri}
-          />
-        ) : (
-          <p className="text-sm text-fg-muted">
-            xAI opens in a new tab and asks for a code, which shows here. Opengeni never sees your
-            password.
-          </p>
-        )}
-        {signingIn || connected ? (
-          <p
-            role="status"
-            className="flex min-w-0 items-center gap-2 rounded-[10px] bg-surface-2 px-3 py-2.5 text-sm text-fg-muted"
-          >
-            {connected ? (
-              <>
-                <CircleCheckIcon aria-hidden="true" className="size-4 shrink-0 text-status-idle" />
-                Connected
-              </>
-            ) : (
-              <>
-                <LoaderCircleIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-fg-subtle motion-safe:animate-spin"
-                />
-                Waiting for you to sign in…
-              </>
-            )}
-          </p>
-        ) : null}
+        <DeviceSignInStatus
+          provider="supergrok"
+          connected={connected}
+          panel={
+            grok.pending ? (
+              <SuperGrokDeviceCodePanel
+                userCode={grok.pending.userCode}
+                verificationUri={grok.pending.verificationUri}
+              />
+            ) : null
+          }
+        />
       </FieldStack>
     </ModelsFormPage>
   );

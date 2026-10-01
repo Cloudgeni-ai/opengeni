@@ -1420,10 +1420,80 @@ describe("BrowserViewer", () => {
     await flush(120);
     expect(catalogCalls).toBeGreaterThanOrEqual(2);
     expect(targetCalls).toBe(1);
-    expect(rendered.container.textContent).toContain("No browser open");
+    expect(rendered.container.textContent).toContain("Browser unavailable");
+    expect(rendered.container.textContent).toContain("This chat moved to another computer.");
     await flush(900);
     expect(targetCalls).toBe(1);
     await rendered.unmount();
+  });
+
+  test.each([false, true])(
+    "explains the task's lost browser with live peers=%s",
+    async (withPeer) => {
+      const lost: BrowserSession = {
+        ...browserSession(),
+        name: "Research browser",
+        lifecycle: "lost",
+        failureCode: "provider_deadline_rotation",
+      };
+      const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Peer browser");
+      let controllerCalls = 0;
+      const client = fakeClient({
+        listBrowserSessions: async () => ({
+          revision: 1,
+          sessions: withPeer ? [lost, peer] : [lost],
+        }),
+        getBrowserSession: async () => {
+          controllerCalls += 1;
+          return lost;
+        },
+      });
+      const rendered = await renderComponent(
+        <BrowserViewer
+          client={client}
+          workspaceId={WORKSPACE_ID}
+          sessionId={SESSION_ID}
+          renderEmpty={() => <p>Custom empty viewer</p>}
+        />,
+      );
+      try {
+        await flush(60);
+        expect(rendered.container.textContent).toContain("Browser unavailable");
+        expect(rendered.container.textContent).toContain("Research browser");
+        expect(rendered.container.textContent).toContain("reached its time limit");
+        expect(rendered.container.textContent).not.toContain("Custom empty viewer");
+        expect(rendered.container.textContent).not.toContain("provider_deadline_rotation");
+        expect(controllerCalls).toBe(0);
+      } finally {
+        await rendered.unmount();
+      }
+    },
+  );
+
+  test("does not show a peer's loss or a loss older than the task's closed browser", async () => {
+    const own = { ...browserSession(), lifecycle: "ended" as const };
+    const old = {
+      ...browserSession("66666666-4444-4444-8444-444444444444"),
+      lifecycle: "lost" as const,
+    };
+    const peer = {
+      ...browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Peer browser"),
+      lifecycle: "lost" as const,
+    };
+    for (const sessions of [[peer], [own, old, peer]]) {
+      const client = fakeClient({ listBrowserSessions: async () => ({ revision: 1, sessions }) });
+      const rendered = await renderComponent(
+        <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      );
+      try {
+        await flush(60);
+        expect(rendered.container.textContent).toContain("No browser open");
+        expect(rendered.container.textContent).not.toContain("Browser unavailable");
+        expect(rendered.container.textContent).not.toContain("Peer browser");
+      } finally {
+        await rendered.unmount();
+      }
+    }
   });
 
   test("restores the task's last selected BrowserSession", async () => {
@@ -1665,7 +1735,59 @@ describe("BrowserViewer", () => {
     }
   });
 
-  test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
+  test("keeps diagnostic counts unavailable until the tab has an observation", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    let completeObservation!: (value: BrowserObservation) => void;
+    const pendingObservation = new Promise<BrowserObservation>((resolve) => {
+      completeObservation = resolve;
+    });
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => pendingObservation,
+      attachBrowserSession: async () => attachment(currentTarget.id),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    try {
+      await flush(40);
+      const debug = rendered.container.querySelector<HTMLButtonElement>(
+        "button[aria-controls='browser-diagnostics-drawer']",
+      );
+      expect(debug).not.toBeNull();
+      await actRun(() => debug!.click());
+      await flush(10);
+      const summary = rendered.container.querySelector(
+        "section[aria-labelledby='browser-page-title']",
+      );
+      expect(summary).not.toBeNull();
+      const counts = () => [...summary!.querySelectorAll("dd")].map((cell) => cell.textContent);
+      expect(counts()).toEqual(["Unavailable", "Unavailable", "Unavailable", "Unavailable"]);
+
+      await actRun(() => completeObservation(observation(BROWSER_SESSION_ID, currentTarget)));
+      await flush(10);
+      expect(counts()).toEqual(["0", "0", "0", "0"]);
+    } finally {
+      completeObservation(observation(BROWSER_SESSION_ID, currentTarget));
+      await rendered.unmount();
+    }
+  });
+
+  test("opens actionable runtime and tab diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();
     const download = browserDownload();
@@ -1745,6 +1867,15 @@ describe("BrowserViewer", () => {
     await flush(10);
 
     const drawer = rendered.container.querySelector("[aria-label='Browser diagnostics']");
+    expect(drawer?.querySelector("#browser-page-title")?.textContent?.trim()).toBe(
+      "Tab diagnostics",
+    );
+    expect(drawer?.textContent).toContain("Includes earlier pages in this tab.");
+    expect(
+      [...drawer!.querySelectorAll("section[aria-labelledby='browser-page-title'] dd")].map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(["1", "0", "1", "1"]);
     expect(drawer?.textContent).toContain("chromium 151 · headless");
     expect(drawer?.textContent).toContain("opengeni.cdp.v1");
     expect(drawer?.textContent).toContain("Semantic page structure available");

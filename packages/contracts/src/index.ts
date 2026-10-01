@@ -16772,6 +16772,22 @@ export const DeviceEnrollmentApproveRequest = z.object({
 });
 export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
 
+// Machine-authenticated renewal: possession of a bearer alone is insufficient.
+// The existing install key signs this exact, bounded request. No consent/scope
+// fields are accepted; the server retains the current enrollment authority.
+export const RenewEnrollmentRequest = z
+  .object({
+    bearer: z.string().min(1).max(4096),
+    signedAt: z.number().int().positive(),
+    signature: z.string().min(1).max(128),
+  })
+  .strict();
+export type RenewEnrollmentRequest = z.infer<typeof RenewEnrollmentRequest>;
+
+export function enrollmentRenewalProof(bearer: string, signedAt: number): string {
+  return `opengeni:enrollment-renew:v1\n${signedAt}\n${bearer}`;
+}
+
 export const DeviceEnrollmentApproveResponse = z.object({
   approved: z.boolean(),
   enrollmentId: z.string().uuid(),
