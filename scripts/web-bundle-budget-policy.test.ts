@@ -359,4 +359,9 @@ describe("web bundle budget policy", () => {
     // Module-scope composer panel callers must not sit in a chunk cycle.
     expect(vite).toContain('name: "composer-menu-primitives"');
   });
+
+  test("bounds the usage allowances UI session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_536_098, 1.5 * kib)");
+  });
 });
