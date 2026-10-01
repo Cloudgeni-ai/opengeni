@@ -1,6 +1,7 @@
 import {
   allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
+  isModelAvailableForNewSelection,
   policyProviderIdForModel,
   resolveModelProvider,
   resolveTurnExecutionPolicyV1,
@@ -106,15 +107,20 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: continuationModel,
-      requestedModelId: null,
-      modelSource: "continuation",
-      reasoningEffort: continuationReasoningEffort,
-      reasoningSource: "continuation",
-      latencyMode: continuationLatencyMode,
-      latencyModeSource: "continuation",
-    });
+    // Blocked models must reach the locked, visible pause path below. Resolving
+    // a new execution policy first would throw for retired/missing selections
+    // and retry forever instead. No continuation is created on that path.
+    const turnExecutionPolicy = modelPolicyBlocked
+      ? undefined
+      : resolveTurnExecutionPolicyV1(settings, {
+          modelId: continuationModel,
+          requestedModelId: null,
+          modelSource: "continuation",
+          reasoningEffort: continuationReasoningEffort,
+          reasoningSource: "continuation",
+          latencyMode: continuationLatencyMode,
+          latencyModeSource: "continuation",
+        });
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -153,7 +159,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
         latencyMode: continuationLatencyMode,
-        turnExecutionPolicy,
+        ...(turnExecutionPolicy ? { turnExecutionPolicy } : {}),
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },
@@ -206,6 +212,12 @@ export function goalContinuationModelDecision(input: {
       providerId: policyProviderIdForModel(catalogSettings, modelId),
       modelId,
     }).allowed;
+  if (!isModelAvailableForNewSelection(catalogSettings, input.inheritedModel)) {
+    return {
+      model: input.inheritedModel,
+      blocked: `model "${input.inheritedModel}" is retired from new selection; choose an available model before resuming the goal`,
+    };
+  }
   if (
     resolveModelProvider(catalogSettings, input.inheritedModel) &&
     !policyBlocks(input.inheritedModel)
