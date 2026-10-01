@@ -570,8 +570,11 @@ const workspaceOrganizationRoute = createRoute({
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
     const invitation =
       section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
+    // Workspaces: a workspace's page. Billing: a workspace's budget page.
     const workspace =
-      section === "workspaces" ? parseOrganizationRecordId(search.workspace) : undefined;
+      section === "workspaces" || section === "billing"
+        ? parseOrganizationRecordId(search.workspace)
+        : undefined;
     return {
       ...(checkout ? { checkout } : {}),
       ...(section ? { section } : {}),

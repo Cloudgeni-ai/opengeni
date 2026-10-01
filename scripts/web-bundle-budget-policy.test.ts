@@ -328,4 +328,17 @@ describe("web bundle budget policy", () => {
     expect(source).toContain("wholeKibEnvelope(713_634, 1.5 * kib)");
     expect(wholeKibEnvelope(713_634, 1.5 * KIB) - 713_634).toBeGreaterThanOrEqual(1.5 * KIB);
   });
+
+  test("bounds the usage-allowance UI growth and keeps its pages lazy", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    // The refusal row, shared wording and two lazy usage boundaries only; the
+    // budget pages, meters and slider live in the lazy usage-allowances chunk.
+    expect(source).toContain("wholeKibEnvelope(2_542_163, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(716_165, 1.5 * kib)");
+    expect(wholeKibEnvelope(2_542_163, 1.5 * KIB) - 2_542_163).toBeGreaterThanOrEqual(1.5 * KIB);
+    const vite = readFileSync(new URL("../apps/web/vite.config.ts", import.meta.url), "utf8");
+    expect(vite).toContain('name: "usage-allowances"');
+    expect(vite).toContain("(?!usage-entry\\.)");
+    expect(vite).toContain("react-slider");
+  });
 });

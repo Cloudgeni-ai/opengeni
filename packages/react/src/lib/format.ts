@@ -1,4 +1,5 @@
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { OpenGeniAllowanceExhaustedError, OpenGeniApiError } from "@opengeni/sdk";
+import { DEFAULT_ALLOWANCE_LABELS } from "../usage/allowance-copy";
 
 const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -120,6 +121,20 @@ export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
   "This turn requires Opengeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
 
 export function composerSubmissionErrorMessage(error: Error): string {
+  if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
+    const labels = DEFAULT_ALLOWANCE_LABELS;
+    const workspace =
+      error instanceof OpenGeniAllowanceExhaustedError && error.scope === "workspace";
+    const resetsAt = error instanceof OpenGeniAllowanceExhaustedError ? error.resetsAt : null;
+    return [
+      `${workspace ? labels.workspaceLimitReachedTitle : labels.memberLimitReachedTitle}.`,
+      workspace ? labels.workspaceRemedy : labels.memberRemedy,
+      resetsAt ? labels.resets(labels.formatDate(resetsAt)) : "",
+      "Your draft is preserved.",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
   return error instanceof OpenGeniApiError &&
     error.status === 402 &&
     error.code === "payment_required"

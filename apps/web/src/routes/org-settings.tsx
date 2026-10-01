@@ -83,7 +83,7 @@ export function OrgSettingsRoute({
   person?: string | undefined;
   /** People: the invitation whose page is open. */
   invitation?: string | undefined;
-  /** Workspaces: the workspace whose page is open. */
+  /** Workspaces: the workspace whose page is open. Billing: whose budget page is open. */
   workspace?: string | undefined;
 }) {
   const context = useAppContext();
@@ -227,7 +227,8 @@ export function OrgSettingsRoute({
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && organizationView === "new-key") ||
     // Opened from another scope (a workspace's Models): Billing brings its own back link.
-    (section === "billing" && Boolean(returnTo));
+    // A workspace's budget page brings its own back link and title too.
+    (section === "billing" && Boolean(returnTo || workspace));
 
   return (
     <OrganizationDirectoryProvider
@@ -334,12 +335,13 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "billing" ? (
-          <BillingSection returnTo={returnTo}>
+          <BillingSection returnTo={workspace ? undefined : returnTo}>
             <OrganizationBillingPage
               key={`${identityKey}:billing`}
               identity={adminIdentity}
               canReadBilling={canReadBilling}
               canManageBilling={canManageBilling}
+              budgetWorkspaceId={workspace}
             />
           </BillingSection>
         ) : null}

@@ -206,7 +206,9 @@ export default defineConfig({
               // session workbench into startup. The personal-workspace badge and
               // session title contract must not carry settings-only dependencies.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              // The usage-limit gauge and allowance wording are drawn by the
+              // conversation's refusal row and by the lazy usage pages.
+              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -228,6 +230,18 @@ export default defineConfig({
               // settings drawer and runtime controls belong behind this boundary too.
               name: "workspace-management-surfaces",
               test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // Usage allowance pages and the lazily loaded account-menu and
+              // composer surfaces. Only usage-entry (two lazy boundaries) is
+              // imported by the rail and session graphs; pin everything behind
+              // it so entry-aware merging cannot pull budget or settings code
+              // into a direct session load. The member slider's Radix primitive is
+              // used nowhere else; it must not join the shared UI runtime.
+              name: "usage-allowances",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]usage[\\/](?!usage-entry\.)[\w-]+\.tsx?|lib[\\/]usage-allowances\.ts)|packages[\\/]react[\\/]src[\\/](?:usage\.ts|usage[\\/]summary\.ts|hooks[\\/]use-usage\.ts|components[\\/]usage-(?:meter|limit-notice|member-list)\.tsx)|packages[\\/]sdk[\\/]src[\\/]usage-allowances\.ts|@radix-ui(?:\+|[\\/])react-slider(?:@|[\\/]).*)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

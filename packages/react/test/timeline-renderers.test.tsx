@@ -4,6 +4,7 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush, actRun } from "./render-hook";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
+import { formatAllowanceDate } from "../src/usage/allowance-copy";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -118,18 +119,64 @@ describe("allowance refusal rendering", () => {
       await flush();
       const text = r.container.textContent ?? "";
       expect(text).toContain(
-        scope === "workspace" ? "organization administrator" : "workspace administrator",
+        scope === "workspace"
+          ? "An organization admin can raise the workspace budget."
+          : "A workspace admin can raise this limit.",
       );
-      expect(text).toContain("2026-10-01 00:30 UTC");
-      expect(
-        [...r.container.querySelectorAll('[role="status"]')].filter((row) =>
-          row.textContent?.includes("usage allowance is exhausted"),
-        ),
-      ).toHaveLength(1);
-      expect(text).not.toMatch(/buy credits|subscription|private wrapper/i);
+      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
+      expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
+        "status",
+      );
+      expect(text).not.toMatch(/buy credits|subscription|private wrapper|API key/i);
       await r.unmount();
     },
   );
+
+  test("hosts reword or replace the row and keep the typed refusal", async () => {
+    const refusal = {
+      code: "allowance_exhausted",
+      scope: "member",
+      subjectId: "user:member",
+      resetsAt: null,
+      message: "ignored",
+    };
+    const reworded = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("usage.exhausted", refusal)]}
+        allowanceExhaustedLabels={{
+          memberLimitReachedTitle: "You're out of usage for this plan",
+          memberRemedy: "Ask your team admin for more.",
+          noReset: "Buy a top-up to keep going.",
+        }}
+      />,
+    );
+    await flush();
+    const text = reworded.container.textContent ?? "";
+    expect(text).toContain("You're out of usage for this plan");
+    expect(text).toContain("Ask your team admin for more. Buy a top-up to keep going.");
+    await reworded.unmount();
+
+    const seen: unknown[] = [];
+    const replaced = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("usage.exhausted", { ...refusal, scope: "workspace" })]}
+        renderAllowanceExhausted={(typed, { defaultRow }) => {
+          seen.push(typed);
+          return typed.scope === "workspace" ? (
+            <p data-testid="custom">Your team has used this month's plan. Upgrade?</p>
+          ) : (
+            defaultRow
+          );
+        }}
+      />,
+    );
+    await flush();
+    expect(replaced.container.textContent).toContain("Upgrade?");
+    expect(replaced.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(0);
+    expect(seen[0]).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+    await replaced.unmount();
+  });
 });
 
 describe("context compaction rendering", () => {
