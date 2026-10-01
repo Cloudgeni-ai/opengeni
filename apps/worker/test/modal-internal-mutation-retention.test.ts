@@ -20,6 +20,7 @@ import {
   releaseLeaseHolder,
   retainedProcessSettlementIdentity,
   settleRetainedProcess,
+  markSessionAttemptQuiesced,
   getSession,
   getSessionTurn,
   peekSessionWork,
@@ -85,12 +86,14 @@ async function admittedInternalMutation() {
     createdEventPayload: {},
   });
   const attemptId = crypto.randomUUID();
+  const workflowRunId = crypto.randomUUID();
+  const dispatchId = `internal-${crypto.randomUUID()}`;
   const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
     sessionId: session.id,
     workflowId: `session-${session.id}`,
-    workflowRunId: crypto.randomUUID(),
+    workflowRunId,
     attemptId,
-    dispatchId: `internal-${crypto.randomUUID()}`,
+    dispatchId,
     trigger: { kind: "next" },
   });
   if (claim.action !== "claimed") throw new Error(`Fixture claim failed: ${claim.action}`);
@@ -171,6 +174,8 @@ async function admittedInternalMutation() {
     workspaceId,
     session,
     attemptId,
+    workflowRunId,
+    dispatchId,
     holderId,
     leaseEpoch,
     instanceId,
@@ -214,83 +219,139 @@ function unknownCommand(instanceId: string) {
   };
 }
 
-test("the real retained SDK writer parks its owning turn without failure, setup replay or capture", async () => {
-  const fixture = await admittedInternalMutation();
-  const { error: original, command } = unknownCommand(fixture.instanceId);
-  let starts = 0;
-  const failure = await fixture.runtime
-    .runWorkspaceMutationForSandbox(
-      fixture.sandbox as never,
-      "eagerOwnedSandboxSetup",
-      async () => {
-        starts++;
-        throw original;
-      },
-    )
-    .catch((error) => error);
-  const context = createTurnContext({ settings: testSettings(), cancellationRequestedAt: null });
-  Object.assign(context.attempt, {
-    turnId: fixture.claim.turn.id,
-    triggerEventId: fixture.claim.turn.triggerEventId,
-    executionGeneration: fixture.claim.turn.executionGeneration,
-    providerRecoveryCount: 5,
-  });
-  const result = await settleTurnFailure({
-    ...context,
-    error: failure,
-    input: {
-      accountId: fixture.accountId,
-      workspaceId: fixture.workspaceId,
-      sessionId: fixture.session.id,
-      attemptId: fixture.attemptId,
-    },
-    settings: testSettings(),
-    db: client.db,
-    bus: { publish: async () => undefined },
-    observability: {},
-    cancellationSignal: fixture.cancellation.signal,
-    sandboxRotationController: new AbortController(),
-    claimedResult: (value: object) => ({
-      ...value,
+test.each(["exited", "lost"] as const)(
+  "the real retained SDK writer parks its owning turn even after exact %s proof",
+  async (terminal) => {
+    const fixture = await admittedInternalMutation();
+    const { error: original, command } = unknownCommand(fixture.instanceId);
+    let starts = 0;
+    const failure = await fixture.runtime
+      .runWorkspaceMutationForSandbox(
+        fixture.sandbox as never,
+        "eagerOwnedSandboxSetup",
+        async () => {
+          starts++;
+          throw original;
+        },
+      )
+      .catch((error) => error);
+    const context = createTurnContext({ settings: testSettings(), cancellationRequestedAt: null });
+    Object.assign(context.attempt, {
       turnId: fixture.claim.turn.id,
-      attemptId: fixture.attemptId,
-    }),
-    acknowledgeLostAttemptOwnership: () => undefined,
-    acknowledgeRecoveryQuiescence: () => undefined,
-  } as never);
-  expect(result).toMatchObject({ status: "recovering", deferredUntilWake: true });
-  expect(starts).toBe(1);
-  expect(await getSession(client.db, fixture.workspaceId, fixture.session.id)).toMatchObject({
-    status: "recovering",
-  });
-  expect(await getSessionTurn(client.db, fixture.workspaceId, fixture.claim.turn.id)).toMatchObject(
-    {
+      triggerEventId: fixture.claim.turn.triggerEventId,
+      executionGeneration: fixture.claim.turn.executionGeneration,
+      providerRecoveryCount: 5,
+    });
+    const result = await settleTurnFailure({
+      ...context,
+      error: failure,
+      input: {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.session.id,
+        attemptId: fixture.attemptId,
+      },
+      settings: testSettings(),
+      db: client.db,
+      bus: { publish: async () => undefined },
+      observability: {},
+      cancellationSignal: fixture.cancellation.signal,
+      sandboxRotationController: new AbortController(),
+      claimedResult: (value: object) => ({
+        ...value,
+        turnId: fixture.claim.turn.id,
+        attemptId: fixture.attemptId,
+      }),
+      acknowledgeLostAttemptOwnership: () => undefined,
+      acknowledgeRecoveryQuiescence: () => undefined,
+    } as never);
+    expect(result).toMatchObject({ status: "recovering", deferredUntilWake: true });
+    expect(starts).toBe(1);
+    expect(await getSession(client.db, fixture.workspaceId, fixture.session.id)).toMatchObject({
+      status: "recovering",
+    });
+    expect(
+      await getSessionTurn(client.db, fixture.workspaceId, fixture.claim.turn.id),
+    ).toMatchObject({
       status: "recovering",
       activeAttemptId: null,
       metadata: {
         sandboxSetupOutcomeUnknown: { turnId: fixture.claim.turn.id, attemptId: fixture.attemptId },
       },
-    },
-  );
-  const [retained] = await shared.admin`select provider_command from sandbox_retained_processes
+    });
+    const [retained] = await shared.admin`select provider_command from sandbox_retained_processes
     where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
-  expect(retained!.provider_command).toEqual(command);
-  const [admission] =
-    await shared.admin`select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    expect(retained!.provider_command).toEqual(command);
+    const [admission] =
+      await shared.admin`select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
     where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
-  expect(admission).toMatchObject({ provider_outcome: "retained", settled_at: null });
-  expect(
-    await readWorkspaceArchiveCapturePreflight(client.db, {
-      ...fixture.captureScope,
-      liveness: "warm",
-    }),
-  ).toBeNull();
-  // Physical quiescence does not falsely make the incomplete helper runnable.
-  // Its real attempt receipt remains independently required by work peek.
-  expect((await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).kind).not.toBe(
-    "runnable",
-  );
-});
+    expect(admission).toMatchObject({ provider_outcome: "retained", settled_at: null });
+    expect(
+      await readWorkspaceArchiveCapturePreflight(client.db, {
+        ...fixture.captureScope,
+        liveness: "warm",
+      }),
+    ).toBeNull();
+    // Physical quiescence does not falsely make the incomplete helper runnable.
+    // Its real attempt receipt remains independently required by work peek.
+    expect(
+      (await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).kind,
+    ).not.toBe("runnable");
+    const processScope = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      processId: (failure as RoutingMutationOutcomeUnknownError).retainedProcess!.id,
+    };
+    const process = await getRetainedProcess(client.db, processScope);
+    expect(process).not.toBeNull();
+    if (terminal === "exited") {
+      await settleRetainedProcess(client.db, {
+        ...processScope,
+        expected: retainedProcessSettlementIdentity(process!),
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: 0,
+      });
+    } else {
+      expect(
+        await markWarmLeaseInstanceLost(client.db, {
+          ...fixture.captureScope,
+          expectedBackend: "modal",
+          diagnostic: "provider_instance_not_found",
+        }),
+      ).toMatchObject({ status: "marked" });
+    }
+    expect((await getRetainedProcess(client.db, processScope))!.state).toBe(terminal);
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      attemptId: fixture.attemptId,
+      temporalWorkflowId: `session-${fixture.session.id}`,
+      temporalWorkflowRunId: fixture.workflowRunId,
+      temporalActivityId: fixture.dispatchId,
+    });
+    expect(await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).toMatchObject(
+      {
+        kind: "sandbox-setup-outcome-unknown",
+        ref: { turnId: fixture.claim.turn.id, attemptId: fixture.attemptId },
+      },
+    );
+    expect(
+      await claimSessionWorkForAttempt(client.db, fixture.workspaceId, {
+        sessionId: fixture.session.id,
+        workflowId: `session-${fixture.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: `no-replay-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      }),
+    ).toMatchObject({ action: "unclaimed", reason: "no-work" });
+    expect(starts).toBe(1);
+  },
+);
 
 test.each(["exited", "lost"] as const)(
   "internal SDK unknown retains its original writer until exact %s proof",

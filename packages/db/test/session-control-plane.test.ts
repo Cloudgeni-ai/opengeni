@@ -804,7 +804,7 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       attemptId,
       reason: "sandbox_command_start_outcome_unknown",
-    };
+    } as const;
     // No lease at all is not proof that the unwound helper finished. Ordinary
     // wakes and direct claim attempts cannot bypass the durable marker.
     for (let wake = 0; wake < 3; wake++) {
