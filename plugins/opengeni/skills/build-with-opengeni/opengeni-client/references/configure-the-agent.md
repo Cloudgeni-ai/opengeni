@@ -214,10 +214,35 @@ Rules the server enforces:
 
 ## Verify
 
+Read response visibility from `session.tenancy?.visibility`, not
+`session.visibility`. The top-level `visibility` field belongs to create
+requests; the response's tenancy projection may be absent when private-session
+support is unavailable. Absence means unknown, not `"workspace"`.
+
+`effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
+locally if your UI needs capability sections:
+
+```ts
+import type { AgentEffectiveTools } from "@opengeni/sdk";
+
+const session = await og.getSession(workspaceId, sessionId);
+const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
+const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+for (const tool of session.effectiveTools?.tools ?? []) {
+  const group = byCapability.get(tool.capability) ?? [];
+  group.push(tool);
+  byCapability.set(tool.capability, group);
+}
+const knowledgeTools = byCapability.get("knowledge") ?? [];
+```
+
+An absent `effectiveTools` projection on an older session means the inventory is
+unknown, not that every capability is off. Each tool's `visibility` means model
+discovery (`"upfront"` or `"search"`), not who can see the session. Preserve it
+when grouping. `mcpServers[].toolsKnown: false` means that server's schemas are
+not known in this projection; do not invent tool names or treat it as disabled.
+
 - `session.agent`: the resolved configuration, including `source` (request,
   workspace default, inherited, ...) and `unavailable`.
-- `session.effectiveTools.tools`: every known tool with its capability and
-  `visibility: "upfront" | "search"`. `mcpServers[].toolsKnown: false` means that
-  server lists its tools when a turn starts.
 - The model-context inspector in the OpenGeni web app (session > Debug >
   Context) shows the instructions actually sent, split into titled sections.
