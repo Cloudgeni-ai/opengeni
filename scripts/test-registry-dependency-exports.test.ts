@@ -139,7 +139,7 @@ describe("registry dependency export smoke", () => {
     const ci = parse(readFileSync(join(workflows, "ci.yml"), "utf8")) as Workflow;
     expect(
       ci.jobs["package-contracts"]!.steps.some((step) =>
-        step.run?.includes("bun test scripts/test-registry-dependency-exports.test.ts"),
+        step.run?.includes("bun test ./scripts/test-registry-dependency-exports.test.ts"),
       ),
     ).toBe(true);
     const publication = parse(

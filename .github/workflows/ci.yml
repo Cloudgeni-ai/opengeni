@@ -1128,7 +1128,7 @@ jobs:
         run: bun run test:publish-consumer
 
       - name: Registry dependency export guard regression
-        run: bun test scripts/test-registry-dependency-exports.test.ts scripts/test-effective-dependency-exports.test.ts scripts/dependency-export-workflow-contract.test.ts
+        run: bun test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
 
       - name: Frozen Version PR effective registry export closure
         if: github.head_ref == 'changeset-release/main' || inputs.automation_pr_number != ''
