@@ -4,7 +4,9 @@ import { OpenGeniClient, type SessionEvent } from "@opengeni/sdk";
 import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
-import "./workbench-peers";
+import { enableDemoWorkbenchPeers } from "./workbench-peers";
+
+enableDemoWorkbenchPeers();
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
