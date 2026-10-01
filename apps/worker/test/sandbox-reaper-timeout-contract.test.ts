@@ -294,10 +294,11 @@ describe("sandbox reaper per-box timeout contract", () => {
     expect(workerFactoryValidation).toBeGreaterThan(workerFactoryStart);
     expect(workerFactoryValidation).toBeLessThan(temporalConnection);
     expect(workerSource).toContain("taskQueue: settings.temporalTaskQueue");
+    expect(workerSource).toContain("sandboxLifecycleTaskQueue(settings.temporalTaskQueue)");
+    expect(workerSource).toContain("combineWorkerRunTargets(ownedWorkers)");
     expect(workerSource).toContain(
-      "taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue)",
+      "browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue)",
     );
-    expect(workerSource).toContain("combineWorkerRunTargets([worker, sandboxLifecycleWorker])");
     expect(workerSource).toContain('temporal.workflow.start("sandboxReaperWorkflowV2"');
     expect(workerSource).toContain("workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID");
     expect(workerSource).toContain("Reconciled the global sandbox-lease reaper Schedule");
