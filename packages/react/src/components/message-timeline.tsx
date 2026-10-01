@@ -1124,6 +1124,9 @@ export function MessageTimeline({
     ) {
       stopSettlement();
       disclosureKeepsUnpinnedRef.current = false;
+      // Reader navigation supersedes a pending camera/anchor scroll echo,
+      // including downward keys that do not explicitly release the pin.
+      programmaticScrollRef.current = 0;
       const node = scrollRef.current;
       readerIntentStartRef.current = node
         ? { scrollTop: node.scrollTop, maxScroll: maxScrollOf(node) }
@@ -1132,7 +1135,6 @@ export function MessageTimeline({
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
       return;
     }
-    programmaticScrollRef.current = 0;
     requestEarlierFromReader();
   };
 
@@ -2153,9 +2155,9 @@ export function MessageTimeline({
     }
     const nearBottom = isNearBottom(node);
 
-    // Re-pin only when the reader moved toward/at the tip without a content
-    // insertion. Prepend restore and overflow-anchor raise scrollTop by
-    // roughly the same amount as maxScroll; treating that as a scroll-down
+    // Re-pin only when the reader moved toward/at the tip. Prepend restore
+    // and overflow-anchor raise scrollTop by roughly the same amount as
+    // maxScroll; treating that as a scroll-down
     // re-pinned a compact-tail history reader (their preserved gap falls
     // inside PIN_THRESHOLD once the window is tall) and snapped them back.
     // A commit may already have adopted this scroll position into the layout
@@ -2164,10 +2166,15 @@ export function MessageTimeline({
     // Passive wheel handlers may run after compositor scrolling; retain the
     // earlier layout baseline when it still contains that reader movement.
     const returnStart =
-      readerIntentStart && readerIntentStart.scrollTop < previousTop ? readerIntentStart : null;
+      readerIntentStart && readerIntentStart.scrollTop <= previousTop ? readerIntentStart : null;
     const inserted = Math.max(0, nextMaxScroll - (returnStart?.maxScroll ?? previousMaxScroll));
     const towardTip = nextTop - (returnStart?.scrollTop ?? previousTop) - inserted;
-    const nextPinned = !hasNewer && nearBottom && towardTip > 0.5 && inserted <= 1;
+    // Explicit intent may reach the exact live bottom despite intervening
+    // streaming growth. Keep subtracting that growth: native anchoring alone
+    // conserves the gap and must never qualify as reader movement.
+    const explicitReturnToBottom = returnStart !== null && nextMaxScroll - nextTop <= 1;
+    const nextPinned =
+      !hasNewer && nearBottom && towardTip > 0.5 && (inserted <= 1 || explicitReturnToBottom);
     if (!nextPinned) {
       stopFollow();
     }

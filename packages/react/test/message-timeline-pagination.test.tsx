@@ -899,6 +899,127 @@ describe("MessageTimeline pagination affordances", () => {
     }
   });
 
+  test.each(["End", "PageDown", "ArrowDown"])(
+    "downward %s supersedes a pending prepend-restore scroll echo",
+    async (key) => {
+      const tail = manyEvents(8).map((evt) => event(evt.sequence + 12));
+      const r = await renderComponent(<MessageTimeline events={tail} hasOlder />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2400,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        await readerScrollUp(scroller, 1000);
+        await r.rerender(<MessageTimeline events={tail} hasOlder />);
+
+        layout.setContentHeightOnPrepend(2450);
+        await r.rerender(<MessageTimeline events={manyEvents(20)} hasOlder />);
+        // The restore write has happened, but its browser echo is pending.
+        expect(scroller.scrollTop).toBe(1050);
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+        await actRun(() => {
+          scroller.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+          scroller.scrollTop = 2050;
+          scroller.dispatchEvent(new Event("scroll"));
+        });
+        expect(scroller.dataset.ogBottomFollow).toBe("true");
+        expect(distanceFromBottom(scroller)).toBe(0);
+      } finally {
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
+  test.each([
+    ["wheel", true],
+    ["End", true],
+    ["pointer", true],
+    ["wheel", false],
+    ["End", false],
+    ["pointer", false],
+  ] as const)(
+    "returning to the exact live bottom survives growth (%s, commit before scroll: %s)",
+    async (navigation, commitBeforeScroll) => {
+      const events = manyEvents(20);
+      const r = await renderComponent(<MessageTimeline events={events} />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2400,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        await readerScrollUp(scroller, 1000);
+        await actRun(() => {
+          scroller.dispatchEvent(
+            navigation === "wheel"
+              ? new WheelEvent("wheel", { deltaY: 1100, bubbles: true })
+              : navigation === "pointer"
+                ? new PointerEvent("pointerdown", {
+                    button: 0,
+                    pointerType: "mouse",
+                    bubbles: true,
+                  })
+                : new KeyboardEvent("keydown", { key: navigation, bubbles: true }),
+          );
+          layout.setContentHeight(2450);
+          scroller.scrollTop = 2050;
+        });
+        if (commitBeforeScroll) {
+          await r.rerender(<MessageTimeline events={events} />);
+        }
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        expect(scroller.dataset.ogBottomFollow).toBe("true");
+        expect(distanceFromBottom(scroller)).toBe(0);
+      } finally {
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
+  test.each([0, 20])(
+    "native-anchor growth after reader input does not re-pin a preserved tip gap (%s px)",
+    async (gap) => {
+      const events = manyEvents(20);
+      const r = await renderComponent(<MessageTimeline events={events} />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2400,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        // Upward input releases follow even when the reader remains near tip.
+        await readerScrollUp(scroller, 2000 - gap);
+        await actRun(() => {
+          scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: 1, bubbles: true }));
+          layout.setContentHeight(2450);
+          scroller.scrollTop = 2050 - gap;
+        });
+        await r.rerender(<MessageTimeline events={events} />);
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+        expect(distanceFromBottom(scroller)).toBe(gap);
+      } finally {
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
   test("a sentinel-owned prepend restores an unpinned compact tail instead of snapping to the tip", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
