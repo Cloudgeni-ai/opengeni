@@ -217,10 +217,10 @@ requirements/current inspection proof. See [`goals.md`](goals.md).
 | Knowledge entries, instructions, Skills, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | Conversation history or temporary task notes |
 
 [Archived imports](../packages/core/src/application/archived-session-imports.ts)
-use server-only `@opengeni/sdk/session-history-import` for bounded, idempotent
+use server-only `@opengeni/sdk/session-history-import` for idempotent
 `session_events`; never model history, turns, active goals or wakes. Lifecycle
-seams establish `asUser` ownership/visibility; re-upload files first. Imports refuse
-execution during rolling deployments. React's projection stays unchanged;
+seams establish `asUser` ownership/visibility; upload files first. Imports refuse
+execution during rolling deployments. React's projection is unchanged;
 `SessionConversation` hides execution controls. [Product integration](product-integration.md).
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
