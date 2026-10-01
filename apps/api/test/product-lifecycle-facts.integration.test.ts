@@ -9,6 +9,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 
+import { createUserPresenceRecorder } from "@opengeni/core";
+
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
 
@@ -120,10 +122,13 @@ describe("product lifecycle facts from managed auth", () => {
   test("email sign-up, verification, sign-in and organization setup each write one fact", async () => {
     if (!shared || !client) return;
     const { messages, transport } = captureTransport();
+    // A long flush delay: the test flushes explicitly, like a process tick.
+    const userPresence = createUserPresenceRecorder({ db: client.db, flushDelayMs: 600_000 });
     const app = createApp({
       settings: runtimeSettings(),
       db: client.db,
       observability: quietObservability(),
+      userPresence,
       managedEmailTransport: transport,
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
@@ -187,8 +192,24 @@ describe("product lifecycle facts from managed auth", () => {
       ["organization.setup", "created", organizationId],
       ["auth.sign_in", "email", null],
     ]);
+    // An authenticated browser request records server-side presence once per
+    // throttle window, and the first activity of the UTC day is one
+    // `user.active` fact. A repeat within the window writes nothing new.
+    for (let index = 0; index < 3; index += 1) {
+      const workspaces = await app.request("/v1/workspaces", {
+        headers: requestHeaders(cookiePairs(signIn)),
+      });
+      expect(workspaces.status).toBe(200);
+      await userPresence.flush();
+    }
+    const presence = await shared.admin<{ subject_id: string }[]>`
+      select subject_id from opengeni_private.user_activity_presence
+      where subject_id = ${subjectId}`;
+    expect(presence).toHaveLength(1);
+    expect(summary((await factsFor(subjectId)).slice(5))).toEqual([["user.active", null, null]]);
+
     // Nothing that identifies the person beyond the opaque subject id.
-    const exported = JSON.stringify(facts);
+    const exported = JSON.stringify(await factsFor(subjectId));
     expect(exported).not.toContain(email);
     expect(exported).not.toContain("Lifecycle Human");
     expect(exported).not.toContain("Lifecycle Org");

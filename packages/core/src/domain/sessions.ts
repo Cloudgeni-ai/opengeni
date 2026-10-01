@@ -14,6 +14,11 @@ import type {
   SessionTurnSurface,
 } from "@opengeni/contracts";
 import { resolveTurnSurface } from "../turn-surface";
+import {
+  recordSessionCreated,
+  recordUserMessageAccepted,
+  type ProductUsageMetricsSink,
+} from "../product-usage-metrics";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -891,6 +896,11 @@ export async function createAndStartSessionWithOutcome(input: {
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /**
+   * Live product usage counters: a newly created session (never a replay)
+   * counts once, and its initial user message once unless deferred.
+   */
+  metrics?: ProductUsageMetricsSink | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
@@ -1240,6 +1250,7 @@ export async function createAndStartSessionWithOutcome(input: {
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
     );
+    recordCreatedSessionUsage(input);
     return {
       session: finished.session,
       outcome: "created",
@@ -1316,12 +1327,30 @@ export async function createAndStartSessionWithOutcome(input: {
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
   );
+  recordCreatedSessionUsage(input);
   return {
     session: finished.session,
     outcome: "created",
     replay: false,
     changed: true,
   };
+}
+
+function recordCreatedSessionUsage(input: {
+  metrics?: ProductUsageMetricsSink | null;
+  surface?: SessionTurnSurface | null;
+  createdBy?: TurnInitiator;
+  parentSessionId?: string | null;
+  deferInitialTurn?: boolean;
+}): void {
+  recordSessionCreated(input.metrics, {
+    surface: input.surface,
+    createdByKind: input.createdBy?.kind ?? "service",
+    parentSessionId: input.parentSessionId,
+  });
+  if (!input.deferInitialTurn) {
+    recordUserMessageAccepted(input.metrics, { surface: input.surface });
+  }
 }
 
 /** Backward-compatible entity-returning create path used by existing callers. */
@@ -3541,6 +3570,7 @@ async function createSessionForRequestInFileScope(
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       surface,
+      metrics: unresolvedDeps.observability ?? null,
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       resources,
@@ -4117,6 +4147,11 @@ async function acceptSessionUserMessageInFileScope(
     });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
+    const surface = resolveTurnSurface({
+      grant,
+      authorization: input.authorization,
+      requested: input.surface,
+    });
     const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
       await postUserMessageTurn({
         db,
@@ -4151,11 +4186,7 @@ async function acceptSessionUserMessageInFileScope(
           : {}),
         delivery,
         origin: source === "api" ? "operator" : "human",
-        surface: resolveTurnSurface({
-          grant,
-          authorization: input.authorization,
-          requested: input.surface,
-        }),
+        surface,
         actor: grant.subjectId,
         ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
         commandActor,
@@ -4170,6 +4201,7 @@ async function acceptSessionUserMessageInFileScope(
           ? { schedulePostCommit: deps.schedulePromptPostCommit }
           : {}),
       });
+    if (!replay) recordUserMessageAccepted(deps.observability, { surface });
     return {
       accepted,
       turn,

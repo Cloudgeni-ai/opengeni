@@ -35,6 +35,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
+import type { UserPresenceRecorder } from "../user-presence";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
 
 const bearerPrefix = "Bearer ";
@@ -233,6 +234,8 @@ export type AccessDeps = {
   settings: Settings;
   managedAuth?: ManagedAuth | null;
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
+  /** Analytics only: notes canonical managed-cookie activity, never authority. */
+  userPresence?: UserPresenceRecorder | null;
 };
 
 /** null means this is not an authenticated external lane; [] means that lane
@@ -800,6 +803,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      // Presence counts people, so only this verified browser-session branch
+      // reports it. Open SSE streams re-enter here on every reauthorization.
+      deps.userPresence?.touch(context.subjectId);
       return context;
     }
   }

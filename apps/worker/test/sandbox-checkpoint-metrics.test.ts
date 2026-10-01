@@ -60,7 +60,9 @@ describe("sandbox checkpoint and deadline metrics", () => {
       expect(metrics).toMatch(
         /opengeni_workspace_capture_duration_seconds_count\{[^}]*backend="modal"[^}]*\} 1/,
       );
-      expect(metrics).toMatch(/opengeni_workspace_capture_revision_duration_seconds_count\{[^}]*\} 1/);
+      expect(metrics).toMatch(
+        /opengeni_workspace_capture_revision_duration_seconds_count\{[^}]*\} 1/,
+      );
       expect(metrics).toContain("opengeni_workspace_capture_total{");
       await observability.flush();
     }
