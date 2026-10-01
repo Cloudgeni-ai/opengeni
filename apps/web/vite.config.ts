@@ -231,8 +231,11 @@ export default defineConfig({
               // merging cannot use an icon or label helper to pull the full
               // session workbench into startup. The personal-workspace badge and
               // session title contract must not carry settings-only dependencies.
+              // CalendarClock is also a session header/rail glyph. Keep it
+              // here so management revision UI cannot share its route chunk
+              // and make management controls static session dependencies.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -278,8 +281,11 @@ export default defineConfig({
               // Design-system primitives used only by settings and other lazy
               // management routes. Keep them in one lazy unit so entry-aware
               // merging cannot fold them into chunks a direct session imports.
+              // Diff/revision history imports ErrorMessage; leaving either
+              // unpinned co-locates it with shared session glyphs and drags this
+              // entire group plus management Radix controls into sessions.
               name: "management-ui-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 19,
             },
