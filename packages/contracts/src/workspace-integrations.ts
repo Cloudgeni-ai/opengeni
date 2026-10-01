@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { TurnInitiator, TurnInitiatorContext } from "./index";
 
-import { WORKSPACE_WEBHOOK_EVENT_TYPES } from "./workspace-integration-wire";
+import {
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
+  WORKSPACE_WEBHOOK_EVENT_TYPES,
+} from "./workspace-integration-wire";
 import {
   UsageAllowancePeriod,
   UsageAllowanceStatus,
@@ -250,9 +253,32 @@ export const WorkspaceUsageWebhookEvent = z.object({
     .passthrough(),
 });
 export type WorkspaceUsageWebhookEvent = z.infer<typeof WorkspaceUsageWebhookEvent>;
+/**
+ * "Send test event": proves the endpoint is reachable and verifies the
+ * signature. It names the workspace but no session, turn or sequence.
+ */
+export const WorkspaceTestWebhookEvent = z.object({
+  lane: z.enum(["organization", "workspace"]).default("workspace"),
+  id: z.string().uuid(),
+  type: z.literal(OPENGENI_WEBHOOK_TEST_EVENT_TYPE),
+  workspaceId: z.string().uuid(),
+  workspace: z
+    .object({
+      id: z.string().uuid(),
+      externalSource: z.string().nullable(),
+      externalId: z.string().nullable(),
+    })
+    .optional(),
+  sessionId: z.null().optional(),
+  turnId: z.null().optional(),
+  occurredAt: z.string(),
+  data: z.object({ webhookId: z.string().uuid().optional() }).passthrough(),
+});
+export type WorkspaceTestWebhookEvent = z.infer<typeof WorkspaceTestWebhookEvent>;
 export const WorkspaceWebhookEvent = z.union([
   SessionWorkspaceWebhookEvent,
   WorkspaceUsageWebhookEvent,
+  WorkspaceTestWebhookEvent,
 ]);
 export type WorkspaceWebhookEvent = z.infer<typeof WorkspaceWebhookEvent>;
 
@@ -341,7 +367,13 @@ export type CredentialProviderRequest = {
   lane: "organization" | "workspace";
   /** Selected session-attached remote targets; providers must authorize each exact URL. */
   mcpServers: { id: string; url: string }[];
-  purpose: "provision" | "renewal";
+  /**
+   * `test` comes from an administrator's "Test connection": it is not a run,
+   * so `sessionId`, `rootSessionId`, `turnId` and `attemptId` are the nil
+   * UUID. Answer it as you would a run in this workspace (OpenGeni shows only
+   * the names of what you return, never the values), or `not_applicable`.
+   */
+  purpose: "provision" | "renewal" | "test";
   forceRefresh: boolean;
   accountId: string;
   workspaceId: string;
@@ -520,4 +552,89 @@ export type RotateWorkspaceWebhookSecretResponse = z.infer<
 export const RotateOrganizationWebhookSecretResponse = CreateOrganizationWebhookResponse;
 export type RotateOrganizationWebhookSecretResponse = z.infer<
   typeof RotateOrganizationWebhookSecretResponse
+>;
+
+/**
+ * The outcome of one test request to a webhook or credential-provider
+ * endpoint. Nothing is stored: the request is sent once, synchronously.
+ * Credential values never appear; `credentials` names what a run would get.
+ */
+export const IntegrationEndpointTestResult = z
+  .object({
+    /** A 2xx answer (for a provider, also a valid response body). */
+    ok: z.boolean(),
+    /** The HTTP status, or null when the endpoint was not reached. */
+    status: z.number().int().nullable(),
+    durationMs: z.number().int().nonnegative(),
+    /** What went wrong, in one sentence, or null. */
+    error: z.string().nullable(),
+    /** The exact JSON body OpenGeni signed and sent. */
+    request: z.string(),
+    /** The start of the endpoint's answer. Omitted for a successful provider answer. */
+    responseBody: z.string().nullable(),
+    credentials: z
+      .object({
+        status: z.enum(["ok", "not_applicable", "auth_needed"]),
+        environment: z.array(z.string()),
+        files: z.array(z.string()),
+        git: z.array(z.string()),
+        mcp: z.array(z.string()),
+        expiresAt: z.string().nullable(),
+        authNeeded: z.array(
+          z.object({
+            reason: z.string(),
+            providerDomain: z.string().nullable(),
+            message: z.string().nullable(),
+          }),
+        ),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type IntegrationEndpointTestResult = z.infer<typeof IntegrationEndpointTestResult>;
+
+export const TestWorkspaceWebhookResponse = z
+  .object({ result: IntegrationEndpointTestResult })
+  .strict();
+export type TestWorkspaceWebhookResponse = z.infer<typeof TestWorkspaceWebhookResponse>;
+
+/** Tests the provider runs in this workspace would use: its own, else the organization's. */
+export const TestWorkspaceCredentialProviderResponse = z
+  .object({
+    lane: z.enum(["workspace", "organization"]),
+    url: z.string(),
+    result: IntegrationEndpointTestResult,
+  })
+  .strict();
+export type TestWorkspaceCredentialProviderResponse = z.infer<
+  typeof TestWorkspaceCredentialProviderResponse
+>;
+
+/**
+ * Organization registrations that apply to one workspace, for workspace
+ * administrators: an enabled organization provider whose filter matches
+ * (even when this workspace overrides it) and the enabled organization
+ * webhooks that also receive this workspace's events. Never secrets.
+ */
+export const WorkspaceInheritedIntegrationsResponse = z
+  .object({
+    credentialProvider: z
+      .object({ url: z.string(), timeoutMs: z.number().int(), updatedAt: z.string() })
+      .strict()
+      .nullable(),
+    webhooks: z.array(
+      z
+        .object({
+          id: z.string().uuid(),
+          url: z.string(),
+          eventTypes: z.array(WorkspaceWebhookEventType),
+          description: z.string().nullable(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type WorkspaceInheritedIntegrationsResponse = z.infer<
+  typeof WorkspaceInheritedIntegrationsResponse
 >;

@@ -14,7 +14,9 @@ export type {
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export type { ServiceContext } from "./embedding-client";
 export {
+  OPENGENI_TEST_REQUEST_NIL_ID,
   OPENGENI_WEBHOOK_HEADERS,
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
   OpenGeniSignatureError,
   WORKSPACE_WEBHOOK_EVENT_TYPES,
   signOpenGeniPayload,
@@ -61,6 +63,11 @@ export type {
   WorkspaceWebhookEventType,
   SessionWorkspaceWebhookEvent,
   WorkspaceUsageWebhookEvent,
+  WorkspaceTestWebhookEvent,
+  IntegrationEndpointTestResult,
+  TestWorkspaceWebhookResponse,
+  TestWorkspaceCredentialProviderResponse,
+  WorkspaceInheritedIntegrationsResponse,
 } from "./workspace-integrations";
 export type {
   AllowanceExhaustedRefusal,

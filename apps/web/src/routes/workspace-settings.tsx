@@ -13,10 +13,7 @@ import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
 import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
-import {
-  WorkspaceDeveloperSettings,
-  WorkspaceSandboxImageRow,
-} from "@/components/workspace-developer-settings";
+import { WorkspaceSandboxImageRow } from "@/components/workspace-sandbox-image-row";
 import {
   WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
@@ -48,6 +45,8 @@ import {
 } from "@/lib/workspace-deletion";
 import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
+import type { DeveloperLocation } from "@/lib/developer-route";
+import { hasAccountPermission } from "@/lib/permissions";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({
@@ -56,10 +55,13 @@ export function WorkspaceSettingsRoute({
   modelsAccount,
   modelsView,
   apiKey,
+  developer,
   access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
+  /** Settings > Developer: the webhook or provider page, or form, that is open. */
+  developer?: DeveloperLocation | undefined;
   /** Settings > Models: the account page that is open. */
   modelsAccount?: string | undefined;
   /** Settings > Models: the form page that is open. */
@@ -88,6 +90,7 @@ export function WorkspaceSettingsRoute({
       modelsAccount={modelsAccount}
       modelsView={modelsView}
       apiKey={apiKey}
+      developer={developer}
       access={access}
     />
   );
@@ -113,6 +116,7 @@ function OperationalWorkspaceSettingsRoute({
   modelsAccount,
   modelsView,
   apiKey,
+  developer,
   access,
 }: {
   workspaceId: string;
@@ -120,6 +124,7 @@ function OperationalWorkspaceSettingsRoute({
   modelsAccount?: string | undefined;
   modelsView?: ModelsView | undefined;
   apiKey?: string | undefined;
+  developer?: DeveloperLocation | undefined;
   access?: AccessSearch | undefined;
 }) {
   const context = useAppContext();
@@ -164,6 +169,12 @@ function OperationalWorkspaceSettingsRoute({
   // Models: owners and admins in an organization administrator session (or the single
   // local user).
   const [gatewayRevision, setGatewayRevision] = useState(0);
+  const navigate = useNavigate();
+  // The organization integration routes' rule: an administrator in a managed or
+  // single-user session.
+  const canManageOrganizationIntegrations =
+    canManageOrganizationModels &&
+    hasAccountPermission(context.accessContext, accountId, "account:admin");
 
   return (
     <WorkspaceSettingsContent>
@@ -212,12 +223,32 @@ function OperationalWorkspaceSettingsRoute({
       ) : null}
 
       {section === "developer" ? (
-        <WorkspaceDeveloperSettings
-          client={context.client}
-          workspaceId={workspaceId}
-          canManage={canAdministerWorkspace}
-          personal={personal}
-        />
+        <Suspense fallback={<SettingsRowsFallback label="Loading developer settings" />}>
+          <LazyWorkspaceDeveloperSettings
+            client={context.client}
+            workspaceId={workspaceId}
+            canManage={canAdministerWorkspace}
+            personal={personal}
+            location={developer}
+            onNavigate={(next) =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "developer", ...next },
+              })
+            }
+            onOpenOrganizationSettings={
+              canManageOrganizationIntegrations
+                ? () =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: { section: "developer" },
+                    })
+                : undefined
+            }
+          />
+        </Suspense>
       ) : null}
     </WorkspaceSettingsContent>
   );
@@ -832,6 +863,11 @@ function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: str
     </Notice>
   );
 }
+
+const LazyWorkspaceDeveloperSettings = lazy(async () => {
+  const module = await import("@/components/workspace-developer-settings");
+  return { default: module.WorkspaceDeveloperSettings };
+});
 
 const LazyMembersSection = lazy(async () => {
   const module = await import("./workspace-members-section");

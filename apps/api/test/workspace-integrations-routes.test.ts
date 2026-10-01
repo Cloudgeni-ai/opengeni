@@ -6,10 +6,17 @@ import {
   appendSessionEvents,
   bootstrapWorkspace,
   createDb,
+  createOrganizationWebhook,
   createSession,
+  deleteOrganizationCredentialProvider,
+  encryptEnvironmentValue,
+  upsertOrganizationCredentialProvider,
   type DbClient,
 } from "@opengeni/db";
-import { verifyWebhookEvent } from "../../../packages/sdk/src/workspace-integrations";
+import {
+  verifyCredentialProviderRequest,
+  verifyWebhookEvent,
+} from "../../../packages/sdk/src/workspace-integrations";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -308,6 +315,191 @@ describe("workspace integration routes", () => {
       expect((await call("DELETE", `/webhooks/${flaky.id}`)).status).toBe(404);
     } finally {
       receiver.stop(true);
+    }
+  });
+
+  test("Send test event and Test connection reach the endpoint now and never echo credentials", async () => {
+    const received: Array<{ path: string; body: string; headers: Headers }> = [];
+    const receiver = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: async (request) => {
+        const body = await request.text();
+        const path = new URL(request.url).pathname;
+        received.push({ path, body, headers: request.headers });
+        if (path === "/refuses") return new Response("bad signature", { status: 401 });
+        if (path === "/credentials") {
+          return Response.json({
+            status: "ok",
+            environment: { SECRET_TOKEN: "value-that-must-not-leak" },
+            git: [{ host: "GitHub.com", password: "ghs_must_not_leak" }],
+          });
+        }
+        return new Response(null, { status: 204 });
+      },
+    });
+    try {
+      const base = `http://127.0.0.1:${receiver.port}`;
+      const created = await (
+        await call("POST", "/webhooks", { url: `${base}/hook`, eventTypes: ["turn.completed"] })
+      ).json();
+      const tested = await call("POST", `/webhooks/${created.webhook.id}/test`);
+      expect(tested.status).toBe(200);
+      expect(tested.headers.get("cache-control")).toBe("private, no-store");
+      const { result } = await tested.json();
+      expect(result).toMatchObject({ ok: true, status: 204, error: null, credentials: null });
+      const delivered = received.find((entry) => entry.path === "/hook")!;
+      const verified = await verifyWebhookEvent({
+        body: delivered.body,
+        headers: delivered.headers,
+        secret: created.secret,
+      });
+      expect(verified.event).toMatchObject({
+        type: "webhook.test",
+        workspaceId,
+        sessionId: null,
+        data: { webhookId: created.webhook.id },
+      });
+      expect(delivered.headers.get("opengeni-event-id")).toBe(verified.event.id);
+      expect(result.request).toBe(delivered.body);
+      // Nothing is queued: a test is not a delivery.
+      const deliveries = await (
+        await call("GET", `/webhooks/${created.webhook.id}/deliveries`)
+      ).json();
+      expect(deliveries.deliveries).toEqual([]);
+
+      const refusing = await (
+        await call("POST", "/webhooks", { url: `${base}/refuses`, eventTypes: ["turn.failed"] })
+      ).json();
+      const refused = (await (await call("POST", `/webhooks/${refusing.webhook.id}/test`)).json())
+        .result;
+      expect(refused).toMatchObject({ ok: false, status: 401, responseBody: "bad signature" });
+      expect(refused.error).toContain("signing secret");
+
+      await call("DELETE", "/credential-provider");
+      const provider = await (
+        await call("PUT", "/credential-provider", { url: `${base}/credentials` })
+      ).json();
+      const providerTest = await call("POST", "/credential-provider/test");
+      expect(providerTest.status).toBe(200);
+      const providerText = await providerTest.text();
+      expect(providerText).not.toContain("value-that-must-not-leak");
+      expect(providerText).not.toContain("ghs_must_not_leak");
+      const providerResult = JSON.parse(providerText);
+      expect(providerResult).toMatchObject({
+        lane: "workspace",
+        url: `${base}/credentials`,
+        result: {
+          ok: true,
+          status: 200,
+          responseBody: null,
+          credentials: {
+            status: "ok",
+            environment: ["SECRET_TOKEN"],
+            git: ["github.com"],
+            files: [],
+            mcp: [],
+          },
+        },
+      });
+      const sent = received.find((entry) => entry.path === "/credentials")!;
+      const request = await verifyCredentialProviderRequest({
+        body: sent.body,
+        headers: sent.headers,
+        secret: provider.secret,
+      });
+      expect(request).toMatchObject({
+        type: "credentials.request",
+        purpose: "test",
+        workspaceId,
+        accountId,
+        sessionId: "00000000-0000-0000-0000-000000000000",
+        turnId: "00000000-0000-0000-0000-000000000000",
+        initiatingHumanSubjectId: subjectId,
+      });
+
+      // A paused provider is still testable, so it can be checked before resuming.
+      await call("PUT", "/credential-provider", { url: `${base}/credentials`, enabled: false });
+      expect((await (await call("POST", "/credential-provider/test")).json()).result.ok).toBe(true);
+
+      await call("PUT", "/credential-provider", { url: "http://127.0.0.1:1/credentials" });
+      const unreachable = (await (await call("POST", "/credential-provider/test")).json()).result;
+      expect(unreachable).toMatchObject({ ok: false, status: null });
+      expect(unreachable.error).toContain("refused");
+
+      for (const path of ["/credential-provider/test", `/webhooks/${created.webhook.id}/test`]) {
+        expect((await call("POST", path, undefined, { kind: "agent_attempt" })).status).toBe(403);
+        expect((await call("POST", path, undefined, { admin: false })).status).toBe(403);
+      }
+      await call("DELETE", "/credential-provider");
+      expect((await call("POST", "/credential-provider/test")).status).toBe(404);
+      await call("DELETE", `/webhooks/${created.webhook.id}`);
+      await call("DELETE", `/webhooks/${refusing.webhook.id}`);
+    } finally {
+      receiver.stop(true);
+    }
+  });
+
+  test("shows the organization registrations that reach this workspace, never secrets", async () => {
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    expect((await (await call("GET", "/inherited-integrations")).json()).credentialProvider).toBe(
+      null,
+    );
+    await upsertOrganizationCredentialProvider(client.db, {
+      accountId,
+      url: "https://org.example/credentials",
+      enabled: true,
+      timeoutMs: 5000,
+      workspaceFilter: { externalSource: "test" },
+      createdBySubjectId: subjectId,
+      secretEncrypted: encryptEnvironmentValue(key, "ogcp_org_secret"),
+    });
+    const matching = await createOrganizationWebhook(client.db, {
+      accountId,
+      url: "https://org.example/events",
+      secretEncrypted: encryptEnvironmentValue(key, "whsec_org_secret"),
+      eventTypes: ["turn.completed"],
+      enabled: true,
+      description: null,
+      workspaceFilter: null,
+      createdBySubjectId: subjectId,
+    });
+    await createOrganizationWebhook(client.db, {
+      accountId,
+      url: "https://other.example/events",
+      secretEncrypted: encryptEnvironmentValue(key, "whsec_other_secret"),
+      eventTypes: ["turn.completed"],
+      enabled: true,
+      description: null,
+      workspaceFilter: { externalSource: "another-product" },
+      createdBySubjectId: subjectId,
+    });
+    try {
+      const response = await call("GET", "/inherited-integrations");
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain("_secret");
+      expect(JSON.parse(text)).toEqual({
+        credentialProvider: {
+          url: "https://org.example/credentials",
+          timeoutMs: 5000,
+          updatedAt: expect.any(String),
+        },
+        webhooks: [
+          {
+            id: matching.id,
+            url: "https://org.example/events",
+            eventTypes: ["turn.completed"],
+            description: null,
+          },
+        ],
+      });
+      expect(
+        (await call("GET", "/inherited-integrations", undefined, { kind: "agent_attempt" })).status,
+      ).toBe(403);
+    } finally {
+      await deleteOrganizationCredentialProvider(client.db, { accountId });
+      await shared!.admin`delete from organization_webhooks where account_id = ${accountId}`;
     }
   });
 });
