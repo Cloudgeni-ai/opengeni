@@ -42,6 +42,8 @@ describe("workspace member permission groups", () => {
       "connections:write",
       "github:manage",
       "rigs:manage",
+      // Connected Machines stay admin-managed in shared workspaces.
+      "enrollments:read",
       "enrollments:manage",
       "variable-sets:manage",
       "secrets:read",

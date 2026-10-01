@@ -252,7 +252,6 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "secrets:write",
   "goals:manage",
   "rigs:use",
-  "enrollments:read",
   "artifacts:read",
   "artifacts:publish",
 ]);
