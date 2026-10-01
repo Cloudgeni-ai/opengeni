@@ -1043,6 +1043,9 @@ export function MessageTimeline({
   }, [cancelLeaveFallback, releasePinAfterScrollSettled]);
 
   const requestEarlierFromReader = () => {
+    // Upward navigation replaces any earlier downward gesture, even when
+    // already unpinned and the engine never delivered scrollend.
+    clearReaderIntent();
     releasePinFromReader();
     wantPinRef.current = false;
     // A stationary upward gesture is still demand. Successful short/folded

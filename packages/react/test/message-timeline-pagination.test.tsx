@@ -1020,6 +1020,52 @@ describe("MessageTimeline pagination affordances", () => {
     },
   );
 
+  test.each(["wheel", "PageUp"])(
+    "upward %s replaces stale downward intent after viewport growth without scrollend",
+    async (navigation) => {
+      setScrollEndSupportForTests(false);
+      const events = manyEvents(20);
+      const r = await renderComponent(<MessageTimeline events={events} />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2400,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        await readerScrollUp(scroller, 1000);
+        await actRun(() => {
+          scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: 800, bubbles: true }));
+          scroller.scrollTop = 1800;
+          scroller.dispatchEvent(new Event("scroll"));
+        });
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+        layout.setClientHeight(560);
+        await r.rerender(<MessageTimeline events={events} />);
+        expect(scroller.scrollTop).toBe(1800);
+
+        await actRun(() => {
+          scroller.dispatchEvent(
+            navigation === "wheel"
+              ? new WheelEvent("wheel", { deltaY: -1, bubbles: true })
+              : new KeyboardEvent("keydown", { key: navigation, bubbles: true }),
+          );
+          scroller.scrollTop = 1799;
+          scroller.dispatchEvent(new Event("scroll"));
+        });
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+        expect(scroller.scrollTop).toBe(1799);
+      } finally {
+        setScrollEndSupportForTests(null);
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
   test("a sentinel-owned prepend restores an unpinned compact tail instead of snapping to the tip", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
