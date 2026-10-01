@@ -86,8 +86,37 @@ function internalMutationUnknownCommand(
     try {
       if (value instanceof ProviderCommandStartOutcomeUnknownError) {
         unknown = true;
+        // Zod reads ordinary properties. First make a bounded own-data-only
+        // copy so neither validation nor equality executes descriptor getters.
+        // This contract has no arrays, functions or symbol-keyed fields.
+        let remaining = 64;
+        const copyCommandData = (candidate: unknown, descriptorDepth = 0): unknown => {
+          if (--remaining < 0 || descriptorDepth > 4)
+            throw new Error("Internal command descriptor exceeded inspection bounds");
+          if (
+            candidate === null ||
+            candidate === undefined ||
+            typeof candidate === "string" ||
+            typeof candidate === "number" ||
+            typeof candidate === "boolean"
+          )
+            return candidate;
+          if (typeof candidate !== "object" || Array.isArray(candidate))
+            throw new Error("Internal command descriptor is not a data object");
+          const keys = Reflect.ownKeys(candidate);
+          if (keys.length > 16)
+            throw new Error("Internal command descriptor exceeded field bounds");
+          const copy: Record<string, unknown> = Object.create(null);
+          for (const key of keys) {
+            const property = Object.getOwnPropertyDescriptor(candidate, key);
+            if (typeof key !== "string" || !property || !("value" in property))
+              throw new Error("Internal command descriptor contains a non-data field");
+            copy[key] = copyCommandData(property.value, descriptorDepth + 1);
+          }
+          return copy;
+        };
         const parsed = ModalRouterProviderCommand.safeParse(
-          Object.getOwnPropertyDescriptor(value, "command")?.value,
+          copyCommandData(Object.getOwnPropertyDescriptor(value, "command")?.value),
         );
         if (!parsed.success || parsed.data.sandboxId !== instanceId) incomplete = true;
         else commands.push(parsed.data);
@@ -106,8 +135,17 @@ function internalMutationUnknownCommand(
           continue;
         }
         if (key === "errors" && Array.isArray(property.value)) {
-          if (property.value.length > 64) incomplete = true;
-          nested.push(...property.value.slice(0, 64));
+          const length = Object.getOwnPropertyDescriptor(property.value, "length")?.value;
+          if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+            incomplete = true;
+            continue;
+          }
+          if (length > 64) incomplete = true;
+          for (let index = 0; index < Math.min(length, 64); index++) {
+            const element = Object.getOwnPropertyDescriptor(property.value, String(index));
+            if (!element || !("value" in element)) incomplete = true;
+            else nested.push(element.value);
+          }
         } else if (property.value !== undefined) nested.push(property.value);
       }
       if (
