@@ -29,6 +29,7 @@ export default defineConfig({
     "src/document-authority.ts",
     "src/knowledge.ts",
     "src/workspace-integrations.ts",
+    "src/usage-allowances.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",

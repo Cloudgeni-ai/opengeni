@@ -487,6 +487,37 @@ calls `og.asUser(me.id, { source }).getMyUsage(...)` server-side and returns
 only the approved fraction/status/reset fields. Do not claim the packaged
 proxy redacts amounts.
 
+## React components and the console
+
+`@opengeni/react/usage` is a focused subpath (kept out of the package root and
+the session entry) for people-facing usage:
+
+| Export | What it does |
+| --- | --- |
+| `useUsage({ client?, workspaceId?, period?, refreshKey? })` | Reads `/usage/me` through `client.getMyUsage` or any client with `requestJson`; returns the response and `summarizeUsage` output |
+| `summarizeUsage(response, subjectId?)` | `unlimited`/`ok`/`warning`/`exhausted` plus the binding ceiling: an exhausted workspace binds first, otherwise the ceiling with less room left |
+| `<UsageMeter>` / `<UsageMeterView>` | Share-only meter (`"38% left"`); `formatAmount` opts in to amounts or plan multiples; `density="compact" \| "hero"` |
+| `<UsageLimitNotice>` | Silent while comfortable; a dismissible near-limit line, then a non-dismissible at-limit line naming who can raise it and when it resets; `labels` and `action` customize it |
+| `<UsageMemberList>` | Admin roster with a share-of-budget slider (keyboard and pointer), optional fixed amounts, and a visible oversubscription summary; `onChangeRule` saves through your backend |
+
+The session timeline renders `allowance_exhausted` as a structured "usage
+limit reached" row. Reword it with `allowanceExhaustedLabels` or replace it
+with `renderAllowanceExhausted` on `MessageTimeline` and `SessionConversation`;
+the typed refusal carries the canonical sentence, never upstream prose.
+
+Browser code without the root client uses `@opengeni/sdk/usage-allowances`:
+the same reads and administration as free functions over `requestJson`
+(`getMyUsage`, `getUsage`, `getAllUsage`, `getWorkspaceAllowanceState`,
+`setWorkspaceAllowance`, `clearWorkspaceAllowance`, `grantWorkspaceCredits`,
+`setMemberAllowance`). They call the same routes as the root client's methods.
+
+The OpenGeni console shows budgets in dollars, the unit of the credit balance
+they draw on: owners set a shared workspace's monthly budget under
+Organization settings → Billing & usage (a budgets list and one page per
+workspace), workspace admins set member limits under Workspace settings →
+Usage, everyone sees their own limit there and in the account menu, and the
+composer shows the near/at-limit notice. Personal workspaces have no budget.
+
 ## Attribution and background work
 
 The initiating human is frozen at accepted-work boundaries, not inferred from

@@ -1,5 +1,6 @@
+import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { RowButton } from "@/components/ui/page-actions";
@@ -30,19 +31,69 @@ import {
 } from "@/lib/organization-admin";
 import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
 
+// Budgets load only on this page: they never join the session or rail graphs.
+const WorkspaceBudgetsSection = lazy(() =>
+  import("@/components/usage/workspace-budgets-section").then((module) => ({
+    default: module.WorkspaceBudgetsSection,
+  })),
+);
+const WorkspaceBudgetPage = lazy(() =>
+  import("@/components/usage/workspace-budget-page").then((module) => ({
+    default: module.WorkspaceBudgetPage,
+  })),
+);
+
 /* ----------------------------------------------------------------------------
    Organization settings > Billing & usage: the credit balance and top-ups,
-   plan limits, and usage by workspace.
+   plan limits, workspace budgets, and usage by workspace. A workspace's budget
+   page (`?section=billing&workspace=<id>`) opens from the budgets list.
    -------------------------------------------------------------------------- */
 
 export function OrganizationBillingPage({
-  identity,
-  canReadBilling,
-  canManageBilling,
+  budgetWorkspaceId,
+  ...props
 }: {
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  /** The workspace whose budget page is open. */
+  budgetWorkspaceId?: string | undefined;
+}) {
+  const navigate = useNavigate();
+  const anchorWorkspaceId = props.identity.workspaceId;
+  const openBudget = useCallback(
+    (workspace: string | undefined) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId: anchorWorkspaceId },
+        search: workspace ? { section: "billing", workspace } : { section: "billing" },
+      }),
+    [anchorWorkspaceId, navigate],
+  );
+  if (budgetWorkspaceId) {
+    return (
+      <Suspense fallback={null}>
+        <WorkspaceBudgetPage
+          key={budgetWorkspaceId}
+          workspaceId={budgetWorkspaceId}
+          onBack={() => openBudget(undefined)}
+        />
+      </Suspense>
+    );
+  }
+  return <BillingOverview {...props} onOpenBudget={openBudget} />;
+}
+
+function BillingOverview({
+  identity,
+  canReadBilling,
+  canManageBilling,
+  onOpenBudget,
+}: {
+  identity: OrganizationAdminIdentity;
+  canReadBilling: boolean;
+  canManageBilling: boolean;
+  onOpenBudget: (workspaceId: string) => void;
 }) {
   const client = useAppContext().client;
   const accountId = identity.organizationId;
@@ -293,6 +344,10 @@ export function OrganizationBillingPage({
         error={visibleEntitlementsError}
         onRetry={() => void refreshEntitlements()}
       />
+
+      <Suspense fallback={null}>
+        <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
+      </Suspense>
 
       <OrganizationUsageDashboard
         key={identityKey}

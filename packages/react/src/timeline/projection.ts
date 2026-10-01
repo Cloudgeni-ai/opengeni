@@ -171,6 +171,9 @@ export function buildTimeline(
         id: `${event.id}-allowance`,
         tone: "failed",
         text,
+        // The canonical sentence replaces upstream prose, so a host renderer
+        // reading `message` never shows a wrapper's private wording.
+        allowance: { ...refusal, message: text },
         occurredAt: event.occurredAt,
       });
     }
@@ -1259,8 +1262,7 @@ export function buildTimeline(
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
-          const text = allowanceExhaustedMessage(allowance);
-          items.push(turnEndItem(event, "failed", text));
+          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT));
           allowanceNotice(event, turnId);
           break;
         }
@@ -1375,7 +1377,7 @@ export function buildTimeline(
         // back to the generic error/message extraction.
         const allowance = parseAllowanceExhaustedRefusal(payload);
         const failureText = allowance
-          ? allowanceExhaustedMessage(allowance)
+          ? ALLOWANCE_TURN_END_TEXT
           : isCreditExhaustionPayload(payload)
             ? CREDIT_EXHAUSTION_MESSAGE
             : failureMessage(payload);
@@ -1748,6 +1750,13 @@ function mergeToolCallRaw(existingValue: unknown, nextValue: unknown): unknown {
 export function stripOpaqueCitationTokens(text: string): string {
   return text.replace(/\s*cite(?:[^]+)+/gu, "");
 }
+
+/**
+ * The turn summary's short outcome for a usage ceiling. The adjacent notice row
+ * carries who can raise it and when it resets (and is host-customizable), so
+ * the summary line stays a neutral fact instead of repeating remedy prose.
+ */
+const ALLOWANCE_TURN_END_TEXT = "Usage limit reached";
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
@@ -2410,6 +2419,9 @@ export function isTurnExecutionEvidence(type: string): boolean {
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
     type === "turn.failed" ||
+    // An admission refusal can settle a queued turn before it ever starts:
+    // its prompt still belongs above the "usage limit reached" row.
+    type === "usage.exhausted" ||
     type === "turn.superseded" ||
     type === "turn.recovery.requested" ||
     type === "turn.capacity_waiting" ||
