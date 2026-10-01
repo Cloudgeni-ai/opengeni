@@ -1,8 +1,8 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "OpenGeni",
-  "description": "Add agents that finish real work to your product. OpenGeni is the open, self-hostable runtime for long-running AI agents.",
+  "name": "Opengeni",
+  "description": "Opengeni is open-source infrastructure for adding AI agents to your product: durable streaming sessions, sandboxes, tools and MCP, per-user credentials, memory, multi-tenant workspaces, and React components you restyle. Use the managed cloud or self-host.",
   "colors": {
     "primary": "#1f8a74",
     "light": "#9fe3d3",
@@ -33,7 +33,14 @@
     "groups": [
       {
         "group": "Get started",
-        "pages": ["index", "embed-with-a-coding-agent", "embed-manually", "quickstart"]
+        "pages": [
+          "index",
+          "why-opengeni",
+          "embed-with-a-coding-agent",
+          "embed-manually",
+          "quickstart",
+          "compare-agent-frameworks"
+        ]
       },
       {
         "group": "Build",

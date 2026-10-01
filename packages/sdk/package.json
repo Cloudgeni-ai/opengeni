@@ -1,7 +1,28 @@
 {
   "name": "@opengeni/sdk",
   "version": "7.4.0",
-  "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
+  "description": "TypeScript SDK for Opengeni, open-source infrastructure for adding AI agents to your product: durable streaming sessions with reconnect and replay, a tenant-scoped session proxy for your backend, and a chat facade for existing chat UIs. Works with the managed cloud or a self-hosted deployment.",
+  "keywords": [
+    "agent-infrastructure",
+    "agent-runtime",
+    "agents",
+    "ai-agent",
+    "ai-agents",
+    "chat",
+    "llm",
+    "mcp",
+    "multi-tenant",
+    "opengeni",
+    "saas",
+    "sdk",
+    "sse",
+    "streaming",
+    "typescript"
+  ],
+  "homepage": "https://docs.opengeni.ai/reference/sdk",
+  "bugs": {
+    "url": "https://github.com/Cloudgeni-ai/opengeni/issues"
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

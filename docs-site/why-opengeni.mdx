@@ -1,0 +1,91 @@
+---
+title: "Why Opengeni"
+description: "Opengeni is open-source infrastructure for adding AI agents to your product. What you get, who it is for, when it is the right choice, and when another tool fits better."
+icon: "lightbulb"
+---
+
+**Opengeni is the easy way to add AI agents to your product: agents in your product, infrastructure out of the box.** You keep your users, your data, and your UI. Opengeni runs the agent behind them, with durable streaming sessions, sandboxes, tools and MCP, per-user credentials, memory, multi-tenant workspaces, and React components you restyle. Use the managed cloud at [app.opengeni.ai](https://app.opengeni.ai) or self-host the same Apache-2.0 code.
+
+Opengeni is not a library for writing an agent loop. It ships the loop and runs it as a service, so a product team configures an agent (instructions, tools, model, compute) instead of building and operating the platform around it.
+
+## What you would otherwise build
+
+A demo agent is a model call and a few tools. An agent inside a product also needs everything below. Opengeni provides all of it:
+
+| Your product needs                         | What Opengeni gives you                                                                                                                                                                                |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Chat that streams and survives reloads     | **Durable streaming sessions.** Server-sent events with automatic reconnect and resume. Every event is stored in Postgres, so a reload, a second tab, or a worker restart continues the same session.  |
+| A safe place for the agent to run code     | **Sandboxes.** A managed sandbox per session (Docker, Modal, or a cloud sandbox provider), a [Connected Machine](/concepts/compute-targets) you enroll, or no compute at all.                          |
+| Access to your product's data and actions  | **Tools and MCP.** Your [MCP server](/integrate/your-data), called with a short-lived token for the signed-in user, or your API through an OpenAPI description. You select tools per session.          |
+| Each user's own access, never a shared key | **Credentials, handled.** Per-user OAuth connections, short-lived tokens you mint per session, and [credential providers and webhooks](/guides/webhooks-and-credentials). Secrets stay out of prompts. |
+| Agents that remember                       | **Memory.** [Knowledge](/concepts/memory-and-knowledge) keeps files, sources, and findings in a searchable library, scoped to a person or a workspace.                                                 |
+| Customers kept apart                       | **Multi-tenant workspaces.** One [workspace per customer](/integrate/users-and-tenants), with sessions, files, knowledge, and connections isolated in it.                                              |
+| A UI that looks like your product          | **React components you restyle.** [`OpenGeniChat` and `SessionConversation`](/integrate/conversation-ui) render the full conversation; every visual decision is a CSS variable.                        |
+| Work without a user watching               | **Background agents.** [Schedules and product events](/integrate/background-agents) start agents, and webhooks tell your backend when work finishes.                                                   |
+| Freedom to change models                   | **Model choice.** OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, OpenAI-compatible endpoints, or a ChatGPT/Codex or SuperGrok subscription.                                           |
+| Cost control                               | **Usage allowances.** [Monthly pools per workspace and shares per person](/guides/usage-allowances), with drop-in meters.                                                                              |
+
+Integration is one backend route and one component. Your server mounts `createSessionProxyHandler` from `@opengeni/sdk`, which runs your existing auth and keeps your API key server-side, and your frontend renders `OpenGeniChat` from `@opengeni/react`. See [How it fits together](/integrate/how-it-fits-together) and [Embed manually](/embed-manually), or let a coding agent do it with [the opengeni-client skill](/embed-with-a-coding-agent).
+
+## Who it is for
+
+- **SaaS teams adding an agent to their product**, such as a support agent that works tickets, an analyst over the customer's data, or an operations or coding agent, with each customer in its own workspace.
+- **Teams building internal tools** who want agents that call internal APIs as the signed-in employee.
+- **Teams that want an agent workspace for themselves.** The same platform is a complete web app for giving agents work, with shared sessions, Knowledge, schedules, and Slack.
+
+Your backend can be any language. The browser SDK and React components talk to your own route, and [Django, Rails, Go, PHP, or Java backends](/integrate/proxy-from-any-backend) can implement that route without a Node sidecar.
+
+## When Opengeni is the right choice
+
+Choose Opengeni when most of these are true:
+
+- You want an agent feature in your product soon, and building sessions, streaming, sandboxes, credentials, memory, and tenancy yourself is not where you want to spend your time.
+- The agent needs to act on real systems: call your APIs, run code, read files, or work for minutes or hours.
+- Each of your customers or users needs their own isolated agent context and credentials.
+- You want a finished conversation UI that you can theme, not a set of primitives to assemble.
+- You want the option to start on a managed cloud and move to your own infrastructure later without rewriting the integration.
+
+## When something else fits better
+
+Opengeni is a service with its own agent loop. That is the point, and it also defines where other tools fit better:
+
+- **You only need a single model call or a simple chat completion.** A model provider SDK or the [Vercel AI SDK](https://ai-sdk.dev) is lighter.
+- **You want to hand-code the agent's control flow** as an explicit graph or state machine inside your own process. Use a framework such as [LangGraph](https://www.langchain.com/langgraph) or [Mastra](https://mastra.ai).
+- **You want to embed an agent library directly in your application process** rather than call a service.
+- **You need the agent to run on-device, without a server.**
+
+These are not exclusive. Your existing agents and services can become tools for an Opengeni agent through MCP or an OpenAPI description, and a product that already has a Vercel AI SDK `useChat` UI can [keep it](/integrate/existing-chat-ui) while Opengeni serves the backend. For a side-by-side look at LangGraph, CrewAI, Mastra, the Vercel AI SDK, the OpenAI Agents SDK, Letta, Inngest AgentKit, and hosted agent runtimes, see [Opengeni compared with agent frameworks](/compare-agent-frameworks).
+
+## Managed cloud or self-host
+
+Both run the same open-source API, web app, and workers, and the SDK and React components work the same against either.
+
+|             | Managed cloud ([app.opengeni.ai](https://app.opengeni.ai))                                                                                                                                | Self-host                                                                                                         |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Setup       | Sign up and start with the Opengeni credits new sign-ups get. Nothing to deploy                                                                                                           | Helm chart on Kubernetes, with reference Terraform for AWS, Azure, and GCP                                        |
+| You operate | Nothing                                                                                                                                                                                   | The API, web app, and workers, plus Postgres with pgvector, Temporal, NATS, object storage, and a sandbox backend |
+| Cost        | Pay as you go: usage is charged to your credits at the provider's model price plus 5%, with no seat or platform fees. Your own ChatGPT/Codex plan or API keys are billed by that provider | No license fee under Apache-2.0. You pay for your infrastructure and model providers                              |
+| Data        | Stored in the managed deployment                                                                                                                                                          | Stored in your Postgres and object storage                                                                        |
+| Best for    | Getting started fast and most production use                                                                                                                                              | Teams that need the platform inside their own cloud, or want to modify it                                         |
+
+Start on the managed cloud and self-host later if you need to; apart from the API URL, organization ID, and key, the integration code does not change. See the [Quickstart](/quickstart) and [Self-host](/guides/self-host). For private infrastructure, deployment help, or commercial support, see [Opengeni pricing](https://opengeni.ai/pricing).
+
+## Open source, stable to build on
+
+- **Apache-2.0, all of it.** The API, web app, workers, SDK, React components, Helm chart, and reference Terraform are open source. Self-hosted, your sessions and Knowledge live in a Postgres database you operate and can export.
+- **A compatibility policy you can rely on.** The public HTTP API, session events, and the exports of `@opengeni/sdk` and `@opengeni/react` only change additively within a major version. A breaking change needs deprecation headers, at least 90 days of notice, and a new major, and CI checks the public surface on every change. See [Going to production](/integrate/production).
+- **Built from production use.** Opengeni grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai), and is developed in the open on [GitHub](https://github.com/Cloudgeni-ai/opengeni).
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Embed in your product" icon="plug" href="/embed-with-a-coding-agent">
+    Hand the integration to your coding agent, or follow four manual steps.
+  </Card>
+  <Card title="Try the app" icon="arrow-up-right-from-square" href="https://app.opengeni.ai">
+    Sign in, connect a model, and give an agent work in the browser.
+  </Card>
+  <Card title="Compare" icon="scale-balanced" href="/compare-agent-frameworks">
+    How Opengeni relates to LangGraph, Mastra, the Vercel AI SDK, and others.
+  </Card>
+</CardGroup>
