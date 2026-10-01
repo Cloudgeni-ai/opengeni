@@ -123,7 +123,7 @@ export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE =
  * actor-private draft or any finalized attachment.
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
-  "This turn requires Opengeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
+  "Your organization doesn't have enough OpenGeni credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.";
 
 export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
@@ -133,11 +133,24 @@ export function composerSubmissionErrorMessage(error: Error): string {
       ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
       : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
   }
-  return error instanceof OpenGeniApiError &&
-    error.status === 402 &&
-    error.code === "payment_required"
-    ? COMPOSER_PAYMENT_REQUIRED_MESSAGE
-    : error.message;
+  return isComposerCreditRefusal(error) ? COMPOSER_PAYMENT_REQUIRED_MESSAGE : error.message;
+}
+
+/** These definitive refusals need a payment or allowance change, not an unchanged retry. */
+export function composerSubmissionCanRetry(error: Error): boolean {
+  return !(
+    isComposerCreditRefusal(error) ||
+    (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
+  );
+}
+
+function isComposerCreditRefusal(error: Error): boolean {
+  return (
+    (error instanceof OpenGeniApiError &&
+      error.status === 402 &&
+      (error.code === "payment_required" || error.code === "insufficient_credits")) ||
+    isCreditExhaustion(error.message)
+  );
 }
 
 /**

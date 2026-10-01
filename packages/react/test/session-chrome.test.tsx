@@ -1813,7 +1813,7 @@ describe("SessionChrome compact queue annotations", () => {
   test.each([
     { state: "sending" as const, status: "Placing in queue" },
     { state: "queued" as const, status: "Queued" },
-    { state: "failed" as const, status: "Not confirmed" },
+    { state: "failed" as const, status: "Message not sent" },
   ])("labels an annotation-only optimistic row while $state", async ({ state, status }) => {
     const retried: string[] = [];
     mounted = await renderComponent(
@@ -1860,6 +1860,49 @@ describe("SessionChrome compact queue annotations", () => {
       await act(async () => retry!.click());
       expect(retried).toEqual(["client-send-annotation-only"]);
     }
+  });
+
+  test("a refused queued message exposes its credit remedy and Edit without Retry", async () => {
+    const edited: string[] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "refused-queue-credit",
+              delivery: "send",
+              destination: "queue",
+              text: "Run the report later",
+              annotations: [],
+              resources: [],
+              occurredAt: new Date().toISOString(),
+              state: "failed",
+              retryable: false,
+              outcomeUnknown: false,
+              error: "Insufficient OpenGeni credits. Add credits before sending again.",
+            },
+          ],
+          retryOptimisticMessage: () => {
+            throw new Error("unchanged retry must not be offered");
+          },
+          restoreOptimisticMessage: (id) => edited.push(id),
+        })}
+        defaultActive="queue"
+      />,
+    );
+    const row = mounted.container.querySelector("[data-optimistic-queue-message]")!;
+    expect(row.textContent).toContain("Insufficient OpenGeni credits. Add credits");
+    expect(row.textContent).not.toContain("Not confirmed");
+    expect(
+      Array.from(row.querySelectorAll("button")).some((button) => button.textContent === "Retry"),
+    ).toBe(false);
+    await act(async () => {
+      Array.from(row.querySelectorAll("button"))
+        .find((button) => button.textContent === "Edit message")!
+        .click();
+    });
+    expect(edited).toEqual(["refused-queue-credit"]);
   });
 
   test("shows an explicit fallback for a row with neither prompt nor annotations", async () => {

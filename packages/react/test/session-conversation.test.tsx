@@ -253,6 +253,41 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
   ).toHaveLength(0);
 });
 
+test("definitively refused messages offer editing, not an unchanged retry", () => {
+  let edits = 0;
+  const items = conversationTimeline(
+    [],
+    { queue: [], snapshot: null },
+    {
+      optimisticMessages: [
+        {
+          clientEventId: "refused-credit-message",
+          delivery: "send",
+          destination: "chat",
+          text: "preserved prompt",
+          annotations: [],
+          resources: [],
+          occurredAt: new Date(0).toISOString(),
+          state: "failed",
+          error: "Out of credits",
+          retryable: false,
+        },
+      ],
+      retryOptimisticMessage: () => {
+        throw Error("A credit refusal must not expose Retry");
+      },
+      restoreOptimisticMessage: () => {
+        edits += 1;
+      },
+    },
+  );
+  const item = items[0]!;
+  if (item.kind !== "user-message") throw Error("Expected refused message");
+  expect(item.delivery?.onRetry).toBeUndefined();
+  item.delivery?.onEdit?.();
+  expect(edits).toBe(1);
+});
+
 test("complete conversation loads queue and provides queue actions beside composer", async () => {
   let streams = 0;
   let latestQuestionLookups = 0;
