@@ -14,6 +14,11 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
+For a non-React frontend talking to the standalone service, see the runnable
+[Vue conversation recipe](../examples/vue-conversation/README.md): published
+`@opengeni/sdk`, the existing Bun Fetch proxy, and host-rendered Vue components.
+It is not an in-process runtime embed and adds no new core port or API contract.
+
 ### Participant-owned MCP connections
 
 Use ordinary native connections, optionally scoped to the canonical user.
