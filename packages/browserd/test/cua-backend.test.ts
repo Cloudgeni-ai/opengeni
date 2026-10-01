@@ -113,6 +113,48 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("invokes controls and opens their menu through the native button contract", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let invoked = 0,
+      menus = 0;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree) {
+        const state = JSON.parse(response.structuredJson!);
+        state.elements[0].actions.push("AXShowMenu");
+        response.structuredJson = JSON.stringify(state);
+      }
+      if (name === "click") {
+        // Current CUA's typed click input refuses the old action field. Both
+        // pinned Mac CUA and the current contract use right for AXShowMenu.
+        if ("action" in args)
+          return result({ status: "refused", refusal: { code: "invalid_arguments" } }, true);
+        if (args.button === "right") menus++;
+        else invoked++;
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      await backend.dispatch(command(await backend.observe(target.id)));
+      const observed = await backend.observe(target.id);
+      const menu = command(observed);
+      menu.action = {
+        type: "semantic",
+        locator: { kind: "ref", ref: observed.roots[0]!.ref },
+        action: "show_menu",
+      };
+      await backend.dispatch(menu);
+      expect({ invoked, menus }).toEqual({ invoked: 1, menus: 1 });
+      expect(fixture.calls.filter((call) => call.name === "click")).toHaveLength(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("keeps tokens current, redacts protected values and never calls browser tools", async () => {
     const fixture = new Fixture(),
       backend = await CuaComputerBackend.open(fixture);

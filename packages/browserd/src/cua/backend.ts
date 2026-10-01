@@ -533,7 +533,9 @@ export class CuaComputerBackend implements ComputerBackend {
           args: {
             ...args,
             element_token: node.ref,
-            action: action.action === "show_menu" ? "show_menu" : "press",
+            // Both the pinned SDK and the current typed click contract use
+            // right for a semantic context menu; invoke uses the default left.
+            button: action.action === "show_menu" ? "right" : "left",
             delivery_mode: "background",
           },
         },

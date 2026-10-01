@@ -9,6 +9,11 @@ to the existing OpenGeni controller, operation receipts and frame stream. The CU
 adapter translates desktop calls only. It does not add an authorization system or
 another operation journal. Machine/session access remains enforced above it.
 
+Semantic invoke and context-menu actions use CUA's native `button` contract:
+`left` and `right`, respectively. SDK 0.30.4 supports both; upstream 0.31's typed
+click input rejects the older `action` field. This compatibility does not adopt
+the unreleased SDK or accept another operating system.
+
 For source-mode experiments, select `OPENGENI_BROWSERD_COMPUTER_BACKEND=cua` with
 the existing desktop environment mode. Only one CUA session may own this process's
 physical desktop. Existing macOS accessibility and screen-recording permissions
