@@ -3,6 +3,8 @@ import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   nestedPostgresSqlState,
+  databaseFailureCode,
+  isRetryablePersistenceSqlState,
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
@@ -352,6 +354,13 @@ function retryableDatabaseFailureCode(
   error: unknown,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  if (!persistenceFailure) {
+    const driver = findPostgresDriverError(error);
+    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
+    if (isRetryablePersistenceSqlState(driverSqlState)) {
+      return databaseFailureCode(driverSqlState);
+    }
+  }
   const sqlState = persistenceFailure?.details.sqlState ?? null;
   if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
     return "db_failure";
@@ -1010,6 +1019,16 @@ function findPostgresDriverError(error: unknown): Record<string, unknown> | null
   return null;
 }
 
+function isRawDatabaseQueryError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "query" in error &&
+    typeof error.query === "string" &&
+    "params" in error &&
+    Array.isArray(error.params)
+  );
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -1060,7 +1079,11 @@ function baseAgentRunFailurePayload(
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
-    const underlying = isSessionEventPersistenceError(error.cause)
+    const databaseFailure =
+      isSessionEventPersistenceError(error.cause) ||
+      findPostgresDriverError(error.cause) !== null ||
+      isRawDatabaseQueryError(error.cause);
+    const underlying = databaseFailure
       ? agentRunFailurePayload(error.cause, options)
       : {
           error: error.cause instanceof Error ? error.cause.message : String(error.cause),
@@ -1068,6 +1091,21 @@ function baseAgentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  // Raw ORM wrappers can contain the full SQL and its parameters. Classify a
+  // real driver before provider message heuristics; the original cause stays
+  // available to internal diagnostics. This payload grants no replay authority.
+  const postgresDriverError = findPostgresDriverError(error);
+  const rawOrmFailure = isRawDatabaseQueryError(error);
+  if ((postgresDriverError || rawOrmFailure) && !isSessionEventPersistenceError(error)) {
+    const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
+    const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
+    return {
+      error: "OpenGeni encountered a database error.",
+      code: databaseFailureCode(sqlState),
+      sqlState,
+      ...(Object.keys(database).length > 0 ? { database } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
@@ -1361,18 +1399,6 @@ function baseAgentRunFailurePayload(
       };
     }
     return { error: message, code: "provider_unavailable", retryable: true };
-  }
-  const postgresDriverError = findPostgresDriverError(error);
-  if (postgresDriverError) {
-    const database = safeDatabaseErrorFacts(postgresDriverError);
-    const sqlState = nestedPostgresSqlState(postgresDriverError);
-    if (sqlState !== null || Object.keys(database).length > 0) {
-      return {
-        error: message,
-        sqlState,
-        ...(Object.keys(database).length > 0 ? { database } : {}),
-      };
-    }
   }
   return { error: message };
 }
