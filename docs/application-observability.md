@@ -213,7 +213,7 @@ or stream), `reason`, `clientRoute` and `clientRevision`; reconnects and vitals
 do not log. Histogram buckets cover the published thresholds: CLS 0.1/0.25, INP
 0.2/0.5 s, TTFB 0.8/1.8 s, LCP 2.5/4 s.
 
-Useful ratios: `opengeni_client_request_failures_total` against the matching
+Automated browsers (`navigator.webdriver`) do not send signals. Useful ratios: `opengeni_client_request_failures_total` against the matching
 HTTP request rate for that route, `long_disconnect` per active session view, and
 p75 of each vital per page from the histogram. Every series is a lower bound for
 the same reasons as the error counter.

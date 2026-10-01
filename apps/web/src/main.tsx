@@ -35,14 +35,18 @@ setClientErrorReporter(
   createClientErrorReporter({ send: sendBeacon, revision: bundleDeploymentRevision || "dev" }),
 );
 // Failed key requests, live-stream health and web vitals share that beacon;
-// see lib/client-signals.ts.
-setClientSignalReporter(
-  createClientSignalReporter({
-    send: sendBeacon,
-    revision: bundleDeploymentRevision || "dev",
-    routePattern: appRoutePattern,
-  }),
-);
+// see lib/client-signals.ts. Automated browsers (`navigator.webdriver`, such
+// as CI acceptance runs) do not report them, so they never skew the series.
+const reportClientSignals = !navigator.webdriver;
+if (reportClientSignals) {
+  setClientSignalReporter(
+    createClientSignalReporter({
+      send: sendBeacon,
+      revision: bundleDeploymentRevision || "dev",
+      routePattern: appRoutePattern,
+    }),
+  );
+}
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
 // Content-free count of analytics banner answers; see lib/analytics-consent.ts.
 setAnalyticsConsentDecisionSender(beaconSender(`${apiBaseUrl}${ANALYTICS_CONSENT_PATH}`));
@@ -59,16 +63,18 @@ if (preloadRecoveryStorage) {
 }
 
 // Web vitals load after the page settles, outside the initial bundle graph.
-window.addEventListener(
-  "load",
-  () =>
-    setTimeout(() => {
-      void import("./lib/web-vitals-reporting")
-        .then(({ installWebVitalsReporting }) => installWebVitalsReporting())
-        .catch(() => undefined);
-    }, 0),
-  { once: true },
-);
+if (reportClientSignals) {
+  window.addEventListener(
+    "load",
+    () =>
+      setTimeout(() => {
+        void import("./lib/web-vitals-reporting")
+          .then(({ installWebVitalsReporting }) => installWebVitalsReporting())
+          .catch(() => undefined);
+      }, 0),
+    { once: true },
+  );
+}
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

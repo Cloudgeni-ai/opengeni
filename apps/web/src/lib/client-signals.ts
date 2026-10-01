@@ -22,7 +22,7 @@ import {
   type ClientWebVitalMetric,
 } from "@opengeni/contracts/client-error-report";
 
-import { clientRevision, clientRoutePattern } from "./client-error-reporting";
+import { clientRevision, clientRoutePattern } from "./client-route-pattern";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MODEL_PROVIDER_SEGMENTS = new Set(["codex", "supergrok", "ai-gateway", "openrouter"]);

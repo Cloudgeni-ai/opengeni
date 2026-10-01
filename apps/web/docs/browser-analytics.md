@@ -311,6 +311,10 @@ The same beacon carries closed failure and health signals
   page the document loaded on. Every document is sampled
   (`WEB_VITALS_SAMPLE_RATE = 1`); the API bounds admission.
 
+Automated browsers (`navigator.webdriver`, for example CI acceptance runs)
+report none of these signals, so test traffic never skews the series; the
+error beacon itself is unchanged.
+
 The browser suppresses a repeated request-failure or stream signal for 30
 seconds and sends at most twenty per ten minutes. A beacon that cannot be
 delivered (offline, or the request failed) is held in page memory (at most 20)

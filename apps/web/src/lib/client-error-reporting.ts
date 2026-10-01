@@ -7,8 +7,6 @@
 // apps/web/docs/browser-analytics.md). The wire grammar is shared with the API
 // route and the public log projection through @opengeni/contracts.
 import {
-  CLIENT_ERROR_REVISION_PATTERN,
-  CLIENT_ERROR_ROUTE_PATTERN,
   CLIENT_ERRORS_PATH,
   CLIENT_ERROR_KINDS,
   type ClientErrorKind,
@@ -16,14 +14,10 @@ import {
 } from "@opengeni/contracts/client-error-report";
 import { rootRouteId } from "@tanstack/react-router";
 
-export { CLIENT_ERRORS_PATH, CLIENT_ERROR_KINDS, type ClientErrorKind, type ClientErrorReport };
+import { clientRevision, clientRoutePattern } from "./client-route-pattern";
 
-/** Reduce a router `fullPath` to the reportable pattern, or `unknown`. */
-export function clientRoutePattern(fullPath: string | undefined | null): string {
-  if (!fullPath) return "unknown";
-  const trimmed = fullPath.length > 1 ? fullPath.replace(/\/+$/, "") : fullPath;
-  return CLIENT_ERROR_ROUTE_PATTERN.test(trimmed) ? trimmed : "unknown";
-}
+export { CLIENT_ERRORS_PATH, CLIENT_ERROR_KINDS, type ClientErrorKind, type ClientErrorReport };
+export { clientRevision, clientRoutePattern };
 
 /** The leaf route's pattern, or `unknown` when only the root matched (not found). */
 export function routePatternFromMatches(
@@ -42,10 +36,6 @@ export function routePatternFromRoutes(
 ): string {
   const leaf = routes.at(-1);
   return leaf && leaf.id !== rootRouteId ? clientRoutePattern(leaf.fullPath) : "unknown";
-}
-
-export function clientRevision(value: string | undefined | null): string {
-  return value && CLIENT_ERROR_REVISION_PATTERN.test(value) ? value : "unknown";
 }
 
 const CHUNK_LOAD_MESSAGE_PATTERNS = [
