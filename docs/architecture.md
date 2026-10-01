@@ -483,7 +483,13 @@ causes permit finite five-replacement same-turn recovery, including pre-eventing
 setup. Server DNS text and post-dispatch errors never prove non-execution.
 Uncertain Starts return typed outcome-unknown results, never transport retries.
 Supervised retries settle the exact never-started reservation first; retained or
-outcome-unknown causes block recovery. Published consumers use unpatched Modal:
+outcome-unknown causes block replay. Internal SDK ambiguity retains the exact
+authenticated command or unresolved admission. An unwound setup parks its exact
+turn as recovering with `sandboxSetupOutcomeUnknown`; DB work peek and claim
+both refuse redispatch. Physical exit/loss or an observation deadline cannot
+prove completion of the remaining helper. This is neither setup success nor a
+fabricated model tool/capacity/approval wait, and does not reset the five-budget.
+Published consumers use unpatched Modal:
 runtime owns its native error class and recognizes SDK boundaries by a local
 own-Symbol data marker, never patch-only imports, names, codes or diagnostic text.
 

@@ -365,6 +365,9 @@ export function postClaimDatabaseRecoveryDetail(
   const hasProviderRecoveryCount = detail.providerRecoveryCount !== undefined;
   const hasProviderFailureCode = detail.providerFailureCode !== undefined;
   if (
+    (detail.sandboxSetupOutcomeUnknown !== undefined &&
+      detail.sandboxSetupOutcomeUnknown !== true) ||
+    (detail.sandboxSetupOutcomeUnknown === true && hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||
@@ -768,6 +771,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (peek.kind === "capacity-wait") {
       await waitForProviderCapacity(peek.ref);
       continue;
+    }
+    if (peek.kind === "sandbox-setup-outcome-unknown") {
+      // Do not spend another worker slot or reconstruct an unwound SDK setup
+      // coroutine. Command exit, NOT_FOUND, expiry and ordinary queue wakes are
+      // not proof that the remaining setup completed. Accepted control signals
+      // still own their normal close-race fence.
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
     }
     if (peek.kind === "sandbox-lifecycle-wait") {
       // The recovering turn carries an exact group/epoch marker. Do not reserve
