@@ -66,6 +66,15 @@ export function isDeveloperSetupGrant(grant: AccessGrant): boolean {
   return developerSetupGrants.has(grant);
 }
 
+/** Setup-derived credentials cannot carry literal organization or key authority. */
+export function isDeveloperSetupDelegatedPermissionAllowed(permission: Permission): boolean {
+  return (
+    permission !== "secrets:read" &&
+    permission !== "api_keys:manage" &&
+    !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission)
+  );
+}
+
 /** Canonical authentication provenance, including the backing key of asUser. */
 export function requireApiKeyManagementContext(context: AccessContext): void {
   if (developerSetupApiKeyContexts.has(context)) {
@@ -1069,12 +1078,7 @@ async function delegatedAccessContext(
   }
   const restricted = payload.credentialRestriction === "developer_setup";
   const workspacePermissions = restricted
-    ? payload.permissions.filter(
-        (permission) =>
-          permission !== "secrets:read" &&
-          permission !== "api_keys:manage" &&
-          !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission),
-      )
+    ? payload.permissions.filter(isDeveloperSetupDelegatedPermissionAllowed)
     : payload.permissions;
   const context: AccessContext = {
     mode,

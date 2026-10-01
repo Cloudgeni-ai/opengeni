@@ -1,14 +1,32 @@
 import {
   readTurnExecutionPolicyV1,
   type AccessGrant,
+  type Permission,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import {
   isDeveloperSetupAuthorization,
   isDeveloperSetupGrant,
+  isDeveloperSetupDelegatedPermissionAllowed,
   type AccessGrantAuthorization,
 } from "./access";
+
+/** The policy must be server-frozen, never supplied as request metadata. */
+export function requireDeveloperSetupDelegatedPermissions(
+  policy: TurnExecutionPolicyV1,
+  permissions: readonly Permission[] | undefined,
+): void {
+  if (policy.credentialRestriction !== "developer_setup") return;
+  const forbidden = permissions?.find(
+    (permission) => !isDeveloperSetupDelegatedPermissionAllowed(permission),
+  );
+  if (forbidden) {
+    throw new HTTPException(403, {
+      message: `Developer setup cannot delegate first-party MCP permission: ${forbidden}`,
+    });
+  }
+}
 
 /** Only pass server-owned persisted session/turn metadata, never request JSON. */
 export function withDeveloperSetupCredentialRestriction(
