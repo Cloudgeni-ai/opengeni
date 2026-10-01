@@ -8,6 +8,14 @@ Those components do not consume this simplified chat-handler protocol.
 
 ## Run
 
+Before running, an organization owner or admin must enable **Only me chats**
+in the web app under **Organization settings > Security & data**. If the
+setting is unavailable, ask the installation operator to activate private
+chats first. The chat facade defaults to private chats; neither onboarding
+nor the chat handler enables this organization setting. Until it is enabled,
+chat requests fail closed with `OPENGENI_SETUP_REQUIRED` (`OpenGeniSetupError`
+in the SDK) instead of creating a chat or changing the setting.
+
 ```bash
 cd examples/chat-quickstart
 cp .env.example .env.local

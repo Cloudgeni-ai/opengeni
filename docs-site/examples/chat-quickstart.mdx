@@ -10,6 +10,8 @@ The chat quickstart is a small server that serves an OpenGeni agent through `cre
 
 You need Bun, a repository checkout, a full-access organization API key, and your organization id.
 
+An organization owner or admin must first enable **Only me chats** in the web app under **Organization settings > Security & data**. If the setting is unavailable, ask the installation operator to activate private chats. The chat facade defaults to private chats; onboarding and the chat handler do not enable this organization setting. Until enabled, requests fail closed with `OPENGENI_SETUP_REQUIRED` (`OpenGeniSetupError` in the SDK), without creating a chat or changing the setting.
+
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git
 cd opengeni && bun install
