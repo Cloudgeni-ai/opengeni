@@ -983,8 +983,14 @@ async function bufferCodexErrorResponse(res: Response): Promise<Response> {
   let errorType: string | undefined;
   let responseBody = bodyText;
   try {
-    const parsed = JSON.parse(bodyText) as { error?: { type?: unknown } };
+    const parsed = JSON.parse(bodyText) as { error?: { type?: unknown }; detail?: unknown };
     errorType = typeof parsed.error?.type === "string" ? parsed.error.type : undefined;
+    // Codex also returns FastAPI's { detail: string } envelope. The OpenAI SDK
+    // reads only error.message, otherwise replacing this useful explanation
+    // with "status code (no body)". Retain the original fields and exact text.
+    if (parsed.error === undefined && typeof parsed.detail === "string") {
+      responseBody = JSON.stringify({ ...parsed, error: { message: parsed.detail } });
+    }
   } catch {
     /* non-JSON error body — leave as-is, no retry-header override */
   }

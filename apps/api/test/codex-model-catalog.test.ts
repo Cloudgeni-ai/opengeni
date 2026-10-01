@@ -17,6 +17,29 @@ describe("Codex model catalog", () => {
     expect(models.at(0)?.label).toBe("GPT-6 Astra");
   });
 
+  test("live support filters exact upstream models, without prefix matching or invented rows", () => {
+    const settings = getSettings({ OPENGENI_OPENAI_API_KEY: "test" });
+    const capabilities = configuredModels(withCodexCatalogProvider(settings))[0]!.capabilities;
+    const catalog = applyModelCatalogDocument(settings, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-sol"],
+      codexModels: [
+        {
+          id: "codex/gpt-6.1-sol",
+          upstreamModelId: "gpt-6.1-sol",
+          label: "GPT-6.1 Sol",
+          capabilities,
+        },
+        { id: "codex/gpt-6-sol", upstreamModelId: "gpt-6-sol", label: "GPT-6 Sol", capabilities },
+      ],
+    });
+    expect(codexModelsForPicker(catalog, ["gpt-6-sol", "unconfigured-model"])).toEqual([
+      expect.objectContaining({ id: "codex/gpt-6-sol", label: "GPT-6 Sol" }),
+    ]);
+    expect(codexModelsForPicker(catalog, [])).toEqual([]);
+    expect(codexModelsForPicker(catalog, ["gpt-6.1-sol"])[0]?.label).toBe("GPT-6.1 Sol");
+  });
+
   test("connection picker honors configured membership and explicit removal", () => {
     const settings = getSettings({ OPENGENI_OPENAI_API_KEY: "test" });
     const capabilities = configuredModels(withCodexCatalogProvider(settings)).find((model) =>
