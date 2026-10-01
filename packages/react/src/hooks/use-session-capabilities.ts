@@ -7,6 +7,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../lib/format";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { usePageLiveActivity } from "./internal";
@@ -91,7 +92,11 @@ export type UseSessionCapabilitiesResult = {
    * to complete acknowledgment automatically while Desktop is opening.
    */
   acknowledgmentRequired: "unredacted" | "shared" | null;
-  /** 429 from the desktop attach: the per-session viewer cap is reached. */
+  /**
+   * 429 from a viewer attach. Desktop consumes this as its viewer-cap notice;
+   * a failed Files attach also surfaces the authoritative API error through
+   * `state`/`error` because Files has no separate viewer-cap UI.
+   */
   viewerCapReached: boolean;
   /** The viewer holder id minted on a desktop attach (for detach/heartbeat). */
   viewerId: string | null;
@@ -139,8 +144,10 @@ function rotationsFrom(events: SessionEvent[]): StreamUrlRotatedPayload[] {
  *
  * Degradation is a value, never a crash: an unsupported surface comes back
  * `available:false`/`transport:null` + a `reason`; the components render the
- * reason-aware empty state. 409 (acknowledgment) and 429 (viewer cap) are
- * surfaced as typed signals, not thrown.
+ * reason-aware empty state. 409 (acknowledgment) and desktop-only 429 (viewer
+ * cap) are surfaced as typed signals. A 429 that denies a Files warm attach is
+ * also a terminal `error`, so the Files surface does not wait on a warm-up that
+ * admission already refused.
  */
 export function useSessionCapabilities(
   sessionId: string | null | undefined,
@@ -420,9 +427,22 @@ export function useSessionCapabilities(
                 }
               } else if (cause.status === 429) {
                 setViewerCapReached(true);
+                if (wantFilesAttach) {
+                  // Desktop has a dedicated viewer-cap state, but Files consumes
+                  // the hook's ordinary error channel. Admission refused this
+                  // exact warm request, so no holder exists and polling cannot
+                  // make progress; surface the authoritative API failure now.
+                  setState("error");
+                  setError(cause);
+                  return;
+                }
               } else if (cause.status === 403) {
                 setState("error");
                 setError(cause);
+                return;
+              } else if (cause.status === 402) {
+                setState("error");
+                setError(new Error(CREDIT_EXHAUSTION_MESSAGE));
                 return;
               } else {
                 throw cause;
@@ -466,6 +486,11 @@ export function useSessionCapabilities(
         if (cause instanceof OpenGeniApiError && cause.status === 403) {
           setState("error");
           setError(new Error("not permitted to view this session's sandbox"));
+          return;
+        }
+        if (cause instanceof OpenGeniApiError && cause.status === 402) {
+          setState("error");
+          setError(new Error(CREDIT_EXHAUSTION_MESSAGE));
           return;
         }
         setState("error");
