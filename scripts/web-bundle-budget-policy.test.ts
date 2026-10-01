@@ -325,6 +325,7 @@ describe("web bundle budget policy", () => {
   test("bounds the runtime-robustness session graph growth", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     expect(source).toContain("wholeKibEnvelope(711_698, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(2_533_812, 1.5 * kib)");
   });
 
   test("bounds the usage-allowance session graph growth", () => {

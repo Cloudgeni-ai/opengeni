@@ -482,6 +482,10 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Runtime robustness (empty-final-reply notice, per-model availability) on
+    // main with usage allowances and the pill dodge: 2,533,812 raw on Bun 1.4
+    // macOS/arm64 with the notice grouped into session-shared-primitives.
+    wholeKibEnvelope(2_533_812, 1.5 * kib),
     // Usage allowances: typed allowance refusal rendering in the session timeline
     // plus usage event types in shared contracts, on top of main f874217f5
     // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
