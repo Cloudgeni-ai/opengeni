@@ -2740,13 +2740,14 @@ function BrowserDiagnosticsDrawer(props: {
             id="browser-page-title"
             className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-fg-subtle"
           >
-            Current page
+            Tab diagnostics
           </h3>
+          <p className="mt-1 text-og-xs text-og-fg-subtle">Includes earlier pages in this tab.</p>
           <dl className="mt-2 grid grid-cols-2 gap-2">
-            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount ?? 0} />
-            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount ?? 0} />
-            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount ?? 0} />
-            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount ?? 0} />
+            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount} />
+            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount} />
+            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount} />
+            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount} />
           </dl>
           {session?.failureCode ? (
             <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-danger">
@@ -3044,7 +3045,7 @@ function DiagnosticFact(props: { label: string; value: string }) {
   );
 }
 
-function DiagnosticCount(props: { label: string; value: number }) {
+function DiagnosticCount(props: { label: string; value: number | undefined }) {
   return (
     <div className="rounded-og-sm border border-og-border bg-og-bg px-2.5 py-2">
       <dt className="text-[10px] text-og-fg-subtle">{props.label}</dt>
@@ -3054,7 +3055,7 @@ function DiagnosticCount(props: { label: string; value: number }) {
           props.value ? "text-og-fg" : "text-og-fg-muted",
         )}
       >
-        {props.value}
+        {props.value ?? "Unavailable"}
       </dd>
     </div>
   );
