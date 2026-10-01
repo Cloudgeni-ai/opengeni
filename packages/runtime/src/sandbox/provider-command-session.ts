@@ -42,6 +42,18 @@ export class ProviderCommandStartRejectedError extends Error {
   }
 }
 
+/** Start was attempted exactly once, but its acknowledgement is unavailable.
+ * The client-chosen locator is reconciliation authority, never replay authority. */
+export class ProviderCommandStartOutcomeUnknownError extends Error {
+  constructor(
+    readonly command: ModalRouterProviderCommand,
+    cause: unknown,
+  ) {
+    super("Provider command Start outcome is unknown; the invocation was not replayed", { cause });
+    this.name = "ProviderCommandStartOutcomeUnknownError";
+  }
+}
+
 export type ProviderCommandSession = {
   verifyCommandSupervisionCapability?(): Promise<{ sandboxId: string; taskId: string }>;
   releaseSupervisedCommand?(handle: number): Promise<void>;

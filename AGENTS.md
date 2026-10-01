@@ -407,6 +407,12 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Modal Start transport errors are not rejection proof, including DNS-shaped
+`UNAVAILABLE`. Only locally constructed pre-dispatch readiness proof permits
+recovery. Function tools return explicit outcome-unknown results without replay;
+retain the exact invocation and its writer fence until terminal provider proof.
+Setup/lifecycle calls still throw. See `docs/run-lifecycle.md` for the source proof.
+
 Modal lease-owned physical creation uses `modal-create-session.ts` and the
 `modal-create-boundary.ts` RPC hook: persist one operation before dispatch,
 disable create retries, attribute the returned instance before manifest setup.

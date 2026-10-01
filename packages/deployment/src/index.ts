@@ -198,8 +198,8 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
 ];
 
 /** Agent configuration rollout switches (sessions.agent_config, migration
- * 0558). Both default off in @opengeni/config; valueEnv passthroughs emitted
- * only when set. Enable admission only after every worker runs a 0558-aware
+ * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
+ * only when set. Enable admission only after every worker runs a 0559-aware
  * image; the default-for-new-sessions switch then turns omitted-`agent` new
  * sessions into `{ capabilities: "all" }`. */
 export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [

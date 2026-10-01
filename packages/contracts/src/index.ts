@@ -13071,7 +13071,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Exact model-visible OpenGeni selection. The default omits connector-wide
     // tools; [] intentionally selects none.
     firstPartyMcpTools: z.array(FirstPartyMcpToolName),
-    // Frozen agent configuration (migration 0558). null = a legacy session
+    // Frozen agent configuration (migration 0559). null = a legacy session
     // with byte-identical historical behavior.
     agent: ResolvedAgentConfig.nullable().default(null),
     // Capability-level projection of what a configured session can use.

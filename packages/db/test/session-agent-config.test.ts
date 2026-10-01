@@ -12,7 +12,7 @@ import {
   getSession,
 } from "../src/index";
 
-// Migration 0558: sessions.agent_config is one frozen, nullable agent
+// Migration 0559: sessions.agent_config is one frozen, nullable agent
 // configuration. NULL keeps a legacy session; the mid-session update shares the
 // tool-policy version CAS.
 
@@ -76,8 +76,8 @@ async function storedConfig(sessionId: string): Promise<unknown> {
   return row?.agent_config ?? null;
 }
 
-describe("sessions.agent_config (0558)", () => {
-  test("the complete fixture applies allowances and collaborator migrations before 0558", async () => {
+describe("sessions.agent_config (0559)", () => {
+  test("the complete fixture applies allowances and collaborator migrations before 0559", async () => {
     const applied = await shared.admin<{ name: string }[]>`
       SELECT name FROM schema_migrations
       WHERE name IN (
@@ -87,7 +87,8 @@ describe("sessions.agent_config (0558)", () => {
         '0555_member_collaborator_permissions.sql',
         '0556_member_collaborator_permissions_backfill_index.sql',
         '0557_member_collaborator_permissions_backfill.sql',
-        '0558_session_agent_config.sql'
+        '0558_external_membership_removal_owner_rls.sql',
+        '0559_session_agent_config.sql'
       )
       ORDER BY name
     `;
@@ -98,7 +99,8 @@ describe("sessions.agent_config (0558)", () => {
       "0555_member_collaborator_permissions.sql",
       "0556_member_collaborator_permissions_backfill_index.sql",
       "0557_member_collaborator_permissions_backfill.sql",
-      "0558_session_agent_config.sql",
+      "0558_external_membership_removal_owner_rls.sql",
+      "0559_session_agent_config.sql",
     ]);
   }, 60_000);
 

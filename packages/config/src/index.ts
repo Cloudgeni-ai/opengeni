@@ -835,7 +835,7 @@ const SettingsSchema = z.object({
   // Admission: when false the API rejects every `agent` input (and the
   // mid-session update) with 422 agent_config_not_enabled, and stored
   // workspace agent defaults are ignored. Enable only after every worker
-  // understands sessions.agent_config (migration 0558). Workers always honor
+  // understands sessions.agent_config (migration 0559). Workers always honor
   // stored configurations regardless of this switch.
   agentConfigAdmissionEnabled: EnvBoolean.default(false),
   // When true, a new top-level session that omits `agent` (and has no

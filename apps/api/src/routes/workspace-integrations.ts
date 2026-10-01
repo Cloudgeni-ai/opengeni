@@ -1,10 +1,17 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { environmentsEncryptionKeyBytes, sandboxImageAllowlist } from "@opengeni/config";
 import {
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   GetWorkspaceCredentialProviderResponse,
   ListWorkspaceWebhookDeliveriesResponse,
+  OPENGENI_EVENT_ID_HEADER,
+  OPENGENI_TEST_REQUEST_NIL_ID,
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
+  TestWorkspaceCredentialProviderResponse,
+  TestWorkspaceWebhookResponse,
+  WorkspaceInheritedIntegrationsResponse,
+  type CredentialProviderRequest,
   ListWorkspaceWebhooksResponse,
   PutWorkspaceCredentialProviderRequest,
   PutWorkspaceCredentialProviderResponse,
@@ -24,15 +31,21 @@ import {
 } from "@opengeni/core";
 import {
   createWorkspaceWebhook,
+  decryptEnvironmentValue,
   deleteWorkspaceCredentialProvider,
   deleteWorkspaceWebhook,
   encryptEnvironmentValue,
   getWorkspace,
+  getOrganizationCredentialProvider,
   getWorkspaceCredentialProvider,
   getWorkspaceWebhook,
+  integrationWorkspaceFilterMatches,
+  listOrganizationWebhooks,
   listWorkspaceWebhookDeliveries,
   listWorkspaceWebhooks,
   redeliverWorkspaceWebhookDelivery,
+  resolveInitiatingHuman,
+  resolveWorkspaceCredentialProvider,
   rotateWorkspaceCredentialProviderSecret,
   rotateWorkspaceWebhookSecret,
   updateWorkspaceWebhook,
@@ -43,7 +56,8 @@ import {
   type WorkspaceWebhookDeliveryRow,
   type WorkspaceWebhookRow,
 } from "@opengeni/db";
-import { isLocalTestEnvironment } from "@opengeni/network";
+import { isLocalTestEnvironment, type pinnedFetch } from "@opengeni/network";
+import { sendIntegrationEndpointTest } from "../integration-endpoint-test";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -156,7 +170,19 @@ export function isIntegrationAgent(
   );
 }
 
-export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps): void {
+/** A test request waits at most this long, whatever the provider's run timeout. */
+const TEST_TIMEOUT_MS = 10_000;
+
+export type WorkspaceIntegrationRouteOptions = {
+  /** Tests inject a fetch; production uses the pinned outbound client. */
+  fetch?: typeof pinnedFetch;
+};
+
+export function registerWorkspaceIntegrationRoutes(
+  app: Hono,
+  deps: ApiRouteDeps,
+  options: WorkspaceIntegrationRouteOptions = {},
+): void {
   // Configuring where credentials come from or where events go is a human or
   // host decision; an agent may never redirect its own credential source.
   const requireIntegrationAdmin = async (c: Context, workspaceId: string): Promise<AccessGrant> => {
@@ -392,6 +418,148 @@ export function registerWorkspaceIntegrationRoutes(app: Hono, deps: ApiRouteDeps
       return c.json(integrationDeliveryProjection(row));
     },
   );
+
+  // Organization registrations that reach this workspace, so its administrators
+  // can see where its events go and which credential provider runs inherit.
+  app.get("/v1/workspaces/:workspaceId/inherited-integrations", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const workspace = await getWorkspace(deps.db, workspaceId);
+    c.header("cache-control", "private, no-store");
+    // Organization registrations never cover a Personal workspace.
+    if (!workspace || workspace.accountId !== grant.accountId || workspace.kind !== "shared") {
+      return c.json(
+        WorkspaceInheritedIntegrationsResponse.parse({ credentialProvider: null, webhooks: [] }),
+      );
+    }
+    // Matched like the runtime resolver, but shown even while this workspace
+    // overrides it, so the page can say what its own provider replaces.
+    const organizationProvider = await getOrganizationCredentialProvider(deps.db, {
+      accountId: grant.accountId,
+    });
+    const inheritedProvider =
+      organizationProvider?.enabled &&
+      integrationWorkspaceFilterMatches(organizationProvider.workspaceFilter, workspace)
+        ? organizationProvider
+        : null;
+    const organizationWebhooks = await listOrganizationWebhooks(deps.db, {
+      accountId: grant.accountId,
+    });
+    return c.json(
+      WorkspaceInheritedIntegrationsResponse.parse({
+        credentialProvider: inheritedProvider
+          ? {
+              url: inheritedProvider.url,
+              timeoutMs: inheritedProvider.timeoutMs,
+              updatedAt: inheritedProvider.updatedAt.toISOString(),
+            }
+          : null,
+        webhooks: organizationWebhooks
+          .filter(
+            (webhook) =>
+              webhook.enabled &&
+              integrationWorkspaceFilterMatches(webhook.workspaceFilter, workspace),
+          )
+          .map((webhook) => ({
+            id: webhook.id,
+            url: webhook.url,
+            eventTypes: webhook.eventTypes,
+            description: webhook.description,
+          })),
+      }),
+    );
+  });
+
+  // "Send test event": one signed `webhook.test` POST, sent now, never queued.
+  app.post("/v1/workspaces/:workspaceId/webhooks/:webhookId/test", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const webhookId = z.string().uuid().safeParse(c.req.param("webhookId"));
+    if (!webhookId.success) throw new HTTPException(404, { message: "Webhook not found" });
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const row = await getWorkspaceWebhook(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      webhookId: webhookId.data,
+    });
+    if (!row) throw new HTTPException(404, { message: "Webhook not found" });
+    const workspace = await getWorkspace(deps.db, workspaceId);
+    const eventId = randomUUID();
+    const body = JSON.stringify({
+      id: eventId,
+      type: OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
+      lane: "workspace",
+      workspaceId,
+      workspace: {
+        id: workspaceId,
+        externalSource: workspace?.externalSource ?? null,
+        externalId: workspace?.externalId ?? null,
+      },
+      sessionId: null,
+      turnId: null,
+      occurredAt: new Date().toISOString(),
+      data: { webhookId: row.id },
+    });
+    const result = await sendIntegrationEndpointTest({
+      kind: "webhook",
+      url: row.url,
+      secret: decryptEnvironmentValue(requireKey(), row.secretEncrypted),
+      body,
+      headers: { [OPENGENI_EVENT_ID_HEADER]: eventId },
+      timeoutMs: TEST_TIMEOUT_MS,
+      settings: deps.settings,
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(TestWorkspaceWebhookResponse.parse({ result }));
+  });
+
+  // "Test connection": a signed `purpose: "test"` request to the provider this
+  // workspace's runs use. A paused workspace provider is still tested, so it
+  // can be checked before it is turned back on.
+  app.post("/v1/workspaces/:workspaceId/credential-provider/test", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireIntegrationAdmin(c, workspaceId);
+    const scope = { accountId: grant.accountId, workspaceId };
+    const own = await getWorkspaceCredentialProvider(deps.db, scope);
+    const provider = own ?? (await resolveWorkspaceCredentialProvider(deps.db, scope));
+    if (!provider) throw new HTTPException(404, { message: "Credential provider not found" });
+    const lane = "workspaceId" in provider ? ("workspace" as const) : ("organization" as const);
+    const initiatingHuman = await resolveInitiatingHuman(deps.db, scope, grant.subjectId);
+    const initiator = { kind: "subject" as const, subjectId: grant.subjectId };
+    const request: CredentialProviderRequest = {
+      type: "credentials.request",
+      lane,
+      mcpServers: [],
+      purpose: "test",
+      forceRefresh: true,
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: OPENGENI_TEST_REQUEST_NIL_ID,
+      rootSessionId: OPENGENI_TEST_REQUEST_NIL_ID,
+      parentSessionId: null,
+      turnId: OPENGENI_TEST_REQUEST_NIL_ID,
+      attemptId: OPENGENI_TEST_REQUEST_NIL_ID,
+      initiator,
+      initiatorContext: { kind: "human", initiator, context: {} },
+      initiatingHumanSubjectId: grant.subjectId,
+      initiatingHuman,
+      sandboxBackend: deps.settings.sandboxBackend,
+      sandboxOs: "linux",
+    };
+    const result = await sendIntegrationEndpointTest({
+      kind: "credential-provider",
+      url: provider.url,
+      secret: decryptEnvironmentValue(requireKey(), provider.secretEncrypted),
+      body: JSON.stringify(request),
+      timeoutMs: Math.min(provider.timeoutMs, TEST_TIMEOUT_MS),
+      settings: deps.settings,
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      TestWorkspaceCredentialProviderResponse.parse({ lane, url: provider.url, result }),
+    );
+  });
 
   // The images a workspace may choose as its default sandbox image.
   app.get("/v1/workspaces/:workspaceId/sandbox-images", async (c) => {

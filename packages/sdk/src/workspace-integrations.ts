@@ -2,6 +2,7 @@ import {
   OPENGENI_DELIVERY_ID_HEADER,
   OPENGENI_EVENT_ID_HEADER,
   OPENGENI_SIGNATURE_HEADER,
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
   verifyOpenGeniSignature,
 } from "@opengeni/contracts/workspace-integration-wire";
 import type { CredentialProviderRequest, WorkspaceWebhookEvent } from "@opengeni/contracts";
@@ -20,7 +21,10 @@ import type {
   RotateOrganizationCredentialProviderSecretResponse,
   RotateWorkspaceWebhookSecretResponse,
   RotateOrganizationWebhookSecretResponse,
+  TestWorkspaceCredentialProviderResponse,
+  TestWorkspaceWebhookResponse,
   UpdateOrganizationWebhookRequest,
+  WorkspaceInheritedIntegrationsResponse,
   WorkspaceWebhook,
 } from "@opengeni/contracts";
 
@@ -37,6 +41,7 @@ export type {
   GetOrganizationCredentialProviderResponse,
   GetWorkspaceCredentialProviderResponse,
   InitiatingHuman,
+  IntegrationEndpointTestResult,
   IntegrationWorkspaceFilter,
   ListOrganizationWebhookDeliveriesResponse,
   ListOrganizationWebhooksResponse,
@@ -50,12 +55,16 @@ export type {
   RotateOrganizationCredentialProviderSecretResponse,
   RotateWorkspaceWebhookSecretResponse,
   RotateOrganizationWebhookSecretResponse,
+  TestWorkspaceCredentialProviderResponse,
+  TestWorkspaceWebhookResponse,
   OrganizationCredentialProvider,
   OrganizationWebhook,
   OrganizationWebhookDelivery,
   UpdateOrganizationWebhookRequest,
   UpdateWorkspaceWebhookRequest,
   WorkspaceCredentialProvider,
+  WorkspaceInheritedIntegrationsResponse,
+  WorkspaceTestWebhookEvent,
   WorkspaceWebhook,
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEvent,
@@ -67,6 +76,8 @@ export {
   OPENGENI_DELIVERY_ID_HEADER,
   OPENGENI_EVENT_ID_HEADER,
   OPENGENI_SIGNATURE_HEADER,
+  OPENGENI_TEST_REQUEST_NIL_ID,
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
   WORKSPACE_WEBHOOK_EVENT_TYPES,
   signOpenGeniPayload,
   verifyOpenGeniSignature,
@@ -117,7 +128,8 @@ async function verifiedObject(input: SignedRequest): Promise<Record<string, unkn
 
 /**
  * Verify and parse one webhook delivery. Delivery is at least once: dedupe on
- * `event.id` (also sent as the `OpenGeni-Event-Id` header).
+ * `event.id` (also sent as the `OpenGeni-Event-Id` header). A `webhook.test`
+ * event (from "Send test event") names no session: acknowledge it with 2xx.
  */
 export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   event: WorkspaceWebhookEvent;
@@ -135,7 +147,12 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
     !(
       typeof event.sessionId === "string" ||
       ((event.sessionId === null || event.sessionId === undefined) &&
-        ["usage.threshold_reached", "usage.exhausted", "usage.period_reset"].includes(event.type))
+        [
+          "usage.threshold_reached",
+          "usage.exhausted",
+          "usage.period_reset",
+          OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
+        ].includes(event.type))
     )
   ) {
     throw new OpenGeniSignatureError();
@@ -340,5 +357,46 @@ export async function rotateWorkspaceWebhookSecret(
   return client.requestJson(
     "POST",
     `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}/rotate-secret`,
+  );
+}
+
+/**
+ * Send one signed `webhook.test` event to a workspace webhook now and return
+ * what the endpoint answered. Nothing is queued or retried.
+ */
+export async function testWorkspaceWebhook(
+  client: Pick<OpenGeniClient, "requestJson">,
+  workspaceId: string,
+  webhookId: string,
+): Promise<TestWorkspaceWebhookResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/webhooks/${encodeURIComponent(webhookId)}/test`,
+  );
+}
+
+/**
+ * Send one signed `purpose: "test"` request to the credential provider this
+ * workspace's runs use (its own, else the organization's). Only the names of
+ * returned credentials come back, never their values.
+ */
+export async function testWorkspaceCredentialProvider(
+  client: Pick<OpenGeniClient, "requestJson">,
+  workspaceId: string,
+): Promise<TestWorkspaceCredentialProviderResponse> {
+  return client.requestJson(
+    "POST",
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/credential-provider/test`,
+  );
+}
+
+/** Organization registrations that reach this workspace. Workspace administrators only. */
+export async function getWorkspaceInheritedIntegrations(
+  client: Pick<OpenGeniClient, "requestJson">,
+  workspaceId: string,
+): Promise<WorkspaceInheritedIntegrationsResponse> {
+  return client.requestJson(
+    "GET",
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/inherited-integrations`,
   );
 }

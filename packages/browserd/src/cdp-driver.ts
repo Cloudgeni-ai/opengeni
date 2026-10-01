@@ -54,6 +54,7 @@ import {
   CdpCommandTimeoutError,
   CdpConnection,
   CdpProtocolError,
+  CdpSessionDetachedError,
   CdpTransportError,
   type CdpEvent,
 } from "./cdp";
@@ -1126,14 +1127,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           }
           return null;
         }
-        const currentInfo = await this.requireTargetInfo(
-          await this.ensureConnection(),
-          info.targetId,
-        );
-        return await this.observeUnlocked(state, currentInfo);
+        try {
+          const currentInfo = await this.requireTargetInfo(
+            await this.ensureConnection(),
+            info.targetId,
+          );
+          return await this.observeUnlocked(state, currentInfo);
+        } catch (error) {
+          // Input has already been dispatched. A closing popup or failed
+          // follow-up read cannot prove that the mutation itself failed.
+          if (!(error instanceof InteractionDefiniteDriverError)) throw error;
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
+          );
+        }
       },
       true,
-    );
+    ).catch((error: unknown) => {
+      if (error instanceof CdpSessionDetachedError) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "The tab disconnected while browser input was being sent. Check the current tabs before continuing; do not repeat the action automatically.",
+        );
+      }
+      throw error;
+    });
     this.refreshSubscribedFrame(command.targetId);
     return observation;
   }
@@ -2832,11 +2851,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "one or more workspace files are unavailable on the browser placement",
           );
         }
-        const node = await this.resolveLocator(state, action.locator);
-        await this.sendActionTarget(state, "DOM.setFileInputFiles", {
-          files: [...paths],
-          backendNodeId: node.backendDOMNodeId,
-        });
+        await this.uploadFiles(state, action.locator, paths);
         return;
       }
       case "clipboard":
@@ -2848,6 +2863,179 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "wait":
         await this.waitForCondition(state, action);
         return;
+    }
+  }
+
+  private async uploadFiles(
+    state: TargetState,
+    locator: BrowserLocator,
+    paths: readonly string[],
+  ): Promise<void> {
+    const node = await this.resolveLocator(state, locator);
+    const frameId = node.frameId ?? state.frame.id;
+    if (this.engine === "lightpanda") {
+      // Lightpanda supports direct file inputs, not Chromium's native chooser.
+      await this.setUploadFiles(state, node.backendDOMNodeId, frameId, paths);
+      return;
+    }
+    const isFileInput = await this.callOnNode(
+      state,
+      node.backendDOMNodeId,
+      "function () { return this instanceof HTMLInputElement && this.type === 'file'; }",
+      [],
+      { isolatedFrameId: frameId },
+    );
+    if (isFileInput === true) {
+      await this.setUploadFiles(state, node.backendDOMNodeId, frameId, paths);
+      return;
+    }
+
+    const sourceFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+      (frame) => frame.id === frameId,
+    );
+    if (!sourceFrame) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "upload control frame is unavailable",
+      );
+    }
+    const connection = await this.ensureConnection();
+    // Intercept only for this upload. The normal browser/native picker remains
+    // untouched outside the target's serialized action.
+    try {
+      await connection.send(
+        "Page.setInterceptFileChooserDialog",
+        { enabled: true },
+        {
+          sessionId: state.sessionId,
+        },
+      );
+    } catch (error) {
+      if (error instanceof CdpProtocolError) {
+        throw new InteractionDefiniteDriverError(
+          "unsupported",
+          "this browser cannot intercept file choosers; target a file input directly",
+        );
+      }
+      throw error;
+    }
+    const abort = new AbortController();
+    const chooser = connection
+      .waitForEvent("Page.fileChooserOpened", {
+        sessionId: state.sessionId,
+        timeoutMs: DEFAULT_ACTION_TIMEOUT_MS,
+        signal: abort.signal,
+        predicate: (params) => params.frameId === frameId,
+      })
+      .then(
+        (event) => event,
+        () => null,
+      );
+    let clicked = false;
+    try {
+      await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+      clicked = true;
+      const event = await chooser;
+      if (!event) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "upload control was clicked but no file chooser was confirmed; inspect the page before continuing",
+        );
+      }
+      const currentFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+        (frame) => frame.id === frameId,
+      );
+      if (currentFrame?.loaderId !== sourceFrame.loaderId) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "upload control changed documents; no files were selected",
+        );
+      }
+      const backendNodeId = event.params.backendNodeId;
+      if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId)) {
+        throw new InteractionDefiniteDriverError(
+          "unsupported",
+          "this file chooser is not backed by a file input",
+        );
+      }
+      await this.setUploadFiles(state, backendNodeId, frameId, paths);
+    } catch (error) {
+      if (error instanceof DialogOpenedSignal) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "upload control opened a JavaScript dialog; no file selection was confirmed",
+        );
+      }
+      if (clicked && error instanceof InteractionDefiniteDriverError) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `upload control was clicked, but file selection failed (${error.code}): ${error.message}`,
+        );
+      }
+      throw error;
+    } finally {
+      abort.abort();
+      await connection.send(
+        "Page.setInterceptFileChooserDialog",
+        { enabled: false },
+        {
+          sessionId: state.sessionId,
+        },
+      );
+    }
+  }
+
+  private async setUploadFiles(
+    state: TargetState,
+    backendNodeId: number | null,
+    frameId: string,
+    paths: readonly string[],
+  ): Promise<void> {
+    if (this.engine === "chromium") {
+      const input = await this.callOnNode(
+        state,
+        backendNodeId,
+        `function () {
+        return {
+          file: this instanceof HTMLInputElement && this.type === 'file',
+          disabled: this.matches(':disabled'), multiple: this.multiple,
+          directory: this.webkitdirectory
+        };
+      }`,
+        [],
+        { isolatedFrameId: frameId },
+      );
+      if (!isRecord(input) || input.file !== true || input.disabled === true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "upload requires an enabled file input",
+        );
+      }
+      if (input.directory === true || (paths.length > 1 && input.multiple !== true)) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          input.directory === true
+            ? "directory selection is not supported; choose a file upload control"
+            : "this file input accepts only one file",
+        );
+      }
+    }
+    try {
+      await this.sendActionTarget(state, "DOM.setFileInputFiles", {
+        files: [...paths],
+        backendNodeId,
+      });
+    } catch (error) {
+      if (
+        error instanceof CdpProtocolError &&
+        error.message === "Node is not a file input element"
+      ) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "upload target is no longer a file input",
+        );
+      }
+      throw error;
     }
   }
 
@@ -3347,37 +3535,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     toBackendNodeId: number | null,
   ): Promise<void> {
     const from = await this.actionPoint(state, fromBackendNodeId, true);
-    const to = await this.actionPoint(state, toBackendNodeId, false);
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: from.x,
-      y: from.y,
-    });
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: from.x,
-      y: from.y,
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    for (let step = 1; step <= 10; step += 1) {
-      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: from.x + ((to.x - from.x) * step) / 10,
-        y: from.y + ((to.y - from.y) * step) / 10,
-        button: "left",
-        buttons: 1,
-      });
-    }
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: to.x,
-      y: to.y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
+    await this.dragPoints(
+      state,
+      from,
+      () => this.actionPoint(state, toBackendNodeId, false),
+      "left",
+    );
   }
 
   private async dispatchPointerAction(
@@ -3484,7 +3647,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async dragPoints(
     state: TargetState,
     from: { x: number; y: number },
-    to: { x: number; y: number },
+    destination: { x: number; y: number } | (() => Promise<{ x: number; y: number }>),
     button: "left" | "right" | "middle",
   ): Promise<void> {
     await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
@@ -3500,23 +3663,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       buttons: mouseButtonMask(button),
       clickCount: 1,
     });
-    for (let step = 1; step <= 10; step += 1) {
+    let point = from;
+    try {
+      if (typeof destination === "function") {
+        // Start the drag before revealing the destination: scrolling it into
+        // view can move the source away from its measured coordinates.
+        point = { x: from.x + (from.x >= 8 ? -8 : 8), y: from.y };
+        await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          ...point,
+          button,
+          buttons: mouseButtonMask(button),
+        });
+      }
+      const to = typeof destination === "function" ? await destination() : destination;
+      const start = point;
+      for (let step = 1; step <= 10; step += 1) {
+        point = {
+          x: start.x + ((to.x - start.x) * step) / 10,
+          y: start.y + ((to.y - start.y) * step) / 10,
+        };
+        await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          ...point,
+          button,
+          buttons: mouseButtonMask(button),
+        });
+      }
+      // The final step may only enter a small target. A second move delivers
+      // dragover, allowing the page to accept the drop before mouse release.
       await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
-        x: from.x + ((to.x - from.x) * step) / 10,
-        y: from.y + ((to.y - from.y) * step) / 10,
+        ...point,
         button,
         buttons: mouseButtonMask(button),
       });
+    } finally {
+      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        ...point,
+        button,
+        buttons: 0,
+        clickCount: 1,
+      });
     }
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: to.x,
-      y: to.y,
-      button,
-      buttons: 0,
-      clickCount: 1,
-    });
   }
 
   private async navigate(state: TargetState, url: string): Promise<void> {

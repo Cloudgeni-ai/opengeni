@@ -73,7 +73,8 @@ export const WORKSPACE_SETTINGS_COPY: Record<
   },
   developer: {
     title: "Developer",
-    description: () => "Webhooks and a credential provider for products built on this workspace.",
+    description: () =>
+      "For products built on Opengeni: tell your backend what happens here, and give runs credentials from it.",
   },
   learning: {
     title: "Agent learning",

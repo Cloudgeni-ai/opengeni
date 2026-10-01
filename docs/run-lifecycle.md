@@ -666,8 +666,10 @@ resumes the same accepted turn through bounded connectivity backoff. Retained
 or outcome-unknown routing errors veto recovery even if their causes look safe.
 Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
 batches, message-only lookalikes, HTTP status metadata, and the exact
-`FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
-non-retryable because pre-command safety is not proven. Required first-party
+`FAILED_PRECONDITION: Modal Sandbox is shutting down` condition never authorize
+automatic Start replay because pre-command safety is not proven. Ambiguous
+model-facing native Starts instead return explicit outcome-unknown tool results,
+keeping inference alive. Required first-party
 connect/tools-list also treats a rolling API
 replacement's temporary `404` or statusless plain transport `Error` as
 recovery-safe. That narrow exception does not apply to external MCP servers,
@@ -678,9 +680,9 @@ OpenGeni. A failed MCP request records its HTTP method, parsed JSON-RPC method
 when available, and a bounded exact source/cause chain in the durable recovery
 detail before SDK layers can flatten the transport error. Only genuinely public
 SDK/console diagnostics receive a fixed structural projection; raw transport
-messages, URLs, and response bodies remain exact on internal data paths. Other
-HTTP client failures and unknown provider codes remain authoritative and
-terminal. Hitting an explicitly configured
+messages, URLs, and response bodies remain exact on internal data paths. Outside
+rendered tool failures, other HTTP client failures and unknown provider codes
+remain authoritative and terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
 waits for the next user message. For an MCP timeout that escapes after a
@@ -688,6 +690,48 @@ successful tool output, conversation truth is checkpointed before the turn
 settles and the continuation is a new follow-up — the completed tool call/full
 turn is never blindly replayed. Budget/credit exhaustion likewise idles the turn
 rather than failing the session, so a top-up lets the same session continue.
+
+**Modal Start DNS provenance and unknown outcomes.** The pinned
+`@grpc/grpc-js@1.14.4` resolver (`resolver-dns.ts`, `defaultResolutionError`)
+creates `UNAVAILABLE: Name resolution failed for target dns:...` locally.
+An initial configuration failure exits `ResolvingCall` before constructing a
+retrying child or reaching `LoadBalancingCall`'s transport dispatch, so that
+specific local path sends no Start bytes. But `subchannel-call.ts` accepts
+server-controlled `grpc-status`/`grpc-message` trailers, and `nice-grpc@2.1.17`
+`wrapClientError` converts both origins to the same public
+`ClientError(path, code, details)`. The accepting TLS-server regression in
+`packages/runtime/test/modal-command-router-wire.test.ts` demonstrates a
+dispatched Start returning identical DNS text. Exact status/details/hostname
+matching therefore cannot prove pre-dispatch provenance.
+
+Unpatched `modal@0.9.0` also wraps `execStart` in `callUnary` with ten transient
+retries: a final genuine resolver failure can follow an earlier dispatched
+attempt. `patches/modal@0.9.0.patch` bypasses that transient retry loop for Start
+and disables grpc-js transparent retries on the task-router channel. The
+existing authentication-rejection retry and read/control retry loops remain;
+the native command wire already disables gRPC retries. Neither reusing an
+`execId` nor unspecified server-side deduplication licenses Start replay.
+
+After an ambiguous native Start, `ProviderCommandStartOutcomeUnknownError`
+carries the original client-chosen invocation. Routing completes the tool-side
+admission with `outcome_unknown` by promoting that exact locator through the
+existing retained-process protocol, never by marking its provider rejection or
+physical exit. Its database parent remains `provider_outcome='retained'` with
+`settled_at IS NULL`, preserving capture, rotation and successor/quiescence
+fences until exact terminal proof. A supervised launch keeps its existing
+pre-dispatch reservation and does not release user code on an ambiguous reply.
+Local readiness cancellation/closure carries distinct never-dispatched proof:
+settle only its exact supervised reservation, never retain a phantom invocation
+or authorize another launch. Closed/cancelled proof vetoes connectivity recovery
+even when a nested cause is a readiness failure.
+Failed promotion retains the same candidate and retries only settlement before
+inspection/control. Model-facing function tools return explicit uncertainty,
+the numeric inspection handle when available, and no blind-retry advice; the
+physical tool fence keeps the process registered for cleanup. Setup/lifecycle
+callers still throw and never receive a fabricated successful result. The
+scripted Runner and native PostgreSQL worker tests cover continuation,
+exactly-once Start, failed promotion recovery, retained writer fencing and
+terminal-proof settlement. No new database outcome or migration is required.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or

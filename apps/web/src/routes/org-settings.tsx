@@ -44,11 +44,18 @@ import {
   resolveOrganizationSettingsSection,
 } from "@/lib/organization-settings-access";
 import type { OrganizationView } from "@/lib/organization-route";
+import type { DeveloperLocation } from "@/lib/developer-route";
+import { hasAccountPermission } from "@/lib/permissions";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@/lib/workspace-deletion";
 import type { OrganizationMembershipRole } from "@/types";
+
+const OrganizationDeveloperIntegrations = lazy(async () => {
+  const module = await import("@/components/workspace-developer-settings");
+  return { default: module.OrganizationDeveloperIntegrations };
+});
 
 const LazyOrganizationModelsSection = lazy(async () => {
   const module = await import("@/components/models/organization-models-section");
@@ -70,8 +77,11 @@ export function OrgSettingsRoute({
   person,
   invitation,
   workspace,
+  developer,
 }: {
   workspaceId: string;
+  /** Developer: the webhook or provider page, or form, that is open. */
+  developer?: DeveloperLocation | undefined;
   checkout?: "success" | "cancelled";
   section?: OrganizationAdminSection;
   /** Models: the account page that is open. */
@@ -229,13 +239,26 @@ export function OrgSettingsRoute({
     [accessibleWorkspaceIds, accountId, client, context, navigate, singleUser, workspaceId],
   );
 
+  const canManageOrganizationIntegrations =
+    organizationAdministratorSession &&
+    Boolean(accountId) &&
+    hasAccountPermission(context.accessContext, accountId, "account:admin");
+  // A webhook or provider page, or a form, brings its own back link and title.
+  const developerSubPage = Boolean(developer?.view || developer?.webhook);
+  const navigateDeveloper = (next: DeveloperLocation) =>
+    void navigate({
+      to: "/workspaces/$workspaceId/organization",
+      params: { workspaceId },
+      search: { section: "developer", ...next },
+    });
   // Models is for signed-in people in this organization; a key or service gets a plain refusal.
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
+
   const subPage =
     (section === "models" && Boolean(modelsAccount || modelsView || workspace)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
-    (section === "developer" && organizationView === "new-key") ||
+    (section === "developer" && (organizationView === "new-key" || developerSubPage)) ||
     // Opened from another scope (a workspace's Models): Billing brings its own back link.
     (section === "billing" && Boolean(returnTo));
 
@@ -329,30 +352,55 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
-        {!modelsRefused && section === "developer" ? (
+        {!modelsRefused && section === "developer" && developerSubPage ? (
           <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
-            <LazyOrganizationApiKeysSection
-              key={`${identityKey}:organization-api-keys`}
+            <OrganizationDeveloperIntegrations
+              key={`${identityKey}:developer-integrations`}
+              client={client}
               organizationId={accountId}
-              canManage={canManageOrganizationApiKeys && Boolean(accountId)}
-              agentSettings={context.clientConfig.agentConfig?.enabled === true}
-              view={organizationView === "new-key" ? "new-key" : undefined}
-              onViewChange={(view) =>
-                void navigate({
-                  to: "/workspaces/$workspaceId/organization",
-                  params: { workspaceId },
-                  search: view ? { section: "developer", view } : { section: "developer" },
-                })
-              }
-              listApiKeys={async () => await client.listOrganizationApiKeys(accountId)}
-              createApiKey={async (request) =>
-                await client.createOrganizationApiKey(accountId, request)
-              }
-              deleteApiKey={async (apiKeyId) =>
-                await client.deleteOrganizationApiKey(accountId, apiKeyId)
-              }
+              canManage={canManageOrganizationIntegrations}
+              location={developer}
+              onNavigate={navigateDeveloper}
             />
           </Suspense>
+        ) : !modelsRefused && section === "developer" ? (
+          <div className="flex min-w-0 flex-col gap-8">
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationApiKeysSection
+                key={`${identityKey}:organization-api-keys`}
+                organizationId={accountId}
+                canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+                agentSettings={context.clientConfig.agentConfig?.enabled === true}
+                view={organizationView === "new-key" ? "new-key" : undefined}
+                onViewChange={(view) =>
+                  void navigate({
+                    to: "/workspaces/$workspaceId/organization",
+                    params: { workspaceId },
+                    search: view ? { section: "developer", view } : { section: "developer" },
+                  })
+                }
+                listApiKeys={async () => await client.listOrganizationApiKeys(accountId)}
+                createApiKey={async (request) =>
+                  await client.createOrganizationApiKey(accountId, request)
+                }
+                deleteApiKey={async (apiKeyId) =>
+                  await client.deleteOrganizationApiKey(accountId, apiKeyId)
+                }
+              />
+            </Suspense>
+            {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (
+              <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                <OrganizationDeveloperIntegrations
+                  key={`${identityKey}:developer-integrations`}
+                  client={client}
+                  organizationId={accountId}
+                  canManage
+                  location={{}}
+                  onNavigate={navigateDeveloper}
+                />
+              </Suspense>
+            ) : null}
+          </div>
         ) : null}
 
         {!modelsRefused && section === "billing" ? (

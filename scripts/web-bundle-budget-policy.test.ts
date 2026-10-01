@@ -350,4 +350,10 @@ describe("web bundle budget policy", () => {
     expect(source).toContain("wholeKibEnvelope(713_634, 1.5 * kib)");
     expect(wholeKibEnvelope(713_634, 1.5 * KIB) - 713_634).toBeGreaterThanOrEqual(1.5 * KIB);
   });
+
+  test("bounds the organization Models page session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_533_407, 1.5 * kib)");
+    expect(wholeKibEnvelope(2_533_407, 1.5 * KIB) - 2_533_407).toBeGreaterThanOrEqual(1.5 * KIB);
+  });
 });

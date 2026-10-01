@@ -311,6 +311,7 @@ import {
   createSandboxClient,
   isModalTaskExecStartPreDispatchUnavailableError,
   isRoutingMutationOutcomeUnknownError,
+  renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setOpenSandboxApplyDiff,
@@ -3970,6 +3971,12 @@ function buildAgentCapabilitiesFromComposition(
       // readiness proof, which reaches bounded same-turn recovery.
       execCommandErrorFunction: (_context, error) => {
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        if (isRoutingMutationOutcomeUnknownError(error)) {
+          // The outer physical fence must retain the exact process before
+          // rendering uncertainty. Platform/setup calls still throw normally.
+          if (toolCancellation) throw error;
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        }
         const details = error instanceof Error ? error.toString() : String(error);
         return `An error occurred while running the tool. Please try again. Error: ${details}`;
       },

@@ -20,7 +20,7 @@ import {
 } from "../src";
 
 const repair = "0552_usage_allowances.sql";
-const currentSessionWriterMigration = "0558_session_agent_config.sql";
+const currentSessionWriterMigration = "0559_session_agent_config.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));
 
 async function expectSqlState(action: () => Promise<unknown>, state: string) {

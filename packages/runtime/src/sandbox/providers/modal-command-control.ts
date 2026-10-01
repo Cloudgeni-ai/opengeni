@@ -12,6 +12,7 @@ import {
   admittedCommandSupervisionReady,
   markPendingCommandSupervised,
   reserveSupervisedLaunch,
+  ProviderCommandStartOutcomeUnknownError,
 } from "../provider-command-session";
 import {
   ModalCommandControl as LegacyControl,
@@ -22,6 +23,7 @@ import {
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
+  ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
 
 export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
@@ -208,9 +210,11 @@ export class ModalCommandControl {
       },
     };
     if (supervision) await reserveSupervisedLaunch(command);
+    let startAttempted = false;
     try {
-      await this.withRouter(taskId, signal, (router) =>
-        router.start(
+      await this.withRouter(taskId, signal, async (router) => {
+        startAttempted = true;
+        await router.start(
           {
             taskId,
             execId,
@@ -231,18 +235,20 @@ export class ModalCommandControl {
               : {}),
           },
           signal,
-        ),
-      );
+        );
+      });
     } catch (error) {
-      // A client-chosen router id remains the only possible invocation. The
-      // supervisor is idle, so an ambiguous launch never ran user code. Retain
-      // the descriptor and reconcile that id; do not replay the start.
+      // A client-chosen router id remains the only possible invocation. Retain
+      // it even for PTY/runAs/unsupervised starts: a rejected acknowledgement
+      // does not prove that the provider rejected the launch.
       if (
-        !supervision ||
+        !startAttempted ||
+        error instanceof ModalCommandStartNotDispatchedError ||
         error instanceof ModalCommandStartRejectedError ||
         error instanceof ModalCommandStartPreDispatchUnavailableError
       )
         throw error;
+      throw new ProviderCommandStartOutcomeUnknownError(command, error);
     }
     return command;
   }

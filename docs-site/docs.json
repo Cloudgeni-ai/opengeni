@@ -63,7 +63,12 @@
       },
       {
         "group": "Guides",
-        "pages": ["guides/self-host", "run-locally", "guides/connect-a-machine"]
+        "pages": [
+          "guides/self-host",
+          "run-locally",
+          "guides/connect-a-machine",
+          "guides/webhooks-and-credentials"
+        ]
       },
       {
         "group": "Reference",

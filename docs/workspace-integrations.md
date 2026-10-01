@@ -160,7 +160,8 @@ OpenGeni POSTs:
 }
 ```
 
-The provider answers with one of:
+`purpose` is `provision`, `renewal`, or `test` (an administrator's Test
+connection; see [Test requests](#test-requests)). The provider answers with one of:
 
 ```json
 { "status": "ok",
@@ -387,6 +388,40 @@ Provider PUT returns `{ provider, secret? }`, webhook creation returns
 individual webhook reads/updates return the webhook. Organization projections
 use `organizationId` and `workspaceFilter`; workspace projections retain
 `workspaceId`. Workspace helper names and endpoints remain available.
+
+### Test requests
+
+Workspace administrators can check an endpoint without waiting for real work.
+Both requests are signed exactly like real ones, sent once through the same
+pinned outbound policy (10-second limit), and never queued or retried:
+
+| HTTP | SDK helper (`@opengeni/sdk/workspace-integrations`) |
+| --- | --- |
+| POST `/v1/workspaces/:workspaceId/webhooks/:webhookId/test` | `testWorkspaceWebhook` |
+| POST `/v1/workspaces/:workspaceId/credential-provider/test` | `testWorkspaceCredentialProvider` |
+| GET `/v1/workspaces/:workspaceId/inherited-integrations` | `getWorkspaceInheritedIntegrations` |
+
+- The webhook test sends `{ "type": "webhook.test", "sessionId": null, "data": { "webhookId": "…" } }`
+  with the usual `OpenGeni-Signature` and `OpenGeni-Event-Id` headers.
+  `verifyWebhookEvent` accepts it; acknowledge it with any 2xx. It is not a
+  subscribable event type and is never recorded as a delivery.
+- The provider test targets the provider this workspace's runs use: its own
+  row (also while paused), else the matching organization provider. It sends an
+  ordinary `credentials.request` with `purpose: "test"`, the administrator as
+  initiating human, and the nil UUID as `sessionId`, `rootSessionId`, `turnId`
+  and `attemptId`. Answer as you would for a run in that workspace, or
+  `not_applicable`. OpenGeni validates the answer and returns only the names of
+  what a run would get (environment variable names, file paths, Git hosts, MCP
+  URLs, expiry); a successful provider answer's bytes never leave the API.
+- Both return `{ ok, status, durationMs, error, request, responseBody, credentials }`:
+  the exact signed body, and at most 1 KiB of a webhook answer or a failed
+  provider answer.
+
+`inherited-integrations` lets workspace administrators see organization
+registrations that reach their workspace: the enabled organization provider
+whose filter matches (shown even while the workspace overrides it) and the
+enabled organization webhooks that also receive its events. It returns URLs and
+event types only, never secrets, and is empty for Personal workspaces.
 
 ### Signing-secret rotation
 
