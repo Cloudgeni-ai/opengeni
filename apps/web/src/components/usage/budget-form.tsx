@@ -5,10 +5,10 @@ import type {
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { RowSelect } from "@/components/settings/row-select";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
 import { TextInput } from "@/components/ui/field";
 import { RowButton } from "@/components/ui/page-actions";
+import { SelectMenu } from "@/components/ui/select-menu";
 import { Section } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import {
@@ -176,7 +176,11 @@ export function BudgetForm({
           controlWidth="auto"
           control={
             canEdit ? (
-              <RowSelect
+              // SelectMenu with its own name: the budget pages stay independent
+              // of the settings-pages chunk that holds RowSelect.
+              <SelectMenu
+                size="sm"
+                aria-label="Resets on"
                 options={DAY_OPTIONS}
                 value={day}
                 onValueChange={(value) => setDay(value)}
@@ -198,7 +202,9 @@ export function BudgetForm({
           controlWidth="auto"
           control={
             canEdit && !custom ? (
-              <RowSelect
+              <SelectMenu
+                size="sm"
+                aria-label="Member limits"
                 options={memberOptions.map(({ value, label }) => ({ value, label }))}
                 value={members}
                 onValueChange={(value) => setMembers(value)}

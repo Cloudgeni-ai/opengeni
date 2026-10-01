@@ -493,9 +493,9 @@ const effectiveBudgets = {
     // gauge icon is pinned to session-shared-primitives. Session-page usage
     // surfaces and the budget pages/member slider live in two lazy chunks.
     // Main bb2f7ea7f measures 2,533,099 raw / 714,130 gzip across 39 files; this
-    // change 2,535,494 / 713,906 across 38 (Bun 1.4 macOS/arm64). Keep the
+    // change 2,533,772 / 713,028 across 38 (Bun 1.4 macOS/arm64). Keep the
     // established 1.5 KiB headroom; gzip and every other cap stay fixed.
-    wholeKibEnvelope(2_535_494, 1.5 * kib),
+    wholeKibEnvelope(2_533_772, 1.5 * kib),
     // Launch sign-up attribution: memory-only first-touch capture at boot and
     // attributed sign-up/social request bodies in the shared API helper. Base
     // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /

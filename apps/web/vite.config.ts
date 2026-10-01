@@ -257,11 +257,14 @@ export default defineConfig({
               // settings frame are reached only from lazy settings routes. Pin
               // them so entry-aware merging cannot co-locate one of them with a
               // session-used helper and make the management surface reachable
-              // from a direct session load. Connection access renders a Models
+              // from a direct session load. The default sandbox environment row
+              // is settings-only too; left to entry-aware grouping it can share a
+              // chunk with the workspace paused banner and pull this chunk (via
+              // its RowSelect) into a direct workspace load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

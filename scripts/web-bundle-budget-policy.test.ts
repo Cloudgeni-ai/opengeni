@@ -333,10 +333,10 @@ describe("web bundle budget policy", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     // The refusal row, shared wording and two lazy usage boundaries only; the
     // budget pages, meters and slider live in the lazy usage-allowances chunk.
-    expect(source).toContain("wholeKibEnvelope(2_535_494, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(2_533_772, 1.5 * kib)");
     // Gzip stays under the existing cap; no new gzip envelope.
     expect(source).not.toContain("wholeKibEnvelope(716_165");
-    expect(wholeKibEnvelope(2_535_494, 1.5 * KIB) - 2_535_494).toBeGreaterThanOrEqual(1.5 * KIB);
+    expect(wholeKibEnvelope(2_533_772, 1.5 * KIB) - 2_533_772).toBeGreaterThanOrEqual(1.5 * KIB);
     const vite = readFileSync(new URL("../apps/web/vite.config.ts", import.meta.url), "utf8");
     expect(vite).toContain('name: "usage-allowances"');
     expect(vite).toContain('name: "usage-surfaces"');
