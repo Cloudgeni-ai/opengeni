@@ -539,7 +539,12 @@ export function WorkspaceModelsPage({
         <ProviderConnectPage
           key={provider}
           state={gateways[provider]}
-          onClose={backToList}
+          onClose={
+            // Reconnecting a Claude subscription returns to its page.
+            provider === "claude_subscription" && gateways[provider].connected
+              ? () => nav.openAccount(accountKey("gateway", provider))
+              : backToList
+          }
           onConnected={() => nav.openAccount(accountKey("gateway", provider))}
           fields={note}
         />

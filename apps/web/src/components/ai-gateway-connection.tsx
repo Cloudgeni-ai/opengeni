@@ -1467,6 +1467,9 @@ export function ProviderConnectPage({
         onClose={onClose}
         onConnected={onConnected}
         footerStart={footerStart}
+        fields={fields}
+        blockedReason={blockedReason}
+        afterSave={afterSave}
       />
     );
   return (

@@ -270,11 +270,13 @@ describe("settings rail", () => {
     workspacePermissions = ["sessions:create"];
     const view = await renderShell({ kind: "settings", section: null });
     try {
+      // Models shows a member their own Personal workspace's model settings.
       expect(linkLabels(view.section("organization"))).toEqual([
         "Organization identity",
+        "Models",
         "Security & data",
       ]);
-      // Two pages stay one group, not two lone rows.
+      // A short list stays one group, not lone rows.
       expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("General");
