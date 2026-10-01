@@ -1,12 +1,19 @@
 {
-  "name": "opengeni-developer-plugins",
-  "owner": { "name": "Cloudgeni" },
-  "description": "OpenGeni SDK setup and product integration skills.",
+  "name": "opengeni",
+  "owner": {
+    "name": "OpenGeni",
+    "url": "https://opengeni.ai"
+  },
+  "metadata": {
+    "description": "OpenGeni plugins for coding agents."
+  },
   "plugins": [
     {
-      "name": "opengeni-developer",
-      "source": "./",
-      "description": "Set up OpenGeni SDK access and embed OpenGeni in your product."
+      "name": "opengeni",
+      "source": "./plugins/opengeni",
+      "description": "Offload long-running or parallel work to an OpenGeni workspace over MCP, and build products on OpenGeni agents.",
+      "category": "development",
+      "tags": ["mcp", "agents", "background-agents", "sdk"]
     }
   ]
 }

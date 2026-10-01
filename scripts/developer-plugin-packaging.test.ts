@@ -1,41 +1,36 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkClientSkill, renderPluginSetupSkillFile } from "./sync-client-skill";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const pluginName = "opengeni-developer";
-const marketplaceName = "opengeni-developer-plugins";
-const skillNames = ["opengeni-setup", "opengeni-client"];
-const skillPaths = skillNames.map((name) => `./.agents/skills/${name}`);
-const manifestDirectories = [".codex-plugin", ".claude-plugin", ".cursor-plugin"];
-const identityFields = [
-  "name",
-  "version",
-  "description",
-  "author",
-  "homepage",
-  "repository",
-  "license",
-  "keywords",
-  "skills",
-];
-
+const pluginRoot = join(root, "plugins/opengeni");
+const names = ["build-with-opengeni", "offload-to-opengeni", "opengeni-setup"];
 function json(path: string): Record<string, any> {
   return JSON.parse(readFileSync(join(root, path), "utf8"));
 }
-
-function insideRoot(path: string): string {
-  expect(path.startsWith("./")).toBe(true);
-  expect(isAbsolute(path)).toBe(false);
-  expect(path.split("/")).not.toContain("..");
-  const target = realpathSync(resolve(root, path));
-  const fromRoot = relative(realpathSync(root), target);
+function contained(path: string): string {
+  const target = realpathSync(path);
+  const fromRoot = relative(realpathSync(pluginRoot), target);
   expect(fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)).toBe(false);
+  expect(lstatSync(path).isSymbolicLink()).toBe(false);
   return target;
 }
-
-function expectSkillsOnly(value: unknown): void {
+function files(directory: string): Map<string, string> {
+  const result = new Map<string, string>();
+  function visit(path: string) {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const child = join(path, entry.name);
+      expect(entry.isSymbolicLink()).toBe(false);
+      if (entry.isDirectory()) visit(child);
+      else result.set(relative(directory, child), readFileSync(child, "utf8"));
+    }
+  }
+  visit(directory);
+  return result;
+}
+function noTransport(value: unknown): void {
   if (!value || typeof value !== "object") return;
   for (const [key, child] of Object.entries(value)) {
     expect([
@@ -47,119 +42,150 @@ function expectSkillsOnly(value: unknown): void {
       "agents",
       "rules",
       "lspServers",
-      "settings",
-      "userConfig",
-      "variables",
     ]).not.toContain(key);
-    expectSkillsOnly(child);
+    noTransport(child);
   }
 }
 
-describe("skills-only OpenGeni developer plugin", () => {
-  test("host manifests share stable identity and select only canonical skills", () => {
-    const codex = json(".codex-plugin/plugin.json");
-    expect(codex.name).toBe(pluginName);
-    expect(codex.version).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(codex.author.name).toBe("Cloudgeni");
-    expect(codex.license).toBe("Apache-2.0");
-    expect(codex.repository).toBe("https://github.com/Cloudgeni-ai/opengeni");
-    for (const directory of manifestDirectories) {
-      const manifest = json(`${directory}/plugin.json`);
-      expect(manifest.skills).toEqual(skillPaths);
-      for (const field of identityFields) expect(manifest[field]).toEqual(codex[field]);
-      expect(Object.keys(manifest).sort()).toEqual(
-        [
-          ...identityFields,
-          ...(directory === ".codex-plugin" ? ["interface", "extensions"] : []),
-        ].sort(),
-      );
-      expectSkillsOnly(manifest);
+describe("shared skills-only OpenGeni package", () => {
+  test("one identity uses default contained skills and compatible manifests", () => {
+    const claude = json("plugins/opengeni/.claude-plugin/plugin.json");
+    const portable = json("plugins/opengeni/plugin.json");
+    for (const manifest of [claude, portable]) {
+      expect(manifest.name).toBe("opengeni");
+      expect(manifest.version).toBe("0.1.0");
+      expect(manifest).not.toHaveProperty("skills");
+      noTransport(manifest);
+    }
+    for (const field of [
+      "name",
+      "version",
+      "description",
+      "author",
+      "homepage",
+      "repository",
+      "license",
+      "keywords",
+    ])
+      expect(portable[field]).toEqual(claude[field]);
+    expect(portable.$schema).toBe("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
+    const schema = json("scripts/fixtures/agent-plugin-1.0.0.schema.json");
+    expect(schema.$id).toBe(portable.$schema);
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(["$schema", "name"]);
+    for (const key of Object.keys(portable)) expect(Object.keys(schema.properties)).toContain(key);
+    expect(portable.extensions["com.openai"].onboardingSkill).toBe(
+      "./skills/opengeni-setup/SKILL.md",
+    );
+    expect(contained(join(pluginRoot, portable.extensions["com.openai"].onboardingSkill))).toBe(
+      realpathSync(join(pluginRoot, "skills/opengeni-setup/SKILL.md")),
+    );
+  });
+
+  test("Bendik userConfig required semantics and shared metadata are preserved", () => {
+    const manifest = json("plugins/opengeni/.claude-plugin/plugin.json");
+    expect(manifest.displayName).toBe("OpenGeni");
+    expect(manifest.author).toEqual({ name: "OpenGeni", url: "https://opengeni.ai" });
+    expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
+    expect(manifest.userConfig).toEqual({
+      base_url: {
+        type: "string",
+        title: "OpenGeni URL",
+        description:
+          "Origin of your OpenGeni deployment, without a trailing slash. Use https://app.opengeni.ai for OpenGeni Cloud.",
+        default: "https://app.opengeni.ai",
+        required: true,
+      },
+      workspace_id: {
+        type: "string",
+        title: "Workspace ID",
+        description:
+          "The UUID after /workspaces/ in the OpenGeni address bar when the workspace you want to use is open.",
+        required: true,
+      },
+    });
+  });
+
+  test("all catalogs use the same identity and nested repository-relative source", () => {
+    for (const directory of [".agents/plugins", ".claude-plugin", ".cursor-plugin"]) {
+      const catalog = json(`${directory}/marketplace.json`);
+      expect(catalog.name).toBe("opengeni");
+      expect(catalog.plugins).toHaveLength(1);
+      const entry = catalog.plugins[0];
+      expect(entry.name).toBe("opengeni");
+      const source = directory === ".agents/plugins" ? entry.source.path : entry.source;
+      expect(source).toBe("./plugins/opengeni");
+      expect(source.split("/")).not.toContain("..");
+      expect(resolve(root, source)).toBe(pluginRoot);
+      expect(resolve(root, directory, source)).not.toBe(pluginRoot);
+      expect(entry).not.toHaveProperty("skills");
+      noTransport(catalog);
     }
   });
 
-  test("every declared skill resolves in place with valid frontmatter and references", () => {
-    for (const directory of manifestDirectories) {
-      const manifest = json(`${directory}/plugin.json`);
-      for (const [index, path] of manifest.skills.entries()) {
-        const canonical = join(root, ".agents", "skills", skillNames[index]!);
-        expect(lstatSync(canonical).isDirectory()).toBe(true);
-        expect(lstatSync(canonical).isSymbolicLink()).toBe(false);
-        expect(insideRoot(path)).toBe(realpathSync(canonical));
-        const entrypoint = join(canonical, "SKILL.md");
-        expect(lstatSync(entrypoint).isFile()).toBe(true);
-        expect(lstatSync(entrypoint).isSymbolicLink()).toBe(false);
-        const text = readFileSync(entrypoint, "utf8");
-        const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
-        expect(frontmatter).not.toBeNull();
-        const metadata = Bun.YAML.parse(frontmatter![1]!) as Record<string, unknown>;
-        expect(metadata.name).toBe(skillNames[index]);
-        expect(typeof metadata.description).toBe("string");
-        expect((metadata.description as string).trim().length).toBeGreaterThan(0);
-        for (const match of text.matchAll(/\]\((references\/[^)\s]+\.md)(?:#[^)\s]*)?\)/g)) {
-          const reference = join(dirname(entrypoint), match[1]!);
-          expect(existsSync(reference)).toBe(true);
-          expect(insideRoot(`./${relative(root, reference)}`)).toBe(realpathSync(reference));
-        }
+  test("only three immediate skill folders are public and every local entrypoint link stays inside the package", () => {
+    expect(readdirSync(join(pluginRoot, "skills")).sort()).toEqual([...names].sort());
+    for (const name of names) {
+      const path = join(pluginRoot, "skills", name, "SKILL.md");
+      contained(path);
+      const text = readFileSync(path, "utf8");
+      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+      expect(frontmatter).not.toBeNull();
+      const metadata = Bun.YAML.parse(frontmatter![1]!) as Record<string, string>;
+      expect(metadata.name).toBe(name);
+      expect(metadata.description.trim().length).toBeGreaterThan(0);
+      for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+        if (/^(?:https?:|#)/.test(match[1]!)) continue;
+        contained(resolve(dirname(path), match[1]!.split("#")[0]!));
       }
     }
+    expect(existsSync(join(pluginRoot, "skills/opengeni-client"))).toBe(false);
+    expect(
+      existsSync(join(pluginRoot, "skills/build-with-opengeni/opengeni-client/SKILL.md")),
+    ).toBe(true);
+  });
+
+  test("canonical client/setup mirrors have complete deterministic parity without weakening setup semantics", async () => {
+    await checkClientSkill();
+    const client = files(join(root, ".agents/skills/opengeni-client"));
+    expect(files(join(pluginRoot, "skills/build-with-opengeni/opengeni-client"))).toEqual(client);
+    expect(
+      files(join(root, "packages/runtime/src/bundled_default_skills/opengeni-client")),
+    ).toEqual(client);
+    const setup = files(join(root, ".agents/skills/opengeni-setup"));
+    const packaged = files(join(pluginRoot, "skills/opengeni-setup"));
+    expect([...packaged.keys()].sort()).toEqual([...setup.keys()].sort());
+    for (const [path, text] of setup) {
+      expect(packaged.get(path)).toBe(renderPluginSetupSkillFile(path, text));
+      expect(
+        packaged.get(path)!.replaceAll("build-with-opengeni/opengeni-client", "opengeni-client"),
+      ).toBe(text);
+    }
+    const handoff = join(pluginRoot, "skills/opengeni-setup/references/setup-api.md");
+    contained(resolve(dirname(handoff), "../../build-with-opengeni/opengeni-client/SKILL.md"));
   });
 
   test.each([
     ".agents/skills/opengeni-client/SKILL.md",
     "packages/runtime/src/bundled_default_skills/opengeni-client/SKILL.md",
     "docs-site/reference/opengeni-client-skill.mdx",
-  ])("client setup handoff is portable in %s", (path) => {
+    "plugins/opengeni/skills/build-with-opengeni/opengeni-client/SKILL.md",
+  ])("client setup handoff stays portable in %s", (path) => {
     const text = readFileSync(join(root, path), "utf8");
     const handoffs = [...text.matchAll(/\[OpenGeni developer setup\]\(([^)\s]+)\)/g)];
     expect(handoffs).toHaveLength(1);
-    const target = new URL(handoffs[0]![1]!);
-    expect(target.protocol).toBe("https:");
-    expect(target.href).toBe("https://docs.opengeni.ai/guides/developer-plugin");
+    expect(new URL(handoffs[0]![1]!).href).toBe("https://docs.opengeni.ai/guides/developer-plugin");
   });
 
-  test("Codex presentation and onboarding use the supported compatibility fields", () => {
-    const manifest = json(".codex-plugin/plugin.json");
-    expect(manifest).not.toHaveProperty("$schema");
-    expect(manifest.interface.displayName).toBe("OpenGeni Developer");
-    expect(manifest.interface.shortDescription.length).toBeLessThanOrEqual(30);
-    expect(manifest.extensions).toEqual({
-      "com.openai": { onboardingSkill: `${skillPaths[0]}/SKILL.md` },
-    });
-    expect(insideRoot(manifest.extensions["com.openai"].onboardingSkill)).toBe(
-      realpathSync(join(root, ".agents/skills/opengeni-setup/SKILL.md")),
-    );
-  });
-
-  test("all marketplaces resolve the plugin from the repo root, not their catalog directory", () => {
-    const codex = json(".agents/plugins/marketplace.json");
-    expect(codex.interface.displayName).toBe("OpenGeni Developer Plugins");
-    for (const directory of [".agents/plugins", ".claude-plugin", ".cursor-plugin"]) {
-      const catalog = json(`${directory}/marketplace.json`);
-      expect(catalog.name).toBe(marketplaceName);
-      expect(catalog.plugins).toHaveLength(1);
-      const entry = catalog.plugins[0];
-      expect(entry.name).toBe(pluginName);
-      const source = directory === ".agents/plugins" ? entry.source.path : entry.source;
-      expect(source).toBe("./");
-      expect(insideRoot(source)).toBe(realpathSync(root));
-      expect(resolve(root, directory, source)).not.toBe(realpathSync(root));
-      expectSkillsOnly(catalog);
-      if (directory === ".agents/plugins") {
-        expect(entry.source).toEqual({ source: "local", path: "./" });
-        expect(entry.policy).toEqual({ installation: "AVAILABLE", authentication: "ON_INSTALL" });
-        expect(entry.category).toBe("Developer Tools");
-      } else {
-        expect(catalog.owner).toEqual({ name: "Cloudgeni" });
-        expect(entry).not.toHaveProperty("skills");
-        expect(entry).not.toHaveProperty("version");
-      }
-    }
-  });
-
-  test("no portable manifest, copied skills, or default executable components are packaged", () => {
+  test("the package contains no transport, executable components, symlinks or competing root plugins", () => {
     for (const path of [
+      ".claude-plugin/plugin.json",
+      ".codex-plugin/plugin.json",
+      ".cursor-plugin/plugin.json",
       "plugin.json",
-      "skills",
+    ])
+      expect(existsSync(join(root, path))).toBe(false);
+    for (const path of [
       ".mcp.json",
       "mcp.json",
       ".app.json",
@@ -169,36 +195,37 @@ describe("skills-only OpenGeni developer plugin", () => {
       "agents",
       "rules",
       "settings.json",
-      ".codex-plugin/skills",
-      ".claude-plugin/skills",
-      ".cursor-plugin/skills",
-    ]) {
-      expect(existsSync(join(root, path))).toBe(false);
-    }
+      ".codex-plugin",
+      ".cursor-plugin",
+    ])
+      expect(existsSync(join(pluginRoot, path))).toBe(false);
+    for (const path of files(pluginRoot).keys())
+      expect(path).not.toMatch(/(?:^|[\\/])(?:\.mcp\.json|mcp\.json|hooks\.json)$/);
   });
 
-  test("public install docs are discoverable and cite dated official specifications", () => {
-    const navigation = json("docs-site/docs.json");
-    expect(
-      navigation.navigation.groups.flatMap((group: { pages: string[] }) => group.pages),
-    ).toContain("guides/developer-plugin");
-    expect(readFileSync(join(root, "README.md"), "utf8")).toContain("docs/developer-plugin.md");
+  test("docs describe the current selector, three skills, optional transport and native verification", () => {
     const guide = readFileSync(join(root, "docs/developer-plugin.md"), "utf8");
     for (const token of [
+      "opengeni@opengeni",
+      "./plugins/opengeni",
+      "build-with-opengeni",
+      "offload-to-opengeni",
+      "opengeni-setup",
       "October 1, 2026",
-      "https://developers.openai.com/plugins/build/plugins",
-      "https://developers.openai.com/plugins/deploy/submission",
-      "https://code.claude.com/docs/en/plugins/manifest-reference",
-      "https://cursor.com/docs/skills",
-      "https://cursor.com/docs/reference/plugins",
-      "Skills-only plugins are officially supported",
-      "does **not** publish",
-      "scripts/sync-client-skill.ts",
-    ]) {
+      "required",
+      "skills-only",
+      "check-developer-plugin-hosts.ts",
+      "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+    ])
       expect(guide).toContain(token);
-    }
+    expect(guide).not.toContain("opengeni-developer@");
     const page = readFileSync(join(root, "docs-site/guides/developer-plugin.mdx"), "utf8");
-    expect(page).toContain("docs/developer-plugin.md");
+    expect(page).toContain("opengeni@opengeni");
     expect(page).toContain("has not been published");
+    expect(
+      json("docs-site/docs.json").navigation.groups.flatMap(
+        (group: { pages: string[] }) => group.pages,
+      ),
+    ).toContain("guides/developer-plugin");
   });
 });

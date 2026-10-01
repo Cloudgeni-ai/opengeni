@@ -1,36 +1,43 @@
 ---
-title: "Developer plugin"
-description: "Give your coding agent the OpenGeni SDK setup and product integration skills."
+title: "OpenGeni plugin"
+description: "Give your coding agent the shared OpenGeni build, offload-workflow and SDK setup guides."
 icon: "puzzle-piece"
 ---
 
-The **OpenGeni Developer** plugin gives your coding agent two skills:
+The **OpenGeni** plugin has three public skills:
 
-- `opengeni-setup` sets up SDK access.
-- `opengeni-client` integrates OpenGeni into your product.
+- `build-with-opengeni` builds products and local demos, with the full client
+  guide as supporting reference material.
+- `offload-to-opengeni` describes the remote-work workflow. Actual offloading
+  requires an available, authenticated transport; this package does not ship one.
+- `opengeni-setup` sets up SDK/REST access through your coding agent's own tools.
 
-It contains no MCP server, hooks, or UI. Installing it does not configure
-credentials or give the coding agent API access. These skills are for the agent
-building your product, not the agent your customers use.
+This revision is skills-only: no MCP server, hooks, or plugin UI. Installation
+does not configure credentials or grant access. The skills guide the coding
+agent building your product, not your product's customer-facing agent.
 
 ## Install
 
-| Coding agent | Installation                                                                                                                                                                |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude Code  | Add the `Cloudgeni-ai/opengeni` marketplace, then install `opengeni-developer@opengeni-developer-plugins`.                                                                  |
-| Codex        | Add the `Cloudgeni-ai/opengeni` marketplace, then install `opengeni-developer@opengeni-developer-plugins`. `/plugins` and the supported desktop plugin directory also work. |
-| Cursor       | In **Customize → From GitHub Repository**, import `https://github.com/Cloudgeni-ai/opengeni`, then install **OpenGeni Developer**.                                          |
-| ChatGPT      | Use the supported desktop repo/local marketplace flow. Skills-only plugins are supported; availability depends on your surface and workspace permissions.                   |
+For Claude Code or Codex, add the `Cloudgeni-ai/opengeni` marketplace and install
+**`opengeni@opengeni`**. For Cursor, import that repository through
+**Customize → From GitHub Repository**, then install **OpenGeni**. Supported
+ChatGPT desktop marketplace surfaces can also use the portable package;
+availability depends on the surface and workspace permissions.
 
-[Copy the install commands, including local-checkout instructions](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/developer-plugin.md).
-The guide also records the official formats verified on October 1, 2026.
-This plugin has not been published to the universal public directory.
+[Copy the install commands and local-checkout instructions](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/developer-plugin.md).
+The guide records official formats verified October 1, 2026 and native-loader
+checks. This plugin has not been published to the universal public directory.
+
+Claude retains the shared required URL/workspace settings. Its tested CLI loads
+all three skills with both settings unset and shows a configure reminder; no
+workspace or MCP connection is needed just to install and read the guides.
 
 ## Use
 
-Ask your coding agent to set up OpenGeni SDK access, or to embed OpenGeni in your
-product. In Claude Code, invoke `/opengeni-developer:opengeni-setup` or
-`/opengeni-developer:opengeni-client` explicitly.
+Ask your coding agent to set up OpenGeni access or build an OpenGeni-powered
+product. In Claude Code, invoke `/opengeni:opengeni-setup` or
+`/opengeni:build-with-opengeni`. The nested client guide is supporting material,
+not a separate fourth plugin skill.
 
 Continue with [Embed with your coding agent](/embed-with-a-coding-agent) or
 [For AI agents](/reference/for-ai-agents).
