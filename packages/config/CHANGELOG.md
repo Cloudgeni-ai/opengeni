@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 3.2.1
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/codex@0.2.31
+
 ## 3.2.0
 
 ### Minor Changes

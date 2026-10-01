@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 7.6.0
+
+### Patch Changes
+
+- 9b3c40e: Show factual response-waiting copy once a model request is dispatched, while preserving the loading indicator and host customization.
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- Updated dependencies [e5b0123]
+  - @opengeni/sdk@7.6.0
+
 ## 7.5.0
 
 ### Minor Changes
