@@ -1,10 +1,15 @@
 import { useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniApiError, OpenGeniAllowanceExhaustedError, type ClientModel } from "@opengeni/sdk";
-import { ChatComposer, MessageTimeline, ModelPolicyPicker, SessionChrome } from "@opengeni/react";
-import { useComposer } from "../src/hooks/use-composer";
-import { conversationTimeline } from "../src/conversation-timeline";
-import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
+import {
+  ChatComposer,
+  MessageTimeline,
+  ModelPolicyPicker,
+  SessionChrome,
+  conversationTimeline,
+  useComposer,
+  type UseTurnQueueResult,
+} from "@opengeni/react";
 import { MockOpenGeniClient } from "./mock";
 import "./styles.css";
 
