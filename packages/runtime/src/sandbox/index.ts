@@ -592,6 +592,7 @@ export {
   isRoutingMutationOutcomeUnknownError,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
+  renderRoutingMutationOutcomeUnknownToolResult,
   RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
