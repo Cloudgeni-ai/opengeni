@@ -685,18 +685,27 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. Native Modal `TaskExecStart` recovery is safe only when the client-side
-channel-readiness gate fails before issuing the RPC. This also covers resolver
+delay. Modal `TaskExecStart` recovery is safe only when read-only task/router
+preparation or the client-side channel-readiness gate fails before issuing the
+RPC. Both native Starts and the pinned Modal SDK enforce this boundary; SDK
+manifest/setup, file/path helpers, and archive hydration/capture must not bypass
+it. SDK provider/archive wrappers preserve the typed error cause. This also covers resolver
 failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
 server replies. After exact never-started reservation settlement, OpenGeni
-resumes the same accepted turn through bounded connectivity backoff. Retained
+resumes the same accepted turn through bounded connectivity backoff, including
+pre-model setup before `turn.started` eventing exists. The same durable five-replacement
+budget applies, with explicit typed exhaustion on the sixth failure. Retained
 or outcome-unknown routing errors veto recovery even if their causes look safe.
 Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
 batches, message-only lookalikes, HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition never authorize
 automatic Start replay because pre-command safety is not proven. Ambiguous
 model-facing native Starts instead return explicit outcome-unknown tool results,
-keeping inference alive. Required first-party
+keeping inference alive. Internal SDK/probe ambiguity has no adopted durable
+command handle; it is a non-retryable `sandbox_command_start_outcome_unknown`
+failure rather than raw gRPC failure or permission to replay setup. Legacy
+`ContainerExec` still disables SDK retries and cannot recover an execution id
+lost with its response. Required first-party
 connect/tools-list also treats a rolling API
 replacement's temporary `404` or statusless plain transport `Error` as
 recovery-safe. That narrow exception does not apply to external MCP servers,

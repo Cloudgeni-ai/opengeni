@@ -3,6 +3,7 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
 import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
+import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import {
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
@@ -349,6 +350,68 @@ describe("early accepted-definition mismatch", () => {
     Object.assign(deps.eventing, { publish: undefined });
     return deps;
   }
+
+  test("pre-dispatch command-start setup recovery checkpoints before eventing with the same finite budget", async () => {
+    const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+      waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+        callback(new Error("router not ready")),
+    } as never).catch((failure) => failure);
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    } as never);
+    try {
+      for (const [count, continueDelayMs] of [2000, 5000, 15000, 30000, 60000].entries()) {
+        const deps = earlyDeps(error);
+        deps.attempt.providerRecoveryCount = count;
+        deps.historySink.reconcileConversationTruth = mock(async () => {
+          throw new Error("no model history before eventing");
+        });
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          turnId: "turn-1",
+          continueDelayMs,
+        });
+        expect(recovery).toHaveBeenLastCalledWith(
+          {},
+          "workspace-1",
+          expect.objectContaining({
+            turnId: "turn-1",
+            attemptId: "attempt-1",
+            triggerEventId: "trigger-1",
+            reason: "sandbox_command_start_unavailable",
+            providerRecoveryCount: count + 1,
+          }),
+        );
+        expect(deps.historySink.reconcileConversationTruth).not.toHaveBeenCalled();
+      }
+      const exhausted = earlyDeps(error);
+      exhausted.attempt.providerRecoveryCount = 5;
+      await expect(settleTurnFailure(exhausted as any)).rejects.toMatchObject({
+        type: "SandboxCommandStartUnavailableError",
+        nonRetryable: true,
+        message: expect.stringContaining("stopped after 5 retries"),
+      });
+      expect(recovery).toHaveBeenCalledTimes(5);
+    } finally {
+      recovery.mockRestore();
+    }
+  });
+
+  test("raw gRPC lookalikes never gain early command-start recovery authority", async () => {
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+    try {
+      for (const error of [
+        Object.assign(new Error("Name resolution failed"), { code: 14 }),
+        Object.assign(new Error("lookalike"), { name: "CommandStartPreDispatchUnavailableError" }),
+      ]) {
+        await expect(settleTurnFailure(earlyDeps(error) as any)).rejects.toBe(error);
+      }
+      expect(recovery).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+    }
+  });
 
   test("checkpoints the exact turn before eventing without reconciling model history", async () => {
     const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({

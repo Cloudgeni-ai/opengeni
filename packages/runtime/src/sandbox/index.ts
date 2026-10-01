@@ -177,6 +177,7 @@ export {
   deleteModalCheckpointSnapshot,
   inspectModalSandboxLifecycle,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   modalSessionMatchesCheckpointProviderBinding,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,

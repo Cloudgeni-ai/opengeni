@@ -146,6 +146,27 @@ export class ModalCommandControl {
       }
   }
 
+  /** Access lookup may retry safely, but once the callback enters the Start
+   * boundary only the wire's own dispatch proof can authorize recovery. */
+  private async withStartRouter<T>(
+    taskId: string,
+    signal: AbortSignal | undefined,
+    run: (router: ModalCommandRouterWire) => Promise<T>,
+  ): Promise<T> {
+    let entered = false;
+    try {
+      return await this.withRouter(taskId, signal, async (router) => {
+        entered = true;
+        return await run(router);
+      });
+    } catch (error) {
+      if (entered) throw error;
+      return await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(async () => {
+        throw error;
+      }, signal);
+    }
+  }
+
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalRouterProviderCommand> {
     signal?.throwIfAborted();
     const supervised = admittedCommandSupervisionReady() && !args.tty && !args.runAs;
@@ -154,7 +175,10 @@ export class ModalCommandControl {
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
       throw new Error("Command workdir is outside the sandbox workspace");
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined);
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     const taskId = task.taskId;
     if (this.sandboxId !== sandboxId)
@@ -214,7 +238,7 @@ export class ModalCommandControl {
     if (supervision) await reserveSupervisedLaunch(command);
     let startAttempted = false;
     try {
-      await this.withRouter(taskId, signal, async (router) => {
+      await this.withStartRouter(taskId, signal, async (router) => {
         startAttempted = true;
         await router.start(
           {
@@ -261,9 +285,12 @@ export class ModalCommandControl {
   async verifySupervisionCapability(): Promise<{ sandboxId: string; taskId: string }> {
     const sandboxId = this.sandboxId;
     const signal = AbortSignal.timeout(5_000);
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, { signal }),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    await this.withRouter(task.taskId, signal, async (router) => {
+    await this.withStartRouter(task.taskId, signal, async (router) => {
       const identity = { taskId: task.taskId!, execId: randomUUID() };
       await router.start(
         {
@@ -378,7 +405,7 @@ export class ModalCommandControl {
       throw new Error("Supervised command identity is unavailable");
     const identity = { taskId: command.taskId, execId: randomUUID() };
     const signal = AbortSignal.timeout(5_000);
-    return await this.withRouter(command.taskId, signal, async (router) => {
+    return await this.withStartRouter(command.taskId, signal, async (router) => {
       await router.start(
         {
           ...identity,
