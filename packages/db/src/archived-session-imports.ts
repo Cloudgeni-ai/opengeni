@@ -9,6 +9,8 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type Permission,
+  type AccessGrant,
+  type FileAsset,
 } from "@opengeni/contracts";
 import {
   rawRows,
@@ -22,15 +24,69 @@ import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./los
 import { lockSessionEventWriteRows } from "./session-control";
 import { acceptArchivedSessionFileAttachments } from "./session-file-attachments";
 import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
-import {
-  createSessionWithIdempotencyKeyResult,
-  getFilesForSubject,
-  getSession,
-  getWorkspaceGrant,
-  SessionCreateIdempotencyConflictError,
-  SessionCreateIdempotencyUnavailableError,
-} from "./index";
 import * as schema from "./schema";
+
+type ArchivedImportDependencies = {
+  createSessionWithIdempotencyKeyResult: (
+    db: Database,
+    input: {
+      accountId: string;
+      workspaceId: string;
+      subjectId: string;
+      visibility: "user_private" | "workspace_shared";
+      createIdempotencyKey: string;
+      initialMessage: string;
+      resources: never[];
+      skills: never[];
+      tools: never[];
+      metadata: Record<string, unknown>;
+      createdBy: TurnInitiator;
+      createdByContext?: TurnInitiatorContext;
+      model: string;
+      reasoningEffort: "low";
+      latencyMode: "standard";
+      sandboxBackend: "none";
+      variableSetIds: string[];
+      firstPartyMcpTools: never[];
+      firstPartyMcpPermissions: never[];
+      beforeCreateCommit: (
+        tx: Database,
+        sessionId: string,
+        context?: { created: boolean },
+      ) => Promise<void>;
+    },
+  ) => Promise<{ denied: false; created: boolean; session: { id: string } } | { denied: true }>;
+  getFilesForSubject: (
+    db: Database,
+    input: {
+      accountId: string;
+      workspaceId: string;
+      subjectId: string | null;
+      fileIds: readonly string[];
+    },
+  ) => Promise<FileAsset[]>;
+  getSession: (db: Database, workspaceId: string, sessionId: string) => Promise<Session | null>;
+  getWorkspaceGrant: (
+    db: Database,
+    subjectId: string,
+    workspaceId: string,
+  ) => Promise<AccessGrant | null>;
+  isCreateConflict: (error: unknown) => boolean;
+  isCreateUnavailable: (error: unknown) => boolean;
+};
+
+/** Bind canonical session/file helpers at the root composition, never by
+ * importing that barrel back into a reexported leaf. No permissive defaults. */
+export function createArchivedSessionImportPersistence(dependencies: ArchivedImportDependencies) {
+  return {
+    importArchivedSession: (db: Database, input: Parameters<typeof importArchivedSession>[1]) =>
+      importArchivedSession(db, input, dependencies),
+    appendArchivedSessionEvents: (
+      db: Database,
+      input: Parameters<typeof appendArchivedSessionEvents>[1],
+    ) => appendArchivedSessionEvents(db, input, dependencies),
+  };
+}
 
 export type ArchivedSessionImportErrorCode =
   | "SESSION_IMPORT_CONFLICT"
@@ -89,7 +145,11 @@ type ImportScope = {
   beforeCommit?: (tx: Database) => Promise<void>;
 };
 
-async function revalidateImporter(tx: Database, scope: ImportScope): Promise<void> {
+async function revalidateImporter(
+  tx: Database,
+  scope: ImportScope,
+  dependencies: ArchivedImportDependencies,
+): Promise<void> {
   if (scope.apiKeyId) {
     const key = await withAccountRls(tx, scope.accountId, async (keyTx) => {
       const [row] = await rawRows<{ permissions: string[] }>(
@@ -114,7 +174,7 @@ async function revalidateImporter(tx: Database, scope: ImportScope): Promise<voi
     throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
   }
   if (scope.requireLiveSubject && scope.requiredPermission) {
-    const grant = await getWorkspaceGrant(tx, scope.subjectId, scope.workspaceId);
+    const grant = await dependencies.getWorkspaceGrant(tx, scope.subjectId, scope.workspaceId);
     // An exact verified Personal-workspace owner deliberately has no ordinary
     // workspace_memberships row; the live resolver proved that pointer above.
     if (
@@ -177,9 +237,10 @@ async function validateFiles(
   tx: Database,
   scope: ImportScope,
   events: ArchivedSessionImportEvent[],
+  dependencies: ArchivedImportDependencies,
 ): Promise<void> {
   const ids = archivedSessionImportFileIds(events);
-  const files = await getFilesForSubject(tx, {
+  const files = await dependencies.getFilesForSubject(tx, {
     ...scope,
     subjectId: scope.fileOwnerSubjectId,
     fileIds: ids,
@@ -254,13 +315,14 @@ async function appendTimeline(
   }));
 }
 
-export async function importArchivedSession(
+async function importArchivedSession(
   db: Database,
   input: ImportScope & {
     payload: ImportArchivedSessionRequest;
     createdBy: TurnInitiator;
     createdByContext?: TurnInitiatorContext;
   },
+  dependencies: ArchivedImportDependencies,
 ): Promise<{
   session: Session;
   importId: string;
@@ -283,81 +345,83 @@ export async function importArchivedSession(
       // Both external and native authority must remain current through commit.
       await lockExternalWorkspaceMembershipLifecycle(tx, input.accountId);
       let committedEvents: SessionEvent[] = [];
-      const result = await createSessionWithIdempotencyKeyResult(tx, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        visibility: payload.visibility ?? "workspace_shared",
-        createIdempotencyKey: `archived-import:${canonicalArchivedSessionImportHash(payload.importId)}`,
-        initialMessage: "",
-        resources: [],
-        skills: [],
-        tools: [],
-        metadata: {},
-        createdBy: input.createdBy,
-        ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
-        model: "archived-import",
-        reasoningEffort: "low",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        variableSetIds: [],
-        firstPartyMcpTools: [],
-        firstPartyMcpPermissions: [],
-        beforeCreateCommit: async (createTx, sessionId, context) => {
-          const locks = await lockSessionEventWriteRows(createTx, {
-            workspaceId: input.workspaceId,
-            controlLock: "none",
-            sessionIds: [sessionId],
-          });
-          const row = locks.sessions[0];
-          if (!row || row.accountId !== input.accountId)
-            throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
-          await revalidateImporter(createTx, input);
-          if (!context?.created) {
-            if (
-              row.importedArchiveImportId !== payload.importId ||
-              row.importedArchiveRequestHash !== requestHash ||
-              row.importedArchiveSubjectId !== input.subjectId
-            ) {
-              throw new ArchivedSessionImportError("SESSION_IMPORT_CONFLICT");
+      const result = await dependencies
+        .createSessionWithIdempotencyKeyResult(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          visibility: payload.visibility ?? "workspace_shared",
+          createIdempotencyKey: `archived-import:${canonicalArchivedSessionImportHash(payload.importId)}`,
+          initialMessage: "",
+          resources: [],
+          skills: [],
+          tools: [],
+          metadata: {},
+          createdBy: input.createdBy,
+          ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+          model: "archived-import",
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          variableSetIds: [],
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: [],
+          beforeCreateCommit: async (createTx, sessionId, context) => {
+            const locks = await lockSessionEventWriteRows(createTx, {
+              workspaceId: input.workspaceId,
+              controlLock: "none",
+              sessionIds: [sessionId],
+            });
+            const row = locks.sessions[0];
+            if (!row || row.accountId !== input.accountId)
+              throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
+            await revalidateImporter(createTx, input, dependencies);
+            if (!context?.created) {
+              if (
+                row.importedArchiveImportId !== payload.importId ||
+                row.importedArchiveRequestHash !== requestHash ||
+                row.importedArchiveSubjectId !== input.subjectId
+              ) {
+                throw new ArchivedSessionImportError("SESSION_IMPORT_CONFLICT");
+              }
+              return;
             }
-            return;
+            await validateFiles(createTx, input, payload.events, dependencies);
+            await createTx
+              .update(schema.sessions)
+              .set({
+                importedArchiveImportId: payload.importId,
+                importedArchiveImportedAt: new Date(),
+                importedArchiveRequestHash: requestHash,
+                importedArchiveSubjectId: input.subjectId,
+                importedArchiveNextOffset: payload.events.length,
+                title: payload.title,
+                titleSource: "user",
+                createdAt: new Date(payload.createdAt),
+                status: "idle",
+              })
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.id, sessionId),
+                ),
+              );
+            committedEvents = await appendTimeline(createTx, input, sessionId, 0, payload.events);
+          },
+        })
+        .catch((error: unknown) => {
+          if (dependencies.isCreateUnavailable(error)) {
+            throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
           }
-          await validateFiles(createTx, input, payload.events);
-          await createTx
-            .update(schema.sessions)
-            .set({
-              importedArchiveImportId: payload.importId,
-              importedArchiveImportedAt: new Date(),
-              importedArchiveRequestHash: requestHash,
-              importedArchiveSubjectId: input.subjectId,
-              importedArchiveNextOffset: payload.events.length,
-              title: payload.title,
-              titleSource: "user",
-              createdAt: new Date(payload.createdAt),
-              status: "idle",
-            })
-            .where(
-              and(
-                eq(schema.sessions.workspaceId, input.workspaceId),
-                eq(schema.sessions.id, sessionId),
-              ),
-            );
-          committedEvents = await appendTimeline(createTx, input, sessionId, 0, payload.events);
-        },
-      }).catch((error: unknown) => {
-        if (error instanceof SessionCreateIdempotencyUnavailableError) {
-          throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
-        }
-        if (error instanceof SessionCreateIdempotencyConflictError) {
-          throw new ArchivedSessionImportError("SESSION_IMPORT_CONFLICT");
-        }
-        throw error;
-      });
+          if (dependencies.isCreateConflict(error)) {
+            throw new ArchivedSessionImportError("SESSION_IMPORT_CONFLICT");
+          }
+          throw error;
+        });
       if (result.denied) throw new ArchivedSessionImportError("SESSION_IMPORT_CONFLICT");
       // The ordinary create seam maps its INSERT RETURNING row. Re-read the
       // marker and canonical event cursor written by beforeCreateCommit.
-      const session = await getSession(tx, input.workspaceId, result.session.id);
+      const session = await dependencies.getSession(tx, input.workspaceId, result.session.id);
       if (!session) throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
       const [marker] = await tx
         .select({ nextOffset: schema.sessions.importedArchiveNextOffset })
@@ -382,7 +446,7 @@ export async function importArchivedSession(
   );
 }
 
-export async function appendArchivedSessionEvents(
+async function appendArchivedSessionEvents(
   db: Database,
   input: ImportScope & {
     importId: string;
@@ -391,6 +455,7 @@ export async function appendArchivedSessionEvents(
      * and mutable database authority are verified again after the prefix. */
     sessionId: string;
   },
+  dependencies: ArchivedImportDependencies,
 ): Promise<{
   sessionId: string;
   importId: string;
@@ -420,7 +485,7 @@ export async function appendArchivedSessionEvents(
       ) {
         throw new ArchivedSessionImportError("SESSION_IMPORT_NOT_FOUND");
       }
-      await revalidateImporter(tx, input);
+      await revalidateImporter(tx, input, dependencies);
       const [existing] = await rawRows<{ requestHash: string; nextOffset: number }>(
         tx,
         sql`select request_hash as "requestHash", next_offset as "nextOffset"
@@ -446,7 +511,7 @@ export async function appendArchivedSessionEvents(
       ) {
         throw new ArchivedSessionImportError("SESSION_IMPORT_OFFSET_CONFLICT");
       }
-      await validateFiles(tx, input, payload.events);
+      await validateFiles(tx, input, payload.events, dependencies);
       const events = await appendTimeline(
         tx,
         input,

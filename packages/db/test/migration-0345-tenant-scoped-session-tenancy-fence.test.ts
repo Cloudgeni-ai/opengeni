@@ -67,6 +67,7 @@ const directHotMutatorInventory = [
   "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
   "opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)",
   "opengeni_private.reap_stale_interaction_transitions(bigint)",
+  "opengeni_private.record_archived_session_import_batch(uuid,uuid,uuid,text,text,text,text,integer,integer)",
   "opengeni_private.request_due_sandbox_rotations(bigint,integer)",
   "organization_membership_command(jsonb)",
   "organization_membership_command_0263(jsonb)",

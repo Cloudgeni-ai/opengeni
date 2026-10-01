@@ -78,6 +78,14 @@ test("real non-bypass owner migrates receipts while all original source policies
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
+    // Current adapters need nullable reader fields, not the deferred import
+    // lifecycle. Remove these before the real ordered migration replay.
+    await owner`ALTER TABLE sessions
+      ADD COLUMN imported_archive_import_id text,
+      ADD COLUMN imported_archive_imported_at timestamptz,
+      ADD COLUMN imported_archive_request_hash text,
+      ADD COLUMN imported_archive_subject_id text,
+      ADD COLUMN imported_archive_next_offset integer`;
     await owner`delete from schema_migrations where name >= ${repair}`;
     const [role] =
       await owned.admin`select rolsuper,rolbypassrls from pg_roles where rolname=${owned.ownerRole}`;
@@ -215,6 +223,12 @@ test("real non-bypass owner migrates receipts while all original source policies
     expect(before.some((row) => row.polname === "organization_usage_expected_visibility")).toBe(
       false,
     );
+    await owner`ALTER TABLE sessions
+      DROP COLUMN imported_archive_import_id,
+      DROP COLUMN imported_archive_imported_at,
+      DROP COLUMN imported_archive_request_hash,
+      DROP COLUMN imported_archive_subject_id,
+      DROP COLUMN imported_archive_next_offset`;
     await migrate(owned.ownerUrl);
     expect([...(await snapshot())]).toEqual([...before]);
     const [backfill] =

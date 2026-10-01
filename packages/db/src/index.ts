@@ -656,7 +656,24 @@ export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
-export * from "./archived-session-imports";
+import { createArchivedSessionImportPersistence } from "./archived-session-imports";
+export {
+  ArchivedSessionImportError,
+  assertSessionIsNotImported,
+  canonicalArchivedSessionImportHash,
+  archivedSessionImportFileIds,
+  getArchivedSessionImportId,
+  type ArchivedSessionImportErrorCode,
+} from "./archived-session-imports";
+export const { importArchivedSession, appendArchivedSessionEvents } =
+  createArchivedSessionImportPersistence({
+    createSessionWithIdempotencyKeyResult,
+    getFilesForSubject,
+    getSession,
+    getWorkspaceGrant,
+    isCreateConflict: (error) => error instanceof SessionCreateIdempotencyConflictError,
+    isCreateUnavailable: (error) => error instanceof SessionCreateIdempotencyUnavailableError,
+  });
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
 export * from "./session-realtime";

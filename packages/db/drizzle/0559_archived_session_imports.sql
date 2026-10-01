@@ -92,6 +92,9 @@ BEGIN
     OR p_offset::bigint+p_count>2147483647 OR p_batch IS NULL OR octet_length(p_batch) NOT BETWEEN 1 AND 800
     OR p_hash IS NULL OR p_hash !~ '^[0-9a-f]{64}$'
   THEN RAISE EXCEPTION 'invalid import batch' USING ERRCODE='22023'; END IF;
+  -- Direct capability callers must own the tenancy fence before row locks,
+  -- even when the application import transaction already holds it.
+  PERFORM acquire_session_tenancy_fence(p_workspace);
   SELECT imported_archive_next_offset INTO archive_offset FROM sessions
     WHERE account_id=p_account AND workspace_id=p_workspace AND id=p_session
       AND imported_archive_import_id=p_import AND imported_archive_subject_id=p_subject
