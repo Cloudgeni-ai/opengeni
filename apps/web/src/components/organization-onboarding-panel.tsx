@@ -449,6 +449,7 @@ export function OrganizationOnboardingPanel({
       <ModelAccessOnboardingPanel
         client={client}
         organizationId={createdSetup.organizationId}
+        organizationName={organizationName.trim() || undefined}
         workspaceId={createdSetup.personalWorkspaceId}
         billingMode={billingMode}
         codexEnabled={codexEnabled}

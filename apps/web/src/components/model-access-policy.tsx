@@ -189,7 +189,9 @@ export function useModelAccessPolicy(workspaceId: string) {
 export type ModelAccessPolicyState = ReturnType<typeof useModelAccessPolicy>;
 
 /** The current value, short, for the Allowed models row: "All models", "3 models". */
-export function allowedModelsSummary(state: ModelAccessPolicyState): string {
+export function allowedModelsSummary(
+  state: Pick<ModelAccessPolicyState, "saved" | "models">,
+): string {
   const draft = state.saved;
   if (!draft) return "";
   if (draft.mode === "unrestricted") return "All models";

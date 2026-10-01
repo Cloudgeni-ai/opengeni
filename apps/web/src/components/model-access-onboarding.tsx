@@ -1,12 +1,13 @@
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { labelReasoningEffort } from "@opengeni/react";
-import type { CodexConnectPoll } from "@opengeni/sdk";
+import type { CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
+import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -95,10 +96,17 @@ function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string
  * purchase is an optional upgrade. Connecting a model updates the
  * actor-private new-chat draft so the next chat preselects that model. Leaving
  * remains available; this does not change the 0348 API.
+ *
+ * The person here just created the organization, so a subscription (Codex,
+ * SuperGrok) connects for everyone in it, and reaches their Personal
+ * workspace through the organization. API keys stay in the Personal
+ * workspace: the organization's keys serve shared workspaces only, so an
+ * organization key would not pay for the next chat.
  */
 export function ModelAccessOnboardingPanel({
   client,
   organizationId,
+  organizationName,
   workspaceId,
   billingMode = "disabled",
   codexEnabled = false,
@@ -109,6 +117,8 @@ export function ModelAccessOnboardingPanel({
 }: {
   client?: OpenGeniBrowserClient;
   organizationId: string;
+  /** The new organization's name, for "Shared with everyone in Acme". */
+  organizationName?: string | undefined;
   workspaceId: string;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
@@ -207,13 +217,24 @@ export function ModelAccessOnboardingPanel({
     let verificationUri: string;
     const controller = new AbortController();
     try {
+      // Subscriptions connect for the whole organization (its creator is its
+      // owner); the Personal workspace uses the organization's accounts.
       if (kind === "codex") {
-        const start = await client.codexConnectStart(workspaceId);
+        const start = await client.requestJson<CodexConnectStart>(
+          "POST",
+          `/v1/organizations/${organizationId}/codex/connect/start`,
+          {},
+        );
         verificationUri = start.verificationUri;
         setPending({ kind, userCode: start.userCode, verificationUri });
         begin = () =>
           pollDeviceAuthorization<CodexConnectPoll>({
-            poll: () => client.codexConnectPoll(workspaceId, start.state),
+            poll: () =>
+              client.requestJson<CodexConnectPoll>(
+                "POST",
+                `/v1/organizations/${organizationId}/codex/connect/poll`,
+                { state: start.state },
+              ),
             expired: { status: "expired" },
             initialIntervalSeconds: Math.max(2, start.intervalSeconds),
             expiresAtMs: Date.now() + CODEX_DEVICE_CODE_TTL_MS,
@@ -221,12 +242,12 @@ export function ModelAccessOnboardingPanel({
             retryable: isRetryableDevicePollError,
           });
       } else {
-        const start = await client.supergrokConnectStart(workspaceId, "user");
+        const start = await client.organizationSupergrokConnectStart(organizationId);
         verificationUri = start.verificationUriComplete ?? start.verificationUri;
         setPending({ kind, userCode: start.userCode, verificationUri });
         begin = () =>
           pollSuperGrokDeviceLogin({
-            poll: () => client.supergrokConnectPoll(workspaceId, start.state),
+            poll: () => client.organizationSupergrokConnectPoll(organizationId, start.state),
             initialIntervalSeconds: start.intervalSeconds,
             expiresAtMs: Date.now() + start.expiresInSeconds * 1_000,
             signal: controller.signal,
@@ -251,8 +272,8 @@ export function ModelAccessOnboardingPanel({
       if (result.status === "connected") {
         toast.success(
           kind === "codex"
-            ? `Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`
-            : "SuperGrok connected",
+            ? `Codex connected for ${organizationName || "your organization"}${result.plan ? ` (${result.plan} plan)` : ""}`
+            : `SuperGrok connected for ${organizationName || "your organization"}`,
         );
         // Hold the leave buttons until the connected model is the next-chat selection.
         setBusy(true);
@@ -346,31 +367,32 @@ export function ModelAccessOnboardingPanel({
   }
 
   const validAmount = validTopupAmount(topupAmount);
+  const everyone = `everyone in ${organizationName || "your organization"}`;
   const providers = [
     {
       name: "Codex",
-      description: "Use your ChatGPT plan",
+      description: `Use your ChatGPT plan, for ${everyone}`,
       action: () => void startDeviceLogin("codex"),
       analytics: "connect_codex" as const,
       disabled: !client,
     },
     {
       name: "SuperGrok",
-      description: "Use your xAI subscription",
+      description: `Use your xAI subscription, for ${everyone}`,
       action: () => void startDeviceLogin("supergrok"),
       analytics: "connect_supergrok" as const,
       disabled: !client,
     },
     {
       name: "Vercel AI Gateway",
-      description: "Use your own API key",
+      description: "Use your own API key, in your Personal workspace",
       action: () => toggleKeyProvider("gateway"),
       analytics: "connect_ai_gateway" as const,
       key: "gateway",
     },
     {
       name: "OpenRouter",
-      description: "Use your own API key",
+      description: "Use your own API key, in your Personal workspace",
       action: () => toggleKeyProvider("openrouter"),
       analytics: "connect_openrouter" as const,
       key: "openrouter",
@@ -382,47 +404,39 @@ export function ModelAccessOnboardingPanel({
   );
 
   const connectOptions = pending ? (
-    <div className="grid gap-4 py-3" role="status">
-      <div>
-        <h3 className="text-sm font-medium">
-          Connect {pending.kind === "codex" ? "Codex" : "SuperGrok"}
-        </h3>
-        <p className="mt-1 text-sm leading-relaxed text-fg-muted">
-          Enter this code on the {pending.kind === "codex" ? "OpenAI" : "xAI"} page we opened in a
-          new tab. This screen updates when you’re connected.
-        </p>
-      </div>
-      <p className="rounded-md bg-bg px-4 py-4 text-center font-mono text-2xl tracking-[0.18em] select-all">
-        {pending.userCode}
-      </p>
-      <Button asChild type="button">
-        <a href={pending.verificationUri} target="_blank" rel="noreferrer">
-          Open authorization <ArrowUpRightIcon className="size-4" />
-        </a>
-      </Button>
-      {pending.kind === "codex" ? (
-        <p className="text-xs leading-relaxed text-fg-muted">
-          Device code login must be turned on in ChatGPT under Settings → Security. On Business or
-          Enterprise plans, a workspace admin has to allow it.{" "}
-          <a
-            className="font-medium text-fg underline underline-offset-2"
-            href={CHATGPT_SECURITY_SETTINGS_URL}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open ChatGPT security settings
-          </a>
-        </p>
-      ) : null}
-      <p className="flex items-center justify-center gap-2 text-xs text-fg-subtle">
-        <Loader2Icon className="size-3 animate-spin motion-reduce:animate-none" /> Waiting for
-        authorization
-      </p>
+    <div className="grid gap-4 py-3">
+      <h3 className="m-0 text-sm font-medium text-fg">
+        Connect {pending.kind === "codex" ? "Codex" : "SuperGrok"}
+      </h3>
+      <SubscriptionDeviceCodePanel
+        provider={pending.kind}
+        userCode={pending.userCode}
+        verificationUri={pending.verificationUri}
+        onCopyResult={(copied) =>
+          copied
+            ? toast.success("Code copied")
+            : toast.error("Couldn't copy the code", { description: "Copy it manually instead." })
+        }
+      />
       {pendingSlow ? (
         <Notice tone="waiting" title="Still waiting?">
-          {pending.kind === "codex"
-            ? "Check that you entered the code exactly as shown and approved access. If ChatGPT says device code login is disabled, turn it on under Settings → Security (or ask your workspace admin), then cancel and try again."
-            : "Check that you entered the code exactly as shown and approved access on the xAI page. If the code expired, cancel and try again."}
+          {pending.kind === "codex" ? (
+            <>
+              Check that you entered the code exactly as shown. If ChatGPT says device code login is
+              off, turn it on in ChatGPT under Settings, Security (on Business and Enterprise plans
+              a ChatGPT admin allows it), then cancel and try again.{" "}
+              <a
+                className="font-medium text-fg underline underline-offset-2"
+                href={CHATGPT_SECURITY_SETTINGS_URL}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open ChatGPT security settings
+              </a>
+            </>
+          ) : (
+            "Check that you entered the code exactly as shown and approved access on the xAI page. If the code expired, cancel and try again."
+          )}
         </Notice>
       ) : null}
       <Button type="button" variant="ghost" onClick={stopDeviceLogin}>
