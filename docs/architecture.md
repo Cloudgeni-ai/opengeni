@@ -602,8 +602,7 @@ Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ## 4. System architecture
 
-OpenGeni separates durable control from live transport and separates control
-plane processes from the place where user code runs.
+OpenGeni separates durable control, live transport, and user-code execution.
 
 ```mermaid
 flowchart LR
@@ -653,8 +652,8 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 ### 4.1 Request and event path
 
-1. A client calls `apps/api`. Middleware establishes the deployment perimeter,
-   observability context, authentication, workspace, and permissioned grant.
+1. `apps/api` middleware establishes deployment perimeter, observability context,
+   authentication, workspace, and permissioned grant.
 2. HTTP routes adapt the request into `@opengeni/core` domain operations.
 3. The domain operation validates the request and commits authoritative rows,
    events, queue/control state, audit facts, and workflow-wake intent in
@@ -676,8 +675,8 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 ### 4.2 Control path versus data path
 
-The API, Postgres, Temporal, and worker form the durable control plane. NATS
-session fanout is a live projection of that control state. Connected Machine
+API, Postgres, Temporal, and worker own durable control; NATS session fanout
+projects that state. Connected Machine
 commands also cross NATS, but authorization and durable ownership are decided
 before transport. Direct browser data planes are established only from a
 short-lived API-authorized grant and never become an independent source of
@@ -699,8 +698,7 @@ the public transport surface is in [`../packages/sdk/README.md`](../packages/sdk
 
 ### 4.3 Dependency direction
 
-At a high level, dependencies flow inward from process adapters toward stable
-contracts and domain boundaries:
+Process adapters depend on contracts and domain boundaries:
 
 ```text
 contracts / config / network
@@ -714,13 +712,14 @@ apps/api and apps/worker
 contracts → sdk → react → apps/web
 ```
 
-The client closure stays server-free: `apps/web` consumes the SDK and React
-packages and owns no session or authorization semantics. Hosts embedding
-API/core/worker packages keep the same boundaries.
+Server-free clients: `apps/web` consumes SDK/React, never owning session/authorization
+semantics. Embedded API/core/worker hosts preserve these boundaries.
 
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
-Workspace management routes: `apps/web/src/lib/workspace-management-location.ts`; the settings shell (`components/settings/workspace-settings-shell.tsx`) loads lazily, only for management destinations.
+Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
+shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
+destinations.
 
 ---
 
@@ -1396,7 +1395,7 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
-React root exports stay optional-peer-free; workbench subpaths register peer loaders
+React root stays optional-peer-free; workbench subpaths register peer loaders
 (`packages/react/src/lib/workbench-peers.ts`, `scripts/react-root-package-contract.test.ts`).
 
 `ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share console/embed

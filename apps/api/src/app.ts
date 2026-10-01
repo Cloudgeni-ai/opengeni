@@ -20,12 +20,9 @@ import { registerModelConnectionAccessRoutes } from "./routes/model-connection-a
 import {
   codeSearchDeploymentPolicy,
   agentConfigDeploymentPolicy,
-  configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
-  withCodexCatalogProvider,
-  withXaiSubscriptionCatalogProvider,
   type Settings,
 } from "@opengeni/config";
 import {
