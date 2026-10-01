@@ -161,7 +161,6 @@ function OperationalWorkspaceSettingsRoute({
   );
   // Connections change on Organization > Models now; General reads them fresh on open.
   const gatewayRevision = 0;
-  const navigate = useNavigate();
   // The organization integration routes' rule: an administrator in a managed or
   // single-user session.
   const canManageOrganizationIntegrations =
