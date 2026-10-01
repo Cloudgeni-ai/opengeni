@@ -11,12 +11,9 @@ import { Manifest } from "@openai/agents/sandbox";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import {
-  Sandbox,
-  CommandStartPreDispatchUnavailableError,
-  CommandStartOutcomeUnknownError,
-} from "modal";
+import { Sandbox, CommandStartPreDispatchUnavailableError } from "modal";
 import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
+import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
 import {
   ModalCommandRouterWire,
   modalRouterWire,
@@ -276,11 +273,11 @@ test("native capability/control/materialization Starts also contain ambiguous gR
   } as const;
   try {
     const capability = await control.verifySupervisionCapability().catch((error) => error);
-    expect(capability).toBeInstanceOf(CommandStartOutcomeUnknownError);
+    expect(capability).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
     const controlFailure = await control
       .supervisionControl(command as never, "status")
       .catch((error) => error);
-    expect(controlFailure).toBeInstanceOf(CommandStartOutcomeUnknownError);
+    expect(controlFailure).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
     const pending = new Set<AbortController>();
     const probe = await verifyModalMaterializedPath(control, "dir", "/workspace", pending).catch(
       (error) => error,

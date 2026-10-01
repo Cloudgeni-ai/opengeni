@@ -5,7 +5,6 @@ import {
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
 import type { SandboxDirectoryEntry } from "@openai/agents/sandbox";
-import { createRequire } from "node:module";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -22,11 +21,8 @@ import {
 } from "./modal-command-router-wire";
 import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
-import {
-  CommandStartPreDispatchUnavailableError,
-  CommandStartOutcomeUnknownError,
-  type ModalClient,
-} from "modal";
+import type { ModalClient } from "modal";
+import { hasModalCommandStartBoundary } from "./modal-command-start-errors";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -224,9 +220,6 @@ const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
 const MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH = 8;
 const MODAL_TASK_EXEC_START_ERROR_MAX_NODES = 64;
 const MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS = 32;
-// The pinned SDK ships ESM and CJS constructors. Accept either genuine local
-// boundary type, never names/details supplied by a server or diagnostic text.
-const modalCjsStartErrors = createRequire(import.meta.url)("modal") as typeof import("modal");
 
 function modalHttpStatus(value: unknown): number | null {
   if (typeof value !== "number" && typeof value !== "string") return null;
@@ -274,11 +267,7 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
     try {
       const record = current.value as Record<string, unknown>;
       if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
-      if (
-        current.value instanceof CommandStartOutcomeUnknownError ||
-        current.value instanceof modalCjsStartErrors.CommandStartOutcomeUnknownError
-      )
-        return false;
+      if (hasModalCommandStartBoundary(current.value, "outcome-unknown")) return false;
       if (current.value instanceof ModalCommandStartNotDispatchedError) return false;
       if (hasContradictoryModalHttpStatus(record)) return false;
 
@@ -286,8 +275,7 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
       // Start dispatch; an RPC's own status or details never enters this path.
       if (
         current.value instanceof ModalCommandStartPreDispatchUnavailableError ||
-        current.value instanceof CommandStartPreDispatchUnavailableError ||
-        current.value instanceof modalCjsStartErrors.CommandStartPreDispatchUnavailableError
+        hasModalCommandStartBoundary(current.value, "pre-dispatch-unavailable")
       ) {
         matchingLeaves += 1;
         continue;
@@ -338,11 +326,7 @@ export function isModalCommandStartOutcomeUnknownError(error: unknown): boolean 
     const { depth, value } = pending.shift()!;
     if (!value || typeof value !== "object" || seen.has(value)) continue;
     seen.add(value);
-    if (
-      value instanceof CommandStartOutcomeUnknownError ||
-      value instanceof modalCjsStartErrors.CommandStartOutcomeUnknownError
-    )
-      return true;
+    if (hasModalCommandStartBoundary(value, "outcome-unknown")) return true;
     if (depth >= MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH) continue;
     try {
       const record = value as Record<string, unknown>;

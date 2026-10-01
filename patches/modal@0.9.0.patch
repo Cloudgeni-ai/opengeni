@@ -11,7 +11,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    App: () => App,
    AppService: () => AppService,
    ClientClosedError: () => ClientClosedError,
-@@ -61888,6 +61890,20 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
+@@ -61888,6 +61890,22 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
      }
    }
  }
@@ -19,12 +19,14 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
 +  constructor(cause) {
 +    super("Modal command router was not ready before Start dispatch", { cause });
 +    this.name = "CommandStartPreDispatchUnavailableError";
++    Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.boundary.v1"), { value: "pre-dispatch-unavailable" });
 +  }
 +};
 +var CommandStartOutcomeUnknownError = class extends Error {
 +  constructor(taskId, execId, cause) {
 +    super("Modal command Start outcome unknown; do not replay this invocation", { cause });
 +    this.name = "CommandStartOutcomeUnknownError";
++    Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.boundary.v1"), { value: "outcome-unknown" });
 +    this.taskId = taskId;
 +    this.execId = execId;
 +  }
@@ -32,7 +34,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
  var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    stub;
    channel;
-@@ -61900,6 +61916,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61900,6 +61918,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    jwtExp;
    jwtRefreshLock = Promise.resolve();
    logger;
@@ -40,7 +42,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    closed = false;
    static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
      let resp;
-@@ -61928,14 +61945,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61928,14 +61947,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "url",
        resp.url
      );
@@ -90,7 +92,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        "grpc.max_receive_message_length": 100 * 1024 * 1024,
        "grpc.max_send_message_length": 100 * 1024 * 1024,
        "grpc-node.flow_control_window": 64 * 1024 * 1024,
-@@ -61944,8 +61994,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61944,8 +61996,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "grpc.keepalive_permit_without_calls": 1
      };
      let channel;
@@ -101,7 +103,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          "Using insecure TLS (skip certificate verification) for task command router"
        );
        channel = (0, import_nice_grpc11.createChannel)(
-@@ -61960,40 +62010,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61960,40 +62012,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
          channelConfig
        );
      }
@@ -146,7 +148,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    }
    close() {
      if (this.closed) {
-@@ -62018,7 +62044,29 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62018,7 +62046,29 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      );
    }
    async execStart(request) {
@@ -177,7 +179,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    }
    async containerCreate(request) {
      return await this.callUnary(() => this.stub.taskContainerCreate(request));
-@@ -62229,15 +62277,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62229,15 +62279,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        throw err;
      }
    }
@@ -196,7 +198,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
            "task_id",
            this.taskId
          );
-@@ -62250,11 +62298,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62250,11 +62300,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            this.sandboxId,
            this.isV2
          );
@@ -223,7 +225,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        } catch (err) {
          error = err;
        }
-@@ -62265,11 +62326,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62265,11 +62328,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      }
    }
    async callWithAuthRetry(func) {
@@ -237,7 +239,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          return await func();
        }
        throw err;
-@@ -62291,6 +62353,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62291,6 +62355,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      while (true) {
        try {
          const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
@@ -245,7 +247,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          const request = TaskExecStdioReadRequest.create({
            taskId,
            execId,
-@@ -62312,7 +62375,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62312,7 +62377,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            return;
          } catch (err) {
            if (err instanceof import_nice_grpc11.ClientError && err.code === import_nice_grpc11.Status.UNAUTHENTICATED && !didAuthRetry) {
@@ -254,7 +256,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
              didAuthRetry = true;
              continue;
            }
-@@ -64396,7 +64459,16 @@ var Sandbox2 = class _Sandbox {
+@@ -64396,7 +64461,16 @@ var Sandbox2 = class _Sandbox {
        env: envDict,
        secrets: resolvableSecrets
      };
@@ -272,7 +274,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
      const execId = (0, import_uuid2.v4)();
      const request = buildTaskExecStartRequestProto(
        taskId,
-@@ -64658,7 +64730,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64658,7 +64732,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -281,7 +283,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64778,7 +64850,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64778,7 +64852,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -393,7 +395,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
 
  // node_modules/@bufbuild/protobuf/dist/esm/wire/varint.js
  function varint64read() {
-@@ -61816,6 +61816,20 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
+@@ -61816,6 +61816,22 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
      }
    }
  }
@@ -401,12 +403,14 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
 +  constructor(cause) {
 +    super("Modal command router was not ready before Start dispatch", { cause });
 +    this.name = "CommandStartPreDispatchUnavailableError";
++    Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.boundary.v1"), { value: "pre-dispatch-unavailable" });
 +  }
 +};
 +var CommandStartOutcomeUnknownError = class extends Error {
 +  constructor(taskId, execId, cause) {
 +    super("Modal command Start outcome unknown; do not replay this invocation", { cause });
 +    this.name = "CommandStartOutcomeUnknownError";
++    Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.boundary.v1"), { value: "outcome-unknown" });
 +    this.taskId = taskId;
 +    this.execId = execId;
 +  }
@@ -414,7 +418,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
  var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    stub;
    channel;
-@@ -61828,6 +61842,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61828,6 +61844,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    jwtExp;
    jwtRefreshLock = Promise.resolve();
    logger;
@@ -422,7 +426,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
    closed = false;
    static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
      let resp;
-@@ -61856,14 +61871,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61856,14 +61873,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "url",
        resp.url
      );
@@ -472,7 +476,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        "grpc.max_receive_message_length": 100 * 1024 * 1024,
        "grpc.max_send_message_length": 100 * 1024 * 1024,
        "grpc-node.flow_control_window": 64 * 1024 * 1024,
-@@ -61872,8 +61920,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61872,8 +61922,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "grpc.keepalive_permit_without_calls": 1
      };
      let channel;
@@ -483,7 +487,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          "Using insecure TLS (skip certificate verification) for task command router"
        );
        channel = createChannel2(
-@@ -61888,40 +61936,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61888,40 +61938,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
          channelConfig
        );
      }
@@ -528,7 +532,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
    }
    close() {
      if (this.closed) {
-@@ -61946,7 +61970,28 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61946,7 +61972,28 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      );
    }
    async execStart(request) {
@@ -558,7 +562,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
    }
    async containerCreate(request) {
      return await this.callUnary(() => this.stub.taskContainerCreate(request));
-@@ -62157,15 +62202,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62157,15 +62204,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        throw err;
      }
    }
@@ -577,7 +581,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
            "task_id",
            this.taskId
          );
-@@ -62178,11 +62223,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62178,11 +62225,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            this.sandboxId,
            this.isV2
          );
@@ -604,7 +608,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        } catch (err) {
          error = err;
        }
-@@ -62193,11 +62251,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62193,11 +62253,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      }
    }
    async callWithAuthRetry(func) {
@@ -618,7 +622,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          return await func();
        }
        throw err;
-@@ -62219,6 +62278,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62219,6 +62280,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      while (true) {
        try {
          const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
@@ -626,7 +630,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          const request = TaskExecStdioReadRequest.create({
            taskId,
            execId,
-@@ -62240,7 +62300,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62240,7 +62302,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            return;
          } catch (err) {
            if (err instanceof ClientError10 && err.code === Status10.UNAUTHENTICATED && !didAuthRetry) {
@@ -635,7 +639,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
              didAuthRetry = true;
              continue;
            }
-@@ -64324,7 +64384,15 @@ var Sandbox2 = class _Sandbox {
+@@ -64324,7 +64386,15 @@ var Sandbox2 = class _Sandbox {
        env: envDict,
        secrets: resolvableSecrets
      };
@@ -652,7 +656,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
      const execId = uuidv42();
      const request = buildTaskExecStartRequestProto(
        taskId,
-@@ -64586,7 +64654,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64586,7 +64656,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -661,7 +665,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64706,7 +64774,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64706,7 +64776,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -670,7 +674,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        wireTtlSeconds,
        params
      );
-@@ -64915,6 +64983,8 @@ function encodeIfString(chunk) {
+@@ -64915,6 +64985,8 @@ function encodeIfString(chunk) {
  }
  export {
    AlreadyExistsError,

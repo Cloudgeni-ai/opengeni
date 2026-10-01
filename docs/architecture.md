@@ -488,6 +488,9 @@ SDK catch wrappers retain its cause. Server-supplied DNS text and post-dispatch
 errors never prove non-execution. Uncertain Starts become typed outcome-unknown
 results, not transport retries. Supervised retries first settle their exact
 never-started reservation; retained or outcome-unknown causes block recovery.
+Published runtime consumers receive an unpatched Modal SDK. Runtime owns its
+native error class and recognizes SDK boundary errors through a local own-Symbol
+data marker, never patch-only imports, error names, codes, or diagnostic text.
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the

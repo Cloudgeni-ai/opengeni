@@ -12,7 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { Sandbox, CommandStartOutcomeUnknownError } from "modal";
+import { Sandbox } from "modal";
+import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
+import { isModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal";
 import {
   MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
@@ -207,6 +209,7 @@ test("both pinned SDK distributions dispatch ambiguous Start once without transi
           },
         });
         expect(calls - before).toBe(1);
+        expect(isModalCommandStartOutcomeUnknownError(error)).toBe(true);
       } finally {
         sdk.detach();
       }
@@ -309,7 +312,7 @@ test("authenticated Start rejection is typed separately from transport uncertain
       throw new Error("Expected ambiguous failure");
     } catch (error) {
       expect(error).not.toBeInstanceOf(ModalCommandStartRejectedError);
-      expect(error).toBeInstanceOf(CommandStartOutcomeUnknownError);
+      expect(error).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
       expect((error as Error).cause).toMatchObject({ code: status.UNAVAILABLE });
     }
   } finally {

@@ -1,6 +1,6 @@
 import { Client, Metadata, credentials, status, type ServiceError } from "@grpc/grpc-js";
 import protobuf from "protobufjs";
-import { CommandStartOutcomeUnknownError } from "modal";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
 
 // Narrow wire projection of Modal 0.9.0's task_command_router.proto. The public
@@ -238,7 +238,7 @@ export class ModalCommandRouterWire {
         ].includes(code)
       )
         throw new ModalCommandStartRejectedError(code, error);
-      throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error);
+      throw new ModalCommandStartOutcomeUnknownError(request.taskId, request.execId, error);
     }
   }
 

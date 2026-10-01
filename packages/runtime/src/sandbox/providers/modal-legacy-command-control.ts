@@ -1,5 +1,6 @@
 import { posix } from "node:path";
-import { ModalClient, CommandStartOutcomeUnknownError } from "modal";
+import { ModalClient } from "modal";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { status } from "@grpc/grpc-js";
 import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
@@ -225,10 +226,10 @@ export class ModalCommandControl {
           throw new ProviderCommandStartRejectedError(error);
         // Legacy ContainerExec assigns its id in the lost response. There is no
         // safe invocation locator and no authority to issue another launch.
-        throw new CommandStartOutcomeUnknownError(task.taskId!, "", error);
+        throw new ModalCommandStartOutcomeUnknownError(task.taskId!, "", error);
       });
     if (!result.execId)
-      throw new CommandStartOutcomeUnknownError(
+      throw new ModalCommandStartOutcomeUnknownError(
         task.taskId,
         "",
         new Error("Modal command start returned no execution identity"),
