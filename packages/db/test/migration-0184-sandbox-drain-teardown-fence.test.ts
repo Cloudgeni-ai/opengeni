@@ -97,6 +97,9 @@ const withheldMigrationNames = [
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",
+  // Patches the real scheduled binding function from withheld 0275/0414/0461.
+  // Replay it after those prerequisites, rather than inventing a fixture guard.
+  "0561_scheduled_session_agent_identity.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -224,6 +227,17 @@ describe("migration 0184 sandbox drain teardown fence", () => {
         where name = any(${withheldMigrationNames}::text[])
         order by name`;
       expect(receipts.map((receipt) => receipt.name)).toEqual(withheldMigrationNames);
+
+      const [scheduledFence] = await sql<Array<{ definition: string }>>`
+        select pg_get_functiondef(
+          'fence_scheduled_task_run_connection_session_identity()'::regprocedure
+        ) as definition`;
+      expect(scheduledFence!.definition).toContain("'_opengeni_session_create_agent_config_v1'");
+      expect(scheduledFence!.definition).toContain("accepted ->> 'resolvedAgentInstructions'");
+      expect(scheduledFence!.definition).toContain("session_row.agent_config IS DISTINCT FROM");
+      expect(scheduledFence!.definition).toContain(
+        "nullif(accepted -> 'resolvedAgentConfig', 'null'::jsonb)",
+      );
 
       const [backfilled] = await sql<
         Array<{
