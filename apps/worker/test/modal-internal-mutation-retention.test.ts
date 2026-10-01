@@ -423,7 +423,7 @@ test.each([
     expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(
       failureKind !== "aggregate index getter",
     );
-    expect(failure.retainedProcess).toBeUndefined();
+    expect(failure.retainedProcess).toBeNull();
     await expect(fixture.sandbox.release({ workspaceWritersQuiesced: true })).rejects.toThrow(
       "still outcome-unknown",
     );
