@@ -64,6 +64,7 @@
       {
         "group": "Guides",
         "pages": [
+          "guides/developer-plugin",
           "guides/self-host",
           "run-locally",
           "guides/connect-a-machine",

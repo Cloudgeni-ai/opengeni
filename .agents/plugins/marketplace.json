@@ -1,0 +1,12 @@
+{
+  "name": "opengeni-developer-plugins",
+  "interface": { "displayName": "OpenGeni Developer Plugins" },
+  "plugins": [
+    {
+      "name": "opengeni-developer",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}
