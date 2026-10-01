@@ -2,4 +2,4 @@
 "@opengeni/jev": patch
 ---
 
-`code_search` results now end with `(engine scout-0.4.1)`, so packs from the build with the change-together ordering fix can be told apart from scout-0.4.0.
+`code_search` lets a second passage of a file compete without the file-diversity penalty, so a large file with several strong regions is no longer cut down to one or two passages in favour of weaker passages from other files. Results now end with `(engine scout-0.4.1)`.
