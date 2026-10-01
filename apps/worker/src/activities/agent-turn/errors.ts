@@ -394,6 +394,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (input.sandboxSetupOutcomeUnknown && input.providerRecovery) return null;
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
