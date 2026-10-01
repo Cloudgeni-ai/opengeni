@@ -155,7 +155,22 @@ try {
     ),
     writeFile(
       join(consumerRoot, "probe.mjs"),
-      'import { createRequire } from "node:module";\nimport { extractResponseOutputText } from "@opengeni/runtime";\nconst require = createRequire(import.meta.url);\nconst rootZod = require("zod/package.json").version;\nif (!rootZod.startsWith("3.")) throw new Error(`expected host Zod 3, got ${rootZod}`);\nif (typeof extractResponseOutputText !== "function") throw new Error("runtime export missing");\nconsole.log(`RUNTIME_EMBED_OK root_zod=${rootZod}`);\n',
+      [
+        'import { createRequire } from "node:module";',
+        'import * as modal from "modal";',
+        'import { extractResponseOutputText, isModalTaskExecStartPreDispatchUnavailableError, isModalCommandStartOutcomeUnknownError } from "@opengeni/runtime";',
+        "const require = createRequire(import.meta.url);",
+        'const rootZod = require("zod/package.json").version;',
+        'if (!rootZod.startsWith("3.")) throw new Error(`expected host Zod 3, got ${rootZod}`);',
+        'if (typeof extractResponseOutputText !== "function") throw new Error("runtime export missing");',
+        'if ("CommandStartOutcomeUnknownError" in modal || "CommandStartPreDispatchUnavailableError" in modal) throw new Error("consumer must exercise the unpatched Modal SDK");',
+        'for (const name of ["CommandStartOutcomeUnknownError", "CommandStartPreDispatchUnavailableError"]) {',
+        '  const spoof = Object.assign(new Error("DNS-shaped server error"), { name, code: 14 });',
+        '  if (isModalTaskExecStartPreDispatchUnavailableError(spoof) || isModalCommandStartOutcomeUnknownError(spoof)) throw new Error("unpatched SDK error-name spoof was classified as local proof");',
+        "}",
+        "console.log(`RUNTIME_EMBED_OK root_zod=${rootZod} unpatched_modal=true`);",
+        "",
+      ].join("\n"),
     ),
   ]);
 

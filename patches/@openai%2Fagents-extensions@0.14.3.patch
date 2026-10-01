@@ -528,3 +528,131 @@ index 41969fcc87d854f799f4819442f863ad4b8c4f5a..e067e448504e7d9bb842942d977082f9
  }
  async function createRunloopClient(options) {
      try {
+diff --git a/dist/sandbox/shared/archive.js b/dist/sandbox/shared/archive.js
+index 13a17fcac4b66359e245e14b51512a09a7ef08a0..becf1b0a0458e283bf492a5295005f6f729ffda1 100644
+--- a/dist/sandbox/shared/archive.js
++++ b/dist/sandbox/shared/archive.js
+@@ -70,12 +70,12 @@ async function persistRemoteWorkspaceTar(args) {
+         if (error instanceof sandbox_1.SandboxArchiveError) {
+             throw error;
+         }
+-        throw new sandbox_1.SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
++        throw Object.assign(new sandbox_1.SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+@@ -120,12 +120,12 @@ async function hydrateRemoteWorkspaceTar(args) {
+         if (error instanceof sandbox_1.SandboxArchiveError) {
+             throw error;
+         }
+-        throw new sandbox_1.SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
++        throw Object.assign(new sandbox_1.SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+diff --git a/dist/sandbox/shared/archive.mjs b/dist/sandbox/shared/archive.mjs
+index d462054fd897417c24134de99993db8d31985a00..70f0842ee767254eef6a85314e13f707d4e98454 100644
+--- a/dist/sandbox/shared/archive.mjs
++++ b/dist/sandbox/shared/archive.mjs
+@@ -60,12 +60,12 @@ export async function persistRemoteWorkspaceTar(args) {
+         if (error instanceof SandboxArchiveError) {
+             throw error;
+         }
+-        throw new SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
++        throw Object.assign(new SandboxArchiveError(`${args.providerName} failed to persist the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+@@ -110,12 +110,12 @@ export async function hydrateRemoteWorkspaceTar(args) {
+         if (error instanceof SandboxArchiveError) {
+             throw error;
+         }
+-        throw new SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
++        throw Object.assign(new SandboxArchiveError(`${args.providerName} failed to hydrate the workspace archive.`, {
+             provider: args.providerName,
+             root,
+             archivePath,
+             cause: error instanceof Error ? error.message : String(error),
+-        });
++        }), { cause: error });
+     }
+     finally {
+         await args.io
+diff --git a/dist/sandbox/shared/session.js b/dist/sandbox/shared/session.js
+index d6698518838dcab5f7a4b8843e1da5f6eacbf654..dc9d760fa417f85bb70f6af330a675c6850fd731 100644
+--- a/dist/sandbox/shared/session.js
++++ b/dist/sandbox/shared/session.js
+@@ -20,7 +20,7 @@ async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+         await session.close();
+     }
+     catch (closeError) {
+-        throw new agents_core_1.UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`);
++        throw Object.assign(new agents_core_1.UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`), { cause: new AggregateError([manifestError, closeError], 'Sandbox manifest application and close both failed') });
+     }
+     throw manifestError;
+ }
+@@ -59,14 +59,14 @@ async function withProviderError(providerName, provider, operation, fn, context
+         }
+         const cause = providerErrorMessage(error);
+         const retryable = providerErrorRetryability(error);
+-        throw new sandbox_1.SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
++        throw Object.assign(new sandbox_1.SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
+             provider,
+             operation,
+             ...context,
+             ...providerErrorDetails(error),
+             retryable,
+             cause,
+-        });
++        }), { cause: error });
+     }
+ }
+ function isProviderSandboxNotFoundError(error) {
+diff --git a/dist/sandbox/shared/session.mjs b/dist/sandbox/shared/session.mjs
+index b3cf905259abeca724c282ebd16b725a7b10e0f9..fe0faaba628d168f6e56f6840f21d35310d9af32 100644
+--- a/dist/sandbox/shared/session.mjs
++++ b/dist/sandbox/shared/session.mjs
+@@ -7,7 +7,7 @@ export async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+         await session.close();
+     }
+     catch (closeError) {
+-        throw new UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`);
++        throw Object.assign(new UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`), { cause: new AggregateError([manifestError, closeError], 'Sandbox manifest application and close both failed') });
+     }
+     throw manifestError;
+ }
+@@ -46,14 +46,14 @@ export async function withProviderError(providerName, provider, operation, fn, c
+         }
+         const cause = providerErrorMessage(error);
+         const retryable = providerErrorRetryability(error);
+-        throw new SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
++        throw Object.assign(new SandboxProviderError(`${providerName} failed to ${operation}${cause ? `: ${cause}` : ''}`, {
+             provider,
+             operation,
+             ...context,
+             ...providerErrorDetails(error),
+             retryable,
+             cause,
+-        });
++        }), { cause: error });
+     }
+ }
+ export function isProviderSandboxNotFoundError(error) {

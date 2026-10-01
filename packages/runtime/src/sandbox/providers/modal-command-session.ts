@@ -42,15 +42,39 @@ export function installModalCommandSession(
     execCommand?: ChannelASession["execCommand"];
     writeStdin?: ChannelASession["writeStdin"];
     verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
+    verifyExecReadiness?: (signal: AbortSignal) => Promise<number>;
   },
   control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write"> &
-    Partial<Pick<ModalCommandControl, "supervisionControl" | "verifySupervisionCapability">>,
+    Partial<
+      Pick<
+        ModalCommandControl,
+        "supervisionControl" | "verifySupervisionCapability" | "verifyExecReadiness"
+      >
+    >,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
   const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
+  if (control.verifyExecReadiness) {
+    const verify = control.verifyExecReadiness.bind(control);
+    session.verifyExecReadiness = async (signal: AbortSignal) => {
+      const cancellation = new AbortController();
+      const abort = () => cancellation.abort(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      pendingStarts.add(cancellation);
+      try {
+        const exit = await verify(cancellation.signal);
+        cancellation.signal.throwIfAborted();
+        return exit;
+      } finally {
+        signal.removeEventListener("abort", abort);
+        pendingStarts.delete(cancellation);
+      }
+    };
+  }
   session.verifyCommandSupervisionCapability = async () => {
     if (!control.verifySupervisionCapability)
       throw new Error("Modal instance lacks supervised command capability verification");

@@ -5496,6 +5496,208 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(row?.refcount).toBe(2);
   });
 
+  test("deployment repin between turns preserves warm group image until the cold successor election", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const base = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      backend: "modal",
+      imagePolicy: "new_creates_only" as const,
+      leaseTtlMs: 45_000,
+    };
+    const first = await acquireLease(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-1",
+      image: "pin-A",
+    });
+    expect(first).toMatchObject({ role: "spawner", lease: { image: "pin-A" } });
+    const committed = await commitWarmingToWarm(db, {
+      ...base,
+      expectedEpoch: first.lease.leaseEpoch,
+      instanceId: "sb-pin-A",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-pin-A" } },
+      },
+    });
+    expect(committed.committed).toBe(true);
+    const epoch = committed.lease!.leaseEpoch;
+    await acquireLease(db, {
+      ...base,
+      kind: "viewer",
+      holderId: "keeper",
+      image: "pin-A",
+    });
+    await releaseLeaseHolder(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-1",
+      idleGraceMs: 45_000,
+    });
+
+    // The deployment pin changes while no turn runs, but a viewer holds the box.
+    const second = await acquireLease(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-2",
+      image: "pin-B",
+    });
+    expect(second).toMatchObject({
+      role: "attached",
+      lease: {
+        image: "pin-A",
+        instanceId: "sb-pin-A",
+        leaseEpoch: epoch,
+        rotationRequestedAt: null,
+        refcount: 2,
+        resumeState: committed.lease!.resumeState,
+      },
+    });
+    const direct = await acquireLease(db, {
+      ...base,
+      kind: "direct",
+      holderId: "direct-after-repin",
+      image: "pin-B",
+    });
+    expect(direct).toMatchObject({ role: "attached", lease: { image: "pin-A" } });
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "stale-epoch",
+        image: "pin-B",
+        expectedEpoch: epoch + 1,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "superseded" });
+
+    // New groups use the new pin immediately, independently of the warm group.
+    expect(
+      await acquireLease(db, {
+        ...base,
+        sandboxGroupId: crypto.randomUUID(),
+        kind: "turn",
+        holderId: "new-group",
+        image: "pin-B",
+      }),
+    ).toMatchObject({ role: "spawner", lease: { image: "pin-B" } });
+
+    for (const [kind, holderId] of [
+      ["turn", "turn-2"],
+      ["direct", "direct-after-repin"],
+      ["viewer", "keeper"],
+    ] as const) {
+      await releaseLeaseHolder(db, { ...base, kind, holderId, idleGraceMs: 45_000 });
+    }
+    // An idle-grace arrival re-arms the same provider, not the newly selected pin.
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "turn-3",
+        image: "pin-B",
+      }),
+    ).toMatchObject({
+      role: "rearmed",
+      lease: { image: "pin-A", instanceId: "sb-pin-A", leaseEpoch: epoch },
+    });
+    await releaseLeaseHolder(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-3",
+      idleGraceMs: 45_000,
+    });
+    const captureId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        ...base,
+        captureId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-pin-A",
+        liveness: "draining",
+        captureTimeoutMs: 45_000,
+        minIntervalMs: 0,
+      }),
+    ).toMatchObject({ status: "claimed" });
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "capture-fenced",
+        image: "pin-B",
+        captureWaitMs: 0,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "capture_in_progress" });
+    await releaseWorkspaceArchiveCapture(db, {
+      ...base,
+      captureId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-pin-A",
+    });
+    await admin`update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'operator'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "rotation-fenced",
+        image: "pin-B",
+        captureWaitMs: 0,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "rotation_in_progress" });
+    // The fixture's provider teardown is complete; only now may a new creator
+    // stamp pin-B on the existing group.
+    expect(await confirmDrainCold(db, { ...base, expectedEpoch: epoch })).toEqual({
+      wentCold: true,
+    });
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "successor",
+        image: "pin-B",
+      }),
+    ).toMatchObject({
+      role: "spawner",
+      lease: { image: "pin-B", instanceId: null, leaseEpoch: epoch + 1 },
+    });
+  });
+
+  test("racing deployment pins attach to the elected warming image without relabeling it", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const arrivals = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        acquireLease(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "turn",
+          holderId: `pin-race-${index}`,
+          backend: "modal",
+          image: index % 2 === 0 ? "pin-A" : "pin-B",
+          imagePolicy: "new_creates_only",
+          leaseTtlMs: 45_000,
+        }),
+      ),
+    );
+    const creators = arrivals.filter((arrival) => arrival.role === "spawner");
+    expect(creators).toHaveLength(1);
+    expect(arrivals.filter((arrival) => arrival.role === "attached")).toHaveLength(11);
+    const image = creators[0]!.lease.image!;
+    expect(["pin-A", "pin-B"]).toContain(image);
+    expect(arrivals.every((arrival) => arrival.lease.image === image)).toBe(true);
+    expect(await readLease(db, workspaceId, groupId)).toMatchObject({
+      image,
+      liveness: "warming",
+      refcount: 12,
+      rotationRequestedAt: null,
+    });
+  });
+
   test("(11) image B3: a solo image change preserves the box/checkpoint and requests capture-and-drain rotation", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -5885,6 +6087,21 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         kind: "turn",
         holderId: "newcomer",
         backend: "modal",
+        rigVersionId: "bbbb2222-2222-4222-8222-222222222222",
+        leaseTtlMs: 45_000,
+      }),
+    ).rejects.toThrow(SandboxRigConflictError);
+    // Ambient image-pin continuity cannot weaken a required rig-version fence.
+    await expect(
+      acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: "repinned-newcomer",
+        backend: "modal",
+        image: "pin-B",
+        imagePolicy: "new_creates_only",
         rigVersionId: "bbbb2222-2222-4222-8222-222222222222",
         leaseTtlMs: 45_000,
       }),

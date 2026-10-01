@@ -39,6 +39,7 @@ function panelProps(panel: PanelProps["panel"], dialogOpen: boolean): PanelProps
     setPanel: () => {},
     setOpen: () => {},
     dialogOpen,
+    dialogFocusOwnerRef: { current: dialogOpen },
     fileUploadsEnabled: false,
     servers: [],
     firstPartyTools: [],

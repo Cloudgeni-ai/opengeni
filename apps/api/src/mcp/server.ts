@@ -89,6 +89,7 @@ import {
 } from "@opengeni/contracts";
 import {
   countVariableSets,
+  SessionCreateConnectionSelectionUnavailableError,
   beginRigChangeVerificationAttempt,
   createVariableSet,
   decryptVariableSetValue,
@@ -445,6 +446,18 @@ function sessionCreateValidationFailureResult(error: z4.ZodError) {
 }
 
 function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+  if (
+    tool === "session_create" &&
+    error instanceof SessionCreateConnectionSelectionUnavailableError
+  ) {
+    return {
+      error: {
+        code: "session_create_connection_selection_unavailable",
+        message: error.message,
+        retryable: false,
+      },
+    };
+  }
   const allowance =
     (error instanceof HTTPException ? parseAllowanceExhaustedRefusal(error.cause) : null) ??
     parseAllowanceExhaustedRefusal(error);
