@@ -21,7 +21,7 @@ export async function acquirePreKnowledgeTestDatabase(
     for (const name of allowanceMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // The import migration extends the withheld 0499 attachment helper.
-    await admin`INSERT INTO schema_migrations(name) VALUES('0559_archived_session_imports.sql')`;
+    await admin`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
     await migrate(blank.databaseUrl);
     // Current session adapters project the archive columns, but this fixture
     // must retain the historical runtime without the withheld import guards.
@@ -35,7 +35,7 @@ export async function acquirePreKnowledgeTestDatabase(
       ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
-    await admin`DELETE FROM schema_migrations WHERE name='0559_archived_session_imports.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");
     await provisionRoles(blank.databaseUrl, {

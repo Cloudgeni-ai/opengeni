@@ -524,7 +524,7 @@ function expectArchivedImportBoundary(source: string): void {
   expect(source).toContain("importedArchiveImportId: payload.importId");
   expect(source).toContain("turnAssociation: null");
   const migration = readFileSync(
-    join(repoRoot, "packages/db/drizzle/0559_archived_session_imports.sql"),
+    join(repoRoot, "packages/db/drizzle/0560_archived_session_imports.sql"),
     "utf8",
   );
   expect(migration).toContain("sessions_imported_archive_inert_check");

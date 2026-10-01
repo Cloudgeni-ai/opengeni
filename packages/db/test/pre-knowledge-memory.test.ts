@@ -44,7 +44,7 @@ describe("pre-knowledge Memory storage compatibility", () => {
       for (const name of allowanceMigrationTail)
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // The import migration extends the withheld 0499 attachment helper.
-      await owner`INSERT INTO schema_migrations(name) VALUES('0559_archived_session_imports.sql')`;
+      await owner`INSERT INTO schema_migrations(name) VALUES('0560_archived_session_imports.sql')`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();

@@ -96,7 +96,7 @@ const withheldMigrationNames = [
   "0539_scheduled_admission_refusals.sql",
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
-  "0559_archived_session_imports.sql",
+  "0560_archived_session_imports.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

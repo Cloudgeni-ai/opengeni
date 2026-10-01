@@ -67,7 +67,7 @@ const forwardMigrations = [
   // Compile against Knowledge only after this fixture's real 0461 cutover.
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
-  "0559_archived_session_imports.sql",
+  "0560_archived_session_imports.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

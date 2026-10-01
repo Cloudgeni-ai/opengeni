@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0559_archived_session_imports.sql",
+          (migration) => migration.path === "0560_archived_session_imports.sql",
         )
-          ? "0559_archived_session_imports.sql"
+          ? "0560_archived_session_imports.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0558_external_membership_removal_owner_rls.sql",
               )
@@ -502,7 +502,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0558_external_membership_removal_owner_rls.sql",
     );
     const archivedSessionImports = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0559_archived_session_imports.sql",
+      (migration) => migration.path === "0560_archived_session_imports.sql",
     );
     const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
       (migration) => migration.path === "0540_external_workspace_member_permission_updates.sql",
@@ -1217,7 +1217,7 @@ describe("release schema contract", () => {
       ...(externalMembershipRemovalOwnerRls
         ? { latestMigration: "0558_external_membership_removal_owner_rls.sql" }
         : {}),
-      ...(archivedSessionImports ? { latestMigration: "0559_archived_session_imports.sql" } : {}),
+      ...(archivedSessionImports ? { latestMigration: "0560_archived_session_imports.sql" } : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1266,7 +1266,7 @@ describe("release schema contract", () => {
             "0556_member_collaborator_permissions_backfill_index.sql",
             "0557_member_collaborator_permissions_backfill.sql",
             "0558_external_membership_removal_owner_rls.sql",
-            "0559_archived_session_imports.sql",
+            "0560_archived_session_imports.sql",
             "0558_external_membership_removal_owner_rls.sql",
           ].includes(migration.path),
       ),
@@ -2765,7 +2765,7 @@ describe("release schema contract", () => {
       "0556_member_collaborator_permissions_backfill_index.sql",
       "0557_member_collaborator_permissions_backfill.sql",
       "0558_external_membership_removal_owner_rls.sql",
-      "0559_archived_session_imports.sql",
+      "0560_archived_session_imports.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
@@ -3315,7 +3315,7 @@ describe("release schema contract", () => {
       "0556_member_collaborator_permissions_backfill_index.sql",
       "0557_member_collaborator_permissions_backfill.sql",
       "0558_external_membership_removal_owner_rls.sql",
-      "0559_archived_session_imports.sql",
+      "0560_archived_session_imports.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -67,5 +67,5 @@ export const embeddingMigrationTail = [
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
-  "0559_archived_session_imports.sql",
+  "0560_archived_session_imports.sql",
 ];
