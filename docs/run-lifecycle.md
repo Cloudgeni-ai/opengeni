@@ -2043,7 +2043,15 @@ attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
 not create a temporary box and ask SDK hydration to replace it. Directory and tar
 archives still hydrate the elected destination. This removes the hidden second
-create. Migration 0523 adds a durable Modal creation receipt immediately before
+create. Deployment/workspace image pins apply only to new sandbox creates. Turn,
+viewer and direct-operation admissions retain a warming, warm or re-armable
+draining group's recorded image under the lease row lock; a between-turn repin
+neither relabels the existing provider nor requests rotation. The cold successor
+election after normal rotation/reaping stamps the then-selected pin. Explicit
+required-image changes retain their shared-state conflict behavior; rig-version,
+capture, rotation and epoch fences remain enforced.
+
+Migration 0523 adds a durable Modal creation receipt immediately before
 the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
 creation and retains the pinned SDK's public session implementation; its
 `modal-create-boundary.ts` hook runs after image/secret preparation and before
