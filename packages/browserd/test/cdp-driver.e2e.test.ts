@@ -12,6 +12,7 @@ import { BrowserInteractionController } from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
   AgentBrowserJsonRunner,
+  BrowserSupervisor,
   imageDimensions,
   resolvePinnedAgentBrowserBinary,
 } from "../src";
@@ -247,6 +248,144 @@ headedE2e(
     }
   },
   90_000,
+);
+
+headedE2e(
+  "streams a mobile headed tab continuously while managed input stays in the background",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-background-input-");
+    const socketDirectory = await mkdtemp("/tmp/ogb-bg-sockets-");
+    const reference = {
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+    };
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: socketDirectory,
+    });
+    let cdp: CdpConnection | null = null;
+    let frames: import("../src").BrowserFrameSubscription | null = null;
+    try {
+      const foreground = await supervisor.createSession({
+        ...reference,
+        headed: true,
+        initialUrl: fixture("Foreground"),
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+      });
+      const [port, browserPath] = (
+        await Bun.file(
+          join(
+            directory,
+            "state",
+            "sessions",
+            reference.browserSessionId,
+            "profile",
+            "DevToolsActivePort",
+          ),
+        ).text()
+      )
+        .trim()
+        .split("\n");
+      if (!port || !/^[0-9]{1,5}$/u.test(port) || !browserPath?.startsWith("/devtools/browser/")) {
+        throw new Error("owned Chromium did not publish its debugger endpoint");
+      }
+      cdp = await CdpConnection.connect(`ws://127.0.0.1:${port}${browserPath}`);
+      const background = await supervisor.openTarget(
+        reference,
+        dataUrl(`<!doctype html>
+        <meta name="viewport" content="width=device-width"><title>Background form</title>
+        <input aria-label="Name"><button onclick="requestAnimationFrame(() => {
+          document.querySelector('output').textContent = 'Clicked in background';
+        })">Update</button><output></output>`),
+      );
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: background.target.id,
+        flatten: true,
+      });
+      const visibility = async () => {
+        const state = await cdp!.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          {
+            expression: "document.visibilityState",
+            returnByValue: true,
+          },
+          { sessionId: attached.sessionId },
+        );
+        return state.result.value;
+      };
+      expect(await visibility()).toBe("hidden");
+      let observed = background;
+      const act = async (action: BrowserActionCommand["action"]) => {
+        const result = await supervisor.action(command(observed, action));
+        expect(result.state).toBe("completed");
+        expect(result.observation).not.toBeNull();
+        observed = result.observation!;
+        expect(await visibility()).toBe("hidden");
+      };
+      await act({ type: "viewport", width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      frames = await supervisor.subscribeFrames(reference, background.target.id, {
+        format: "jpeg",
+      });
+      const iterator = frames[Symbol.asyncIterator]();
+      const first = await frameWithin(iterator, 3_000);
+      const locator = { kind: "role", role: "textbox", name: "Name" } as const;
+      const inputValue = async () => {
+        const result = await cdp!.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          { expression: "document.querySelector('input').value", returnByValue: true },
+          { sessionId: attached.sessionId },
+        );
+        return result.result.value;
+      };
+      await act({ type: "fill", locator, value: "first" });
+      expect(await inputValue()).toBe("first");
+      await act({ type: "fill", locator, value: "replacement" });
+      expect(await inputValue()).toBe("replacement");
+      await act({ type: "press", locator, key: "Mod+A" });
+      await act({ type: "type", locator, text: "Background æøå 🦊" });
+      await act({ type: "click", locator: { kind: "role", role: "button", name: "Update" } });
+      const deadline = Date.now() + 3_000;
+      while (!names(observed).includes("Clicked in background") && Date.now() < deadline) {
+        await frameAfter(iterator, first.sequence, 1_000);
+        observed = await supervisor.observe(reference, background.target.id);
+      }
+      expect(names(observed)).toContain("Clicked in background");
+      const state = await cdp.send<{ result: { value: { visibility: string; value: string } } }>(
+        "Runtime.evaluate",
+        {
+          expression:
+            "({visibility:document.visibilityState,value:document.querySelector('input').value})",
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      expect(state.result.value).toEqual({ visibility: "hidden", value: "Background æøå 🦊" });
+      const screenshot = await supervisor.screenshot(reference, background.target.id);
+      expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      const next = await frameAfter(iterator, first.sequence, 3_000);
+      expect([next.width, next.height]).toEqual([390, 844]);
+      expect(await visibility()).toBe("hidden");
+      // Explicit activation remains available for a human choosing direct control.
+      const activated = await supervisor.action(command(observed, { type: "activate" }));
+      expect(activated.state).toBe("completed");
+      expect(await visibility()).toBe("visible");
+      expect(await supervisor.listTargets(reference)).toContainEqual(
+        expect.objectContaining({
+          id: foreground.observation.target.id,
+          targetGeneration: foreground.observation.target.targetGeneration,
+        }),
+      );
+    } finally {
+      await frames?.close();
+      cdp?.close();
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+      await rm(socketDirectory, { recursive: true, force: true });
+    }
+  },
+  60_000,
 );
 
 headedE2e(

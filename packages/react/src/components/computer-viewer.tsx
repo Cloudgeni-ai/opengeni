@@ -1526,7 +1526,7 @@ function ComputerViewport(props: {
         <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
           <span>
             {!rawInputEnabled && (props.pointerInput || props.keyboardInput)
-              ? "Background view · use native controls"
+              ? "Background view · use app controls"
               : !props.pointerInput && !props.keyboardInput
                 ? "View only · mouse and keyboard unavailable"
                 : props.keyboardInput
@@ -1540,7 +1540,7 @@ function ComputerViewport(props: {
               onClick={() => enqueue({ type: "focus", targetId: props.target!.id }, null)}
               className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
             >
-              Control directly
+              Bring to front
             </button>
           ) : null}
         </div>
@@ -1606,7 +1606,7 @@ function ComputerViewportFallback(props: {
         ) : null}
         {interactive.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-fg-subtle">Native controls remain available</p>
+            <p className="mb-2 text-og-xs text-og-fg-subtle">App controls remain available</p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
                 <button
@@ -1647,7 +1647,7 @@ function ComputerSemanticPanel(props: {
   return (
     <aside className="w-64 shrink-0 overflow-y-auto border-l border-og-border bg-og-surface-1 p-2">
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
-        <KeyboardIcon className="size-3" /> Native controls
+        <KeyboardIcon className="size-3" /> App controls
       </div>
       {nodes.length === 0 ? (
         <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
@@ -1763,7 +1763,7 @@ function ComputerStatusBar(props: {
         {screen
           ? "Full screen · input may move pointer and focus"
           : props.session?.capabilities?.backgroundActions
-            ? "Window · semantic controls stay in the background"
+            ? "Window · app controls work in the background"
             : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}

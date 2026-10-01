@@ -1388,7 +1388,7 @@ describe("ComputerViewer", () => {
       expectedObservationId: "observation-window-1-generation",
       action: { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" },
     });
-    expect(rendered.container.textContent).toContain("semantic controls stay in the background");
+    expect(rendered.container.textContent).toContain("app controls work in the background");
     expect(
       rendered.container.querySelector<HTMLTextAreaElement>(
         "textarea[aria-label='Desktop keyboard input']",
@@ -1622,7 +1622,7 @@ describe("ComputerViewer input reliability", () => {
         capabilities.keyboardInput,
       );
       expect(fixture.rendered.container.textContent).toContain(expectedHint);
-      expect(fixture.rendered.container.textContent).not.toContain("Control directly");
+      expect(fixture.rendered.container.textContent).not.toContain("Bring to front");
       if (!capabilities.pointerInput && !capabilities.keyboardInput) {
         expect(fixture.actions).toEqual([]);
       }

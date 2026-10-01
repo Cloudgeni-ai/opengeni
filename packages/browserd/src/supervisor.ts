@@ -1810,7 +1810,8 @@ async function createBrowserDriver(
             : {}),
         }
       : {}),
-    foregroundManagedTabs: context.headed,
+    // A visible browser can still receive target-scoped input and capture in
+    // the background. Foreground changes are explicit activate actions.
     ...(headlessShell && browserExecutablePath === headlessShell.path
       ? { userAgentMetadataSource: "intercepted_local" as const }
       : {}),
