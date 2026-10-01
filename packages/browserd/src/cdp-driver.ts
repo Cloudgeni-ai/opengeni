@@ -2851,11 +2851,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "one or more workspace files are unavailable on the browser placement",
           );
         }
-        const node = await this.resolveLocator(state, action.locator);
-        await this.sendActionTarget(state, "DOM.setFileInputFiles", {
-          files: [...paths],
-          backendNodeId: node.backendDOMNodeId,
-        });
+        await this.uploadFiles(state, action.locator, paths);
         return;
       }
       case "clipboard":
@@ -2867,6 +2863,179 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "wait":
         await this.waitForCondition(state, action);
         return;
+    }
+  }
+
+  private async uploadFiles(
+    state: TargetState,
+    locator: BrowserLocator,
+    paths: readonly string[],
+  ): Promise<void> {
+    const node = await this.resolveLocator(state, locator);
+    const frameId = node.frameId ?? state.frame.id;
+    if (this.engine === "lightpanda") {
+      // Lightpanda supports direct file inputs, not Chromium's native chooser.
+      await this.setUploadFiles(state, node.backendDOMNodeId, frameId, paths);
+      return;
+    }
+    const isFileInput = await this.callOnNode(
+      state,
+      node.backendDOMNodeId,
+      "function () { return this instanceof HTMLInputElement && this.type === 'file'; }",
+      [],
+      { isolatedFrameId: frameId },
+    );
+    if (isFileInput === true) {
+      await this.setUploadFiles(state, node.backendDOMNodeId, frameId, paths);
+      return;
+    }
+
+    const sourceFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+      (frame) => frame.id === frameId,
+    );
+    if (!sourceFrame) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "upload control frame is unavailable",
+      );
+    }
+    const connection = await this.ensureConnection();
+    // Intercept only for this upload. The normal browser/native picker remains
+    // untouched outside the target's serialized action.
+    try {
+      await connection.send(
+        "Page.setInterceptFileChooserDialog",
+        { enabled: true },
+        {
+          sessionId: state.sessionId,
+        },
+      );
+    } catch (error) {
+      if (error instanceof CdpProtocolError) {
+        throw new InteractionDefiniteDriverError(
+          "unsupported",
+          "this browser cannot intercept file choosers; target a file input directly",
+        );
+      }
+      throw error;
+    }
+    const abort = new AbortController();
+    const chooser = connection
+      .waitForEvent("Page.fileChooserOpened", {
+        sessionId: state.sessionId,
+        timeoutMs: DEFAULT_ACTION_TIMEOUT_MS,
+        signal: abort.signal,
+        predicate: (params) => params.frameId === frameId,
+      })
+      .then(
+        (event) => event,
+        () => null,
+      );
+    let clicked = false;
+    try {
+      await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+      clicked = true;
+      const event = await chooser;
+      if (!event) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "upload control was clicked but no file chooser was confirmed; inspect the page before continuing",
+        );
+      }
+      const currentFrame = flattenFrameTree(await this.frameTree(state.sessionId)).find(
+        (frame) => frame.id === frameId,
+      );
+      if (currentFrame?.loaderId !== sourceFrame.loaderId) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "upload control changed documents; no files were selected",
+        );
+      }
+      const backendNodeId = event.params.backendNodeId;
+      if (typeof backendNodeId !== "number" || !Number.isSafeInteger(backendNodeId)) {
+        throw new InteractionDefiniteDriverError(
+          "unsupported",
+          "this file chooser is not backed by a file input",
+        );
+      }
+      await this.setUploadFiles(state, backendNodeId, frameId, paths);
+    } catch (error) {
+      if (error instanceof DialogOpenedSignal) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "upload control opened a JavaScript dialog; no file selection was confirmed",
+        );
+      }
+      if (clicked && error instanceof InteractionDefiniteDriverError) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `upload control was clicked, but file selection failed (${error.code}): ${error.message}`,
+        );
+      }
+      throw error;
+    } finally {
+      abort.abort();
+      await connection.send(
+        "Page.setInterceptFileChooserDialog",
+        { enabled: false },
+        {
+          sessionId: state.sessionId,
+        },
+      );
+    }
+  }
+
+  private async setUploadFiles(
+    state: TargetState,
+    backendNodeId: number | null,
+    frameId: string,
+    paths: readonly string[],
+  ): Promise<void> {
+    if (this.engine === "chromium") {
+      const input = await this.callOnNode(
+        state,
+        backendNodeId,
+        `function () {
+        return {
+          file: this instanceof HTMLInputElement && this.type === 'file',
+          disabled: this.matches(':disabled'), multiple: this.multiple,
+          directory: this.webkitdirectory
+        };
+      }`,
+        [],
+        { isolatedFrameId: frameId },
+      );
+      if (!isRecord(input) || input.file !== true || input.disabled === true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "upload requires an enabled file input",
+        );
+      }
+      if (input.directory === true || (paths.length > 1 && input.multiple !== true)) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          input.directory === true
+            ? "directory selection is not supported; choose a file upload control"
+            : "this file input accepts only one file",
+        );
+      }
+    }
+    try {
+      await this.sendActionTarget(state, "DOM.setFileInputFiles", {
+        files: [...paths],
+        backendNodeId,
+      });
+    } catch (error) {
+      if (
+        error instanceof CdpProtocolError &&
+        error.message === "Node is not a file input element"
+      ) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "upload target is no longer a file input",
+        );
+      }
+      throw error;
     }
   }
 
