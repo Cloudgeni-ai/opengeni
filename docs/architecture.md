@@ -371,9 +371,8 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
-Configured sessions resolve tools and media through `packages/contracts/src/agent-config.ts`,
-enforced by worker, runtime and Codemode; null configurations stay legacy. See
-[`agent configuration`](design/agent-configuration.md).
+Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
+([design](design/agent-configuration.md)).
 
 ### 3.8 A Connected Machine is first-class primary compute
 
@@ -1390,11 +1389,8 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
-React root exports stay additive and optional-peer-free. `terminal`, `editor`,
-`desktop`, and `diffs` subpaths explicitly register bundler-resolvable peer
-loaders; grammars and terminal WebGL remain host-selected. Canonical registry:
-`packages/react/src/lib/workbench-peers.ts`; packed-root boundary:
-`scripts/react-root-package-contract.test.ts`.
+React root exports stay optional-peer-free; workbench subpaths register peer loaders
+(`packages/react/src/lib/workbench-peers.ts`, `scripts/react-root-package-contract.test.ts`).
 
 `ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share console/embed
 connection inventory and OAuth setup. Presentation filters never authorize
