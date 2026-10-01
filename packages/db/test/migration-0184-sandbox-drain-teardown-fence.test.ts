@@ -97,6 +97,8 @@ const withheldMigrationNames = [
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",
+  // Patches the reaper installed by withheld 0345/0388/0391/0397.
+  "0561_browser_deadline_checkpoints.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
