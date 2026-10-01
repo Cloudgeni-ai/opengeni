@@ -1127,8 +1127,44 @@ jobs:
       - name: Clean published consumer
         run: bun run test:publish-consumer
 
+      # PR jobs execute a merged workflow but check out the exact candidate.
+      # Keep workflow-owned regressions with their own immutable tooling tree;
+      # never skip them or replace the candidate when it predates these files.
+      - name: Check out registry export guard tooling
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci/registry-export-guard
+          persist-credentials: false
+
+      - name: Set up registry export guard Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .ci/registry-export-guard/.bun-version
+
+      - name: Install registry export guard tooling dependencies
+        working-directory: .ci/registry-export-guard
+        run: bun install --frozen-lockfile
+
       - name: Registry dependency export guard regression
-        run: bun test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
+        working-directory: .ci/registry-export-guard
+        run: |
+          set -euo pipefail
+          for guard_test in \
+            scripts/test-registry-dependency-exports.test.ts \
+            scripts/test-effective-dependency-exports.test.ts \
+            scripts/dependency-export-workflow-contract.test.ts; do
+            if [ ! -f "$guard_test" ]; then
+              echo "Missing workflow-owned guard test: $guard_test" >&2
+              exit 1
+            fi
+          done
+          bun test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
+
+      - name: Restore candidate Bun after registry export regression
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
 
       - name: Frozen Version PR effective registry export closure
         if: github.head_ref == 'changeset-release/main' || inputs.automation_pr_number != ''

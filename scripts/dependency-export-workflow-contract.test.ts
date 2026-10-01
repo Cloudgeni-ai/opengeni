@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -9,7 +9,10 @@ type Step = {
   name?: string;
   env?: Record<string, string>;
   run?: string;
-  with?: Record<string, string>;
+  with?: Record<string, string | boolean>;
+  uses?: string;
+  if?: string;
+  "working-directory"?: string;
 };
 type Workflow = { jobs: Record<string, { steps?: Step[] }> };
 
@@ -98,4 +101,151 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
         .some((step) => step.run?.includes("scripts/dependency-export-workflow-contract.test.ts")),
     ).toBe(true);
   });
+
+  test("workflow-owned regression does not replace or skip the exact candidate", async () => {
+    const workflow = Bun.YAML.parse(
+      await readFile(join(root, ".github/workflows/ci.yml"), "utf8"),
+    ) as Workflow;
+    const steps = workflow.jobs["package-contracts"]!.steps!;
+    expect(steps[0]!.with?.ref).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
+    );
+    const checkout = steps.findIndex(
+      (step) => step.name === "Check out registry export guard tooling",
+    );
+    const setup = steps.findIndex((step) => step.name === "Set up registry export guard Bun");
+    const install = steps.findIndex(
+      (step) => step.name === "Install registry export guard tooling dependencies",
+    );
+    const guard = steps.findIndex(
+      (step) => step.name === "Registry dependency export guard regression",
+    );
+    const restore = steps.findIndex(
+      (step) => step.name === "Restore candidate Bun after registry export regression",
+    );
+    const effective = steps.findIndex(
+      (step) => step.name === "Frozen Version PR effective registry export closure",
+    );
+    expect(checkout).toBeGreaterThan(0);
+    expect(setup).toBeGreaterThan(checkout);
+    expect(install).toBeGreaterThan(setup);
+    expect(guard).toBeGreaterThan(install);
+    expect(restore).toBeGreaterThan(guard);
+    expect(effective).toBeGreaterThan(restore);
+    expect(steps[checkout]!.uses).toBe("actions/checkout@v6");
+    expect(steps[checkout]!.with).toEqual({
+      ref: "${{ github.workflow_sha }}",
+      path: ".ci/registry-export-guard",
+      "persist-credentials": false,
+    });
+    expect(steps[setup]!.with?.["bun-version-file"]).toBe(".ci/registry-export-guard/.bun-version");
+    expect(steps[install]!["working-directory"]).toBe(".ci/registry-export-guard");
+    expect(steps[install]!.run).toBe("bun install --frozen-lockfile");
+    expect(steps[guard]!["working-directory"]).toBe(".ci/registry-export-guard");
+    expect(steps[restore]!.with?.["bun-version-file"]).toBe(".bun-version");
+    for (const index of [checkout, setup, install, guard, restore]) {
+      expect(steps[index]!.if).toBeUndefined();
+    }
+    expect(steps[effective]!["working-directory"]).toBeUndefined();
+    expect(steps[effective]!.run).toBe("bun run test:effective-dependency-exports");
+  });
+
+  test("new workflow runs real export regressions when the old candidate lacks every guard file", async () => {
+    const steps = (await workflowSteps("ci.yml")).flat();
+    const guard = steps.find(
+      (step) => step.name === "Registry dependency export guard regression",
+    )!;
+    const fixture = await mkdtemp(join(tmpdir(), "opengeni-mixed-generation-guard-"));
+    const candidateManifest = '{"name":"older-exact-candidate","private":true}';
+    const impactPlan = '{"head":"older-exact-candidate","mode":"impact"}';
+    const env = { PATH: process.env.PATH! };
+    async function command(args: string[], cwd = fixture) {
+      const child = Bun.spawn(args, { cwd, env, stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr, status] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      return { stdout, stderr, status };
+    }
+    try {
+      await writeFile(join(fixture, "package.json"), candidateManifest);
+      await writeFile(join(fixture, "impact-plan.json"), impactPlan);
+      expect((await command(["git", "init", "--quiet"])).status).toBe(0);
+      expect((await command(["git", "add", "package.json", "impact-plan.json"])).status).toBe(0);
+      expect(
+        (
+          await command([
+            "git",
+            "-c",
+            "user.name=Guard Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "older exact candidate",
+          ])
+        ).status,
+      ).toBe(0);
+      const head = (await command(["git", "rev-parse", "HEAD"])).stdout;
+      // This reproduces #3121: the old command fails before any tree-changing build.
+      const old = await command([
+        "bun",
+        "test",
+        "./scripts/test-registry-dependency-exports.test.ts",
+        "./scripts/test-effective-dependency-exports.test.ts",
+        "./scripts/dependency-export-workflow-contract.test.ts",
+      ]);
+      expect(old.status).not.toBe(0);
+      expect(old.stderr).toContain("filters did not match any test files");
+      const tooling = join(fixture, guard["working-directory"]!);
+      await mkdir(join(tooling, "scripts"), { recursive: true });
+      // Run the real browser/Node and immutable-closure suites, not no-op stubs.
+      // Keep this workflow-contract file out of the child to avoid recursive tests.
+      for (const path of [
+        "test-registry-dependency-exports.test.ts",
+        "test-effective-dependency-exports.test.ts",
+      ]) {
+        await writeFile(
+          join(tooling, "scripts", path),
+          `import ${JSON.stringify(join(root, "scripts", path))};\n`,
+        );
+      }
+      const sentinel = join(tooling, "scripts/dependency-export-workflow-contract.test.ts");
+      await writeFile(
+        sentinel,
+        `import { test, expect } from "bun:test";\ntest("matching tooling executes", () => expect(process.cwd()).toBe(${JSON.stringify(tooling)}));\n`,
+      );
+      const corrected = await command(["bash", "-e", "-c", guard.run!], tooling);
+      expect(corrected.status).toBe(0);
+      expect(corrected.stderr).toContain(
+        "browser linking rejects a missing ConnectPopupClosedError",
+      );
+      expect(corrected.stderr).toContain("real Node ESM linking rejects the same missing export");
+      expect(corrected.stderr).toContain(
+        "effective registry serves existing integrity-checked bytes",
+      );
+      expect(corrected.stderr).toContain("matching tooling executes");
+      await unlink(sentinel);
+      const incomplete = await command(["bash", "-e", "-c", guard.run!], tooling);
+      expect(incomplete.status).not.toBe(0);
+      expect(incomplete.stderr).toContain(
+        "Missing workflow-owned guard test: scripts/dependency-export-workflow-contract.test.ts",
+      );
+      await writeFile(
+        sentinel,
+        'import { test } from "bun:test"; test("failing tooling", () => { throw new Error("GUARD_FAILURE_PROPAGATES"); });\n',
+      );
+      const failing = await command(["bash", "-e", "-c", guard.run!], tooling);
+      expect(failing.status).not.toBe(0);
+      expect(failing.stderr).toContain("GUARD_FAILURE_PROPAGATES");
+      expect((await command(["git", "rev-parse", "HEAD"])).stdout).toBe(head);
+      expect((await command(["git", "diff", "--name-only"])).stdout).toBe("");
+      expect(await readFile(join(fixture, "package.json"), "utf8")).toBe(candidateManifest);
+      expect(await readFile(join(fixture, "impact-plan.json"), "utf8")).toBe(impactPlan);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

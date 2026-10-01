@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "6af530fe2177486a6660a4fa5384fdca3b686584865df91324f25bc30c49e6b1"
+      "sha256": "c5a959f58c7174bb41705d84e8b89d89fa0eee1155404a8fee3b72feba94ec70"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -676,6 +676,12 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
+      "step": "Install registry export guard tooling dependencies",
+      "sha256": "1f18b8ae1bdb85eadebceaed58e263b1575ee697020edea3b128832600d74023"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
       "step": "Native report delivery contracts",
       "sha256": "f2a29e986e8d98bc124d9fbd9ea179d89787212a7ff354ec08d7b53863028b80"
     },
@@ -713,7 +719,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Registry dependency export guard regression",
-      "sha256": "ab247cd4f72383efbfae8b89f434f58df96167b4df33ec6fa9744e1c10e49177"
+      "sha256": "96a021899182aa84e93af86f1b5cf47cf6a848de92a24da807b14f166a909a10"
     },
     {
       "workflow": ".github/workflows/ci.yml",

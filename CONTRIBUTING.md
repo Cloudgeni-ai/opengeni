@@ -131,6 +131,13 @@ Frozen Version PR CI and stable publication run this effective guard before any
 publish. Ordinary PRs run the hermetic regression because pending changesets do
 not yet represent frozen package versions.
 
+The hermetic regression is workflow-owned tooling: CI checks out the immutable
+`github.workflow_sha` separately, installs its frozen dependencies, and uses its
+Bun pin. It still runs when an older exact candidate predates the guard files;
+missing tooling or failing tests fail the job rather than skipping coverage.
+The candidate checkout, impact plan, builds, and effective Version-PR closure
+remain bound to the selected candidate, with its Bun pin restored afterward.
+
 `bun run test:registry-dependency-exports --candidate` packs each selected package
 separately and installs only its declared registry dependency closure, without
 sibling candidates, links, or overrides. Build packages first. `--published-source`
