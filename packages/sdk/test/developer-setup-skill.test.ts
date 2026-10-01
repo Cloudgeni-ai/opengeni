@@ -20,6 +20,15 @@ import * as sdkExamples from "../../../.agents/skills/opengeni-setup/references/
 
 const referencePath = `${import.meta.dir}/../../../.agents/skills/opengeni-setup/references/setup-api.md`;
 
+function expectPreservedRequest(
+  contract: { parse(input: unknown): unknown },
+  request: Record<string, unknown>,
+): void {
+  // A successful Zod parse alone can silently strip an invented field. Every
+  // documented field must survive parsing, including fields in nested objects.
+  expect(contract.parse(request)).toMatchObject(request);
+}
+
 describe("developer setup skill", () => {
   test("all illustrative JSON request bodies match their exact public contracts", async () => {
     const markdown = await readFile(referencePath, "utf8");
@@ -30,25 +39,31 @@ describe("developer setup skill", () => {
     // The scoped key contract is checked by preset tests; never permit arbitrary
     // organization-key permissions. Tokens and remote ids below are fake fixtures.
     expect(examples[0]).toEqual({ name: "Product developer setup", access: "developer_setup" });
-    EnsureWorkspaceRequest.parse(examples[1]);
-    UpdateWorkspaceSettingsRequest.parse(examples[2]);
-    AddExternalWorkspaceMemberRequest.parse(examples[3]);
-    CreateConnectionRequest.parse(examples[4]);
-    PreviewApiIntegrationRequest.parse(examples[5]);
-    InstallApiIntegrationRequest.parse({
+    expectPreservedRequest(EnsureWorkspaceRequest, examples[1]);
+    expectPreservedRequest(UpdateWorkspaceSettingsRequest, examples[2]);
+    expectPreservedRequest(AddExternalWorkspaceMemberRequest, examples[3]);
+    expectPreservedRequest(CreateConnectionRequest, examples[4]);
+    expectPreservedRequest(PreviewApiIntegrationRequest, examples[5]);
+    expectPreservedRequest(InstallApiIntegrationRequest, {
       ...examples[6],
       expectedContentSha256: "a".repeat(64),
     });
     // A fragment intentionally containing only MCP fields is a partial session.
-    CreateSessionRequest.parse({ initialMessage: "Safe tool check", ...examples[7] });
-    UpdateSessionMcpApprovalPolicyRequest.parse(examples[8]);
-    CreateScheduledTaskRequest.parse(examples[9]);
-    CreateAutomationSourceRequest.parse({ ...examples[10], webhookSecret: "fixture-secret-123" });
-    CreateAutomationTriggerRequest.parse(examples[11]);
-    CreateWorkspaceWebhookRequest.parse(examples[12]);
-    PutWorkspaceCredentialProviderRequest.parse(examples[13]);
-    SetWorkspaceAllowanceRequest.parse(examples[14]);
-    CreateSessionRequest.parse(examples[15]);
+    expectPreservedRequest(CreateSessionRequest, {
+      initialMessage: "Safe tool check",
+      ...examples[7],
+    });
+    expectPreservedRequest(UpdateSessionMcpApprovalPolicyRequest, examples[8]);
+    expectPreservedRequest(CreateScheduledTaskRequest, examples[9]);
+    expectPreservedRequest(CreateAutomationSourceRequest, {
+      ...examples[10],
+      webhookSecret: "fixture-secret-123",
+    });
+    expectPreservedRequest(CreateAutomationTriggerRequest, examples[11]);
+    expectPreservedRequest(CreateWorkspaceWebhookRequest, examples[12]);
+    expectPreservedRequest(PutWorkspaceCredentialProviderRequest, examples[13]);
+    expectPreservedRequest(SetWorkspaceAllowanceRequest, examples[14]);
+    expectPreservedRequest(CreateSessionRequest, examples[15]);
   });
 
   test("SDK examples remain callable and typechecked with the actual SDK", () => {
