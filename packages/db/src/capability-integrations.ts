@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import {
   assertOrganizationIntegrationAllowed,
   stableJson,
-  type IntegrationSource,
+  type IntegrationSourceInput,
   type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
@@ -138,6 +138,12 @@ export type InstallApiIntegrationInput = {
   requiredScopes?: string[];
   ownership?: "workspace" | "subject" | "either";
   allowedTools?: string[];
+  /**
+   * Selected write/destructive tools that run without per-call human approval.
+   * Removing an approval requirement is never a permission reduction, so it
+   * always passes installation acquisition (organization policy) again.
+   */
+  autoApprovedTools?: string[];
   facetDefinitions?: readonly ApiIntegrationFacetDefinition[];
   revision: StoredApiIntegrationRevision;
   owner?: ApiIntegrationOwner;
@@ -564,8 +570,14 @@ async function installApiIntegrationInScope(
             revision: input.revision,
           });
         }
+        const autoApprovedTools = autoApprovedToolIds(input, selectedTools);
         const approvalRequiredTools = input.revision.tools
-          .filter((tool) => selectedTools.includes(tool.id) && tool.approvalMode === "ask")
+          .filter(
+            (tool) =>
+              selectedTools.includes(tool.id) &&
+              tool.approvalMode === "ask" &&
+              !autoApprovedTools.has(tool.id),
+          )
           .map((tool) => tool.id);
         const nextConfig = {
           baseServerId: input.serverId,
@@ -1217,7 +1229,7 @@ export async function getApiIntegrationReconciliationSnapshot(
     accountId: string;
     workspaceId: string;
     subjectId: string;
-    source: IntegrationSource;
+    source: IntegrationSourceInput;
     connectionId?: string;
     instanceKey?: string;
     expectedRevisionId: string;
@@ -1252,6 +1264,9 @@ export async function getApiIntegrationReconciliationSnapshot(
           runtime.definitionProvenance === "curated" && runtime.definitionId === source.definitionId
         );
       if (runtime.definitionProvenance !== "workspace") return false;
+      // No stored-preview recovery for inline documents: they carry their
+      // full content in the request, so ordinary resolution always applies.
+      if (source.kind === "openapi_document") return false;
       if (source.kind === "graphql")
         return runtime.protocol === "graphql" && source.endpoint === runtime.sourceUrl;
       return (
@@ -1952,6 +1967,17 @@ function selectedToolIds(input: InstallApiIntegrationInput): string[] {
     throw new Error("API Integration selected an unknown tool");
   }
   return selected;
+}
+
+function autoApprovedToolIds(
+  input: InstallApiIntegrationInput,
+  selectedTools: readonly string[],
+): Set<string> {
+  const requested = normalizedStrings(input.autoApprovedTools ?? [], 2_000);
+  if (requested.some((tool) => !selectedTools.includes(tool))) {
+    throw new Error("API Integration auto-approved a tool that is not selected");
+  }
+  return new Set(requested);
 }
 
 function isApiIntegrationPermissionReduction(

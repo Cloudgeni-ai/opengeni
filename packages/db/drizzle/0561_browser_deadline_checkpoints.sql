@@ -173,10 +173,10 @@ DO $protect_checkpoint_window$
 DECLARE definition text; anchor text; replacement text;
 BEGIN
   definition := pg_get_functiondef('opengeni_private.reap_stale_interaction_transitions(bigint)'::regprocedure);
-  IF strpos(definition, '0560 browser checkpoint window') = 0 THEN
+  IF strpos(definition, '0561 browser checkpoint window') = 0 THEN
     anchor := E'          AND holder.kind = ''interaction''\n        ORDER BY holder.id';
     replacement := E'          AND holder.kind = ''interaction''\n'
-      || E'          -- 0560 browser checkpoint window: retain the exact browser holder.\n'
+      || E'          -- 0561 browser checkpoint window: retain the exact browser holder.\n'
       || format($condition$          AND NOT EXISTS (
             SELECT 1 FROM %1$I.browser_sessions browser
             JOIN %1$I.sandbox_leases lease ON lease.id = holder.lease_id
@@ -191,7 +191,7 @@ BEGIN
           )
         ORDER BY holder.id$condition$, current_schema());
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-      RAISE EXCEPTION '0560 checkpoint preemption prerequisite drift' USING ERRCODE = '55000';
+      RAISE EXCEPTION '0561 checkpoint preemption prerequisite drift' USING ERRCODE = '55000';
     END IF;
     EXECUTE replace(definition, anchor, replacement);
   END IF;
@@ -205,9 +205,9 @@ DO $complete_expired_checkpoint_cleanup$
 DECLARE definition text; anchor text; replacement text;
 BEGIN
   definition := pg_get_functiondef('opengeni_private.reap_stale_interaction_transitions(bigint)'::regprocedure);
-  IF strpos(definition, '0560 expired checkpoint cleanup') = 0 THEN
+  IF strpos(definition, '0561 expired checkpoint cleanup') = 0 THEN
     anchor := E'      -- Preserve the exact controller binding for cleanup/audit.';
-    replacement := format($cleanup$      -- 0560 expired checkpoint cleanup: durable state outlives its source.
+    replacement := format($cleanup$      -- 0561 expired checkpoint cleanup: durable state outlives its source.
       UPDATE %1$I.browser_sessions browser
       SET controller_id = NULL, controller_generation = NULL,
           placement_instance_id = NULL, controller_heartbeat_at = NULL,
@@ -228,7 +228,7 @@ BEGIN
 
       -- Preserve the exact controller binding for cleanup/audit.$cleanup$, current_schema());
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1 THEN
-      RAISE EXCEPTION '0560 checkpoint cleanup prerequisite drift' USING ERRCODE = '55000';
+      RAISE EXCEPTION '0561 checkpoint cleanup prerequisite drift' USING ERRCODE = '55000';
     END IF;
     definition := replace(definition, anchor, replacement);
 
@@ -246,7 +246,7 @@ BEGIN
       || E'                AND lease.provider_deadline_at > pg_catalog.now()\n'
       || E'              ))';
     IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 2 THEN
-      RAISE EXCEPTION '0560 checkpoint orphan prerequisite drift' USING ERRCODE = '55000';
+      RAISE EXCEPTION '0561 checkpoint orphan prerequisite drift' USING ERRCODE = '55000';
     END IF;
     EXECUTE replace(definition, anchor, replacement);
   END IF;

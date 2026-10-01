@@ -69,8 +69,8 @@ Use product language for the relevant unresolved choices:
 - **Learning across chats:** no new lasting learning, remember for each person,
   or shared team knowledge. Explain briefly that chat history/retention is separate
   and disabling learning does not delete history or existing authorized Knowledge.
-- **Who can open chats:** only their owner, the team, or a choice on each chat.
-  Keep human visibility separate from agent access and Knowledge scope. Choose the
+- **Who can open chats:** only their owner (`chats: "private"`), the team
+  (`"shared"`), or a workspace per user (`"isolated"`). Choose the
   workspace mapping from the actual sharing boundary; private chats alone do not
   require a workspace per person.
 - **How the agent gets data:** current-page snapshots, read-only tools to fetch

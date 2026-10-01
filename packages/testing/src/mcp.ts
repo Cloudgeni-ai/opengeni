@@ -62,13 +62,15 @@ export function startTestMcpServer(
     toolResultMeta?: Record<string, unknown>;
     /** Advertise the optional MCP output/effect metadata used by catalog tests. */
     richToolMetadata?: boolean;
+    /** Fixed loopback port (dev fixtures); tests use a random free port. */
+    port?: number;
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const requests: TestMcpRequest[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: 0,
+    port: options.port ?? 0,
     ...(options.toolDescriptionBytes || options.toolResultBytes ? { idleTimeout: 60 } : {}),
     async fetch(request) {
       const url = new URL(request.url);

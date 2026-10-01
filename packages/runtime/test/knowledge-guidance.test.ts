@@ -80,7 +80,8 @@ test("shipped knowledge and integration guidance never sends users to retired wr
     "docs/mcp-surfaces.md",
     "docs/product-integration.md",
     "docs-site/concepts/memory-and-knowledge.mdx",
-    "docs-site/guides/integrate-your-product.mdx",
+    "docs-site/embed-manually.mdx",
+    "docs-site/integrate/users-and-tenants.mdx",
     "docs-site/reference/sdk.mdx",
   ]) {
     const text = await readFile(new URL(path, root), "utf8");

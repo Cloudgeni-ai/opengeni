@@ -215,6 +215,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiReasoningEncryptedContent: true,
     openaiMaxRetries: 5,
     webSearchEnabled: true,
+    agentConfigAdmissionEnabled: false,
+    agentConfigDefaultForNewSessions: false,
     jevApiKey: undefined,
     jevBaseUrl: "https://api.typesafe.ai",
     jevModel: "jev-latest",

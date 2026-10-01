@@ -580,6 +580,56 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("archived import receipts require private FORCE RLS and scoped non-public capabilities", () => {
+    const posture = safePosture();
+    const ledger = {
+      name: "session_import_batches",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 3,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(ledger);
+    for (const name of [
+      "read_archived_session_import_batch(uuid, uuid, uuid, text, text, text)",
+      "record_archived_session_import_batch(uuid, uuid, uuid, text, text, text, text, integer, integer)",
+    ])
+      posture.privateRoutines.push({
+        name,
+        owner: ledger.owner,
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    ledger.select = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "archived import ledger lacks private same-owner FORCE-RLS isolation",
+    );
+    ledger.select = false;
+    ledger.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "archived import ledger lacks private same-owner FORCE-RLS isolation",
+    );
+    ledger.rlsForced = true;
+    const reader = posture.privateRoutines.at(-2)!;
+    reader.configuration = ["search_path=public, pg_catalog"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      `archived import capability ${reader.name} is missing or unsafe`,
+    );
+    reader.configuration = ["search_path=pg_catalog, public, pg_temp"];
+    reader.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      `archived import capability ${reader.name} is missing or unsafe`,
+    );
+  });
+
   test("attribution receipts require same-owner FORCE RLS and no public lifecycle execution", () => {
     const posture = safePosture();
     const receipt = posture.tables.find(

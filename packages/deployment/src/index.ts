@@ -197,6 +197,16 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
+/** Agent configuration rollout switches (sessions.agent_config, migration
+ * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
+ * only when set. Enable admission only after every worker runs a 0559-aware
+ * image; the default-for-new-sessions switch then turns omitted-`agent` new
+ * sessions into `{ capabilities: "all" }`. */
+export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED",
+  "OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS",
+];
+
 /** Per-channel and per-DM Slack workspace routing. Default ON in
  * @opengeni/config; a valueEnv passthrough emitted only when set, so an unset
  * key leaves that default alone rather than forcing it off. Turning it OFF is
@@ -2965,6 +2975,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV) {

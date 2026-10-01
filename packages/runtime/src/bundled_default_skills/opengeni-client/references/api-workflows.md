@@ -53,7 +53,7 @@ const created = await client.createSession(workspace.id, {
   initialMessage: "Inspect the uploaded logs and summarize the failing deploy step.",
   idempotencyKey: crypto.randomUUID(),
   skills,
-  firstPartyMcpTools: selectedFirstPartyTools,
+  agent: { capabilities: { from: "none", workspaceFiles: true } }, // chosen per product
   tools: selectedIntegrationServers,
 });
 
@@ -88,10 +88,21 @@ workspace for cross-user chat privacy and a per-chat workspace for hard
 same-user chat isolation. Knowledge authoring Off does not create either
 boundary.
 
-For a headless product, send an explicit minimal `firstPartyMcpTools` and
-`tools` selection. Omission inherits deployment/workspace defaults. Removing
+For a headless product, send an explicit `agent.capabilities` (usually
+`{ from: "none", ... }`) and `tools` selection. Omission inherits the
+workspace defaults. On deployments without agent settings, send an explicit
+minimal `firstPartyMcpTools` instead. Removing
 cross-session tools from a shared workspace is defense in depth, not a hard
 tenant boundary.
+
+## Archived session migration
+
+For a move from an embedded/in-process runtime to a standalone deployment, use
+the server-only `@opengeni/sdk/session-history-import` functions, not session
+creation plus synthetic Send/Steer calls. Follow
+[Archived session history import](session-history-import.md) for exact mappings,
+file-reference replacement, idempotency and read-only rendering. Imported events
+are historical facts only; they are never model-facing history or live execution.
 
 ## Automated work
 
@@ -144,7 +155,8 @@ model-supplied tenant ID.
 
 ## Runtime Profile And Models
 
-Use workspace `agentInstructions` for stable workspace behavior, session
+Use `agent.identity` (or the workspace's `sessionAgentDefaults.identity`) for
+who the agent is, workspace instructions for stable workspace rules, session
 `instructions` for one role/conversation, Skills for conditional procedures,
 and `modelContext` for current dashboard or route state. Avoid duplicating one
 policy across all four surfaces.

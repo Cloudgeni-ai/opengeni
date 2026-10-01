@@ -48,6 +48,7 @@ import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceDefaultAgentIdentity,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
@@ -97,6 +98,12 @@ export type GovernanceModelOk = {
   /** Deployment and workspace allow the Jev-backed code_search tool. */
   codeSearchEnabled: boolean;
   workspaceAgentInstructions: string | null | undefined;
+  /**
+   * Modular composer identity tier: the explicit workspace default identity,
+   * else the frozen legacy persona without `{{core}}`. Never dropped by
+   * instruction policies (only read for sessions with an agent configuration).
+   */
+  workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
@@ -247,6 +254,10 @@ export async function prepareGovernanceAndModel(
   );
   const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
   const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
+  const workspaceAgentIdentity = resolveWorkspaceDefaultAgentIdentity(
+    workspace.settings,
+    workspaceAgentInstructions,
+  ).identity;
   const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
   assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
@@ -482,6 +493,7 @@ export async function prepareGovernanceAndModel(
       agentHumanInputEnabled,
       codeSearchEnabled,
       workspaceAgentInstructions,
+      workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
       workspaceMemory,

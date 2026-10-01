@@ -15,6 +15,7 @@ export default defineConfig({
   entry: [
     "src/allowance-refusal.ts",
     "src/chat/index.ts",
+    "src/tenant-workspaces.ts",
     "src/session-proxy.ts",
     "src/adapters/next.ts",
     "src/adapters/express.ts",
@@ -29,6 +30,7 @@ export default defineConfig({
     "src/document-authority.ts",
     "src/knowledge.ts",
     "src/workspace-integrations.ts",
+    "src/session-history-import.ts",
     "src/usage-allowances.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",

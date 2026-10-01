@@ -44,7 +44,10 @@ export function ComposerMenuHeader(props: {
   return (
     <div className={cn(MENU_BACK_HEADER_CLASS, !props.leading && "pl-2.5")}>
       {props.leading}
-      <h2 className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{props.title}</h2>
+      {/* A menu may only contain menu items: the title stays visual text there. */}
+      <h2 role="none" className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
+        {props.title}
+      </h2>
       {props.trailing}
     </div>
   );

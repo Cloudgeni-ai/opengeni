@@ -2028,15 +2028,15 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on the inventory stamp are also unsafe; in
             -- particular INSERT can mint authority without a table grant.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
@@ -2072,6 +2072,7 @@ export async function inspectRuntimeDatabasePosture(
               'workspace_allowance_clear_receipts',
               'session_file_attachments',
               'session_file_read_capabilities',
+              'session_import_batches',
               'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE}
@@ -3873,6 +3874,48 @@ export function evaluateRuntimeDatabasePosture(
         !routine.configuration?.some((value) => paths.includes(value))
       )
         violations.push(`session attachment capability ${signature} is missing or unsafe`);
+    }
+  }
+
+  const archiveImportLedger = posture.privateTables.find(
+    (table) => table.name === "session_import_batches",
+  );
+  if (archiveImportLedger) {
+    if (
+      archiveImportLedger.owner === expectedRole ||
+      archiveImportLedger.owner !== tableByName.get("sessions")?.owner ||
+      !archiveImportLedger.rlsEnabled ||
+      !archiveImportLedger.rlsForced ||
+      !archiveImportLedger.rlsActive ||
+      (archiveImportLedger.policyCount ?? 0) < 3 ||
+      archiveImportLedger.select ||
+      archiveImportLedger.insert ||
+      archiveImportLedger.update ||
+      archiveImportLedger.delete ||
+      archiveImportLedger.truncate ||
+      archiveImportLedger.references ||
+      archiveImportLedger.trigger
+    )
+      violations.push("archived import ledger lacks private same-owner FORCE-RLS isolation");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const paths = [
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+    ];
+    for (const signature of [
+      "read_archived_session_import_batch(uuid, uuid, uuid, text, text, text)",
+      "record_archived_session_import_batch(uuid, uuid, uuid, text, text, text, text, integer, integer)",
+    ]) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === signature);
+      if (
+        !routine ||
+        !routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== archiveImportLedger.owner ||
+        !routine.configuration?.some((value) => paths.includes(value))
+      )
+        violations.push(`archived import capability ${signature} is missing or unsafe`);
     }
   }
 
