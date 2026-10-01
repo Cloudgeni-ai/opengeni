@@ -9,6 +9,7 @@ import {
   fixedOrganizationApiKeyPermissions,
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
+  lacksWorkspacePermission,
 } from "./permissions";
 import { workspaceMemberAccessRole } from "./workspace-access-levels";
 
@@ -18,6 +19,55 @@ describe("workspace member permission groups", () => {
     expect(member.permissions).toContain("connections:read");
     expect(member.permissions).not.toContain("connections:write");
     expect(member.permissions).not.toContain("capabilities:manage");
+  });
+
+  test("member contains artifacts:read", () => {
+    const member = workspaceAccessLevels.find((level) => level.role === "member")!;
+    expect(member.permissions).toContain("artifacts:read");
+    // Human Site publish, rollback, and archive stay a separate product decision.
+    expect(member.permissions).not.toContain("artifacts:publish");
+  });
+
+  test("member is a superset of viewer without administrative powers", () => {
+    const level = (role: string) => workspaceAccessLevels.find((item) => item.role === role)!;
+    const member = new Set(level("member").permissions);
+    expect(level("viewer").permissions.filter((permission) => !member.has(permission))).toEqual([]);
+    expect(level("member").permissions.every((p) => level("admin").permissions.includes(p))).toBe(
+      true,
+    );
+    for (const administrative of [
+      "workspace:admin",
+      "members:manage",
+      "api_keys:manage",
+      "connections:write",
+      "github:manage",
+      "rigs:manage",
+      "enrollments:manage",
+      "variable-sets:manage",
+      "secrets:read",
+    ]) {
+      expect(member.has(administrative)).toBe(false);
+    }
+  });
+
+  test("only a loaded grant proves a missing workspace permission", () => {
+    const context = (permissions: string[]) =>
+      ({
+        workspaceGrants: [{ workspaceId: "workspace", permissions }],
+      }) as unknown as Parameters<typeof lacksWorkspacePermission>[0];
+    expect(lacksWorkspacePermission(context(["files:read"]), "workspace", "artifacts:read")).toBe(
+      true,
+    );
+    expect(
+      lacksWorkspacePermission(context(["artifacts:read"]), "workspace", "artifacts:read"),
+    ).toBe(false);
+    expect(
+      lacksWorkspacePermission(context(["workspace:admin"]), "workspace", "artifacts:read"),
+    ).toBe(false);
+    expect(lacksWorkspacePermission(context(["files:read"]), "other", "artifacts:read")).toBe(
+      false,
+    );
+    expect(lacksWorkspacePermission(null, "workspace", "artifacts:read")).toBe(false);
   });
 
   test("distinguishes access denial from transient connection failures", () => {

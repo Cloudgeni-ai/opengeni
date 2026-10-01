@@ -256,6 +256,17 @@ describe("migration 0350 organization shared-workspace administration", () => {
       "rigs:use",
       "artifacts:read",
     ]);
+    const rolePermissions = (role: string) =>
+      overview.roles.find((definition) => definition.role === role)!.permissions;
+    // Member is a superset of Viewer (0555) and a subset of Admin.
+    for (const permission of rolePermissions("viewer")) {
+      expect(rolePermissions("member")).toContain(permission);
+    }
+    for (const permission of rolePermissions("member")) {
+      expect(rolePermissions("admin")).toContain(permission);
+    }
+    expect(rolePermissions("member")).toContain("artifacts:read");
+    expect(rolePermissions("member")).not.toContain("artifacts:publish");
     for (const definition of overview.roles) {
       expect(definition.permissions).toContain("workspace:read");
       expect(definition.permissions).not.toContain("secrets:read");

@@ -1036,6 +1036,18 @@ server-owned array rather than accepting caller permissions. Existing or newly
 authored advanced permission sets remain an explicit `custom` escape hatch;
 the server validates them against workspace-scoped permission vocabulary and
 never lets custom workspace access smuggle account or billing authority.
+The named Member role is a superset of Viewer plus ordinary collaborator
+capabilities, and holds no administrative power. Migration 0516 added
+`connections:read`; migration 0555 adds Viewer's `artifacts:read`,
+`stream:view`, and `rigs:use`, plus `stream:acknowledge` (the caller's own
+desktop-stream consent) and `enrollments:read` (read-only Connected Machine
+listing). Workspace administration, member and API-key management, shared
+connection, GitHub App, Sandbox Environment and machine administration, terminal
+attach, sandbox file writes, inline MCP servers, and human Site
+publish/rollback/archive (`artifacts:publish`) stay Admin-only. Each such
+rollout normalizes only rows whose permissions exactly equal an older named
+Member set (any JSONB order), through a writer trigger for overlapping old
+binaries plus a batched backfill; custom sets are never rewritten.
 Organization owners and administrators may create and rename shared
 workspaces, grant or replace access, and revoke access. Ordinary organization
 members, cross-organization membership ids, and every Personal workspace fail
