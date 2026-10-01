@@ -5,6 +5,16 @@ refresh credentials. Integrating backends provision connections through the
 same connection APIs used by interactive clients, under the canonical actor.
 Personal selections remain bound to the named user captured by accepted work.
 
+Generic OAuth connectors request `offline_access` when the authorization
+server advertises it, alongside the MCP resource scopes. Reviewed provider
+profiles retain their exact scope pins. An expired connection without a refresh
+token needs a new interactive OAuth grant; refresh cannot manufacture one.
+
+SDK transport teardown warnings use `mcp_cleanup_failed`, separately from
+`mcp_transport_failed`. A server that rejects session DELETE (for example, HTTP
+405) may still initialize, list tools, and execute tools successfully. Verify
+those phases before classifying a cleanup warning as connector unavailability.
+
 ## Discovery bounds
 
 Tool discovery shares a 4,096-entry allowance across the prepared catalog. One
@@ -53,6 +63,13 @@ account label. Personal bindings additionally retain the verified sender;
 workspace bindings never acquire a personal owner. The account-qualified routes
 are separately visible to tool discovery, so selecting a tool also selects its
 account. Missing or revoked accounts do not fall back to another identity.
+
+Starting voice freezes eligible accounts under the authenticated request's
+authority on its durable lease. Live delegations and the final transcript
+handoff copy that exact snapshot, including after automatic lease expiry.
+Historical leases remain unmodified; new connections do not widen an existing
+call's authority. Physical provider use still checks live membership and
+connection revocation.
 
 The accepted binding set follows queued work, continuations, child work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
