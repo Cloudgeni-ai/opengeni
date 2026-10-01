@@ -899,8 +899,8 @@ describe("MessageTimeline pagination affordances", () => {
     }
   });
 
-  test.each(["End", "PageDown", "ArrowDown"])(
-    "downward %s supersedes a pending prepend-restore scroll echo",
+  test.each(["End", "PageDown", "ArrowDown", "pointer", "right-click", "control"])(
+    "only reader navigation supersedes a pending prepend-restore scroll echo (%s)",
     async (key) => {
       const tail = manyEvents(8).map((evt) => event(evt.sequence + 12));
       const r = await renderComponent(<MessageTimeline events={tail} hasOlder />);
@@ -923,11 +923,24 @@ describe("MessageTimeline pagination affordances", () => {
         expect(scroller.scrollTop).toBe(1050);
         expect(scroller.dataset.ogBottomFollow).toBe("false");
         await actRun(() => {
-          scroller.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+          const pointer = key === "pointer" || key === "right-click" || key === "control";
+          const target =
+            key === "control" ? scroller.appendChild(document.createElement("button")) : scroller;
+          target.dispatchEvent(
+            pointer
+              ? new PointerEvent("pointerdown", {
+                  button: key === "right-click" ? 2 : 0,
+                  pointerType: "mouse",
+                  bubbles: true,
+                })
+              : new KeyboardEvent("keydown", { key, bubbles: true }),
+          );
           scroller.scrollTop = 2050;
           scroller.dispatchEvent(new Event("scroll"));
         });
-        expect(scroller.dataset.ogBottomFollow).toBe("true");
+        expect(scroller.dataset.ogBottomFollow).toBe(
+          key === "right-click" || key === "control" ? "false" : "true",
+        );
         expect(distanceFromBottom(scroller)).toBe(0);
       } finally {
         layout.restore();

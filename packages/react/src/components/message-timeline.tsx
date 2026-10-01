@@ -1108,6 +1108,7 @@ export function MessageTimeline({
       return;
     }
     disclosureKeepsUnpinnedRef.current = false;
+    programmaticScrollRef.current = 0;
     const node =
       event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
     readerIntentArmRef.current = true;
