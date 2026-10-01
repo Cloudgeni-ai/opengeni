@@ -190,6 +190,27 @@ impl AxElement {
             AXUIElementPerformAction(self.as_concrete_TypeRef(), name.as_concrete_TypeRef())
         })
     }
+
+    pub(super) fn raise_if_supported(&self) -> Result<(), AxCallError> {
+        optional_raise_result(self.perform_action("AXRaise"))
+    }
+}
+
+// Raising is optional; the caller must still confirm the exact foreground
+// process and main window. Other AX failures remain uncertain outcomes.
+fn optional_raise_result(result: Result<(), AxCallError>) -> Result<(), AxCallError> {
+    match result {
+        Err(error)
+            if matches!(
+                error.0,
+                accessibility_sys::kAXErrorAttributeUnsupported
+                    | accessibility_sys::kAXErrorActionUnsupported
+            ) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 fn ax_void(result: AXError) -> Result<(), AxCallError> {
@@ -197,5 +218,31 @@ fn ax_void(result: AXError) -> Result<(), AxCallError> {
         Ok(())
     } else {
         Err(AxCallError(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_raise_still_allows_independent_focus_confirmation() {
+        for code in [
+            accessibility_sys::kAXErrorAttributeUnsupported,
+            accessibility_sys::kAXErrorActionUnsupported,
+        ] {
+            assert!(optional_raise_result(Err(AxCallError(code))).is_ok());
+        }
+        assert!(optional_raise_result(Ok(())).is_ok());
+        for code in [
+            accessibility_sys::kAXErrorCannotComplete,
+            accessibility_sys::kAXErrorInvalidUIElement,
+            accessibility_sys::kAXErrorNotImplemented,
+        ] {
+            assert_eq!(
+                optional_raise_result(Err(AxCallError(code))),
+                Err(AxCallError(code))
+            );
+        }
     }
 }
