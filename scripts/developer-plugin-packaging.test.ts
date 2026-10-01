@@ -104,6 +104,19 @@ describe("skills-only OpenGeni developer plugin", () => {
     }
   });
 
+  test.each([
+    ".agents/skills/opengeni-client/SKILL.md",
+    "packages/runtime/src/bundled_default_skills/opengeni-client/SKILL.md",
+    "docs-site/reference/opengeni-client-skill.mdx",
+  ])("client setup handoff is portable in %s", (path) => {
+    const text = readFileSync(join(root, path), "utf8");
+    const handoffs = [...text.matchAll(/\[OpenGeni developer setup\]\(([^)\s]+)\)/g)];
+    expect(handoffs).toHaveLength(1);
+    const target = new URL(handoffs[0]![1]!);
+    expect(target.protocol).toBe("https:");
+    expect(target.href).toBe("https://docs.opengeni.ai/guides/developer-plugin");
+  });
+
   test("Codex presentation and onboarding use the supported compatibility fields", () => {
     const manifest = json(".codex-plugin/plugin.json");
     expect(manifest).not.toHaveProperty("$schema");
