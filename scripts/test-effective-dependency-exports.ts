@@ -49,13 +49,20 @@ export function verifyTarballIntegrity(bytes: Uint8Array, integrity: string): vo
     throw new Error("Registry tarball integrity mismatch or missing strong integrity");
 }
 
-function canonicalJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJson);
+function canonicalJson(value: unknown, isPackageManifest = false): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalJson(item));
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, item]) => [key, canonicalJson(item)]),
+        // Condition keys are evaluated in insertion order, including nested
+        // alternatives. Preserve the package's entire resolution trees.
+        .map(([key, item]) => [
+          key,
+          isPackageManifest && (key === "exports" || key === "imports")
+            ? item
+            : canonicalJson(item),
+        ]),
     );
   }
   return value;
@@ -92,7 +99,9 @@ export async function shippedInventory(
         if (!entry.isFile()) throw new Error(`Nonregular packed file ${name}`);
         let bytes = await readFile(join(path, entry.name));
         if (name === "package.json")
-          bytes = Buffer.from(JSON.stringify(canonicalJson(JSON.parse(bytes.toString("utf8")))));
+          bytes = Buffer.from(
+            JSON.stringify(canonicalJson(JSON.parse(bytes.toString("utf8")), true)),
+          );
         inventory.set(name, createHash("sha256").update(bytes).digest("hex"));
       }
     }

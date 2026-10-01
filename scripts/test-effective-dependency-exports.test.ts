@@ -17,16 +17,18 @@ async function pack(
   root: string,
   id: string,
   packageManifest: SmokeManifest,
-  source: string,
+  source: string | Record<string, string>,
 ): Promise<PackedCandidate> {
   const directory = join(root, id);
   const tarballs = join(directory, "tarballs");
+  const files = typeof source === "string" ? { "index.js": source } : source;
   await mkdir(tarballs, { recursive: true });
   await writeFile(
     join(directory, "package.json"),
-    JSON.stringify({ ...packageManifest, files: ["index.js"] }),
+    JSON.stringify({ ...packageManifest, files: Object.keys(files) }),
   );
-  await writeFile(join(directory, "index.js"), source);
+  for (const [name, contents] of Object.entries(files))
+    await writeFile(join(directory, name), contents);
   const output = await run(
     ["bun", "pm", "pack", "--ignore-scripts", "--quiet", "--destination", tarballs],
     directory,
@@ -83,6 +85,79 @@ const timeout = "export class ConnectPopupTimeoutError extends Error {}";
 const importer =
   'import { ConnectPopupClosedError } from "@opengeni/connect"; export const Closed = ConnectPopupClosedError;';
 const profiles = { "@opengeni/react": { browser: ["."], node: ["."] } };
+
+for (const field of ["exports", "imports"] as const) {
+  for (const nested of [false, true]) {
+    test(`same-version ${field} ${nested ? "nested " : ""}condition ordering changes Node's selected branch and must be rejected`, async () => {
+      await fixture(async (root) => {
+        const name = "@opengeni/connect";
+        const conditions = { node: "./node.js", import: "./import.js" };
+        const reversed = { import: "./import.js", node: "./node.js" };
+        const selector = field === "exports" ? "." : "#selected";
+        const originalManifest = {
+          ...manifest(name, "0.3.0"),
+          [field]: { [selector]: nested ? { node: conditions } : conditions },
+        };
+        const changedManifest = {
+          ...originalManifest,
+          [field]: { [selector]: nested ? { node: reversed } : reversed },
+        };
+        const files = {
+          "index.js": 'export { selected } from "#selected";',
+          "node.js": 'export const selected = "node";',
+          "import.js": 'export const selected = "import";',
+        };
+        const original = await pack(root, "registry", originalManifest, files);
+        const changed = await pack(root, "candidate", changedManifest, files);
+        for (const [id, packed, selected] of [
+          ["registry", original, "node"],
+          ["candidate", changed, "import"],
+        ] as const) {
+          await run(["tar", "-xzf", packed.tarball, "-C", join(root, id)], root);
+          expect(
+            (
+              await run(
+                [
+                  "node",
+                  "--input-type=module",
+                  "--eval",
+                  `console.log((await import("${name}")).selected)`,
+                ],
+                join(root, id, "package"),
+              )
+            ).trim(),
+          ).toBe(selected);
+        }
+        await expect(
+          effectiveRegistry(new Map([[name, changed]]), await sourceFor(original), root).then(
+            (registry) => registry.stop(),
+          ),
+        ).rejects.toThrow("changed shipped bytes without a new version: package.json");
+      });
+    });
+  }
+}
+
+test("benign top-level and dependency key reordering remains unchanged published payload", async () => {
+  await fixture(async (root) => {
+    const originalManifest = {
+      ...manifest("@opengeni/connect", "0.3.0"),
+      dependencies: { "left-fixture": "1.0.0", "right-fixture": "1.0.0" },
+    };
+    const changedManifest = Object.fromEntries(
+      Object.entries(originalManifest).reverse(),
+    ) as SmokeManifest;
+    changedManifest.dependencies = { "right-fixture": "1.0.0", "left-fixture": "1.0.0" };
+    const original = await pack(root, "registry", originalManifest, closed);
+    const changed = await pack(root, "candidate", changedManifest, closed);
+    const registry = await effectiveRegistry(
+      new Map([[changed.manifest.name, changed]]),
+      await sourceFor(original),
+      root,
+    );
+    registry.stop();
+  });
+});
 
 test("effective closure rejects changed unpublished Connect bytes labelled as the existing 0.3.0 version", async () => {
   await fixture(async (root) => {
