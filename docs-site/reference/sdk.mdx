@@ -10,6 +10,25 @@ bun add @opengeni/sdk
 
 `@opengeni/sdk` is a framework-agnostic, ESM-only TypeScript client. It needs only WHATWG `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
 
+### CommonJS hosts
+
+Use dynamic `import()` inside an async initializer in a `.cjs` host, not `require("@opengeni/sdk")` or top-level `await`. Callers await the initializer; the project can keep its existing CommonJS module type.
+
+```js
+// opengeni.cjs
+async function createOpenGeniClient() {
+  const { OpenGeniClient } = await import("@opengeni/sdk");
+  return new OpenGeniClient({
+    baseUrl: process.env.OPENGENI_API_BASE_URL,
+    apiKey: process.env.OPENGENI_API_KEY,
+  });
+}
+
+module.exports = { createOpenGeniClient };
+```
+
+Keep credential-bearing clients on the server, whether loaded with `import` or dynamic `import()`.
+
 ## Entry points
 
 | Import                                          | Use it for                                                                                    |

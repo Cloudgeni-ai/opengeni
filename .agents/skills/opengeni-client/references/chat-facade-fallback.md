@@ -30,11 +30,21 @@ export const POST = createChatHandler(og, {
     return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
   },
   format: "vercel", // or "openai-chat" / "openai-responses"; default: native chunks
+  toolParts: true, // optional Vercel activity indicators; off by default
 });
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
 ```
+
+For the Vercel format, `toolParts: true` emits OpenGeni's tool activity as
+`dynamic`, `providerExecuted` parts, not tools for your app to execute. The
+successful output is only `{ status }`, not the actual result: this opt-in does
+not restore tool results, artifacts or attachments. Leave it off for text-only
+activity. Approval requests are emitted independently of this option (AI SDK
+6+ is needed to answer them). When composing your own AI SDK stream, pass the
+same option to `uiMessageStreamParts(chunks, { framing: false, toolParts: true })`;
+`framing: false` leaves message framing to the outer stream.
 
 Each tenant maps to one workspace and each conversation to one deterministic
 session. Conversation IDs are independent of the acting user; authorization

@@ -22,6 +22,8 @@ mcpServers: [
 tools: [{ kind: "mcp", id: "acme" }],
 ```
 
+The list uses the original names returned by the MCP server's `tools/list`, such as `update_ticket`, not the model-facing `acme__update_ticket` name. API Integrations use a different list: install-time `autoApprovedTools` takes exact compiled `preview.tools[].id` values, and a session MCP policy does not override it. See [Your data](/integrate/your-data).
+
 When the agent proposes a gated call, the session enters `requires_action` and the conversation shows the call with Approve and Reject. A rejection goes back to the agent as the tool's result so it can adapt. Approvals are human-only: an agent can never approve a tool call.
 
 ## Let the agent ask questions
