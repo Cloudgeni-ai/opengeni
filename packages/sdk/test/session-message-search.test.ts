@@ -117,6 +117,49 @@ test("workspace grouping is explicitly serialized without changing default Find"
   expect(requests[1]!.searchParams.has("groupBy")).toBe(false);
 });
 
+test("root and browser SDKs roundtrip omitted, null and UUID parent scopes", async () => {
+  const parentSessionId = "11111111-1111-4111-8111-111111111111";
+  for (const Client of [OpenGeniClient, OpenGeniBrowserClient]) {
+    const requests: URL[] = [];
+    const client = new Client({
+      baseUrl: "https://example.test",
+      fetch: async (input) => {
+        requests.push(new URL(String(input)));
+        return Response.json({
+          matches: [],
+          nextCursor: null,
+          hasMore: false,
+          scannedMessages: 0,
+          matchedMessageCount: 0,
+          matchedOccurrenceCount: 0,
+          countIsExact: true,
+        });
+      },
+    });
+    for (const parent of [undefined, null, parentSessionId]) {
+      await client.searchSessionMessages("workspace", {
+        query: "needle",
+        groupBy: "session",
+        ...(parent !== undefined ? { parentSessionId: parent } : {}),
+      });
+    }
+    expect(requests).toHaveLength(3);
+    expect(requests[0]!.searchParams.has("parentSessionId")).toBe(false);
+    expect(requests[1]!.searchParams.get("parentSessionId")).toBe("null");
+    expect(requests[2]!.searchParams.get("parentSessionId")).toBe(parentSessionId);
+    for (const request of requests) {
+      const wire = Object.fromEntries(request.searchParams);
+      const parsed = SessionMessageSearchRequest.parse({
+        ...wire,
+        ...(wire.parentSessionId === "null" ? { parentSessionId: null } : {}),
+      });
+      expect(parsed.parentSessionId).toBe(
+        wire.parentSessionId === "null" ? null : wire.parentSessionId,
+      );
+    }
+  }
+});
+
 test("selected preview is browser-compatible and sends only the exact identity and cancellation", async () => {
   const controller = new AbortController();
   const calls: URL[] = [];

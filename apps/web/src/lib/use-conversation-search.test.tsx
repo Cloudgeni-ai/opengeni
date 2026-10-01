@@ -67,6 +67,7 @@ async function harness(read: OpenGeniBrowserClient["searchSessionMessages"], str
     workspaceId = "w",
     enabled = true,
     archiveStatus = "all",
+    parentSessionId,
     activeClient = client,
   }: {
     query?: string;
@@ -74,11 +75,12 @@ async function harness(read: OpenGeniBrowserClient["searchSessionMessages"], str
     workspaceId?: string;
     enabled?: boolean;
     archiveStatus?: "active" | "archived" | "all";
+    parentSessionId?: string | null;
     activeClient?: OpenGeniBrowserClient;
   }) {
     committed = useCommittedSearchQuery(
       query,
-      JSON.stringify([authority, workspaceId, archiveStatus]),
+      JSON.stringify([authority, workspaceId, archiveStatus, parentSessionId]),
       enabled,
       40,
     );
@@ -89,6 +91,7 @@ async function harness(read: OpenGeniBrowserClient["searchSessionMessages"], str
       query: committed,
       enabled,
       archiveStatus,
+      parentSessionId,
       debounceMs: 0,
     });
     useLayoutEffect(() => {
@@ -142,6 +145,51 @@ test("a brief typo and undo leave the active request and completed results intac
     await flush(60);
     expect(signals).toHaveLength(1);
     expect(view.state().page?.matches).toHaveLength(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("parent-scope changes abort stale reads and reset the pagination stack", async () => {
+  const requests: Array<{ parentSessionId?: string | null; cursor?: string; signal: AbortSignal }> =
+    [];
+  const stale = deferred<ConversationSearchPage>();
+  const view = await harness(async (_workspace, request, options) => {
+    requests.push({ ...request, signal: options!.signal! });
+    if (request.parentSessionId === null && request.cursor) return stale.promise;
+    if (request.parentSessionId === null)
+      return page({
+        matches: Array.from({ length: 50 }, (_, index) => hit(`parent-${index}`)),
+        hasMore: true,
+        nextCursor: "parent-next",
+        countIsExact: false,
+      });
+    return page({ matches: [hit("child")] });
+  });
+  try {
+    await flush();
+    await view.render({ parentSessionId: null });
+    await flush();
+    expect(view.state().page?.matches).toHaveLength(50);
+    await act(async () => view.state().next());
+    await flush();
+    const oldRequest = requests.at(-1)!;
+    expect(oldRequest.cursor).toBe("parent-next");
+    await view.render({ parentSessionId: undefined });
+    expect(oldRequest.signal.aborted).toBe(true);
+    expect(view.state().pageIndex).toBe(0);
+    expect(view.state().page).toBeNull();
+    await flush();
+    expect(requests.at(-1)?.cursor).toBeUndefined();
+    expect(requests.at(-1)).not.toHaveProperty("parentSessionId");
+    await act(async () => stale.resolve(page({ matches: [hit("stale-parent")] })));
+    expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["child"]);
+    await view.render({ parentSessionId: null });
+    expect(view.state().page).toBeNull();
+    await flush();
+    expect(requests.at(-1)?.parentSessionId).toBeNull();
+    expect(requests.at(-1)?.cursor).toBeUndefined();
+    expect(view.state().pageIndex).toBe(0);
   } finally {
     await view.unmount();
   }

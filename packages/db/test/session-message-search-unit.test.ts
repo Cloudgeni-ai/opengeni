@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { SessionMessageSearchRequest, SessionMessageSearchResponse } from "@opengeni/contracts";
 import {
+  scanSessionMessages,
+  SessionMessageSearchCursorError,
   sessionMessageLiteralPattern,
   sessionMessageSearchSnippet,
 } from "../src/session-message-search";
+import type { Database } from "../src/database";
 
 test("literal metacharacters and wildcard characters are never interpreted", () => {
   for (const query of ["%", "_", "\\", ".*", "[abc]", "a+b?", "$^(){}|"]) {
@@ -66,4 +70,89 @@ test("strict bounded request and explicit advancing empty response", () => {
       countIsExact: false,
     }).hasMore,
   ).toBe(true);
+});
+
+test("parent cursor scopes are fenced in every direction before candidate reads", async () => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const sessionId = "22222222-2222-4222-8222-222222222222";
+  const authority = ["user:search", null];
+  let reads = 0;
+  const query = {
+    from: () => query,
+    innerJoin: () => query,
+    where: () => query,
+    orderBy: () => query,
+    limit: async () => {
+      reads++;
+      const identity = {
+        sessionId,
+        eventId: "33333333-3333-4333-8333-333333333333",
+        sequence: 1,
+        turnId: null,
+        type: "user.message",
+        sessionTitle: null,
+        messageId: null,
+        codec: null,
+        smallText: "needle needle",
+      };
+      return [identity, { ...identity, sessionId: "44444444-4444-4444-8444-444444444444" }];
+    },
+  };
+  const db = { select: () => query } as unknown as Database;
+  const scopes = [undefined, null, workspaceId, sessionId];
+  for (const groupBy of [undefined, "session" as const]) {
+    for (const parentSessionId of scopes) {
+      const request = {
+        query: "needle",
+        limit: 1,
+        ...(groupBy ? { groupBy } : {}),
+        ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      };
+      const page = await scanSessionMessages(db, workspaceId, request, [], authority);
+      expect(page.nextCursor).not.toBeNull();
+      if (parentSessionId === undefined) {
+        const cursor = JSON.parse(Buffer.from(page.nextCursor!, "base64url").toString("utf8"));
+        const legacyBinding = createHash("sha256")
+          .update(
+            JSON.stringify([
+              workspaceId,
+              authority,
+              "needle",
+              null,
+              "active",
+              ...(groupBy ? [{ groupBy }] : []),
+            ]),
+          )
+          .digest("hex");
+        expect(cursor.binding).toBe(legacyBinding);
+      }
+      // The same scope can continue, even with a different page size.
+      await scanSessionMessages(
+        db,
+        workspaceId,
+        { ...request, limit: 2, cursor: page.nextCursor! },
+        [],
+        authority,
+      );
+      for (const nextParent of scopes) {
+        if (nextParent === parentSessionId) continue;
+        const readsBefore = reads;
+        await expect(
+          scanSessionMessages(
+            db,
+            workspaceId,
+            {
+              query: "needle",
+              ...(groupBy ? { groupBy } : {}),
+              ...(nextParent !== undefined ? { parentSessionId: nextParent } : {}),
+              cursor: page.nextCursor!,
+            },
+            [],
+            authority,
+          ),
+        ).rejects.toBeInstanceOf(SessionMessageSearchCursorError);
+        expect(reads).toBe(readsBefore);
+      }
+    }
+  }
 });

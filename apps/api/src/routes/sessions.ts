@@ -724,6 +724,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const raw = c.req.query();
     const parsed = SessionMessageSearchRequest.safeParse({
       ...raw,
+      ...(raw.parentSessionId === "null" ? { parentSessionId: null } : {}),
       ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}),
     });
     if (!parsed.success)

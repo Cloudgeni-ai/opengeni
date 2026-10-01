@@ -82,6 +82,7 @@ export function useConversationSearch(input: {
   authority: string;
   workspaceId: string;
   sessionId?: string;
+  parentSessionId?: string | null;
   query: string;
   enabled: boolean;
   archiveStatus?: "active" | "archived" | "all";
@@ -92,12 +93,20 @@ export function useConversationSearch(input: {
     authority,
     workspaceId,
     sessionId,
+    parentSessionId,
     query,
     enabled,
     archiveStatus = "all",
     debounceMs = 180,
   } = input;
-  const identity = JSON.stringify([authority, workspaceId, sessionId, query, archiveStatus]);
+  const identity = JSON.stringify([
+    authority,
+    workspaceId,
+    sessionId,
+    query,
+    archiveStatus,
+    parentSessionId === undefined ? "all" : parentSessionId,
+  ]);
   const [navigation, setNavigation] = useState<{
     identity: string;
     client: typeof client;
@@ -167,6 +176,7 @@ export function useConversationSearch(input: {
               query,
               ...(sessionId ? { sessionId } : { groupBy: "session" as const }),
               archiveStatus,
+              ...(parentSessionId !== undefined ? { parentSessionId } : {}),
               limit: remaining,
               ...(nextCursor ? { cursor: nextCursor } : {}),
             },
@@ -209,6 +219,7 @@ export function useConversationSearch(input: {
     identity,
     workspaceId,
     sessionId,
+    parentSessionId,
     query,
     archiveStatus,
     cursor,

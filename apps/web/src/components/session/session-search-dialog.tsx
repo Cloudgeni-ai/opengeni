@@ -6,6 +6,8 @@ import { useAppContext } from "@/context";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Select } from "@/components/ui/select";
 import {
   useCommittedSearchQuery,
   useConversationSearch,
@@ -31,20 +33,32 @@ export default function SessionSearchDialog(props: {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [archiveStatus, setArchiveStatus] = useState<"active" | "archived" | "all">("all");
+  const [sessionScope, setSessionScope] = useState<"parents" | "all">("parents");
+  const parentSessionId = sessionScope === "parents" ? null : undefined;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobilePreview, setMobilePreview] = useState(false);
-  const [titleCursor, setTitleCursor] = useState<string | undefined>();
+  const [titleNavigation, setTitleNavigation] = useState<{
+    identity: string;
+    cursor: string;
+  } | null>(null);
   const [previewIndex, setPreviewIndex] = useState(0);
   const resultScroll = useRef(0);
   const previewScroll = useRef(0);
-  const scope = JSON.stringify([accessContext.subjectId, props.workspaceId, archiveStatus]);
+  const scope = JSON.stringify([
+    accessContext.subjectId,
+    props.workspaceId,
+    archiveStatus,
+    sessionScope,
+  ]);
   const committedQuery = useCommittedSearchQuery(query, scope, props.open);
   const identity = JSON.stringify([
     accessContext.subjectId,
     props.workspaceId,
     committedQuery,
     archiveStatus,
+    sessionScope,
   ]);
+  const titleCursor = titleNavigation?.identity === identity ? titleNavigation.cursor : undefined;
   const search = useConversationSearch({
     client,
     authority: accessContext.subjectId,
@@ -53,6 +67,7 @@ export default function SessionSearchDialog(props: {
     debounceMs: 0,
     enabled: props.open,
     archiveStatus,
+    parentSessionId,
   });
   const loadTitles = useCallback(
     (signal: AbortSignal) =>
@@ -60,10 +75,11 @@ export default function SessionSearchDialog(props: {
         search: committedQuery,
         signal,
         archiveStatus,
+        ...(parentSessionId === null ? { parentSessionId } : {}),
         limit: 20,
         ...(titleCursor ? { cursor: titleCursor } : {}),
       }),
-    [client, props.workspaceId, committedQuery, archiveStatus, titleCursor],
+    [client, props.workspaceId, committedQuery, archiveStatus, parentSessionId, titleCursor],
   );
   const titles = useSessionSearchResource(
     `${identity}:${titleCursor ?? ""}`,
@@ -132,7 +148,7 @@ export default function SessionSearchDialog(props: {
     enabled: props.open && !!previewSelection,
   });
   useEffect(() => {
-    setTitleCursor(undefined);
+    setTitleNavigation(null);
     setSelectedId(null);
     setMobilePreview(false);
     setPreviewIndex(0);
@@ -190,8 +206,8 @@ export default function SessionSearchDialog(props: {
         className="flex h-[min(760px,85dvh)] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl sm:p-0"
         aria-describedby="session-search-description"
       >
-        <div className="shrink-0 border-b border-border px-4 pb-3 pt-4 pr-12">
-          <DialogTitle className="mb-3 text-base">Search sessions</DialogTitle>
+        <div className="shrink-0 border-b border-border px-4 pb-3 pt-4">
+          <DialogTitle className="mb-3 pr-8 text-base">Search sessions</DialogTitle>
           <div className="relative">
             <SearchIcon
               className="pointer-events-none absolute left-3 top-2.5 size-4 text-fg-subtle"
@@ -214,26 +230,36 @@ export default function SessionSearchDialog(props: {
               Showing results for “{committedQuery}”
             </p>
           ) : null}
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <DialogDescription id="session-search-description" className="flex-1 text-xs">
-              Literal text in user and completed assistant messages.
-            </DialogDescription>
+          <DialogDescription id="session-search-description" className="sr-only">
+            Search titles and completed messages. All sessions includes sub-sessions.
+          </DialogDescription>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <SegmentedControl
+              aria-label="Session search scope"
+              size="sm"
+              value={sessionScope}
+              options={[
+                { value: "parents", label: "Parent sessions" },
+                { value: "all", label: "All sessions" },
+              ]}
+              onValueChange={setSessionScope}
+            />
             <label className="flex items-center gap-2 text-xs text-fg-muted">
-              Sessions
-              <select
+              Status
+              <Select
                 aria-label="Search session status"
                 value={archiveStatus}
                 onChange={(event) => {
                   setArchiveStatus(event.target.value as typeof archiveStatus);
-                  setTitleCursor(undefined);
+                  setTitleNavigation(null);
                   setSelectedId(null);
                 }}
-                className="rounded-md border border-border bg-bg px-2 py-1 text-fg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="h-8 bg-surface text-xs"
               >
-                <option value="all">All</option>
+                <option value="all">Any status</option>
                 <option value="active">Active</option>
                 <option value="archived">Archived</option>
-              </select>
+              </Select>
             </label>
           </div>
         </div>
@@ -283,7 +309,10 @@ export default function SessionSearchDialog(props: {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setTitleCursor(titles.value?.nextCursor ?? undefined)}
+                  onClick={() => {
+                    if (titles.value?.nextCursor)
+                      setTitleNavigation({ identity, cursor: titles.value.nextCursor });
+                  }}
                 >
                   More title results
                 </Button>

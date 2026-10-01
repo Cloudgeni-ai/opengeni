@@ -2,6 +2,8 @@
 export type SessionMessageSearchRequest = {
   query: string;
   sessionId?: string | undefined;
+  /** Omitted: all sessions; null: roots; UUID: direct children only. */
+  parentSessionId?: string | null | undefined;
   /** Workspace-only first hit per session; cannot combine with sessionId. */
   groupBy?: "session" | undefined;
   archiveStatus?: "active" | "archived" | "all" | undefined;
