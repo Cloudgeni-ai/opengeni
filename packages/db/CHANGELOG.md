@@ -1,5 +1,74 @@
 # @opengeni/db
 
+## 6.3.0
+
+### Minor Changes
+
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+
+### Patch Changes
+
+- e01fc8e: Preserve the exact accepted preference descriptor snapshot across recovery attempts, including after permanent Skill removal or descriptor-rendering changes. Removed content remains unavailable and exact-attempt authorization remains enforced.
+- 0bbe2e7: `installApiIntegration` accepts `autoApprovedTools`: selected write or destructive tools of a custom or curated API Integration (a curated definition may forbid specific operations) that run without per-call human approval, so scheduled and other unattended runs no longer wait forever on an approval. It needs `capabilities:manage`, passes organization integration policy again, and is declarative (omit it and every write tool asks again). Connector tool-permission and session approval-policy errors for API Integration ids now point to this setting.
+- 55f1cdd: Checkpoint managed browsers before provider expiry through existing encrypted
+  suspension receipts. Exact lease and controller claims fence capture, publication
+  and cleanup; retries retain one operation and never recapture a committed artifact.
+  Share browser authority derivation through leaf exports used by API and worker.
+- b45621d: Revalidate live editor source-session authority in the mutation commit transaction, and enforce source-bound socket lease expiry independently of stalled authorization. Publish the session-proxy JavaScript entry and negotiate artifact support without breaking conversation bootstrap against older APIs.
+- b45621d: Fix embedded artifact viewing for external users by resolving fresh effective workspace grants, checking exact session associations on every request, and binding live editor tickets to their source session. Keep editor authority and reconnect reads current when clients or sessions change, and allow retrying temporary viewer configuration failures.
+
+  Source-bound editor sockets renew a 15-second lease through the host proxy, rechecking product authorization; existing unbound console sockets are unchanged. Compact authenticated source tickets remain within the existing wire limit.
+
+  Add server-only `@opengeni/sdk/session-proxy` helpers. Stream embedded Site HTML with backpressure and cancellation and enforce a 25 MiB actual-byte ceiling; oversized streams fail with `site_html_too_large`. Preserve the console's existing shared artifact components and list behavior.
+
+  Allow PostgreSQL test fixtures to use an explicitly configured native server while preserving restricted-role and FORCE-RLS verification.
+
+- c7bb6f1: Stop deterministic goal retries for terminal or unavailable-model sessions,
+  preserve frozen connector authority through voice delegation and handoff, and
+  request advertised OAuth offline access for generic native MCP connections.
+  Distinguish MCP teardown warnings from connection failures in safe telemetry.
+
+  Freeze initial-turn connector accounts against executable workspace defaults,
+  matching follow-up admission while preserving explicit selections and exclusions.
+
+  Validate scheduled generated sessions against the full accepted agent
+  configuration and instruction alias during queued recovery.
+
+- 0bbe2e7: `previewApiIntegration` and `installApiIntegration` accept an inline OpenAPI document: `source: { kind: "openapi_document", sourceKey, document, baseUrl? }` (JSON or YAML, at most 8 MiB). `sourceKey` is the stable installation identity, server URLs must be absolute (or `baseUrl` given), and the preview echoes only the document's SHA-256. Calls still follow the deployment network policy, so a product on a private or loopback address still needs a public tunnel unless the operator enables private targets.
+- 46e3a8e: Give the named shared-workspace Member role everything Viewer has plus read-or-own collaborator access: `artifacts:read` (open Sites and agent-made documents, spreadsheets and presentations), `stream:view`, `stream:acknowledge`, `rigs:use`, and `artifacts:publish` (every member can create and publish Sites and editable artifacts; publish, rollback, and archive act on any artifact in the workspace and are reversible). Rolling migrations 0555-0557 update the preset, normalize older named Member sets written by overlapping binaries, and backfill exact-match memberships in batches. Custom permission sets are unchanged, and administrative permissions stay Admin-only.
+- 3545ca3: Include exact accepted-turn initiator context in signed credential-provider
+  requests, with human/service/agent attribution and bounded causal lineage for
+  children, continuations, and coalesced updates. Preserve initiating-human fields
+  and authorization; expose the additive context through the SDK verifier.
+- 45d1301: Clarify that goal completion records ledger proof, not the user-facing answer, including when late child results arrive after completion.
+- 45d1301: Project structured developer/system text into Chat-native history without mutating canonical messages, recognize completed hosted tools for final-reply handoffs across recovery, and keep DB helper imports within the foundation boundary.
+- dd6795c: Explain known session-creation refusals for unavailable accepted workspace connections as non-retryable errors. Preserve authorization checks and original driver evidence without returning query text, credentials, or account details.
+- 0bbe2e7: `api_key` Connections now must store `{ headers: {...} }` or `{ placements: [...] }`; create and update reject any other shape (such as a bare `{ apiKey }`) with 422 instead of accepting it and failing every tool call later. The SDK types this as `ApiKeyConnectionCredential`. `previewApiIntegration` warns when the selected Connection does not place its credential where the API description declares.
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/config@3.2.0
+  - @opengeni/codemode@0.6.6
+  - @opengeni/observability@0.8.36
+
 ## 6.2.0
 
 ### Minor Changes

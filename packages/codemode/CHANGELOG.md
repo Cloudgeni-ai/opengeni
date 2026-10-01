@@ -1,5 +1,39 @@
 # @opengeni/codemode
 
+## 0.6.6
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/tool-gateway@0.1.17
+
 ## 0.6.5
 
 ### Patch Changes

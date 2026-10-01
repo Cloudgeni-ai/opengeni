@@ -1,5 +1,11 @@
 # @opengeni/jev
 
+## 0.2.1
+
+### Patch Changes
+
+- 48f5d39: `code_search` packs "must change together" declarations after the passages that passed the relevance bar instead of before them, so they no longer push verified passages out of the token budget.
+
 ## 0.2.0
 
 ### Minor Changes
