@@ -123,7 +123,9 @@ test.each([
         sandboxBackend: "docker",
         productAccessMode: "configured",
         environmentsEncryptionKey: Buffer.alloc(32, 3).toString("base64"),
-        mcpServers: [],
+        // Available registry servers are not selected merely by availability.
+        // Session-attached servers, by contrast, are selected by attachment.
+        mcpServers: [unselected],
         integrationsAllowPrivateNetworkTargets: true,
       });
       const provider = {
@@ -174,7 +176,7 @@ test.each([
       const created = await sdk.createSession(scope.workspaceId, {
         initialMessage: "First",
         tools: [{ kind: "mcp", id: remote.id, optional: true, eager: true }],
-        mcpServers: [remote, unselected],
+        mcpServers: [remote],
         idempotencyKey: crypto.randomUUID(),
       });
       const session = (await getSession(
@@ -182,7 +184,10 @@ test.each([
         scope.workspaceId,
         created.id,
       )) as unknown as Session;
-      const runSettings = { ...settings, mcpServers: session.mcpServers };
+      const runSettings = {
+        ...settings,
+        mcpServers: [...settings.mcpServers, ...session.mcpServers],
+      };
       for (const stage of [0, 1]) {
         if (stage === 1) {
           if (delivery === "composer") {

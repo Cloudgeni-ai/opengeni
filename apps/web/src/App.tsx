@@ -492,7 +492,7 @@ const workspaceSettingsRoute = createRoute({
   ): {
     section?: WorkspaceSettingsSection | "plugins";
     account?: string;
-    view?: ModelsView | AccessUrlView | DeveloperView;
+    view?: ModelsView | AccessUrlView | DeveloperView | "agent-defaults";
     key?: string;
     member?: string;
     webhook?: string;
@@ -509,7 +509,9 @@ const workspaceSettingsRoute = createRoute({
         ? parseModelsView(search.view)
         : section === "developer"
           ? parseDeveloperView(search.view)
-          : undefined;
+          : (section ?? "general") === "general" && search.view === "agent-defaults"
+            ? ("agent-defaults" as const)
+            : undefined;
     const key = section === "api-keys" ? parseApiKeyParam(search.key) : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
     const access = section === "access" ? parseAccessSearch(search) : {};
@@ -911,6 +913,9 @@ function WorkspaceSettings() {
     <LazyWorkspaceSettingsRoute
       workspaceId={workspaceId}
       section={section ?? "general"}
+      generalView={
+        (section ?? "general") === "general" && view === "agent-defaults" ? view : undefined
+      }
       apiKey={key}
       developer={
         section === "developer"

@@ -12,6 +12,7 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export type { Chats } from "./chats";
 export type { ServiceContext } from "./embedding-client";
 export {
   OPENGENI_TEST_REQUEST_NIL_ID,
@@ -201,6 +202,7 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
@@ -218,8 +220,10 @@ export {
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
 export type {
+  AgentPromptModuleId,
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
+  ModelContextInstructionModule,
   ModelContextSkill,
   ModelContextSkillKind,
   ModelContextSnapshot,
@@ -809,7 +813,13 @@ export type {
   UpdateSlackChannelRoutesRequest,
   SlackReactionChannel,
   SlackReactionChannelListResponse,
+  ApiKeyConnectionCredential,
+  ConnectionCredentialPlacement,
   CreateConnectionRequest,
+  InlineOpenApiDocumentSource,
+  IntegrationSourceInput,
+  IntegrationSourceProjection,
+  SessionApprovalRequest,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -1213,6 +1223,19 @@ export type {
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentCapabilityId,
+  AgentSkillsCapability,
+  AgentCapabilityToggles,
+  AgentCapabilities,
+  AgentRenderer,
+  AgentConfigRequest,
+  WorkspaceAgentDefaults,
+  ResolvedAgentCapabilities,
+  ResolvedAgentConfig,
+  AgentEffectiveTools,
+  ClientAgentConfig,
+  AgentConfigErrorCode,
   UpdateVariableSetRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,

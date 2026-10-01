@@ -175,7 +175,9 @@ rather than hijacking an unrelated existing session. The prompt does not widen
 authority; the relationship policy above remains the enforcement boundary. A
 leaf turn without those tools continues the work itself.
 
-Canonical implementation: `packages/runtime/src/operational-instructions.ts`,
+Canonical implementation: `packages/runtime/src/operational-instructions.ts`
+(legacy sessions), `packages/runtime/src/agent-instructions/modules/subagents.ts`
+(sessions with an agent configuration and the subagents capability),
 `packages/core/src/session-authorization.ts`,
 `packages/db/src/session-control.ts`, `packages/db/src/index.ts`,
 `apps/api/src/routes/sessions.ts`, and `apps/api/src/mcp/server.ts`.

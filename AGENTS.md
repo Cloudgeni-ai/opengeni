@@ -120,6 +120,13 @@ Preserve repository-file discovery independently; it still uses the sandbox SDK
 instruction source.
 See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 
+Non-null session agent configurations use the shared contracts tool-family gate
+at worker/runtime attachment and Codemode SDK routing. Never restore disabled
+families from legacy columns. Null configurations retain legacy behavior.
+Configured Skill read means only `skill_read` with a nonempty catalog; sandbox
+tools and wait/command/title mechanics are not capability toggles. Router history
+preserves the router, never removed execution authority.
+
 - Public clients talk only to the API.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
   authority hierarchy: `managed_accounts.id` remains the physical organization

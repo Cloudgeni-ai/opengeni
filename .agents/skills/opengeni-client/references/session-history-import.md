@@ -2,7 +2,7 @@
 
 Use this reference when a host moves historical sessions from embedded/in-process
 OpenGeni to a standalone deployment. The public walkthrough is
-`/guides/integrate-your-product#migrating-from-embedded-opengeni`; with source
+`/integrate/session-history-import`; with source
 access, `docs/product-integration.md` is the canonical product boundary. Verify
 the target service and installed package types support the import contract.
 

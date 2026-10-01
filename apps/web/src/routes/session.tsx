@@ -1,4 +1,7 @@
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import { enableSandboxTerminal } from "@opengeni/react/terminal";
+import { enableCodeEditor } from "@opengeni/react/editor";
+import { enableDesktopViewer } from "@opengeni/react/desktop";
 import { retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
@@ -62,6 +65,7 @@ import {
 } from "@opengeni/react/session";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BotIcon,
   BugIcon,
   CheckIcon,
   Loader2Icon,
@@ -195,6 +199,17 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 // Highlighted diffs and file views load @pierre/diffs only here, in the lazy
 // session route, so the peer and its highlighter stay out of the initial graph.
 enablePierreDiffs();
+enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") });
+enableDesktopViewer();
+enableCodeEditor({
+  javascript: async () =>
+    (await import("@codemirror/lang-javascript")).javascript({ jsx: true, typescript: true }),
+  json: async () => (await import("@codemirror/lang-json")).json(),
+  python: async () => (await import("@codemirror/lang-python")).python(),
+  markdown: async () => (await import("@codemirror/lang-markdown")).markdown(),
+  css: async () => (await import("@codemirror/lang-css")).css(),
+  html: async () => (await import("@codemirror/lang-html")).html(),
+});
 
 const InlineChatArtifact = lazy(() =>
   import("@/components/artifacts/retained-file-preview").then((module) => ({
@@ -253,6 +268,11 @@ const LazyFailedSessionBanner = lazy(() =>
   })),
 );
 
+const LazyAgentConfigurationPanel = lazy(() =>
+  import("@/components/session/agent-configuration-panel").then(({ AgentConfigurationPanel }) => ({
+    default: AgentConfigurationPanel,
+  })),
+);
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
@@ -1238,6 +1258,17 @@ export function SessionRoute({
   }
 }
 
+/** The latest agent-settings change, and whether a turn has started since. */
+function lastAgentChange(events: readonly SessionEvent[]): { at: string; pending: boolean } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "session.agent.updated") continue;
+    const pending = !events.slice(index + 1).some((later) => later.type === "turn.started");
+    return { at: event.occurredAt, pending };
+  }
+  return null;
+}
+
 /**
  * The resizable Workspace dock: chat on the left, a collapsible/maximizable dock
  * on the right with the capability-gated sandbox surfaces (Files |
@@ -1365,6 +1396,23 @@ function SessionDock(props: {
       ),
     },
   ];
+  if (props.session && context.clientConfig.agentConfig?.enabled) {
+    trailingTabs.push({
+      id: "agent",
+      label: "Agent",
+      icon: <BotIcon />,
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening agent settings" />}>
+          <LazyAgentConfigurationPanel
+            key={props.session.id}
+            session={props.session}
+            lastChange={lastAgentChange(props.events)}
+            onReloadSession={props.onReloadSession}
+          />
+        </Suspense>
+      ),
+    });
+  }
   if (props.session) {
     trailingTabs.push({
       id: "debug",

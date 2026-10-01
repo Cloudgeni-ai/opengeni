@@ -21,6 +21,18 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./terminal": {
+      "types": "./src/terminal.ts",
+      "default": "./src/terminal.ts"
+    },
+    "./editor": {
+      "types": "./src/editor.ts",
+      "default": "./src/editor.ts"
+    },
+    "./desktop": {
+      "types": "./src/desktop.ts",
+      "default": "./src/desktop.ts"
+    },
     "./sites": {
       "types": "./src/sites.ts",
       "default": "./src/sites.ts"

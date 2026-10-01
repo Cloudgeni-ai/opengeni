@@ -12,6 +12,7 @@ import {
   ReasoningEffort,
   type FirstPartyMcpToolName,
   type Permission,
+  type ResolvedAgentConfig,
   type ToolRef,
 } from "@opengeni/contracts";
 
@@ -23,6 +24,7 @@ const SESSION_TITLE_DESCRIPTION =
 export function shouldRequestMissingSessionTitle(input: {
   title: string | null;
   titleSource: "user" | "agent" | null;
+  agentConfig?: ResolvedAgentConfig | null;
   firstPartyMcpTools: readonly FirstPartyMcpToolName[];
   firstPartyMcpPermissions: readonly Permission[] | null;
 }): boolean {
@@ -30,7 +32,9 @@ export function shouldRequestMissingSessionTitle(input: {
   const needsSemanticTitle =
     input.titleSource !== "user" && (!title || title === AUTOMATIC_SESSION_TITLE_FALLBACK);
   if (!needsSemanticTitle) return false;
-  if (!input.firstPartyMcpTools.includes("set_session_title")) return false;
+  // Configured sessions title through the runtime, not an opted-in capability.
+  // Legacy sessions keep their exact selected-tool and permission admission.
+  if (!input.agentConfig && !input.firstPartyMcpTools.includes("set_session_title")) return false;
   const permissions = input.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   return hasPermission([...permissions], "sessions:control");
 }
@@ -51,6 +55,7 @@ export function routeAllowsSessionTitleRequests(
 
 export function sessionTitleToolPlan(input: {
   tools: readonly ToolRef[];
+  agentConfig?: ResolvedAgentConfig | null;
   selectedFirstPartyMcpTools: readonly FirstPartyMcpToolName[];
   shouldRequestTitle: boolean;
   parallelGenerationAvailable: boolean;
@@ -63,7 +68,8 @@ export function sessionTitleToolPlan(input: {
 } {
   const titleToolAvailable =
     input.shouldRequestTitle &&
-    input.tools.some((tool) => tool.kind === "mcp" && tool.id === "opengeni");
+    (input.agentConfig != null ||
+      input.tools.some((tool) => tool.kind === "mcp" && tool.id === "opengeni"));
   const titleRequestAllowed = titleToolAvailable && input.routeAllowsTitleRequests;
   const generateTitleInParallel = titleRequestAllowed && input.parallelGenerationAvailable;
   const promoteTitleTool = titleRequestAllowed && !generateTitleInParallel;

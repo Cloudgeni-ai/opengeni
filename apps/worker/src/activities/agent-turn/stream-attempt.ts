@@ -88,6 +88,7 @@ import {
 import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
+  withPublicApprovalFields,
   type RetainedArtifactMetadata,
   type SessionEvent,
   type SessionTurn,
@@ -1736,9 +1737,11 @@ export async function runTurnStreamAttempt(
                     type: "session.requiresAction" as const,
                     payload: {
                       approvals: approvals.map((approval) =>
-                        withMcpToolDisplayMetadata(
-                          eventing.preparedTools?.mcpServers ?? [],
-                          approval,
+                        withPublicApprovalFields(
+                          withMcpToolDisplayMetadata(
+                            eventing.preparedTools?.mcpServers ?? [],
+                            approval,
+                          ),
                         ),
                       ),
                     },

@@ -19,7 +19,9 @@ import {
 import {
   ApiIntegrationPreview,
   type ApiIntegrationAuthPreview,
-  type IntegrationSource,
+  type InlineOpenApiDocumentSource,
+  type IntegrationSourceInput,
+  type IntegrationSourceProjection,
 } from "@opengeni/contracts";
 import type { StoredApiIntegrationRevision } from "@opengeni/db";
 
@@ -40,7 +42,7 @@ export type ResolvedApiIntegrationPreview = {
 };
 
 export async function resolveApiIntegrationPreview(input: {
-  source: IntegrationSource;
+  source: IntegrationSourceInput;
   connection: ApiIntegrationConnectionDescriptor | null;
   transport: IntegrationTransport;
   credentialResolver?: IntegrationCredentialResolver;
@@ -54,6 +56,9 @@ export async function resolveApiIntegrationPreview(input: {
   }
   if (input.source.kind === "openapi") {
     return await resolveOpenApi(input, input.source.url, input.source.baseUrl);
+  }
+  if (input.source.kind === "openapi_document") {
+    return resolveInlineOpenApiDocument(input, input.source);
   }
   let openApiFailure: unknown;
   try {
@@ -116,7 +121,7 @@ async function resolveDefinition(
     scopes: [...definition.authentication.scopes],
   };
   return resolvedPreview({
-    source: input.source,
+    source: storedSourceProjection(input.source),
     definitionId: definition.id,
     definitionProvenance: "curated",
     identity,
@@ -160,7 +165,7 @@ async function resolveOpenApi(
   const discovered = discoverOpenApiAuth(document);
   const auth = authPreview(discovered, providerDomain, input.connection);
   return resolvedPreview({
-    source: input.source,
+    source: storedSourceProjection(input.source),
     definitionId: identity.sourceDerivedDefinitionId,
     definitionProvenance: "workspace",
     identity,
@@ -169,6 +174,75 @@ async function resolveOpenApi(
     providerDomain,
     baseUrl: resolvedBaseUrl,
     sourceUrl,
+    name: revision.title,
+    description: revision.description ?? null,
+    auth,
+    connection: input.connection,
+    requiredScopes: auth.kind === "oauth2" ? auth.scopes : [],
+    authScheme: discovered,
+  });
+}
+
+/** URL/definition sources echo exactly; inline documents never reach here. */
+function storedSourceProjection(source: IntegrationSourceInput): IntegrationSourceProjection {
+  if (source.kind === "openapi_document") {
+    throw new Error("Inline OpenAPI documents are projected by their digest");
+  }
+  return source;
+}
+
+/**
+ * An inline document has no URL: identity comes from the caller's stable
+ * `sourceKey`, relative server URLs cannot resolve (absolute servers or
+ * `baseUrl` are required), and the preview echoes only the document digest.
+ * Execution uses the same pinned transport and network policy as any other
+ * custom Integration.
+ */
+function resolveInlineOpenApiDocument(
+  input: Parameters<typeof resolveApiIntegrationPreview>[0],
+  source: InlineOpenApiDocumentSource,
+): ResolvedApiIntegrationPreview {
+  const document = parseOpenApiDocument(source.document);
+  const identity = integrationInstallationIdentity(
+    "openapi",
+    source.sourceKey,
+    `document:${source.sourceKey}`,
+  );
+  let revision: ReturnType<typeof compileOpenApiRevision>;
+  try {
+    revision = compileOpenApiRevision(document, {
+      definitionId: identity.sourceDerivedDefinitionId,
+      ...(source.baseUrl ? { baseUrl: source.baseUrl } : {}),
+    });
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "openapi_server_invalid" || code === "openapi_server_missing") {
+      throw new Error(
+        "An inline OpenAPI document needs absolute servers[].url values or an explicit baseUrl",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+  const resolvedBaseUrl = firstOpenApiServerUrl(revision);
+  const providerDomain = new URL(resolvedBaseUrl).hostname.toLowerCase();
+  const discovered = discoverOpenApiAuth(document);
+  const auth = authPreview(discovered, providerDomain, input.connection);
+  return resolvedPreview({
+    source: {
+      kind: "openapi_document",
+      sourceKey: source.sourceKey,
+      documentSha256: createHash("sha256").update(source.document, "utf8").digest("hex"),
+      ...(source.baseUrl ? { baseUrl: source.baseUrl } : {}),
+    },
+    definitionId: identity.sourceDerivedDefinitionId,
+    definitionProvenance: "workspace",
+    identity,
+    revision,
+    provider: null,
+    providerDomain,
+    baseUrl: resolvedBaseUrl,
+    sourceUrl: null,
     name: revision.title,
     description: revision.description ?? null,
     auth,
@@ -201,7 +275,7 @@ async function resolveGraphql(
     ? connectionAuthPreview(input.connection, providerDomain)
     : ({ kind: "none" } as const);
   return resolvedPreview({
-    source: input.source,
+    source: storedSourceProjection(input.source),
     definitionId: identity.sourceDerivedDefinitionId,
     definitionProvenance: "workspace",
     identity,
@@ -220,7 +294,7 @@ async function resolveGraphql(
 }
 
 function resolvedPreview(input: {
-  source: IntegrationSource;
+  source: IntegrationSourceProjection;
   definitionId: string;
   definitionProvenance: "curated" | "workspace";
   identity: ReturnType<typeof integrationInstallationIdentity>;
@@ -228,7 +302,7 @@ function resolvedPreview(input: {
   provider: string | null;
   providerDomain: string;
   baseUrl: string;
-  sourceUrl: string;
+  sourceUrl: string | null;
   name: string;
   description: string | null;
   auth: ApiIntegrationAuthPreview;

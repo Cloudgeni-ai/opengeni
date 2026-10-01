@@ -170,7 +170,7 @@ describe("console composer in a split desktop pane", () => {
           expect(await scroll.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
           await dialog.getByRole("button", { name: /option 30/ }).scrollIntoViewIfNeeded();
         }
-        await dialog.getByRole("button", { name: "Back", exact: true }).click();
+        await dialog.getByRole("menuitem", { name: "Back", exact: true }).click();
         await page.getByRole("menuitem", { name: new RegExp(name) }).click();
         await dialog.waitFor({ state: "visible" });
         await page.keyboard.press("Escape");
@@ -212,7 +212,7 @@ describe("console composer in a split desktop pane", () => {
       await page.screenshot({
         path: `${root}/composer-settings-${newSession ? "new" : "existing"}.png`,
       });
-      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Back", exact: true }).click();
       await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
       expect(await page.getByLabel("Knowledge", { exact: true }).inputValue()).toBe("off");
       await page.keyboard.press("Escape");

@@ -134,6 +134,10 @@
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
     },
+    "./tenant-workspaces": {
+      "types": "./src/tenant-workspaces.ts",
+      "default": "./src/tenant-workspaces.ts"
+    },
     "./session-proxy": {
       "types": "./src/session-proxy.ts",
       "default": "./src/session-proxy.ts"

@@ -187,6 +187,7 @@ export class LazyToolRuntime {
   private activeAgent: object | null = null;
   private activeRunContext: unknown;
   readonly controlTools: Tool[];
+  private routerWasExposed: boolean;
 
   constructor(
     readonly transport: LazyToolTransport,
@@ -195,7 +196,10 @@ export class LazyToolRuntime {
     private readonly deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
     private readonly preparationIndependentToolNames: ReadonlySet<string> = new Set(),
     private readonly modelMcpServerIds: () => ReadonlyMap<string, string> = () => new Map(),
+    private readonly conditionalRouter = false,
+    routerInHistory = false,
   ) {
+    this.routerWasExposed = routerInHistory;
     this.controlTools =
       transport !== "generic_dispatch"
         ? [this.buildNativeSearchTool(), this.buildListTool()]
@@ -216,6 +220,19 @@ export class LazyToolRuntime {
 
   hasPendingPreparation(): boolean {
     return !this.preparationSettled;
+  }
+
+  async prepareConditionalRouter(): Promise<void> {
+    if (this.conditionalRouter) await this.ensurePrepared();
+  }
+
+  visibleControlTools(): Tool[] {
+    // Pending servers are genuinely deferred, even before tools/list completes.
+    this.routerWasExposed ||=
+      !this.conditionalRouter ||
+      this.searchableToolNames.size > 0 ||
+      (this.hasPendingPreparation() && this.deferredMcpServerIds.size > 0);
+    return this.routerWasExposed ? this.controlTools : [];
   }
 
   async ensurePrepared(): Promise<void> {
@@ -599,6 +616,8 @@ export function installLazyToolRuntime(
   deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
   preparationIndependentToolNames: ReadonlySet<string> = new Set(),
   modelMcpServerIds?: () => ReadonlyMap<string, string>,
+  conditionalRouter = false,
+  routerInHistory = false,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -607,6 +626,8 @@ export function installLazyToolRuntime(
     deferredMcpServerIds,
     preparationIndependentToolNames,
     modelMcpServerIds,
+    conditionalRouter,
+    routerInHistory,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -630,17 +651,18 @@ function installLazyToolRuntimeOnAgent(agent: CloneCapableAgent, runtime: LazyTo
   runtime.registerOriginalToolLoader(agent, originalGetAllTools);
   agent.getAllTools = (async (runContext: unknown) => {
     runtime.noteToolResolution(agent, runContext);
+    await runtime.prepareConditionalRouter();
     if (runtime.hasPendingPreparation()) {
       // Deferred MCP projections return an empty list until their shared
       // preparation fence settles, while required/eager MCP and ordinary agent
       // tools resolve normally through the policy-wrapped SDK path.
       const tools = await originalGetAllTools(runContext);
       runtime.refresh(tools);
-      return [...tools, ...runtime.controlTools];
+      return [...tools, ...runtime.visibleControlTools()];
     }
     const tools = await originalGetAllTools(runContext);
     runtime.refresh(tools);
-    return [...runtime.configuredExecutionTools(tools), ...runtime.controlTools];
+    return [...runtime.configuredExecutionTools(tools), ...runtime.visibleControlTools()];
   }) as typeof agent.getAllTools;
 
   const originalClone = agent.clone?.bind(agent);

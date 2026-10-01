@@ -1,6 +1,8 @@
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
-import { OpenGeniApiError } from "./errors";
+import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
+import { chatDefaults, type Chats } from "./chats";
 import { SESSION_SCOPE_HEADER } from "./message-links";
+import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
@@ -38,6 +40,7 @@ type ProxyFacade = {
   readonly client: ProxyClient;
   readonly source: string;
   workspaceId(target: { tenant: string }): Promise<string>;
+  workspaceIdFor?(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string>;
 };
 
 /** Who the authenticated request acts as. Never derive any of it from the request body or path. */
@@ -97,6 +100,11 @@ export type SessionProxyMessageExtras = {
 };
 
 export type SessionProxyHandlerOptions = {
+  /**
+   * Private (default) uses personal Knowledge and session-only reach; shared uses
+   * workspace Knowledge and reach. Isolated also gives each user their own tenant workspace.
+   */
+  chats?: Chats | undefined;
   /** Mandatory host auth hook, called on every request. */
   resolve: SessionProxyResolve;
   /**
@@ -116,7 +124,7 @@ export type SessionProxyHandlerOptions = {
   /**
    * Server-controlled session creation. The browser supplies only
    * {@link SessionProxyCreateInput}; this hook returns the complete create
-   * request (tools, MCP servers, Skills, instructions, model policy). Omit it
+   * request (agent, tools, MCP servers, Skills, instructions, model policy). Omit it
    * to disable browser-initiated creation entirely.
    */
   createSession?:
@@ -259,6 +267,8 @@ export function createSessionProxyHandler(
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const sessionList = options.sessionList ?? "mine";
   const archiveEnabled = options.archive ?? true;
+  const chats = options.chats ?? "private";
+  const defaults = chatDefaults(chats);
   // Canonical subject per external user, for the "mine" list filter.
   const subjects = new Map<string, Promise<string>>();
   const subjectOf = (client: ProxyClient, key: string): Promise<string> => {
@@ -284,26 +294,6 @@ export function createSessionProxyHandler(
         // Never fall back to the organization key's service authority.
         return errorJson(401, "user_required", "Authentication required.");
       }
-      let workspaceId: string;
-      if (resolved.workspaceId) {
-        workspaceId = resolved.workspaceId;
-      } else if (resolved.tenant && isFacade(target)) {
-        workspaceId = await target.workspaceId({ tenant: resolved.tenant });
-      } else {
-        throw new TypeError(
-          "resolve must return a workspaceId (or a tenant when given the OpenGeni facade).",
-        );
-      }
-      const source = resolved.source ?? defaultSource;
-      const client = service.asUser(resolved.user, { source });
-      const context: SessionProxyContext = {
-        request,
-        workspaceId,
-        user: resolved.user,
-        source,
-        client,
-      };
-
       const url = new URL(request.url);
       const segments = routeSegments(url.pathname, options.basePath);
       if (!segments) return errorJson(404, "route_not_allowed", "Not found.");
@@ -314,6 +304,35 @@ export function createSessionProxyHandler(
           : request.headers.get("sec-fetch-site") !== "cross-site";
         if (!allowed) return errorJson(403, "mutation_denied", "Request denied.");
       }
+      const source = resolved.source ?? defaultSource;
+      let workspaceId: string;
+      if (chats === "isolated") {
+        if (!resolved.tenant || !isFacade(target) || !target.workspaceIdFor) {
+          throw new TypeError(
+            'chats: "isolated" requires the OpenGeni facade and a tenant resolution.',
+          );
+        }
+        workspaceId = await target.workspaceIdFor(
+          { tenant: resolved.tenant, user: resolved.user, source },
+          { isolation: "user" },
+        );
+      } else if (resolved.workspaceId) {
+        workspaceId = resolved.workspaceId;
+      } else if (resolved.tenant && isFacade(target)) {
+        workspaceId = await target.workspaceId({ tenant: resolved.tenant });
+      } else {
+        throw new TypeError(
+          "resolve must return a workspaceId (or a tenant when given the OpenGeni facade).",
+        );
+      }
+      const client = service.asUser(resolved.user, { source });
+      const context: SessionProxyContext = {
+        request,
+        workspaceId,
+        user: resolved.user,
+        source,
+        client,
+      };
 
       const call = { signal: request.signal };
       const messageExtras = async (input: SessionProxyMessageInput) =>
@@ -551,6 +570,9 @@ export function createSessionProxyHandler(
         return json(
           await client.createSession(workspaceId, {
             ...created,
+            visibility: created.visibility ?? defaults.visibility,
+            agentAccess: created.agentAccess ?? defaults.agentAccess,
+            memoryScope: created.memoryScope ?? defaults.memoryScope,
             ...(modelContext ? { modelContext } : {}),
           }),
         );
@@ -1122,6 +1144,19 @@ function workspaceLiveStream(
 /** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
 function errorResponse(error: unknown): Response {
   if (error instanceof ProxyRejection) return errorJson(error.status, error.code, error.message);
+  if (error instanceof OpenGeniSetupError) {
+    return json(
+      {
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: false,
+          ...(error.correlationId ? { requestId: error.correlationId } : {}),
+        },
+      },
+      error.status,
+    );
+  }
   if (error instanceof OpenGeniApiError) {
     const status = error.status >= 400 && error.status <= 599 ? error.status : 502;
     // A decoded upstream envelope is forwarded verbatim; the SDK only retains decodable bodies.

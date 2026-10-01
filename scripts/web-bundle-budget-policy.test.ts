@@ -56,6 +56,28 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
+  test("pins the measured agent-configuration and current-main merge aggregates", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_572_187, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(726_074, 1.5 * kib)");
+    expect(source).toContain("Grouping the new config/allowance modules into startup-sdk-runtime");
+    expect(wholeKibEnvelope(2_572_187, 1.5 * KIB)).toBe(2514 * KIB);
+    expect(wholeKibEnvelope(726_074, 1.5 * KIB)).toBe(711 * KIB);
+    expect(2514 * KIB - 2_572_187).toBeGreaterThanOrEqual(1.5 * KIB);
+    expect(711 * KIB - 726_074).toBeGreaterThanOrEqual(1.5 * KIB);
+    for (const limit of [
+      "initialRaw: 1485 * kib",
+      "initialGzip: 405 * kib",
+      "initialFileGzip: wholeKibEnvelope(82_325)",
+      "initialFiles: 18",
+      "lazyChunkRaw: 800 * kib",
+      "lazyChunkGzip: 240 * kib",
+      "cssGzip: wholeKibEnvelope(44_100)",
+    ])
+      expect(source).toContain(limit);
+    expect(source).toContain("39,");
+  });
+
   test("calibrates only the measured session artifact navigation gzip envelope", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     expect(source).toContain("wholeKibEnvelope(656_741, 1.5 * kib)");

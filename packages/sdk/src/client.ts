@@ -50,6 +50,7 @@ import type {
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
   allowanceExhaustedFields,
   OpenGeniSecureContextRequiredError,
@@ -524,6 +525,7 @@ import type {
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -1435,6 +1437,24 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-policy`,
+      request,
+    );
+  }
+
+  /**
+   * Replace the session's agent configuration (capabilities, identity,
+   * instructions alias, renderer). Omitted fields keep their current values.
+   * Uses the tool-policy version (409 when stale) and applies from the next
+   * turn. A legacy session converts from its current effective state.
+   */
+  async updateSessionAgent(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionAgentRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/agent`,
       request,
     );
   }
@@ -9297,10 +9317,15 @@ async function apiErrorFromResponse(
   const ErrorType = allowanceExhaustedFields(body)
     ? OpenGeniAllowanceExhaustedError
     : OpenGeniApiError;
-  return new ErrorType(response.status, body, {
+  const error = new ErrorType(response.status, body, {
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     mutation: isMutationMethod(context.method),
   });
+  return error.status >= 400 &&
+    error.status < 500 &&
+    (error.code === "SESSION_TENANCY_NOT_ACTIVATED" || error.code === "OPENGENI_SETUP_REQUIRED")
+    ? new OpenGeniSetupError(error)
+    : error;
 }
 
 async function assertJsonResponse(

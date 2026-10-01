@@ -20,6 +20,7 @@ import {
 } from "../src";
 
 const repair = "0552_usage_allowances.sql";
+const currentSessionWriterMigration = "0559_session_agent_config.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));
 
 async function expectSqlState(action: () => Promise<unknown>, state: string) {
@@ -74,7 +75,7 @@ test("real non-bypass owner migrates receipts while all original source policies
     await owner.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (
       name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
     const deferred = (await readdir(directory)).filter(
-      (file) => file.endsWith(".sql") && file >= repair,
+      (file) => file.endsWith(".sql") && file >= repair && file !== currentSessionWriterMigration,
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
@@ -86,7 +87,15 @@ test("real non-bypass owner migrates receipts while all original source policies
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
       ADD COLUMN imported_archive_next_offset integer`;
-    await owner`delete from schema_migrations where name >= ${repair}`;
+    // Renumbering the independent nullable agent-config column after this
+    // repair must not break current session writers used to seed legacy rows.
+    // Apply only that additive migration early; allowance/collaborator repairs
+    // stay deferred until historical rows and the original policy snapshot exist.
+    await owner`delete from schema_migrations
+      where name >= ${repair} and name <> ${currentSessionWriterMigration}`;
+    const [staged] = await owner`select
+      to_regclass('opengeni_private.usage_allowance_attribution_receipts') as receipts`;
+    expect(staged!.receipts).toBeNull();
     const [role] =
       await owned.admin`select rolsuper,rolbypassrls from pg_roles where rolname=${owned.ownerRole}`;
     expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
