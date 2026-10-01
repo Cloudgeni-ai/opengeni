@@ -210,6 +210,9 @@ export type ResumeBoxIds = {
    * never conflicts).
    */
   image?: string;
+  /** Deployment/workspace image pins apply only to new creates; an existing
+   * group keeps its image. Omission preserves explicit image matching (B3). */
+  imagePolicy?: "require_match" | "new_creates_only";
   /**
    * RIG IS SHARED STATE (M3): the frozen rig version this run rides. Threaded to
    * acquireLease, which stamps it on the cold-create and conflicts on a live box
@@ -1347,11 +1350,12 @@ async function resumeBoxForTurnOnce(
     },
     os,
     // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
-    // conflicts on a live box already running a different image. A
+    // conflicts on a live box already running a different required image. A
     // SandboxImageConflictError propagates while another holder is active; a
     // solo change requests a capture-and-drain rotation and this attempt retries
     // after the cold successor can safely stamp the new image.
     ...(ids.image ? { image: ids.image } : {}),
+    ...(ids.imagePolicy ? { imagePolicy: ids.imagePolicy } : {}),
     // RIG IS SHARED STATE (M3): thread the frozen rig version so the lease stamps it
     // + conflicts on a live box under a different rig. A SandboxRigConflictError
     // propagates while another holder is active; a solo change uses the same

@@ -60,6 +60,7 @@ import {
 } from "@opengeni/runtime";
 import { WorkspaceArchiveIntegrityError } from "@opengeni/runtime/sandbox";
 import type { ObjectStorage } from "@opengeni/storage";
+import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
 import {
   createFreshSandboxReadinessReplacementBudget,
   resumeBoxForTurn,
@@ -2107,6 +2108,114 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     } finally {
       await resumed.release();
       await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  test("between-turn deployment repin resumes the warm Modal group on its recorded image", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const pin = (byte: string) => `registry.example.com/desktop@sha256:${byte.repeat(64)}`;
+    const routeForPin = async (image: string) => {
+      const settings = testSettings({
+        ...settingsFor(true),
+        sandboxBackend: "modal",
+        modalImageRef: image,
+      });
+      const route = await resolveSandboxRoute({
+        input: { accountId, workspaceId, sessionId: groupId } as never,
+        settings,
+        db,
+        eventing: { modelRunSettings: settings } as never,
+        sandboxState: {} as never,
+        media: {} as never,
+        fileAuthoritySubjectId: null,
+        runSettings: settings,
+        logicalSandboxSettings: settings,
+      });
+      return { settings, route };
+    };
+    const before = await routeForPin(pin("a"));
+    const instanceId = "sb-before-repin";
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: instanceId } },
+    };
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "between-turn-keeper",
+      backend: "modal",
+      image: before.route.groupBoxImage,
+      imagePolicy: before.route.groupBoxImagePolicy,
+      leaseTtlMs: 60_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState,
+      leaseTtlMs: 60_000,
+    });
+    expect(committed.committed).toBe(true);
+    const resumedInstances: string[] = [];
+    const resumeTurn = async (selected: typeof before, attemptId: string) =>
+      await resumeBoxForTurn(
+        {
+          db,
+          settings: selected.settings,
+          establishAttachedSandbox: async (_settings, envelope, options) => {
+            expect(options?.recovery).toBe("resume-only");
+            expect(envelope).toMatchObject(resumeState);
+            resumedInstances.push(instanceId);
+            return {
+              client: {},
+              session: {},
+              sessionState: resumeState.sessionState,
+              instanceId,
+              backendId: "modal",
+              origin: "resumed",
+            };
+          },
+          verifyAttachedSandboxReadiness: async () => undefined,
+        },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: selected.route.groupBoxBackend,
+          image: selected.route.groupBoxImage!,
+          imagePolicy: selected.route.groupBoxImagePolicy,
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt(attemptId),
+      );
+    const firstTurn = await resumeTurn(before, "turn-before-repin");
+    await firstTurn.release();
+    const after = await routeForPin(pin("b"));
+    expect(after.route.groupBoxImage).toBe(pin("b"));
+    const secondTurn = await resumeTurn(after, "turn-after-repin");
+    try {
+      expect(secondTurn.established.origin).toBe("resumed");
+      expect(secondTurn.established.instanceId).toBe(firstTurn.established.instanceId);
+      expect(secondTurn.leaseEpoch).toBe(firstTurn.leaseEpoch);
+      expect(resumedInstances).toEqual([instanceId, instanceId]);
+      expect(await readLease(db, workspaceId, groupId)).toMatchObject({
+        liveness: "warm",
+        image: pin("a"),
+        instanceId,
+        leaseEpoch: firstTurn.leaseEpoch,
+        rotationRequestedAt: null,
+        turnHolders: 1,
+        viewerHolders: 1,
+      });
+    } finally {
+      await secondTurn.release();
     }
   }, 60_000);
 
