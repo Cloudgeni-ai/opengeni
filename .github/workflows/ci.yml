@@ -1134,9 +1134,9 @@ jobs:
         run: |
           bun --no-env-file -e '
           const paths = [
-            "scripts/test-registry-dependency-exports.test.ts",
-            "scripts/test-effective-dependency-exports.test.ts",
-            "scripts/dependency-export-workflow-contract.test.ts",
+            "./scripts/test-registry-dependency-exports.test.ts",
+            "./scripts/test-effective-dependency-exports.test.ts",
+            "./scripts/dependency-export-workflow-contract.test.ts",
           ];
           const manifest = await Bun.file("package.json").json();
           const declared = Object.hasOwn(manifest.scripts ?? {}, "test:effective-dependency-exports");
