@@ -7,6 +7,7 @@ import { canonicalArtifactKernelBuildReceiptBytes } from "../packages/artifact-t
 import {
   publishArtifactRuntime,
   runtimeDownloadAccept,
+  runtimeSourceComparePath,
   validateRuntimeProducer,
   type RuntimePublisherApi,
 } from "./publish-artifact-runtime";
@@ -29,6 +30,12 @@ import { parse as parseYaml } from "yaml";
 import { resolveDevelopmentArtifactRuntime } from "./resolve-development-artifact-runtime";
 
 const roots: string[] = [];
+test("the main ancestry comparison requests a page that omits the changed-file list", () => {
+  expect(runtimeSourceComparePath("a".repeat(40))).toBe(
+    `compare/${"a".repeat(40)}...main?per_page=1&page=2`,
+  );
+});
+
 test("Actions ZIP and release assets use their distinct required API media types", () => {
   expect(runtimeDownloadAccept("actions/artifacts/123/zip")).toBe("application/vnd.github+json");
   expect(runtimeDownloadAccept("releases/assets/123")).toBe("application/octet-stream");
@@ -187,12 +194,14 @@ async function fixture() {
         run_attempt: state.runReads > state.mutateAfterReads ? 2 : producer.run_attempt,
       };
     }
-    if (path.startsWith("compare/"))
+    if (path.startsWith("compare/")) {
+      expect(path).toBe(runtimeSourceComparePath(sourceSha));
       return {
         status: "ahead",
         base_commit: { sha: sourceSha },
         merge_base_commit: { sha: sourceSha },
       };
+    }
     if (path.includes("/artifacts?"))
       return { artifacts: structuredClone(state.listing), total_count: state.listing.length };
     if (path.startsWith("git/ref/")) return structuredClone(state.tag);

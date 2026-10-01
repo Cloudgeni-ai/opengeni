@@ -6,7 +6,9 @@ import {
   type UseSandboxTerminalResult,
 } from "@opengeni/react";
 import "./styles.css";
-import "./workbench-peers";
+import { enableDemoWorkbenchPeers } from "./workbench-peers";
+
+enableDemoWorkbenchPeers();
 
 /* ----------------------------------------------------------------------------
    M6 terminal harness (static, fixture-driven) — the overhauled <SandboxTerminal>

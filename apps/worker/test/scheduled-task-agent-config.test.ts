@@ -181,6 +181,21 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
   }, 60_000);
 
+  test("a task agent instructions alias is frozen and bound to the generated session", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, null, {
+      capabilities: { from: "none", goals: true },
+      instructions: "Report in three bullet points.",
+    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
+      agentConfigAdmissionEnabled: true,
+    });
+    expect(accepted?.resolvedAgentInstructions).toBe("Report in three bullet points.");
+    expect(session.instructions).toBe("Report in three bullet points.");
+    expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
+  }, 60_000);
+
   test("a stored task agent with admission off is refused, never silently dropped", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
