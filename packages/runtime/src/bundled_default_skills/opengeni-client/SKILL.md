@@ -6,7 +6,8 @@ description: >-
   automation. Defaults to embedding the full React conversation behind the
   packaged SDK session proxy. Use for discovery, connecting repositories and
   resources, SDK/API and React choices, implementation, verification, and
-  handoff against a managed, self-hosted, or local OpenGeni deployment. Not for
+  handoff against a managed, self-hosted, or local OpenGeni deployment. Includes
+  server-only archived-session migration from embedded runtimes. Not for
   changing OpenGeni internals or mounting its runtime inside the customer's
   process.
 ---
@@ -153,6 +154,19 @@ workspace, and serves only provider/conversation routes; the chat list shows
 only chats the user created (`sessionList: "visible"` widens it). Never replace the
 proxy with a raw passthrough of arbitrary paths under the organization key.
 Reset UI state when the user or tenant changes.
+
+## Migrating from embedded OpenGeni
+
+When moving old in-process sessions to a standalone deployment, read
+[Archived session history import](references/session-history-import.md).
+Use server-only functions from `@opengeni/sdk/session-history-import`, with the
+existing tenant mappings and verified `asUser` creator/owner. Preserve timestamps
+and visibility, re-upload files and replace references before import, and retain
+exact import/batch requests for idempotent retries. This is a read-only event
+archive, never model-facing history or resumable execution. Keep
+`SessionConversation` behind the existing proxy; imported archives never offer
+Send or Steer, and continuation is unsupported in v1. Do not add import routes
+to the browser proxy or attach this implementation Skill to end-user agents.
 
 ## Deliberate deviations
 

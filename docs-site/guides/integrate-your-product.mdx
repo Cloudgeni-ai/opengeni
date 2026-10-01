@@ -168,6 +168,111 @@ The stylesheet is scoped and needs no Tailwind setup. Brand it by overriding `--
 
 Deviate from this default only for a stated reason: headless `@opengeni/react/session` hooks for a materially different interaction model, the SDK alone for a non-React frontend or backend automation, or the workbench when your product exposes agent compute. See the [SDK reference](/reference/sdk).
 
+## Migrating from embedded OpenGeni
+
+When moving from an in-process/embedded OpenGeni runtime to a standalone deployment,
+import old conversations as **read-only archives** from your backend. This imports
+the user-visible event timeline only, not model-facing history, live execution, or
+runtime state. Check that the target deployment and installed SDK support
+`@opengeni/sdk/session-history-import` before migrating.
+
+Creating an archive requires `sessions:create`. Appending batches requires
+`sessions:control` and the same authenticated importer; grant both for a complete
+migration. With `asUser`, these are the user's permissions, not borrowed key permissions.
+
+1. Preserve your existing external tenant and user mappings: use the same stable
+   `source` / tenant `externalId` with `ensureWorkspace`, and explicitly onboard
+   each admitted user with `addExternalWorkspaceMember`. Import routes do not
+   provision workspaces or grant membership.
+2. Retain the original title, session creation time, event timestamps, creator,
+   and visibility. Source ISO timestamps support at most millisecond precision;
+   normalize higher-precision dates explicitly and retain originals in your ledger.
+   Import through `og.asUser(originalUserId, { source })` to
+   derive the verified external creator/owner. An organization key without
+   `asUser` creates a workspace-shared, ownerless archive; it cannot create a
+   private archive. `visibility: "user_private"` requires the verified owning
+   user and the existing organization private-session enablement. Never widen
+   visibility merely to make an import succeed.
+3. Re-upload retained files to the destination workspace through `uploadFile`
+   (or the existing begin/upload/complete APIs). Build a stable old-to-new file
+   ID/reference map and replace file references in event payloads **before**
+   freezing import requests. Old file IDs, signed URLs, storage paths, and
+   sandbox paths do not become valid in the new deployment.
+4. Store a migration ledger mapping source session IDs to returned session IDs,
+   stable `importId`s, file mappings, exact requests, and acknowledged offsets.
+   The v1 request carries title and creation time, not arbitrary source metadata;
+   keep additional metadata in that host-owned ledger.
+
+```ts
+// Server only; og and source are the backend client and mapping namespace above.
+import {
+  importArchivedSession,
+  appendArchivedSessionEvents,
+  type ImportArchivedSessionRequest,
+  type AppendArchivedSessionEventsRequest,
+} from "@opengeni/sdk/session-history-import";
+
+const actor = og.asUser(legacy.creatorExternalId, { source });
+const importRequest = {
+  importId: `embedded:${legacy.id}`, // Stable, at most 200 characters.
+  title: legacy.title,
+  createdAt: legacy.createdAt, // Original ISO timestamp, not migration time.
+  visibility: legacy.visibility, // "workspace_shared" or "user_private".
+  events: [],
+} satisfies ImportArchivedSessionRequest;
+
+await migrationLedger.saveImportRequest(importRequest); // Persist before sending.
+const imported = await importArchivedSession(actor, workspaceId, importRequest);
+await migrationLedger.saveImportReceipt(imported);
+
+const batchRequest = {
+  batchId: nextBatch.id, // Stable, at most 200 characters; persist the exact body.
+  offset: imported.nextOffset, // Zero-based event count, not an event sequence.
+  events: nextBatch.events, // Non-empty, prepared with destination file references.
+} satisfies AppendArchivedSessionEventsRequest;
+await migrationLedger.saveBatchRequest(batchRequest);
+const appended = await appendArchivedSessionEvents(
+  actor,
+  workspaceId,
+  importRequest.importId,
+  batchRequest,
+);
+await migrationLedger.saveBatchReceipt(appended); // Next new batch uses nextOffset.
+```
+
+`importId` identifies one archive in the destination workspace. Repeating the exact
+create request returns the same session with `created: false`. Append requests
+use a stable `batchId` and zero-based `offset`; repeating the exact batch returns
+`replayed: true` without duplicating events. Each request is limited to 100 events
+and 1 MiB of serialized UTF-8 JSON, with 256 KiB per event. Import `events` may be
+omitted (defaults to `[]`); append batches must be non-empty. Each event has
+`{ type, createdAt, turnId?, payload }`, with an ISO timestamp, optional UUID/null
+turn correlation, and a JSON-object payload. Use only the finite historical event
+types accepted by the installed contract, not arbitrary event names.
+
+On an uncertain response, retry the **stored exact request** with the same actor,
+mapping, IDs, and offset. The SDK does not automatically retry mutations. Changed
+reuse of an `importId` or `batchId`, or an out-of-order new offset, returns `409`;
+reconcile the migration ledger and acknowledged `nextOffset` rather than minting
+new keys to bypass the conflict. If you keep external workspace mappings rather
+than opaque workspace IDs, use `importExternalWorkspaceArchivedSession` and
+`appendExternalWorkspaceArchivedSessionEvents` with `(client, source, externalId, ...)`.
+
+Completed messages, tool calls/results, and goals are optional historical facts.
+They never run tools, recreate pending decisions, set a live goal, seed model-facing
+history, or enqueue a turn. Prefer completed message payloads to reconstructing
+streaming deltas, and preserve supported payload shapes for native rendering.
+`session.importedArchive` contains `{ importId, importedAt, readOnly: true }`;
+this is distinct from a user's ordinary archive/restore preference.
+
+Keep `SessionConversation` unchanged behind the existing session proxy and open
+the returned session ID. Imported archives are view-only: never offer **Send** or
+**Steer**. Continuing an imported archive is unsupported in v1; start a separate
+new session when the user wants new work, without silently treating the archive
+as model context. Import helpers belong only in the backend migration job, are
+not eager client/root exports, and are not exposed by the browser session proxy.
+See [Archived session import](/reference/sdk#archived-session-import-server-only).
+
 ## Choose allowed integration setup
 
 Organization owners and administrators can select allowed integrations in

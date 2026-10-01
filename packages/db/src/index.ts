@@ -656,6 +656,7 @@ export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
+export * from "./archived-session-imports";
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -33253,6 +33254,15 @@ export class SessionCreateIdempotencyConflictError extends Error {
   }
 }
 
+/** An idempotent INSERT lost, but RLS exposes neither its winner nor a denial.
+ * Never probe outside the caller's visibility merely to explain the conflict. */
+export class SessionCreateIdempotencyUnavailableError extends Error {
+  readonly name = "SessionCreateIdempotencyUnavailableError";
+  constructor() {
+    super("Session create idempotency result is unavailable");
+  }
+}
+
 async function frozenSessionCreatorForInsert(
   tx: Database,
   input: {
@@ -34232,6 +34242,8 @@ async function createSessionInTransaction(
           denial: existingDenial,
         };
       }
+      if (input.requestedSessionId) throw new SessionIdConflictError(input.requestedSessionId);
+      throw new SessionCreateIdempotencyUnavailableError();
     }
     if (input.requestedSessionId) throw new SessionIdConflictError(input.requestedSessionId);
     throw new Error("Failed to create session");
@@ -84633,6 +84645,15 @@ function mapSession(
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     status: row.status as SessionStatus,
+    ...(row.importedArchiveImportId && row.importedArchiveImportedAt
+      ? {
+          importedArchive: {
+            importId: row.importedArchiveImportId,
+            importedAt: row.importedArchiveImportedAt.toISOString(),
+            readOnly: true as const,
+          },
+        }
+      : {}),
     admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: row.title ?? null,

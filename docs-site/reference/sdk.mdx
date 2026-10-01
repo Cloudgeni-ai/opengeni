@@ -11,11 +11,12 @@ icon: "code"
 
 ## Choose an entry point
 
-| Import               | Use it for                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| `@opengeni/sdk`      | The full session, workspace, file, tool, and event API, plus `createSessionProxyHandler`   |
-| `@opengeni/react`    | `SessionConversation` and the other React surfaces                                         |
-| `@opengeni/sdk/chat` | Fallback: a text-only handler for an existing Vercel/OpenAI-shaped chat UI, or server bots |
+| Import                                 | Use it for                                                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `@opengeni/sdk`                        | The full session, workspace, file, tool, and event API, plus `createSessionProxyHandler`   |
+| `@opengeni/react`                      | `SessionConversation` and the other React surfaces                                         |
+| `@opengeni/sdk/chat`                   | Fallback: a text-only handler for an existing Vercel/OpenAI-shaped chat UI, or server bots |
+| `@opengeni/sdk/session-history-import` | Server-only migration of historical conversations into read-only archives                  |
 
 For a product adding an agent, start with [Integrate your product](/guides/integrate-your-product): `SessionConversation` in the browser, backed by `createSessionProxyHandler` on your server. Keep the organization API key on your backend.
 
@@ -102,6 +103,63 @@ What it covers:
 Full reference: [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
 
 Organization session listings exclude Personal workspaces and Only me sessions. Each row includes its `workspaceId` for subsequent session, event, and file reads. Use `nextCursor` to determine whether another page exists, even when a page is shorter than the requested limit. [Read-only organization keys](/reference/authentication#organization-key-access) support this reporting path but cannot create chats or send messages.
+
+## Archived session import (server only)
+
+Import these opt-in functions from `@opengeni/sdk/session-history-import`, not the
+SDK root. Each takes a client with `requestJson` as its first argument; none is an
+eager `OpenGeniClient` method or a browser session-proxy route.
+
+| Function                                       | Remaining arguments                     |
+| ---------------------------------------------- | --------------------------------------- |
+| `importArchivedSession`                        | `workspaceId, request`                  |
+| `appendArchivedSessionEvents`                  | `workspaceId, importId, request`        |
+| `importExternalWorkspaceArchivedSession`       | `source, externalId, request`           |
+| `appendExternalWorkspaceArchivedSessionEvents` | `source, externalId, importId, request` |
+
+The external forms resolve an **existing** tenant-to-workspace mapping. All path
+identities are encoded as opaque segments. Onboard the workspace and admitted
+users first. Use the organization-key client's `.asUser(originalUserId, { source })`
+to preserve the verified external creator/owner; a key without `asUser` creates
+only a shared, ownerless archive. Private imports require verified owning-user
+authority and existing organization private-session enablement.
+
+| Type exported by the subpath          | Fields                                                                                                                                  |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ImportArchivedSessionRequest`        | `importId`, `title`, ISO `createdAt`, optional `visibility: "workspace_shared" \| "user_private"`, optional `events` (defaults to `[]`) |
+| `ArchivedSessionImportEvent`          | Finite supported historical `type`, ISO `createdAt`, optional UUID/null `turnId`, JSON-object `payload`                                 |
+| `AppendArchivedSessionEventsRequest`  | `batchId`, zero-based nonnegative integer `offset`, non-empty `events`                                                                  |
+| `ImportArchivedSessionResponse`       | `session`, `importId`, `created`, `nextOffset`                                                                                          |
+| `AppendArchivedSessionEventsResponse` | `sessionId`, `importId`, `nextOffset`, `replayed`                                                                                       |
+| `SessionImportedArchive`              | `importId`, ISO `importedAt`, literal `readOnly: true`                                                                                  |
+
+IDs and titles are limited to 200 characters. A create or append body accepts at
+most 100 events and 1 MiB of serialized UTF-8 JSON; each event is at most 256 KiB.
+Source timestamps support at most millisecond precision; negative-zero JSON
+numbers are rejected because the storage codec cannot preserve them.
+Retain exact requests before sending. Retry the same `importId` create or the same
+`batchId` / `offset` / events append after an uncertain outcome. Replays return
+`created: false` or `replayed: true`; changed key reuse or an out-of-order new
+offset returns `409`. Normal `OpenGeniApiError` transport metadata, including
+`outcomeUnknown`, passes through; the helpers do not retry mutations themselves.
+
+Canonical routes are `POST /v1/workspaces/:workspaceId/session-imports` and
+`POST /v1/workspaces/:workspaceId/session-imports/:importId/events`. External
+forms use `/v1/workspaces/external/:source/:externalId/session-imports` and
+the same `/:importId/events` suffix.
+
+Create requires `sessions:create`; append requires `sessions:control` and the same
+authenticated importer. An `asUser` request uses that user's permissions rather
+than borrowing the organization key's permissions.
+
+These are event-only archives, never model-facing history or live runtime state.
+Completed messages, tool calls/results, and goals may be stored as historical
+facts without execution or pending decisions. `SessionConversation` renders them
+through the unchanged proxy with Send/Steer unavailable. Continuing an imported
+archive is unsupported in v1. Re-upload files using the existing file APIs and
+replace references before import. Follow
+[Migrating from embedded OpenGeni](/guides/integrate-your-product#migrating-from-embedded-opengeni)
+for the complete mapping and retry workflow.
 
 ## @opengeni/react
 

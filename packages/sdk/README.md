@@ -567,6 +567,83 @@ personal grant, Variable Set, Sandbox Environment, MCP server configuration, pro
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 
+## Archived session history import (server only)
+
+Use `@opengeni/sdk/session-history-import` to migrate historical conversations
+into read-only archives. These functions take `client` first, use its ordinary
+`requestJson` transport, and are not eager client methods or root helper exports:
+
+Create requires `sessions:create`; append requires `sessions:control` and the same
+authenticated importer. With `asUser`, the user's permissions apply rather than
+the organization key's permissions.
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+import {
+  importArchivedSession,
+  appendArchivedSessionEvents,
+} from "@opengeni/sdk/session-history-import";
+
+const og = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
+// Existing tenant mapping + explicitly onboarded original creator.
+const actor = og.asUser(originalExternalUserId, { source });
+const imported = await importArchivedSession(actor, workspaceId, {
+  importId: "embedded:thread-42", // Stable; persist the exact request before sending.
+  title: "Original conversation",
+  createdAt: "2025-04-01T09:30:00Z",
+  visibility: "user_private",
+});
+const appended = await appendArchivedSessionEvents(actor, workspaceId, imported.importId, {
+  batchId: "thread-42:batch-0001", // Stable; also persist this exact body first.
+  offset: imported.nextOffset,
+  events: [{
+    type: "agent.message.completed",
+    createdAt: "2025-04-01T09:31:00Z",
+    payload: { text: "Historical answer", channel: "final" },
+  }],
+});
+// Persist imported.session.id and appended.nextOffset in the migration ledger.
+```
+
+External mapping equivalents take `(client, source, externalId, ...)`:
+`importExternalWorkspaceArchivedSession` and
+`appendExternalWorkspaceArchivedSessionEvents`. These resolve an existing
+mapping; neither import form creates a workspace or grants membership. A bare
+organization key creates a shared, ownerless archive. Use `asUser` for the
+verified creator/owner; private imports require existing private-session
+enablement. Preserve source visibility rather than widening it on failure.
+
+The subpath exports `ImportArchivedSessionRequest/Response`,
+`AppendArchivedSessionEventsRequest/Response`, `ArchivedSessionImportEvent` and
+`SessionImportedArchive` types. Requests accept at most 100 events / 1 MiB
+serialized UTF-8 JSON and 256 KiB per event. IDs and titles are bounded to 200
+characters. Import events default to `[]`; append batches must be non-empty.
+Events carry `{ type, createdAt, turnId?, payload }`: a finite supported historical
+type, ISO timestamp, optional UUID/null correlation and JSON-object payload.
+Source timestamps support at most millisecond precision; normalize finer dates
+explicitly and retain originals in the ledger. Negative-zero JSON is rejected.
+
+Exact create replay returns `created: false`; exact append replay returns
+`replayed: true`. `offset` is a zero-based imported-event count, not a timeline
+sequence. Retain the exact actor, mapping, IDs, offset and bodies for uncertain
+retries; new batches use the acknowledged `nextOffset`. Changed key reuse or
+an out-of-order new offset returns 409. Helpers propagate `OpenGeniApiError`,
+including `outcomeUnknown`, and do not automatically retry mutations.
+
+Import is timeline-only: completed messages, calls/results and goals may be
+historical facts, but no model-facing history, live goal, pending decision or
+execution is restored. `session.importedArchive` has
+`{ importId, importedAt, readOnly: true }`, independent of personal archive state.
+Render through the unchanged `SessionConversation` and session proxy; never
+offer Send or Steer. Continuing an imported archive is unsupported in v1.
+The proxy does not expose import routes. Re-upload files through existing APIs
+and replace references before import; preserve additional source metadata and
+source/destination IDs in the host ledger. See
+[Migrating from embedded OpenGeni](../../docs/product-integration.md#migrating-from-embedded-opengeni).
+
 ## Connected accounts
 
 Authenticated messages use the initiating user's eligible connected accounts.

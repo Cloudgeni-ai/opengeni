@@ -1537,6 +1537,11 @@ export type Session = {
   /** Personal archive state. */
   archived?: boolean;
   archivedAt?: string | null;
+  /**
+   * Read-only imported timeline, independent of personal archive/restore state.
+   * Never model-facing conversation history.
+   */
+  importedArchive?: { importId: string; importedAt: string; readOnly: true } | undefined;
   /** Optimistic archive-state revision. */
   archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */

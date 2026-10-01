@@ -216,28 +216,31 @@ requirements/current inspection proof. See [`goals.md`](goals.md).
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Knowledge entries, instructions, Skills, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | Conversation history or temporary task notes |
 
+[Archived imports](../packages/core/src/application/archived-session-imports.ts)
+use server-only `@opengeni/sdk/session-history-import` for bounded, idempotent
+`session_events`; never model history, turns, active goals or wakes. Lifecycle
+seams establish `asUser` ownership/visibility; re-upload files first. Imports refuse
+execution during rolling deployments. React's projection stays unchanged;
+`SessionConversation` hides execution controls. [Product integration](product-integration.md).
+
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Knowledge revisions, evidence, and publication receipts live in Postgres;
-originals in object storage. Scoped access precedes ranking. Chat attachments
-remain conversation resources; agents select lasting findings/reference sources.
-Default discovery excludes supporting evidence. Read-only save preparation fetches
-collections and published/pending matches. See [`knowledge.md`](knowledge.md).
+Knowledge revisions/evidence/receipts live in Postgres; originals in object storage.
+Access precedes ranking. Attachments remain conversation resources; agents select
+lasting findings/references. Discovery excludes supporting evidence; read-only save
+preparation fetches collections and published/pending matches. See [`knowledge.md`](knowledge.md).
 
 Unconditional CORE routes persistent behavior to instructions or Skills, not
 Knowledge, preserving destination scope and review; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
-Agent learning governs Knowledge, instructions, and Skills through Automatic,
-Review first, and Off, with sparse chat/task overrides and frozen accepted-turn
-policies. Review first stages inactive changes without pausing work. Explicit
-pending reads support reuse/correction; ordinary reads show published entries
-only. Pending entries grant no publication or instruction authority;
-instructions and Skills keep their own authority. Instruction edits append to
-the exact active baseline by default, update/remove by unique exact-text
-anchor, and require explicit full replacement. All paths enforce active-head
-compare-and-set and the instruction budget. Retired Memory and
-reviewed-Knowledge authoring remain audit/compatibility evidence. See
+Agent learning governs Knowledge/instructions/Skills: Automatic, Review first,
+Off; sparse chat/task overrides and accepted-turn policies freeze. Review first
+stages inactive changes without pausing. Pending reads support reuse/correction,
+never authority; ordinary reads are published-only. Instructions/Skills retain
+native authority. Instruction edits append to exact baselines or update/remove
+unique exact-text anchors; full replacement requires explicit intent. Active-head
+CAS and budgets apply. Retired writers remain audit/compatibility evidence. See
 [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy: Off rejects

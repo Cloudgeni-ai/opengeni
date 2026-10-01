@@ -58,6 +58,10 @@
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
     },
+    "./session-history-import": {
+      "types": "./src/session-history-import.ts",
+      "default": "./src/session-history-import.ts"
+    },
     "./document-authority": {
       "types": "./src/document-authority.ts",
       "default": "./src/document-authority.ts"
