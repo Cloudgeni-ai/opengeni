@@ -120,6 +120,15 @@ export default defineConfig({
               priority: 16,
             },
             {
+              // mobile-plus calls lazyComposerPanel at module scope. Keep this
+              // eager helper out of reciprocal entry-aware session chunks;
+              // optional panel bodies stay behind their dynamic imports.
+              name: "composer-menu-runtime",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/]composer-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 16,
+            },
+            {
               // Keep Radix, Lucide's eager icon factory, and the two class-name
               // helpers (web `cn` and @opengeni/react `cn` with clsx and
               // tailwind-merge) in one UI runtime. entriesAware route merging
