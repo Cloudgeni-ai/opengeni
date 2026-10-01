@@ -68,6 +68,7 @@ import {
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
+  loadWorkspaceCodexModelAvailability,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
   hasPermission,
@@ -908,6 +909,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           organizationGatewayCustomModels,
           organizationOpenRouterConnectionActive,
           organizationOpenRouterCustomModels,
+          codexModelAvailability,
         ] = await Promise.all([
           getWorkspaceConnectionModelRestrictions(
             db,
@@ -953,9 +955,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             workspaceId: input.workspaceId,
             providerKind: "openrouter",
           }),
+          loadWorkspaceCodexModelAvailability(db, currentSettings, input.workspaceId),
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
+            observations: codexModelAvailability,
             connectionModelRestrictions,
             settings: currentSettings,
             policy,

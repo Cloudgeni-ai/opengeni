@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -260,12 +261,39 @@ describe("Codex status readiness semantics", () => {
         chatgptAccountId: active.chatgptAccountId,
       },
       accountCount: 1,
-      models: [
-        { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
-        { id: "codex/gpt-6-sol", label: "GPT-6 Sol" },
-        { id: "codex/gpt-6-luna", label: "GPT-6 Luna" },
-      ],
+      models: [],
     });
+
+    // A healthy probe uses the refreshing resolver and returns exact live membership.
+    load.mockResolvedValue({ id: active.id } as opengeniDb.CodexCredentialForRun);
+    const token = {
+      accessToken: "refreshed",
+      chatgptAccountId: active.chatgptAccountId,
+      isFedramp: false,
+      credentialVersion: 2,
+      planType: "pro",
+    };
+    const resolver = spyOn(opengeniDb, "buildCodexTokenResolver").mockReturnValue({
+      getToken: async () => token,
+      refresh: async () => token,
+    });
+    const probe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+      ok: true,
+      status: 200,
+      slugs: ["gpt-6-sol", "unconfigured"],
+    });
+    restores.push(
+      () => resolver.mockRestore(),
+      () => probe.mockRestore(),
+    );
+    const healthy = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
+      headers: { authorization: await bearer(WS_A, ["workspace:read"]) },
+    });
+    expect(await healthy.json()).toMatchObject({
+      valid: true,
+      models: [expect.objectContaining({ id: "codex/gpt-6-sol", label: "GPT-6 Sol" })],
+    });
+    expect(probe.mock.calls[0]![0].accessToken).toBe("refreshed");
   });
 });
 

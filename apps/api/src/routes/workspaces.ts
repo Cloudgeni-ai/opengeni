@@ -41,6 +41,7 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
+import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   createWorkspace,
@@ -500,11 +501,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const catalogSettings = deps.resolveCatalogSettings();
     const [
       connectionModelRestrictions,
       resolvedCatalog,
       policy,
       codexSubscriptionActive,
+      codexModelAvailability,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
       workspaceGatewayCustomModels,
@@ -517,9 +520,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
-      deps.resolveCatalogSettings(),
+      catalogSettings,
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      catalogSettings.then(({ settings }) =>
+        loadWorkspaceCodexModelAvailability(deps.db, settings, workspaceId),
+      ),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
       listWorkspaceGatewayCustomModels(deps.db, {
@@ -588,6 +594,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionModelRestrictions,
       settings: resolvedCatalog.settings,
       policy,
+      observations: codexModelAvailability,
       codexSubscriptionActive,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
