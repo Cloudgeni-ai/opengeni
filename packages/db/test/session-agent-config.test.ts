@@ -77,22 +77,28 @@ async function storedConfig(sessionId: string): Promise<unknown> {
 }
 
 describe("sessions.agent_config (0558)", () => {
-  test("the complete migrated fixture applies 0558 and the newer allowance tail", async () => {
+  test("the complete fixture applies allowances and collaborator migrations before 0558", async () => {
     const applied = await shared.admin<{ name: string }[]>`
       SELECT name FROM schema_migrations
       WHERE name IN (
-        '0558_session_agent_config.sql',
         '0552_usage_allowances.sql',
         '0553_non_model_debit_attribution.sql',
-        '0554_video_allowance_refunds.sql'
+        '0554_video_allowance_refunds.sql',
+        '0555_member_collaborator_permissions.sql',
+        '0556_member_collaborator_permissions_backfill_index.sql',
+        '0557_member_collaborator_permissions_backfill.sql',
+        '0558_session_agent_config.sql'
       )
       ORDER BY name
     `;
     expect(applied.map((migration) => migration.name)).toEqual([
-      "0558_session_agent_config.sql",
       "0552_usage_allowances.sql",
       "0553_non_model_debit_attribution.sql",
       "0554_video_allowance_refunds.sql",
+      "0555_member_collaborator_permissions.sql",
+      "0556_member_collaborator_permissions_backfill_index.sql",
+      "0557_member_collaborator_permissions_backfill.sql",
+      "0558_session_agent_config.sql",
     ]);
   }, 60_000);
 
