@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://app.opengeni.ai"><strong>Start free at app.opengeni.ai →</strong></a>
+  <a href="https://app.opengeni.ai"><strong>Get started at app.opengeni.ai →</strong></a>
 </p>
 
 <p align="center">
@@ -49,7 +49,7 @@ The fastest way to wire it up is to give your coding agent (Claude Code, Codex, 
 
 ## Get started
 
-**The fastest way is the managed cloud.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, connect a model (a ChatGPT/Codex or SuperGrok subscription, a provider key, or prepaid credits), and start your first session. Nothing to deploy. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it. Usage billed through Opengeni costs the model price plus 5%, with no seat or platform fees; a subscription or key you connect is billed by its provider.
+**The fastest way is the managed cloud.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, and start your first session. Nothing to deploy. New accounts get Opengeni credits to start; after that it is pay as you go at the provider's model price plus 5%, with no seat or platform fees. You can also use your own ChatGPT/Codex or SuperGrok plan or a provider API key, billed by that provider. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
 
 Prefer to run it yourself? Everything is open source under Apache-2.0. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production with the Helm chart and reference Terraform for AWS, Azure, and GCP.
 
