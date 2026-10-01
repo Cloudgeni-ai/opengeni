@@ -19,6 +19,7 @@ bun add @opengeni/sdk
 | `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                      |
 | `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                      |
 | `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                 |
+| `@opengeni/sdk/session-history-import`          | Server-only archived-session creation and event-batch append helpers                          |
 | `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                   |
 | `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                     |
 | `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                     |
@@ -111,6 +112,63 @@ app.all("/api/opengeni/*", toHonoHandler(createSessionProxyHandler(og, options))
 The Next adapter passes the full URL, including any `basePath`. The Node middleware rebuilds the URL from `originalUrl`, streams bodies and SSE, forwards bodies a parser already read, and aborts the request when the client disconnects.
 
 Pass the chat facade's `OpenGeni` instead of a client to resolve `{ tenant, user }` rather than a workspace id. Never replace the proxy with a passthrough that forwards arbitrary paths under the organization key.
+
+## Archived session import (server only)
+
+Import these opt-in functions from `@opengeni/sdk/session-history-import`, not the
+SDK root. Each takes a client with `requestJson` as its first argument; none is an
+eager `OpenGeniClient` method or a browser session-proxy route.
+
+| Function                                       | Remaining arguments                     |
+| ---------------------------------------------- | --------------------------------------- |
+| `importArchivedSession`                        | `workspaceId, request`                  |
+| `appendArchivedSessionEvents`                  | `workspaceId, importId, request`        |
+| `importExternalWorkspaceArchivedSession`       | `source, externalId, request`           |
+| `appendExternalWorkspaceArchivedSessionEvents` | `source, externalId, importId, request` |
+
+The external forms resolve an **existing** tenant-to-workspace mapping. All path
+identities are encoded as opaque segments. Onboard the workspace and admitted
+users first. Use the organization-key client's `.asUser(originalUserId, { source })`
+to preserve the verified external creator/owner; a key without `asUser` creates
+only a shared, ownerless archive. Private imports require verified owning-user
+authority and existing organization private-session enablement.
+
+| Type exported by the subpath          | Fields                                                                                                                                  |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ImportArchivedSessionRequest`        | `importId`, `title`, ISO `createdAt`, optional `visibility: "workspace_shared" \| "user_private"`, optional `events` (defaults to `[]`) |
+| `ArchivedSessionImportEvent`          | Finite supported historical `type`, ISO `createdAt`, optional UUID/null `turnId`, JSON-object `payload`                                 |
+| `AppendArchivedSessionEventsRequest`  | `batchId`, zero-based nonnegative integer `offset`, non-empty `events`                                                                  |
+| `ImportArchivedSessionResponse`       | `session`, `importId`, `created`, `nextOffset`                                                                                          |
+| `AppendArchivedSessionEventsResponse` | `sessionId`, `importId`, `nextOffset`, `replayed`                                                                                       |
+| `SessionImportedArchive`              | `importId`, ISO `importedAt`, literal `readOnly: true`                                                                                  |
+
+IDs and titles are limited to 200 characters. A create or append body accepts at
+most 100 events and 1 MiB of serialized UTF-8 JSON; each event is at most 256 KiB.
+Source timestamps support at most millisecond precision; negative-zero JSON
+numbers are rejected because the storage codec cannot preserve them.
+Retain exact requests before sending. Retry the same `importId` create or the same
+`batchId` / `offset` / events append after an uncertain outcome. Replays return
+`created: false` or `replayed: true`; changed key reuse or an out-of-order new
+offset returns `409`. Normal `OpenGeniApiError` transport metadata, including
+`outcomeUnknown`, passes through; the helpers do not retry mutations themselves.
+
+Canonical routes are `POST /v1/workspaces/:workspaceId/session-imports` and
+`POST /v1/workspaces/:workspaceId/session-imports/:importId/events`. External
+forms use `/v1/workspaces/external/:source/:externalId/session-imports` and
+the same `/:importId/events` suffix.
+
+Create requires `sessions:create`; append requires `sessions:control` and the same
+authenticated importer. An `asUser` request uses that user's permissions rather
+than borrowing the organization key's permissions.
+
+These are event-only archives, never model-facing history or live runtime state.
+Completed messages, tool calls/results, and goals may be stored as historical
+facts without execution or pending decisions. `SessionConversation` renders them
+through the unchanged proxy with Send/Steer unavailable. Continuing an imported
+archive is unsupported in v1. Re-upload files using the existing file APIs and
+replace references before import. Follow
+[Import archived session history](/integrate/session-history-import)
+for the complete mapping and retry workflow.
 
 ## Chat facade
 

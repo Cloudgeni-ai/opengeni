@@ -5536,6 +5536,32 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/session-imports",
+      "sdk": [
+        "importArchivedSession"
+      ],
+      "request": [
+        "ImportArchivedSessionRequest"
+      ],
+      "response": [
+        "ImportArchivedSessionResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/session-imports/:importId/events",
+      "sdk": [
+        "appendArchivedSessionEvents"
+      ],
+      "request": [
+        "AppendArchivedSessionEventsRequest"
+      ],
+      "response": [
+        "AppendArchivedSessionEventsResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/session-message-search",
       "sdk": [
@@ -7499,6 +7525,33 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/external/:source/:externalId/session-imports",
+      "sdk": [
+        "OpenGeniClient.connectTransport",
+        "importExternalWorkspaceArchivedSession"
+      ],
+      "request": [
+        "ImportArchivedSessionRequest"
+      ],
+      "response": [
+        "ImportArchivedSessionResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/external/:source/:externalId/session-imports/:importId/events",
+      "sdk": [
+        "appendExternalWorkspaceArchivedSessionEvents"
+      ],
+      "request": [
+        "AppendArchivedSessionEventsRequest"
+      ],
+      "response": [
+        "AppendArchivedSessionEventsResponse"
+      ]
+    },
+    {
       "method": "DELETE",
       "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
       "sdk": [
@@ -8327,6 +8380,30 @@
         "$.workspaceId": "string! null"
       }
     },
+    "AppendArchivedSessionEventsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.batchId": "string!",
+        "$.events": "array!",
+        "$.events[]": "ref(ArchivedSessionImportEvent)",
+        "$.offset": "integer!"
+      }
+    },
+    "AppendArchivedSessionEventsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.importId": "string!",
+        "$.nextOffset": "integer!",
+        "$.replayed": "boolean!",
+        "$.sessionId": "string!"
+      }
+    },
     "ApplySessionGoalRevisionRequest": {
       "io": [
         "input"
@@ -8348,6 +8425,19 @@
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.role": "string?"
+      }
+    },
+    "ArchivedSessionImportEvent": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.payload": "object!",
+        "$.payload{}": "unknown",
+        "$.turnId": "string? null",
+        "$.type": "enum!=[\"\\\"agent.message.completed\\\"\",\"\\\"agent.message.delta\\\"\",\"\\\"agent.reasoning.delta\\\"\",\"\\\"agent.toolCall.created\\\"\",\"\\\"agent.toolCall.output\\\"\",\"\\\"artifact.created\\\"\",\"\\\"goal.cleared\\\"\",\"\\\"goal.completed\\\"\",\"\\\"goal.paused\\\"\",\"\\\"goal.progress\\\"\",\"\\\"goal.resumed\\\"\",\"\\\"goal.set\\\"\",\"\\\"goal.updated\\\"\",\"\\\"turn.cancelled\\\"\",\"\\\"turn.completed\\\"\",\"\\\"turn.failed\\\"\",\"\\\"turn.started\\\"\",\"\\\"turn.superseded\\\"\",\"\\\"user.message\\\"\"]"
       }
     },
     "ArtifactCatalogItem": {
@@ -11851,6 +11941,7 @@
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.hasSchedules": "boolean?",
         "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
         "$.initialMessage": "string!",
         "$.initialTurnId": "string! null",
         "$.inputWait": "object? null",
@@ -13993,6 +14084,32 @@
         "$|outcome=expired.outcome": "const!=[\"\\\"expired\\\"\"]",
         "$|outcome=cancelled": "object",
         "$|outcome=cancelled.outcome": "const!=[\"\\\"cancelled\\\"\"]"
+      }
+    },
+    "ImportArchivedSessionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.createdAt": "string!",
+        "$.events": "array?",
+        "$.events[]": "ref(ArchivedSessionImportEvent)",
+        "$.importId": "string!",
+        "$.title": "string!",
+        "$.visibility": "enum?=[\"\\\"user_private\\\"\",\"\\\"workspace_shared\\\"\"]"
+      }
+    },
+    "ImportArchivedSessionResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.created": "boolean!",
+        "$.importId": "string!",
+        "$.nextOffset": "integer!",
+        "$.session": "ref(Session)!"
       }
     },
     "ImportLegacyWorkspaceInstructionPolicyDraftRequest": {
@@ -19441,6 +19558,7 @@
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.hasSchedules": "boolean?",
         "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
         "$.initialMessage": "string!",
         "$.inputWait": "object? null",
         "$.inputWait.deadlineAt": "string!",
@@ -19919,6 +20037,17 @@
         "$.turnId": "string!",
         "$.updatedAt": "string!",
         "$.workspaceId": "string!"
+      }
+    },
+    "SessionImportedArchive": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.importId": "string!",
+        "$.importedAt": "string!",
+        "$.readOnly": "const!=[\"true\"]"
       }
     },
     "SessionLineageResponse": {
@@ -26670,6 +26799,18 @@
       "SyncSessionRealtimeLedgerResponse": "type",
       "WorkspaceRealtimeModelCatalogItem": "type",
       "WorkspaceRealtimeModelCatalogResponse": "type"
+    },
+    "@opengeni/sdk/session-history-import": {
+      "appendArchivedSessionEvents": "value",
+      "AppendArchivedSessionEventsRequest": "type",
+      "AppendArchivedSessionEventsResponse": "type",
+      "appendExternalWorkspaceArchivedSessionEvents": "value",
+      "ArchivedSessionImportEvent": "type",
+      "importArchivedSession": "value",
+      "ImportArchivedSessionRequest": "type",
+      "ImportArchivedSessionResponse": "type",
+      "importExternalWorkspaceArchivedSession": "value",
+      "SessionImportedArchive": "type"
     },
     "@opengeni/sdk/session-proxy": {
       "artifactViewerCapability": "value",

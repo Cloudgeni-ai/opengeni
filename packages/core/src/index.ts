@@ -1,6 +1,7 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
@@ -121,6 +122,7 @@ export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
+export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";

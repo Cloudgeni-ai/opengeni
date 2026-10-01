@@ -68,6 +68,7 @@ import {
   getNestedAgentDepthDeploymentPolicy,
   getSessionByCreateIdempotencyKey,
   getSessionCreationExecutionPolicy,
+  metadataWithAgentConfigCreateIdentity,
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
@@ -2478,24 +2479,27 @@ async function recoverBoundScheduledTaskDispatch(input: {
     );
     const expectedTaskMetadata = { ...task.agentConfig.metadata };
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
-    const expectedMetadata = {
-      ...expectedTaskMetadata,
-      ...scheduledSessionExecutionPolicyMetadata(
-        input.acceptedExecution.turnExecutionPolicy,
-        recoveredCreatorPolicy?.credentialRestriction,
-      ),
-      model: input.acceptedExecution.resolvedModel,
-      reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
-      scheduledTaskId: task.id,
-      scheduledTaskRunMode: task.runMode,
-      ...(task.agentConfig.goal ? { scheduledTaskGoal: task.agentConfig.goal } : {}),
-      scheduledTaskRunId: canonicalGeneratedRunId,
-      ...(frozenSlack ? { [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: frozenSlack.id } : {}),
-    };
+    const expectedMetadata = metadataWithAgentConfigCreateIdentity(
+      {
+        ...expectedTaskMetadata,
+        ...scheduledSessionExecutionPolicyMetadata(
+          input.acceptedExecution.turnExecutionPolicy,
+          recoveredCreatorPolicy?.credentialRestriction,
+        ),
+        model: input.acceptedExecution.resolvedModel,
+        reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
+        scheduledTaskId: task.id,
+        scheduledTaskRunMode: task.runMode,
+        ...(task.agentConfig.goal ? { scheduledTaskGoal: task.agentConfig.goal } : {}),
+        scheduledTaskRunId: canonicalGeneratedRunId,
+        ...(frozenSlack ? { [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: frozenSlack.id } : {}),
+      },
+      input.acceptedExecution.resolvedAgentConfig,
+    );
     if (
       session.createIdempotencyKey !== expectedCreateKey ||
       session.initialMessage !== task.agentConfig.prompt ||
-      session.instructions !== null ||
+      session.instructions !== (input.acceptedExecution.resolvedAgentInstructions ?? null) ||
       session.policyRole !== null ||
       stableJson(session.skills) !== "[]" ||
       stableJson(session.toolPolicy) !==
@@ -2537,8 +2541,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpTools) ||
       stableJson(session.firstPartyMcpPermissions) !==
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpPermissions) ||
-      stableJson(session.agent?.capabilities ?? null) !==
-        stableJson(input.acceptedExecution.resolvedAgentConfig?.capabilities ?? null) ||
+      stableJson(session.agent) !==
+        stableJson(input.acceptedExecution.resolvedAgentConfig ?? null) ||
       session.maxNestedAgentDepthOverride !== (task.agentConfig.maxNestedAgentDepth ?? null) ||
       (session.variableSetId ?? null) !==
         (input.acceptedExecution.resolvedVariableSet?.id ?? null) ||

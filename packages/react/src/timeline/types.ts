@@ -57,6 +57,7 @@ export type UserMessageItem = {
         state: "sending" | "queued" | "failed";
         error?: string | undefined;
         onRetry?: (() => void) | undefined;
+        onEdit?: (() => void) | undefined;
         onRemove?: (() => void) | undefined;
       }
     | undefined;

@@ -270,6 +270,12 @@ does not accept this intent because it has no initial logical-turn boundary.
 
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
+Starting voice freezes native MCP account bindings and personal delegations
+from the authenticated request on `session_realtime_modes` (migration 0562).
+Live delegation and end/expiry transcript-tail Steer copy that exact snapshot;
+they never discover a later participant's accounts. Historical leases retain
+their absent bindings and empty delegation receipts. Revocation and physical
+provider authorization still run against current authority.
 Only the authenticated browser owner/connection is exclusive. Human
 composer/queue/Send/Steer, ordinary turns, recovery, compaction, goals, and
 maintenance continue through their existing transactions and worker claims
@@ -606,6 +612,10 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Once a preference snapshot exists, later attempts of that same turn copy its
+exact immutable descriptors rather than re-rendering historical state. This
+preserves accepted receipts across permanent Skill removal and renderer changes,
+without restoring removed content or relaxing live attempt authority.
 Service-only turns have no human preference scope and skip the preference
 snapshot capability entirely; service continuations carrying a frozen causal
 human and legacy subject turns still snapshot that human's applicable entries.
@@ -675,18 +685,27 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. Native Modal `TaskExecStart` recovery is safe only when the client-side
-channel-readiness gate fails before issuing the RPC. This also covers resolver
+delay. Modal `TaskExecStart` recovery is safe only when read-only task/router
+preparation or the client-side channel-readiness gate fails before issuing the
+RPC. Both native Starts and the pinned Modal SDK enforce this boundary; SDK
+manifest/setup, file/path helpers, and archive hydration/capture must not bypass
+it. SDK provider/archive wrappers preserve the typed error cause. This also covers resolver
 failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
 server replies. After exact never-started reservation settlement, OpenGeni
-resumes the same accepted turn through bounded connectivity backoff. Retained
+resumes the same accepted turn through bounded connectivity backoff, including
+pre-model setup before `turn.started` eventing exists. The same durable five-replacement
+budget applies, with explicit typed exhaustion on the sixth failure. Retained
 or outcome-unknown routing errors veto recovery even if their causes look safe.
 Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
 batches, message-only lookalikes, HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition never authorize
 automatic Start replay because pre-command safety is not proven. Ambiguous
 model-facing native Starts instead return explicit outcome-unknown tool results,
-keeping inference alive. Required first-party
+keeping inference alive. Internal SDK/probe ambiguity has no adopted durable
+command handle; it is a non-retryable `sandbox_command_start_outcome_unknown`
+failure rather than raw gRPC failure or permission to replay setup. Legacy
+`ContainerExec` still disables SDK retries and cannot recover an execution id
+lost with its response. Required first-party
 connect/tools-list also treats a rolling API
 replacement's temporary `404` or statusless plain transport `Error` as
 recovery-safe. That narrow exception does not apply to external MCP servers,
@@ -2037,7 +2056,15 @@ attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
 not create a temporary box and ask SDK hydration to replace it. Directory and tar
 archives still hydrate the elected destination. This removes the hidden second
-create. Migration 0523 adds a durable Modal creation receipt immediately before
+create. Deployment/workspace image pins apply only to new sandbox creates. Turn,
+viewer and direct-operation admissions retain a warming, warm or re-armable
+draining group's recorded image under the lease row lock; a between-turn repin
+neither relabels the existing provider nor requests rotation. The cold successor
+election after normal rotation/reaping stamps the then-selected pin. Explicit
+required-image changes retain their shared-state conflict behavior; rig-version,
+capture, rotation and epoch fences remain enforced.
+
+Migration 0523 adds a durable Modal creation receipt immediately before
 the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
 creation and retains the pinned SDK's public session implementation; its
 `modal-create-boundary.ts` hook runs after image/secret preparation and before
@@ -2357,7 +2384,16 @@ readers cannot parse the new discriminator. After old active locators have
 settled or passed the existing evidence-backed drain, remove the legacy live
 reader; historical records remain immutable and do not authorize execution.
 
-SDK-internal setup/readiness commands still use their original live SDK observer
+Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
+`/bin/true` invocation with no shell, user environment or command admission.
+The existing 60-second budget covers channel readiness and exit observation.
+Only typed local pre-dispatch failure retries Start. A transport failure after
+dispatch instead observes the same UUID, retrying transient reads without another
+Start. Budget expiry and attempt cancellation abort the native RPCs; success
+requires zero exit and EOF on both streams. Definitive rejection and nonzero
+exit remain failures. This applies to both new boxes and warm reattachment.
+
+Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range
 (1–2147483647), so a setup process cannot collide with a retained command. Only
 the same adapter can read those aliases; they cannot be bound as durable commands

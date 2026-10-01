@@ -79,6 +79,14 @@ test("real non-bypass owner migrates receipts while all original source policies
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
+    // Current adapters need nullable reader fields, not the deferred import
+    // lifecycle. Remove these before the real ordered migration replay.
+    await owner`ALTER TABLE sessions
+      ADD COLUMN imported_archive_import_id text,
+      ADD COLUMN imported_archive_imported_at timestamptz,
+      ADD COLUMN imported_archive_request_hash text,
+      ADD COLUMN imported_archive_subject_id text,
+      ADD COLUMN imported_archive_next_offset integer`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply only that additive migration early; allowance/collaborator repairs
@@ -224,6 +232,12 @@ test("real non-bypass owner migrates receipts while all original source policies
     expect(before.some((row) => row.polname === "organization_usage_expected_visibility")).toBe(
       false,
     );
+    await owner`ALTER TABLE sessions
+      DROP COLUMN imported_archive_import_id,
+      DROP COLUMN imported_archive_imported_at,
+      DROP COLUMN imported_archive_request_hash,
+      DROP COLUMN imported_archive_subject_id,
+      DROP COLUMN imported_archive_next_offset`;
     await migrate(owned.ownerUrl);
     expect([...(await snapshot())]).toEqual([...before]);
     const [backfill] =

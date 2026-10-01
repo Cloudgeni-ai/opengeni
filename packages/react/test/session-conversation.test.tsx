@@ -8,6 +8,7 @@ import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
+import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
 registerDom();
 
@@ -18,6 +19,54 @@ async function waitFor(condition: () => boolean, message: string): Promise<void>
     await flush(10);
   }
 }
+
+test("imported archives retain the timeline and expose no execution controls", async () => {
+  let mutations = 0;
+  const client = fakeClient({
+    getSession: async () =>
+      ({
+        id: SESSION_ID,
+        status: "idle",
+        importedArchive: {
+          importId: "old-host/chat-42",
+          importedAt: "2026-10-01T06:30:00.000Z",
+          readOnly: true,
+        },
+      }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () => archivedTranscriptEvents(),
+    sendMessage: async () => {
+      mutations++;
+      throw new Error("must not send");
+    },
+    steerMessage: async () => {
+      mutations++;
+      throw new Error("must not steer");
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+  try {
+    await flush(100);
+    expect(view.container.textContent).toContain("Archived conversation · Read only");
+    expect(view.container.textContent).toContain("Will users still see their past chats?");
+    expect(view.container.textContent).toContain("日本語もそのまま残ります。");
+    expect(view.container.querySelector("textarea")).toBeNull();
+    expect(view.container.querySelector("[data-og-conversation-composer]")).toBeNull();
+    expect(view.container.querySelector("[data-og-conversation-inputs]")).toBeNull();
+    expect(mutations).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
 
 test("an outer host resolver overrides conversation download defaults", async () => {
   const client = fakeClient({
@@ -251,6 +300,41 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
       },
     ),
   ).toHaveLength(0);
+});
+
+test("definitively refused messages offer editing, not an unchanged retry", () => {
+  let edits = 0;
+  const items = conversationTimeline(
+    [],
+    { queue: [], snapshot: null },
+    {
+      optimisticMessages: [
+        {
+          clientEventId: "refused-credit-message",
+          delivery: "send",
+          destination: "chat",
+          text: "preserved prompt",
+          annotations: [],
+          resources: [],
+          occurredAt: new Date(0).toISOString(),
+          state: "failed",
+          error: "Out of credits",
+          retryable: false,
+        },
+      ],
+      retryOptimisticMessage: () => {
+        throw Error("A credit refusal must not expose Retry");
+      },
+      restoreOptimisticMessage: () => {
+        edits += 1;
+      },
+    },
+  );
+  const item = items[0]!;
+  if (item.kind !== "user-message") throw Error("Expected refused message");
+  expect(item.delivery?.onRetry).toBeUndefined();
+  item.delivery?.onEdit?.();
+  expect(edits).toBe(1);
 });
 
 test("complete conversation loads queue and provides queue actions beside composer", async () => {

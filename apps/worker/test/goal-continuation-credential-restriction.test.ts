@@ -33,6 +33,7 @@ const restrictedMetadata = metadataWithTurnExecutionPolicyV1(
 
 async function continuationFixture(
   options: {
+    model?: string;
     sessionMetadata?: unknown;
     sourceMetadata?: unknown;
     noCausalTurn?: boolean;
@@ -68,7 +69,7 @@ async function continuationFixture(
     >),
     spyOn(db, "requireSession").mockResolvedValue({
       id: scope.sessionId,
-      model: settings.openaiModel,
+      model: options.model ?? settings.openaiModel,
       reasoningEffort: "low",
       latencyMode: "standard",
       sandboxBackend: "none",
@@ -82,10 +83,14 @@ async function continuationFixture(
     spyOn(db, "materializeGoalContinuation").mockImplementation(async (_db, input) => {
       // Mirror the production materializer's order: select the locked causal
       // id, await worker admission, then freeze its policy into the update.
-      await input.admission!(
+      const admissionResult = await input.admission!(
         transaction,
         options.noCausalTurn ? null : { id: sourceTurnId, initiatingHumanSubjectId: null },
       );
+      if (admissionResult.budgetBlocked) {
+        expect(input.policy.turnExecutionPolicy).toBeUndefined();
+        return { action: "paused", events: [] };
+      }
       frozenPolicy = TurnExecutionPolicyV1.parse(input.policy.turnExecutionPolicy);
       return { action: "queue", events: [] };
     }),
@@ -112,6 +117,21 @@ async function continuationFixture(
 }
 
 describe("worker automatic goal continuation credential ceiling", () => {
+  test("an unavailable setup continuation model pauses without creating an incomplete policy", async () => {
+    await continuationFixture(
+      {
+        model: "removed/setup-model",
+        sourceMetadata: restrictedMetadata,
+        sessionMetadata: restrictedMetadata,
+      },
+      async ({ run, persistedPolicy, admissionCall }) => {
+        expect(await run()).toEqual({ action: "paused" });
+        expect(persistedPolicy()).toBeNull();
+        expect(admissionCall).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   test.each([
     { name: "turn-only setup", sourceMetadata: restrictedMetadata, expected: "developer_setup" },
     { name: "initial setup", sessionMetadata: restrictedMetadata, expected: "developer_setup" },

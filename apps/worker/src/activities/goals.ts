@@ -1,6 +1,7 @@
 import {
   allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
+  isModelAvailableForNewSelection,
   policyProviderIdForModel,
   resolveModelProvider,
   resolveTurnExecutionPolicyV1,
@@ -65,7 +66,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
-    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
@@ -74,6 +74,13 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     // Kept below the goal-less fast path so a non-goal session still skips the
     // reads entirely.
     const session = await requireSession(db, input.workspaceId, input.sessionId);
+    // Terminal sessions retain their goal for human recovery, but cannot
+    // continue. Do not validate an obsolete model before the locked guard gets
+    // the chance to reject that work; otherwise a deterministic error retries.
+    if (session.status === "failed" || session.status === "cancelled") {
+      return { action: "none" };
+    }
+    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     const inheritedContinuationModel = session.model;
     let continuationModel = inheritedContinuationModel;
     const continuationReasoningEffort = session.reasoningEffort;
@@ -109,20 +116,24 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: continuationModel,
-      requestedModelId: null,
-      modelSource: "continuation",
-      reasoningEffort: continuationReasoningEffort,
-      reasoningSource: "continuation",
-      latencyMode: continuationLatencyMode,
-      latencyModeSource: "continuation",
-    });
-    const continuationPolicy = {
+    const turnExecutionPolicy = modelPolicyBlocked
+      ? undefined
+      : resolveTurnExecutionPolicyV1(settings, {
+          modelId: continuationModel,
+          requestedModelId: null,
+          modelSource: "continuation",
+          reasoningEffort: continuationReasoningEffort,
+          reasoningSource: "continuation",
+          latencyMode: continuationLatencyMode,
+          latencyModeSource: "continuation",
+        });
+    const continuationPolicy: NonNullable<
+      Parameters<typeof materializeGoalContinuation>[1]["policy"]
+    > = {
       model: continuationModel,
       reasoningEffort: continuationReasoningEffort,
       latencyMode: continuationLatencyMode,
-      turnExecutionPolicy,
+      ...(turnExecutionPolicy ? { turnExecutionPolicy } : {}),
       tools: withFirstPartyTools(settings, session.tools),
       sandboxBackend: session.sandboxBackend,
     };
@@ -152,13 +163,15 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
           throw new Error("Goal continuation source turn is unavailable");
         }
         const sourcePolicy = readTurnExecutionPolicyV1(sourceTurn?.metadata);
-        const credentialRestriction = turnCredentialRestriction(
-          sourcePolicy.kind === "valid" ? sourcePolicy.policy : turnExecutionPolicy,
-          session.metadata,
-        );
-        continuationPolicy.turnExecutionPolicy = credentialRestriction
-          ? { ...turnExecutionPolicy, credentialRestriction }
-          : turnExecutionPolicy;
+        if (turnExecutionPolicy) {
+          const credentialRestriction = turnCredentialRestriction(
+            sourcePolicy.kind === "valid" ? sourcePolicy.policy : turnExecutionPolicy,
+            session.metadata,
+          );
+          continuationPolicy.turnExecutionPolicy = credentialRestriction
+            ? { ...turnExecutionPolicy, credentialRestriction }
+            : turnExecutionPolicy;
+        }
         const budgetBlocked = modelPolicyBlocked
           ? null
           : await goalRunBudgetBlocked(
@@ -227,17 +240,20 @@ export function goalContinuationModelDecision(input: {
       providerId: policyProviderIdForModel(catalogSettings, modelId),
       modelId,
     }).allowed;
-  if (
-    resolveModelProvider(catalogSettings, input.inheritedModel) &&
-    !policyBlocks(input.inheritedModel)
-  ) {
-    return { model: input.inheritedModel, blocked: null };
-  }
   if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
     return {
       model: input.inheritedModel,
       blocked: `model "${input.inheritedModel}" is no longer in the deployment or workspace catalog; choose an available model before resuming the goal`,
     };
+  }
+  if (!isModelAvailableForNewSelection(catalogSettings, input.inheritedModel)) {
+    return {
+      model: input.inheritedModel,
+      blocked: `model "${input.inheritedModel}" is retired from new selection; choose an available model before resuming the goal`,
+    };
+  }
+  if (!policyBlocks(input.inheritedModel)) {
+    return { model: input.inheritedModel, blocked: null };
   }
   return {
     model: input.inheritedModel,

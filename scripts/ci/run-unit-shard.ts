@@ -280,6 +280,31 @@ async function run(
   return exitCode;
 }
 
+export function deterministicUnitTestShards(
+  root: string,
+  files: readonly string[],
+  count: number,
+): string[][] {
+  const batch: string[] = [];
+  const isolated: string[] = [];
+  for (const path of new Set(files)) {
+    (fileUsesProcessGlobalTestState(root, path) ? isolated : batch).push(path);
+  }
+  // Balance each execution category independently: changing ordinary file
+  // weights must not repack the serialized PostgreSQL or wall-clock queues.
+  const processes = planUnitTestProcesses(root, batch, isolated, 1);
+  const categories = Object.values(processes).map((category) =>
+    deterministicShards(
+      root,
+      category.flatMap((process) => process.files),
+      count,
+    ),
+  );
+  return Array.from({ length: count }, (_, index) =>
+    categories.flatMap((shards) => shards[index]!).sort(),
+  );
+}
+
 export function resolveUnitTestSelection(
   root: string,
   args: readonly string[],
@@ -312,7 +337,7 @@ export function resolveUnitTestSelection(
   if (plan.schemaVersion !== 1 || !Array.isArray(plan.unitTests)) {
     throw new Error("unsupported or malformed impact plan");
   }
-  const selected = deterministicShards(root, plan.unitTests, count)[index] ?? [];
+  const selected = deterministicUnitTestShards(root, plan.unitTests, count)[index] ?? [];
   return { selected, index, count };
 }
 

@@ -48,6 +48,7 @@
           "integrate/existing-chat-ui",
           "integrate/proxy-from-any-backend",
           "integrate/production",
+          "integrate/session-history-import",
           "integrate/host-managed-integrations"
         ]
       },

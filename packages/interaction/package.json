@@ -19,6 +19,8 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./browser-state-authority": "./src/browser-state-authority.ts",
+    "./browser-controller-authority": "./src/browser-controller-authority.ts",
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

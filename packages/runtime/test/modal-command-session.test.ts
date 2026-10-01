@@ -144,7 +144,12 @@ test("an ambiguous start never retries or claims an execution identity", async (
   const session = f.session();
   await expect(
     withProviderCommandHandle(75, () => session.execCommand!({ cmd: "work" })),
-  ).rejects.toThrow("start response unavailable");
+  ).rejects.toMatchObject({
+    name: "CommandStartOutcomeUnknownError",
+    taskId: "ta-test",
+    execId: "",
+    cause: { message: "start response unavailable" },
+  });
   expect(session.getProviderCommand!(75)).toBeNull();
   expect(f.starts()).toBe(1);
 });
@@ -212,7 +217,9 @@ test("cancellation aborts the exact pending control RPC without losing an earlie
   await session.cancelPendingExecCommand!();
   const error = await observed;
   expect(error).toBeInstanceOf(Error);
-  expect(String(error)).toContain("provider outcome is unknown");
+  expect(error).toMatchObject({ name: "CommandStartOutcomeUnknownError" });
+  expect(String(error)).toContain("do not replay");
+  expect(String(error.cause)).toContain("provider outcome is unknown");
   expect(pendingSignal?.aborted).toBe(true);
   expect(startCalls).toBe(2);
   expect(session.getProviderCommand!(81)).toBeNull();

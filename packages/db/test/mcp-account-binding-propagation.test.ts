@@ -57,8 +57,16 @@ function walk(node: t.Node, visit: (node: t.Node) => void): void {
 // Account routes and personal sender proof have different authority semantics,
 // but every accepted-work carrier must copy both. This structural guard covers
 // producers outside the SQL fixture: queue edits, child notices, goal and
-// background-command continuations, and outbox delivery/replay.
-for (const filename of ["index.ts", "session-queue-commands.ts", "session-control.ts"]) {
+// background-command continuations, outbox delivery/replay, and realtime leases
+// through live delegation and transcript handoff.
+for (const filename of [
+  "index.ts",
+  "session-queue-commands.ts",
+  "session-control.ts",
+  "session-realtime.ts",
+  "session-realtime-context.ts",
+  "session-realtime-ledger.ts",
+]) {
   test(`${filename} never drops account bindings while copying accepted personal authority`, async () => {
     const source = await readFile(new URL(`../src/${filename}`, import.meta.url), "utf8");
     const tree = t.parseSync(filename, source);
@@ -117,6 +125,7 @@ test("account binding columns stay separate from personal delegation ownership",
   });
   expect(columns).toEqual([
     "initial_mcp_account_bindings",
+    "mcp_account_bindings",
     "mcp_account_bindings",
     "mcp_account_bindings",
     "mcp_account_bindings",

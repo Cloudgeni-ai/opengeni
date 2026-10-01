@@ -216,28 +216,31 @@ See [`goals.md`](goals.md).
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Knowledge entries, instructions, Skills, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | Conversation history or temporary task notes |
 
+[Archived imports](../packages/core/src/application/archived-session-imports.ts)
+use server-only `@opengeni/sdk/session-history-import` for idempotent
+`session_events`; never model history, turns, active goals or wakes. Lifecycle
+seams establish `asUser` ownership/visibility; upload files first. Imports refuse
+execution during rolling deployments. React's projection is unchanged;
+`SessionConversation` hides execution controls. [Product integration](product-integration.md).
+
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Knowledge revisions, evidence, and publication receipts live in Postgres;
-originals in object storage. Scoped access precedes ranking. Chat attachments
-remain conversation resources; agents select lasting findings/reference sources.
-Default discovery excludes supporting evidence. Read-only save preparation fetches
-collections and published/pending matches. See [`knowledge.md`](knowledge.md).
+Knowledge revisions/evidence/receipts live in Postgres; originals in object storage.
+Access precedes ranking. Attachments remain conversation resources; agents select
+lasting findings/references. Discovery excludes supporting evidence; read-only save
+preparation fetches collections and published/pending matches. See [`knowledge.md`](knowledge.md).
 
 Unconditional CORE routes persistent behavior to instructions or Skills, not
 Knowledge, preserving destination scope and review; see
 [`company-brain-write-routing.md`](company-brain-write-routing.md).
 
-Agent learning governs Knowledge, instructions, and Skills through Automatic,
-Review first, and Off, with sparse chat/task overrides and frozen accepted-turn
-policies. Review first stages inactive changes without pausing work. Explicit
-pending reads support reuse/correction; ordinary reads show published entries
-only. Pending entries grant no publication or instruction authority;
-instructions and Skills keep their own authority. Instruction edits append to
-the exact active baseline by default, update/remove by unique exact-text
-anchor, and require explicit full replacement. All paths enforce active-head
-compare-and-set and the instruction budget. Retired Memory and
-reviewed-Knowledge authoring remain audit/compatibility evidence. See
+Agent learning governs Knowledge/instructions/Skills: Automatic, Review first,
+Off; sparse chat/task overrides and accepted-turn policies freeze. Review first
+stages inactive changes without pausing. Pending reads support reuse/correction,
+never authority; ordinary reads are published-only. Instructions/Skills retain
+native authority. Instruction edits append to exact baselines or update/remove
+unique exact-text anchors; full replacement requires explicit intent. Active-head
+CAS and budgets apply. Retired writers remain audit/compatibility evidence. See
 [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy: Off rejects
@@ -477,11 +480,17 @@ stdin; already admitted writes remain blockers until settled. Provider loss,
 missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
-Native Modal `TaskExecStart` recovery requires client-side channel readiness to
-fail before any Start RPC is issued. The shell tool carries only this pre-dispatch
-proof to bounded same-turn recovery; server-supplied DNS text and post-dispatch
-errors never prove non-execution. Supervised retries first settle their exact
+Modal `TaskExecStart` recovery requires a read-only task/router lookup or local
+channel-readiness gate to fail before any Start RPC is issued. Native commands
+and the pinned SDK's internal setup/filesystem/archive commands share this rule.
+Typed proof reaches bounded same-turn recovery, including setup before eventing;
+SDK catch wrappers retain its cause. Server-supplied DNS text and post-dispatch
+errors never prove non-execution. Uncertain Starts become typed outcome-unknown
+results, not transport retries. Supervised retries first settle their exact
 never-started reservation; retained or outcome-unknown causes block recovery.
+Published runtime consumers receive an unpatched Modal SDK. Runtime owns its
+native error class and recognizes SDK boundary errors through a local own-Symbol
+data marker, never patch-only imports, error names, codes, or diagnostic text.
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
@@ -680,6 +689,8 @@ Large or high-frequency bytes take separate paths:
   dedicated relay edge for Connected Machines;
 - realtime voice uses Codex WebRTC or the AI Gateway WebSocket while durable
   ownership, ledger, delegation, context, and recovery remain in OpenGeni;
+  the voice lease freezes connector accounts at authenticated admission and
+  supplies that exact authority to delegations and transcript handoff;
 - model token and tool events use the session event stream, not Temporal; and
 - editable artifacts use their typed artifact authority and kernels rather
   than treating Office files or rendered output as mutable truth.
@@ -1499,11 +1510,15 @@ The worker awaits completion and routes rejection through
 `sandbox_deadline_rotation` before `turn.completed`.
 
 BrowserSession/ComputerSession holders remain durable despite old heartbeats.
-Only finite-provider handoff deadlines override them: the reaper marks exact
-controllers `lost`, deterministically fails prepared operations, marks dispatched
-operations `outcome_unknown`, and preserves bindings for cleanup. The bounded
-deadline batch selects interaction-held leases, including already-draining ones;
-unrelated overdue leases cannot starve it. Lease-free Connected Machine/device
+Before Modal expiry, checkpoint-capable managed browsers suspend through existing
+encrypted profile authority. A private claim binds lease epoch, instance and
+controller; no originating-user grant is borrowed. The existing reaper tick starts
+bounded capture children on `-browser-checkpoint-v1`; ordinary draining starts
+independently. Cleanup follows committed suspension; retries reuse its receipt.
+Normal authorized resume restores the checkpoint. At physical expiry, unsupported
+or unsaved controllers become `lost`; dispatched operations become `outcome_unknown`.
+The bounded deadline batch includes interaction-held and draining leases.
+Lease-free Connected Machine/device
 transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
 fences before mutation visibility. Healthy interactions have no independent age
 limit. Existing browser/computer control, including suspension, retains its provider across
@@ -1517,6 +1532,8 @@ losing readers reread without duplicating output or settling uncaptured tails.
 Router credentials remain in memory. Legacy batch readers only drain existing
 commands; their locators are never reinterpreted as offsets. The reaper drains
 progressing output within a bounded claim, since exit requires both streams at EOF.
+Lease readiness uses a fixed native probe with the same pre-dispatch guard;
+uncertain Starts observe their exact invocation within the existing readiness budget.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;

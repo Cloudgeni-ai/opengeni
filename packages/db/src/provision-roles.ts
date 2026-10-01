@@ -2121,6 +2121,14 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    IF to_regclass('opengeni_private.session_import_batches') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.session_import_batches FROM %I',
+        (SELECT string_agg(quote_ident(attname),',') FROM pg_attribute
+          WHERE attrelid='opengeni_private.session_import_batches'::regclass AND attnum>0 AND NOT attisdropped),
+        ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.modal_inventory_read_capabilities') IS NOT NULL THEN
       -- Inventory is the only capability mint. Reprovisioning must repair
       -- accidental table and column grants, never expose its private ledger.

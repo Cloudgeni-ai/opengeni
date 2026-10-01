@@ -958,6 +958,7 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
   fenceMode: "shared" | "none" = "shared",
+  organizationMembershipFence = false,
 ): Promise<T> {
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectSessionActivityRls: a non-empty subjectId is required");
@@ -972,6 +973,7 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
     },
     transactionConfig,
     fenceMode,
+    organizationMembershipFence,
   );
 }
 

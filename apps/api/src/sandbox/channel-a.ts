@@ -814,6 +814,7 @@ async function withChannelAOperation<T>(
       },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       ...(ctx.retainedInstanceId ? { retainedInstanceId: ctx.retainedInstanceId } : {}),
       rigVersionId: session.rigVersionId,
       leaseTtlMs,

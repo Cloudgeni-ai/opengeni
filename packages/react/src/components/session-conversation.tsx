@@ -138,6 +138,7 @@ function Conversation({
   const uploadsEnabled = attachmentsRequested && config.uploads;
   const status = feed.sessionStatus ?? detail.session?.status;
   const terminal = status === "cancelled";
+  const importedArchive = detail.session?.importedArchive?.readOnly === true;
   const releaseSentFiles = (input: SendMessageInput) =>
     files.removeReadyFiles(
       (input.resources ?? []).flatMap((resource) =>
@@ -231,77 +232,90 @@ function Conversation({
         }}
         loadingOldest={feed.loadingOldest}
         onJumpToLatest={feed.jumpToLatest}
-        onAnnotate={composer.addAnnotation}
+        onAnnotate={importedArchive ? undefined : composer.addAnnotation}
       />
-      <div className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto" data-og-conversation-inputs="">
-        {approvals.length > 0 && !terminal ? (
-          <ApprovalSurface
-            className="mx-auto max-w-3xl"
-            approvals={approvals}
-            onApprove={async (approval) => {
-              await control.approve(approval.id);
-            }}
-            onReject={async (approval) => {
-              await control.reject(approval.id);
-            }}
-            responding={control.responding}
-            error={control.error}
-          />
-        ) : null}
-        <HumanInputSurface
-          loadSkillReview={loadSkillReview}
-          requests={human.requests}
-          onSubmit={async (id, response) => {
-            await human.respond(id, response);
-          }}
-          respondingRequestId={human.respondingRequestId}
-          error={human.mutationError?.message}
-          autoFocus={false}
-        />
-        {terminal ? (
-          <SessionChrome queue={queue} sessionStatus={status} readOnly />
-        ) : (
-          <SessionChrome
-            queue={queue}
-            composer={composer}
-            sessionStatus={status}
-            onComposerFocus={() =>
-              region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
-            }
-          />
-        )}
-      </div>
-      <div className="shrink-0" data-og-conversation-composer="">
-        <ChatComposer
-          {...composerProps}
-          composer={composer}
-          attachments={uploadsEnabled ? files : undefined}
-          disabled={terminal || composerProps?.disabled}
-          controlsStart={
-            composerProps?.controlsStart ??
-            (showModelPicker && composer.policy && (
-              <ModelPolicyPicker
-                rows={catalog.rows}
-                model={composer.policy.model}
-                effort={composer.policy.reasoningEffort}
-                latencyMode={composer.policy.latencyMode}
-                loading={catalog.loading}
-                error={catalog.error?.message}
-                disabled={terminal}
-                sessionKey={sessionId}
-                onModelChange={(model) => composer.setModel?.(model)}
-                onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
-                onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
+      {importedArchive ? (
+        <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+          Archived conversation · Read only
+        </p>
+      ) : (
+        <>
+          <div
+            className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto"
+            data-og-conversation-inputs=""
+          >
+            {approvals.length > 0 && !terminal ? (
+              <ApprovalSurface
+                className="mx-auto max-w-3xl"
+                approvals={approvals}
+                onApprove={async (approval) => {
+                  await control.approve(approval.id);
+                }}
+                onReject={async (approval) => {
+                  await control.reject(approval.id);
+                }}
+                responding={control.responding}
+                error={control.error}
               />
-            ))
-          }
-          responsiveBasis={composerProps?.responsiveBasis ?? "container"}
-          effectiveControl={
-            composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl
-          }
-          queuedAheadCount={queue.queue.length}
-        />
-      </div>
+            ) : null}
+            <HumanInputSurface
+              loadSkillReview={loadSkillReview}
+              requests={human.requests}
+              onSubmit={async (id, response) => {
+                await human.respond(id, response);
+              }}
+              respondingRequestId={human.respondingRequestId}
+              error={human.mutationError?.message}
+              autoFocus={false}
+            />
+            {terminal ? (
+              <SessionChrome queue={queue} sessionStatus={status} readOnly />
+            ) : (
+              <SessionChrome
+                queue={queue}
+                composer={composer}
+                sessionStatus={status}
+                onComposerFocus={() =>
+                  region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
+                }
+              />
+            )}
+          </div>
+          <div className="shrink-0" data-og-conversation-composer="">
+            <ChatComposer
+              {...composerProps}
+              composer={composer}
+              attachments={uploadsEnabled ? files : undefined}
+              disabled={terminal || composerProps?.disabled}
+              controlsStart={
+                composerProps?.controlsStart ??
+                (showModelPicker && composer.policy && (
+                  <ModelPolicyPicker
+                    rows={catalog.rows}
+                    model={composer.policy.model}
+                    effort={composer.policy.reasoningEffort}
+                    latencyMode={composer.policy.latencyMode}
+                    loading={catalog.loading}
+                    error={catalog.error?.message}
+                    disabled={terminal}
+                    sessionKey={sessionId}
+                    onModelChange={(model) => composer.setModel?.(model)}
+                    onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
+                    onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
+                  />
+                ))
+              }
+              responsiveBasis={composerProps?.responsiveBasis ?? "container"}
+              effectiveControl={
+                composer.effectiveControl ??
+                queue.effectiveControl ??
+                detail.session?.effectiveControl
+              }
+              queuedAheadCount={queue.queue.length}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

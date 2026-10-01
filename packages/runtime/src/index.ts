@@ -1,4 +1,5 @@
 import { measureMcpPhase } from "@opengeni/observability";
+import { createMcpTransportLogger } from "./mcp-transport-logger";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -310,6 +311,7 @@ import {
 import {
   createSandboxClient,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
   renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
@@ -3979,6 +3981,9 @@ function buildAgentCapabilitiesFromComposition(
           if (toolCancellation) throw error;
           return renderRoutingMutationOutcomeUnknownToolResult(error);
         }
+        if (isModalCommandStartOutcomeUnknownError(error)) {
+          return "Managed sandbox command start outcome unknown. The command may have executed. Do not blindly retry it; inspect the existing sandbox state before taking further action.";
+        }
         const details = error instanceof Error ? error.toString() : String(error);
         return `An error occurred while running the tool. Please try again. Error: ${details}`;
       },
@@ -6419,6 +6424,7 @@ type McpPublicErrorFields = {
 };
 
 type McpPublicFailureCode =
+  | "mcp_cleanup_failed"
   | "mcp_connect_failed"
   | "mcp_close_failed"
   | "mcp_transport_failed"
@@ -6779,27 +6785,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
 }
 
 function mcpTransportLogger(serverId: string) {
-  const logFailure = (_message: string, ...args: unknown[]) => {
-    let error: unknown;
-    for (let index = args.length - 1; index >= 0; index -= 1) {
-      if (args[index] instanceof Error) {
-        error = args[index];
-        break;
-      }
-    }
-    console.warn(
-      "[mcp] transport operation failed",
-      mcpErrorFields(error, "mcp_transport_failed", serverId),
-    );
-  };
-  return {
-    namespace: "opengeni:mcp-transport",
-    debug: () => undefined,
-    error: logFailure,
-    warn: logFailure,
-    dontLogModelData: true,
-    dontLogToolData: true,
-  };
+  return createMcpTransportLogger(serverId, mcpErrorFields);
 }
 
 async function mcpServerRequestInit(

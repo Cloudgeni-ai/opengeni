@@ -296,6 +296,90 @@ full client, so `SessionConversation` can take over without a migration. The
 runnable [chat quickstart example](../examples/chat-quickstart) is one backend
 server file.
 
+## Migrating from embedded OpenGeni
+
+Use `@opengeni/sdk/session-history-import` for a backend migration from an
+in-process runtime to a standalone deployment. It creates read-only historical
+archives, not model-facing history or live sessions. Check the installed SDK and
+target service support this contract before running the migration.
+
+Create requires `sessions:create`; appending requires `sessions:control` and the
+same authenticated importer. Grant both for a complete migration. With `asUser`,
+the user's permissions apply, not the organization key's permissions.
+
+Preserve the original external tenant and user mappings. Call `ensureWorkspace`
+with the same stable external source/tenant ID, explicitly onboard admitted users
+with `addExternalWorkspaceMember`, and persist the resulting workspace ID.
+Imports do not grant membership or create external workspace mappings. Never
+fall back to a Personal/default workspace or invent new identities to clear an
+authorization failure.
+
+Preserve title, original session/event timestamps, creator and visibility. Use
+the organization-key client through `.asUser(originalExternalUserId, { source })`
+for the verified external creator/owner. Without `asUser`, an organization key
+creates only an ownerless workspace-shared archive. `user_private` requires the
+verified owning user and the existing private-session organization enablement;
+do not silently turn private source history into shared history. Keep source IDs
+and any additional metadata not accepted by v1 in a host-owned migration ledger.
+
+Before freezing event requests, re-upload retained files through the destination
+workspace's existing `uploadFile` / begin-upload-complete APIs. Persist an
+old-to-new file/reference map and replace payload references. Source file IDs,
+signed URLs, storage and sandbox paths are not transferable authority.
+
+The focused functions take `client` first and use its normal `requestJson`
+transport:
+
+| Function | Remaining arguments |
+| --- | --- |
+| `importArchivedSession` | `workspaceId, ImportArchivedSessionRequest` |
+| `appendArchivedSessionEvents` | `workspaceId, importId, AppendArchivedSessionEventsRequest` |
+| `importExternalWorkspaceArchivedSession` | `source, externalId, ImportArchivedSessionRequest` |
+| `appendExternalWorkspaceArchivedSessionEvents` | `source, externalId, importId, AppendArchivedSessionEventsRequest` |
+
+Create sends `{ importId, title, createdAt, visibility?, events? }`; omitted
+events default to `[]`. Each event is `{ type, createdAt, turnId?, payload }`,
+with a finite supported historical event type, ISO timestamp, optional UUID/null
+turn correlation and a JSON-object payload. Append sends
+`{ batchId, offset, events }` with a non-empty batch and zero-based event offset.
+Import IDs, batch IDs and titles are at most 200 characters; each request is at
+most 100 events / 1 MiB serialized UTF-8 JSON and each event at most 256 KiB.
+
+Source timestamps support at most millisecond precision; normalize finer dates
+explicitly and keep their originals in the ledger. Negative-zero JSON is rejected.
+
+Create returns `{ session, importId, created, nextOffset }`; append returns
+`{ sessionId, importId, nextOffset, replayed }`. Store the source-session to
+destination-session mapping and each exact request before sending it. After an
+uncertain response, retry the same actor, workspace/mapping, IDs, offset and
+events. Repeated exact creates replay with `created: false`; repeated exact
+append batches replay with `replayed: true`, without duplicate events. New
+batches use the acknowledged `nextOffset`. Changed key reuse or an out-of-order
+new offset conflicts with `409`; reconcile the ledger instead of bypassing the
+conflict with new keys. The SDK performs no automatic mutation retries.
+
+Routes are `POST /v1/workspaces/:workspaceId/session-imports` and
+`POST /v1/workspaces/:workspaceId/session-imports/:importId/events`; external
+mapping forms substitute `/v1/workspaces/external/:source/:externalId` for the
+workspace prefix. Import functions are not root exports or eager client methods
+and are not exposed by `createSessionProxyHandler` to browsers.
+
+Completed messages, tool calls/results and goals are optional historical facts.
+No event executes a tool, restores a pending approval/question, creates an active
+goal, seeds `session_history_items`, starts a workflow or enqueues a model turn.
+Use native payload shapes for rendering; prefer completed messages rather than
+fabricating streaming activity. `session.importedArchive` is
+`{ importId, importedAt, readOnly: true }`, independent of ordinary personal
+archive/restore preferences. Leave `SessionConversation` unchanged behind the
+existing proxy; open the returned session ID in a view-only conversation with no
+Send or Steer. Continuing an imported archive is unsupported in v1; new work
+needs a separate new session, not silent history injection.
+
+The coding-agent walkthrough lives in
+[the client Skill's migration reference](../.agents/skills/opengeni-client/references/session-history-import.md).
+The public walkthrough is in
+[`docs-site/guides/integrate-your-product.mdx`](../docs-site/guides/integrate-your-product.mdx#migrating-from-embedded-opengeni).
+
 ## Boundary and ownership
 
 For included-usage plans, per-seat equal splits, administrator sliders, custom

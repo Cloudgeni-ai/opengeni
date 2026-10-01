@@ -4,6 +4,8 @@ export * from "./claude-subscription-oauth";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
+export * from "./session-history-import";
+import { SessionImportedArchive } from "./session-history-import";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
@@ -13196,6 +13198,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
     archived: z.boolean().default(false),
     archivedAt: z.string().nullable().default(null),
+    /** Workspace-persisted read-only import, independent of a member's rail archive. */
+    importedArchive: z.lazy(() => SessionImportedArchive).optional(),
     /** Optimistic archive-state revision; zero represents an absent personal relation. */
     archiveVersion: z.number().int().nonnegative().default(0),
     /**

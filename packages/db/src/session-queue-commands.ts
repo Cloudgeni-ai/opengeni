@@ -1,4 +1,5 @@
 import { acceptSessionFileAttachments } from "./session-file-attachments";
+import { ArchivedSessionImportError } from "./archived-session-imports";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
@@ -1796,7 +1797,7 @@ export async function submitHumanPromptInTransaction(
       subjectId: input.actor.subjectId,
     });
   }
-  await lockSessionEventWriteRows(db, {
+  const promptLocks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds:
@@ -1806,6 +1807,11 @@ export async function submitHumanPromptInTransaction(
     turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  if (
+    promptLocks.sessions.find((session) => session.id === input.sessionId)?.importedArchiveImportId
+  ) {
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  }
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -2682,6 +2688,8 @@ export async function sendAgentMessageInTransaction(
     input.actor,
   );
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
+  if (session.importedArchiveImportId)
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2954,6 +2962,8 @@ export async function steerAgentSessionInTransaction(
     admission,
   });
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
+  if (session.importedArchiveImportId)
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",

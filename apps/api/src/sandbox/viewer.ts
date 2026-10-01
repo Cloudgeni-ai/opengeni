@@ -267,6 +267,7 @@ export async function attachViewer(
       },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
