@@ -5110,6 +5110,9 @@ describe("provider-neutral browser account acceptance", () => {
       ]);
       setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
+      // The independent set still polls while the other set signs out. Settle
+      // its finite reads before reload can tear down their owning document.
+      await waitForFiniteReadQuiescence(otherProblems);
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(otherPage, beta.displayName).waitFor();
