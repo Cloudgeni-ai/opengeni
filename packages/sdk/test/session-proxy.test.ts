@@ -613,6 +613,7 @@ describe("createSessionProxyHandler", () => {
   test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({
+      modelSelection: false,
       createSession: ({ initialMessage }) => ({ initialMessage, modelContext: "Workspace plan" }),
       beforeForwardMessage: (input, context) => {
         inputs.push({ ...input, user: context.user });
@@ -638,12 +639,20 @@ describe("createSessionProxyHandler", () => {
     });
     await browser.submitComposerDraft(WORKSPACE_ID, SESSION_ID, {
       text: "draft",
+      annotations: [],
+      resources: [],
+      model: "saved-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       expectedDraftRevision: 1,
       clientEventId: "c1",
       delivery: "send",
-    } as never);
+    });
     expect(upstream.requests[2]!.body).toMatchObject({
       text: "draft",
+      model: "saved-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       modelContext: expect.any(String),
     });
     await browser.createSession(WORKSPACE_ID, { initialMessage: "start" } as never);
