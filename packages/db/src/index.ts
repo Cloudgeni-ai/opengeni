@@ -74259,14 +74259,14 @@ export type SessionWorkPeek =
       activityRef: SessionAttemptActivityRef;
     }
   | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
-  | { kind: "admission-blocked" }
+  | {
+      kind: "admission-blocked";
+      reason?: "sandbox_setup_outcome_unknown";
+      ref?: SandboxSetupOutcomeUnknown;
+    }
   | {
       kind: "sandbox-lifecycle-wait";
       ref: SandboxLifecycleWait;
-    }
-  | {
-      kind: "sandbox-setup-outcome-unknown";
-      ref: SandboxSetupOutcomeUnknown;
     }
   | { kind: "approval-pending"; triggerEventId: string; admissionFence?: SessionAdmissionFence }
   | {
@@ -74792,7 +74792,14 @@ export async function peekSessionWork(
       if (turn.status === "recovering" || turn.status === "waiting_capacity") {
         const setupUnknown = sandboxSetupOutcomeUnknownFromTurnMetadata(turn.metadata);
         if (turn.status === "recovering" && setupUnknown) {
-          return { kind: "sandbox-setup-outcome-unknown", ref: setupUnknown };
+          // Existing workflow releases already park this wire kind. Do not
+          // introduce a new peek kind that an older control worker could
+          // mistake for runnable work during a rolling deployment.
+          return {
+            kind: "admission-blocked",
+            reason: "sandbox_setup_outcome_unknown",
+            ref: setupUnknown,
+          };
         }
         const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(turn.metadata);
         if (turn.status === "recovering" && lifecycleWait) {

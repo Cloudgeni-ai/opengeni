@@ -809,7 +809,8 @@ describe("clean session control plane", () => {
     // wakes and direct claim attempts cannot bypass the durable marker.
     for (let wake = 0; wake < 3; wake++) {
       expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
-        kind: "sandbox-setup-outcome-unknown",
+        kind: "admission-blocked",
+        reason: "sandbox_setup_outcome_unknown",
         ref: marker,
       });
       expect(
