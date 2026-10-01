@@ -4408,7 +4408,7 @@ describe("useComposer durable draft and control binding", () => {
   });
 
   for (const delivery of ["send", "steer"] as const) {
-    test(`${delivery} preserves its draft and file after a definite payment rejection, then retries once with Codex`, async () => {
+    test(`${delivery} preserves a credit-refused draft and file for a fresh submission with the selected model`, async () => {
       const resource = {
         kind: "file" as const,
         fileId: "55555555-5555-4555-8555-555555555555",
@@ -4470,6 +4470,7 @@ describe("useComposer durable draft and control binding", () => {
           state: "failed",
           resources: [resource],
           outcomeUnknown: false,
+          retryable: false,
         });
       } else {
         expect(hook.result.current.error).toMatchObject({
@@ -4498,6 +4499,13 @@ describe("useComposer durable draft and control binding", () => {
         expect(failed).toBeDefined();
         await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
         await flush();
+        expect(attempts).toHaveLength(1);
+        await flushing(() => hook.result.current.restoreOptimisticMessage?.(failed!.clientEventId));
+        expect(hook.result.current.value).toBe("read the exact attached bytes");
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+        expect(hook.result.current.optimisticMessages).toEqual([]);
+        await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+        await flush();
       } else {
         await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
       }
@@ -4506,9 +4514,9 @@ describe("useComposer durable draft and control binding", () => {
       expect(attempts[1]).toMatchObject({
         text: "read the exact attached bytes",
         resources: [resource],
-        // Send retries the frozen failed operation; a rejected Steer restores
-        // the composer, so the next explicit Steer uses its newly selected policy.
-        model: delivery === "send" ? "gpt-5.6-sol" : "codex/gpt-5.6-sol",
+        // Edit restores a refused Send without replacing the user's new policy;
+        // a rejected Steer already preserves its composer for the next explicit send.
+        model: "codex/gpt-5.6-sol",
       });
       expect(attempts[1]!.clientEventId).not.toBe(attempts[0]!.clientEventId);
       expect(accepted).toBe(1);

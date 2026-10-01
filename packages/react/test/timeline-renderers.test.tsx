@@ -1366,7 +1366,10 @@ describe("timeline renderer isolation", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Message not sent");
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "Gateway unavailable",
+    );
+    expect(r.container.querySelector('[role="status"] [title]')).toBeNull();
     expect(r.container.querySelector('[role="status"]')?.className).toContain(
       "text-og-status-failed",
     );
@@ -1380,6 +1383,43 @@ describe("timeline renderer isolation", () => {
       remove?.click();
     });
     expect({ retries, removals }).toEqual({ retries: 1, removals: 1 });
+    await r.unmount();
+  });
+
+  test("renders a credit refusal inline with Edit message instead of Retry", async () => {
+    let edits = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          {
+            kind: "user-message",
+            id: "credit-refused-message",
+            text: "Keep the original message",
+            resources: [],
+            tools: [],
+            occurredAt: new Date(0).toISOString(),
+            delivery: {
+              state: "failed",
+              error:
+                "Your organization has no OpenGeni credits left. Add credits before sending again.",
+              onEdit: () => {
+                edits += 1;
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "no OpenGeni credits left",
+    );
+    const buttons = [...r.container.querySelectorAll("button")];
+    expect(buttons.find((button) => button.textContent === "Retry")).toBeUndefined();
+    const edit = buttons.find((button) => button.textContent === "Edit message");
+    expect(edit).toBeDefined();
+    await act(async () => edit?.click());
+    expect(edits).toBe(1);
     await r.unmount();
   });
 

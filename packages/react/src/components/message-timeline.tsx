@@ -3926,30 +3926,43 @@ function UserMessageRow({
         {deliveryFailed ? (
           <div
             role="status"
-            className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-status-failed"
+            className="flex max-w-full flex-col items-start gap-1 px-1 text-og-xs text-og-status-failed"
           >
-            <span className="inline-flex items-center gap-1" title={item.delivery?.error}>
+            <span className="flex min-w-0 items-start gap-1">
               <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden="true" />
-              <span>Message not sent</span>
+              <span className="min-w-0 break-words">
+                {item.delivery?.error || "Message not sent"}
+              </span>
             </span>
-            {item.delivery?.onRetry ? (
-              <button
-                type="button"
-                className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
-                onClick={item.delivery.onRetry}
-              >
-                Retry
-              </button>
-            ) : null}
-            {item.delivery?.onRemove ? (
-              <button
-                type="button"
-                className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
-                onClick={item.delivery.onRemove}
-              >
-                Remove
-              </button>
-            ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+              {item.delivery?.onEdit ? (
+                <button
+                  type="button"
+                  className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
+                  onClick={item.delivery.onEdit}
+                >
+                  Edit message
+                </button>
+              ) : null}
+              {item.delivery?.onRetry ? (
+                <button
+                  type="button"
+                  className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
+                  onClick={item.delivery.onRetry}
+                >
+                  Retry
+                </button>
+              ) : null}
+              {item.delivery?.onRemove ? (
+                <button
+                  type="button"
+                  className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
+                  onClick={item.delivery.onRemove}
+                >
+                  Remove
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : null}
       </div>
