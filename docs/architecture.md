@@ -683,6 +683,8 @@ Large or high-frequency bytes take separate paths:
   dedicated relay edge for Connected Machines;
 - realtime voice uses Codex WebRTC or the AI Gateway WebSocket while durable
   ownership, ledger, delegation, context, and recovery remain in OpenGeni;
+  the voice lease freezes connector accounts at authenticated admission and
+  supplies that exact authority to delegations and transcript handoff;
 - model token and tool events use the session event stream, not Temporal; and
 - editable artifacts use their typed artifact authority and kernels rather
   than treating Office files or rendered output as mutable truth.
