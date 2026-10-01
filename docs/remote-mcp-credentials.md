@@ -64,6 +64,15 @@ workspace bindings never acquire a personal owner. The account-qualified routes
 are separately visible to tool discovery, so selecting a tool also selects its
 account. Missing or revoked accounts do not fall back to another identity.
 
+Creating a session revalidates inherited workspace account identity. If an
+accepted account disappeared, needs reauthorization, or changed authorization
+generation, creation is refused. The first-party tool returns
+`session_create_connection_selection_unavailable` with `retryable: false`;
+HTTP creation returns `SESSION_CREATE_CONNECTION_SELECTION_UNAVAILABLE` (409).
+Repeating the same accepted selection cannot refresh authority. A new authorized
+turn must select current eligible accounts; neither transport silently removes,
+refreshes or substitutes an account. Unknown database failures remain generic.
+
 Initial turns and follow-up messages resolve the same executable connector
 policy before freezing accounts. Workspace-default connectors participate even
 when absent from the stored creation snapshot; explicit lists and connector
