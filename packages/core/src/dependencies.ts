@@ -13,6 +13,7 @@ import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import type { UserPresenceRecorder } from "./user-presence";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
@@ -171,6 +172,11 @@ export type AppDependencies = {
   documentIndexer?: DocumentIndexClient;
   documentServices?: DocumentServices;
   observability?: Observability;
+  /**
+   * Throttled server-side presence for canonical managed browser sessions
+   * (`createUserPresenceRecorder`). Analytics only; never an authorization input.
+   */
+  userPresence?: UserPresenceRecorder | null;
   readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
   githubStateSecret?: string;
   /**
@@ -271,6 +277,7 @@ export type AcceptSessionUserMessageDependencies = Pick<
   | "bus"
   | "sessionAuthorization"
   | "schedulePromptPostCommit"
+  | "observability"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

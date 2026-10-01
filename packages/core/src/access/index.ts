@@ -11,6 +11,8 @@ import {
   type AccessContext,
   type AccessGrant,
   type OrganizationApiKeyAccess,
+  OPENGENI_USER_ACTIVITY_ACTIVE,
+  OPENGENI_USER_ACTIVITY_HEADER,
   Permission,
   type Workspace,
 } from "@opengeni/contracts";
@@ -35,6 +37,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
+import type { UserPresenceRecorder } from "../user-presence";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
 
 const bearerPrefix = "Bearer ";
@@ -299,6 +302,8 @@ export type AccessDeps = {
   settings: Settings;
   managedAuth?: ManagedAuth | null;
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
+  /** Analytics only: notes canonical managed-cookie activity, never authority. */
+  userPresence?: UserPresenceRecorder | null;
 };
 
 /** null means this is not an authenticated external lane; [] means that lane
@@ -892,11 +897,27 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      recordUserPresence(c, deps, context.subjectId);
       return context;
     }
   }
 
   return null;
+}
+
+/**
+ * Presence counts people, so only the verified managed browser-session branch
+ * reports it, and only for a request the console marked as human activity (a
+ * visible tab with recent interaction). Each request counts once: an SSE
+ * stream's periodic reauthorization reuses its original request.
+ */
+const presenceRecordedRequests = new WeakSet<Request>();
+function recordUserPresence(c: Context, deps: AccessDeps, subjectId: string): void {
+  if (!deps.userPresence) return;
+  if (c.req.header(OPENGENI_USER_ACTIVITY_HEADER) !== OPENGENI_USER_ACTIVITY_ACTIVE) return;
+  if (presenceRecordedRequests.has(c.req.raw)) return;
+  presenceRecordedRequests.add(c.req.raw);
+  deps.userPresence.touch(subjectId);
 }
 
 async function apiKeyAccessContext(

@@ -577,6 +577,8 @@ export async function startApi(
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await stopWorkspaceWebhookDispatchPump();
+      // Write queued presence before the database pool closes.
+      await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
