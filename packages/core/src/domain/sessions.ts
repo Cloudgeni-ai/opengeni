@@ -4486,6 +4486,36 @@ function toolPolicyAuditSnapshot(
   };
 }
 
+/** Exact parent authority shared by tool-policy and agent-configuration writes. */
+function sessionToolPolicyCeiling(
+  session: Session,
+  settings: Settings,
+  runtimeSettings: Settings,
+  workspaceDefaults: ReturnType<typeof resolveWorkspaceSessionToolDefaults>,
+): { tools: ToolRef[]; firstPartyMcpTools: FirstPartyMcpToolName[] } {
+  const policy = resolveFirstPartyMcpToolPolicy(settings);
+  const allowed = new Set(policy.allowed);
+  return {
+    tools: withFirstPartyTools(
+      session.toolPolicy.mode === "workspace_default"
+        ? withWorkspaceDefaultMcpTools(
+            availableToolRefs(session.tools, runtimeSettings),
+            settings,
+            runtimeSettings,
+            workspaceDefaults,
+          )
+        : session.tools,
+      runtimeSettings,
+    ).filter(
+      (tool) =>
+        tool.id === "opengeni" || !session.toolPolicy.excludedMcpServerIds?.includes(tool.id),
+    ),
+    firstPartyMcpTools: [...(session.firstPartyMcpTools ?? policy.default)].filter((tool) =>
+      allowed.has(tool),
+    ),
+  };
+}
+
 /**
  * Replace the durable session tool policy. The target and its parent (when
  * present) are locked by the DB event-writer helper, and the update/event are
@@ -4605,26 +4635,13 @@ export async function updateSessionToolPolicy(
           });
         }
         const parentTracksWorkspaceDefaults = parent.toolPolicy?.mode === "workspace_default";
-        const parentEffective = withFirstPartyTools(
-          parentTracksWorkspaceDefaults
-            ? withWorkspaceDefaultMcpTools(
-                availableToolRefs(parent.tools, runtimeSettings),
-                deps.settings,
-                runtimeSettings,
-                workspaceSessionToolDefaults,
-              )
-            : parent.tools,
-          runtimeSettings,
-        ).filter(
-          (tool) =>
-            tool.id === "opengeni" || !parent.toolPolicy.excludedMcpServerIds?.includes(tool.id),
-        );
-        const deploymentAllowedFirstPartyMcpTools = new Set(
-          deploymentFirstPartyMcpToolPolicy.allowed,
-        );
-        const parentFirstPartyMcpTools = [
-          ...(parent.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
-        ].filter((tool) => deploymentAllowedFirstPartyMcpTools.has(tool));
+        const { tools: parentEffective, firstPartyMcpTools: parentFirstPartyMcpTools } =
+          sessionToolPolicyCeiling(
+            parent,
+            deps.settings,
+            runtimeSettings,
+            workspaceSessionToolDefaults,
+          );
         if (requestedMode === "workspace_default") {
           if (!parentTracksWorkspaceDefaults) {
             throw new HTTPException(403, {
@@ -4873,11 +4890,15 @@ export async function updateSessionAgent(
       deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
     ) ?? deploymentFirstPartyMcpToolPolicy.default),
   ];
-  const runtimeMcpServers = (
-    await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, deps.settings, {
+  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    deps.db,
+    grant.workspaceId,
+    deps.settings,
+    {
       subjectId: grant.subjectId,
-    })
-  ).mcpServers;
+    },
+  );
+  const runtimeMcpServers = capabilityRuntimeSettings.mcpServers;
   const runtimeServerIds = new Set(runtimeMcpServers.map((server) => server.id));
   const workspaceDefaultServerIds = workspaceSessionToolPolicyDefaultServerIdsFor(
     runtimeMcpServers,
@@ -4893,8 +4914,9 @@ export async function updateSessionAgent(
         throw new SessionToolPolicyVersionConflictError(currentVersion);
       }
       let parentCeiling: ResolvedAgentCapabilities | undefined;
+      let parent: Session | null = null;
       if (session.parentSessionId) {
-        const parent = await context.getLockedSession(session.parentSessionId);
+        parent = await context.getLockedSession(session.parentSessionId);
         if (!parent) {
           throw new HTTPException(409, { message: "parent session is no longer available" });
         }
@@ -4902,6 +4924,14 @@ export async function updateSessionAgent(
           parent.agent?.capabilities ??
           legacySessionAgentCapabilities(deps.settings, parent, workspace.settings);
       }
+      const parentTools = parent
+        ? sessionToolPolicyCeiling(
+            parent,
+            deps.settings,
+            settingsWithSessionMcpServerMetadata(capabilityRuntimeSettings, session.mcpServers),
+            workspaceSessionToolDefaults,
+          )
+        : null;
       const legacyCeiling = legacySessionAgentCapabilities(
         deps.settings,
         session,
@@ -4925,7 +4955,11 @@ export async function updateSessionAgent(
       ];
       const added = agentAttemptCaller
         ? []
-        : agentConfigAddedFirstPartyMcpTools(previousCapabilities, next, defaultFirstPartyTools);
+        : agentConfigAddedFirstPartyMcpTools(
+            previousCapabilities,
+            next,
+            parentTools?.firstPartyMcpTools ?? defaultFirstPartyTools,
+          );
       let tools = [...session.tools];
       let toolPolicy: SessionToolPolicy = { ...session.toolPolicy };
       if (!agentAttemptCaller) {
@@ -4949,6 +4983,8 @@ export async function updateSessionAgent(
           ) {
             tools.push({ kind: "mcp", id: serverId, optional: true });
           }
+          const parentTool = parentTools?.tools.find((tool) => tool.id === serverId);
+          if (parentTool && !tools.some((tool) => tool.id === serverId)) tools.push(parentTool);
         }
         if (
           reEnabled("workspaceConnectors") &&
@@ -4958,9 +4994,48 @@ export async function updateSessionAgent(
           toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
         }
       }
+      let firstPartyMcpTools = [...new Set([...currentFirstPartyMcpTools, ...added])];
+      if (parent && parentTools) {
+        // Family booleans are not exact tool authority: re-enabling a family
+        // restores only selections the locked parent actually permits.
+        const runtimeSettings = settingsWithSessionMcpServerMetadata(
+          capabilityRuntimeSettings,
+          session.mcpServers,
+        );
+        const parentFirstPartyTools = new Set(parentTools.firstPartyMcpTools);
+        firstPartyMcpTools = firstPartyMcpTools.filter((tool) => parentFirstPartyTools.has(tool));
+        if (toolPolicy.mode === "workspace_default") {
+          tools = withoutExcludedMcpServers(
+            withFirstPartyTools(
+              withWorkspaceDefaultMcpTools(
+                availableToolRefs(tools, runtimeSettings),
+                deps.settings,
+                runtimeSettings,
+                workspaceSessionToolDefaults,
+              ),
+              runtimeSettings,
+            ),
+            toolPolicy.excludedMcpServerIds,
+          );
+          if (parent.toolPolicy.mode !== "workspace_default") {
+            // An explicit parent cannot authorize future workspace additions.
+            toolPolicy = { mode: "inherited", inheritedFromSessionId: parent.id };
+          } else {
+            toolPolicy = {
+              ...toolPolicy,
+              ...defaultPolicyExclusions([
+                ...(parent.toolPolicy.excludedMcpServerIds ?? []),
+                ...(toolPolicy.excludedMcpServerIds ?? []),
+              ]),
+            };
+          }
+        }
+        const parentToolIds = new Set(parentTools.tools.map((tool) => `${tool.kind}:${tool.id}`));
+        tools = tools.filter((tool) => parentToolIds.has(`${tool.kind}:${tool.id}`));
+      }
       const writeThrough = applySessionAgentConfigWriteThrough({
         config: next,
-        firstPartyMcpTools: [...new Set([...currentFirstPartyMcpTools, ...added])],
+        firstPartyMcpTools,
         tools,
         toolPolicy,
         productServerIds: [

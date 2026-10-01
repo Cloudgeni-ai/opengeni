@@ -33674,7 +33674,7 @@ type SessionCreateReplayIdentity = {
   agentAccess?: SessionAgentAccess;
   scopeSubjectId?: SessionScopeSubjectId | null;
   memoryScope?: SessionMemoryScope;
-  /** Resolved agent configuration of the retrying request; omitted skips the check. */
+  /** Resolved creation-time configuration; omitted and null are equivalent. */
   agentConfig?: ResolvedAgentConfig | null;
 };
 
@@ -33692,6 +33692,19 @@ function metadataWithAgentLearningCreateIdentity(
   delete next[SESSION_CREATE_AGENT_LEARNING_METADATA_KEY];
   if (settings && Object.keys(settings).length)
     next[SESSION_CREATE_AGENT_LEARNING_METADATA_KEY] = settings;
+  return next;
+}
+
+const SESSION_CREATE_AGENT_CONFIG_METADATA_KEY = "_opengeni_session_create_agent_config_v1";
+
+function metadataWithAgentConfigCreateIdentity(
+  metadata: Record<string, unknown>,
+  config: ResolvedAgentConfig | null | undefined,
+): Record<string, unknown> {
+  const next = { ...metadata };
+  delete next[SESSION_CREATE_AGENT_CONFIG_METADATA_KEY];
+  const identity = agentConfigReplayIdentity(config);
+  if (identity !== null) next[SESSION_CREATE_AGENT_CONFIG_METADATA_KEY] = identity;
   return next;
 }
 
@@ -33767,12 +33780,11 @@ function assertSessionCreateReplayIdentity(
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
-  // A keyed retry that resolves a different agent configuration (capabilities,
-  // identity, renderer) is a different request.
+  // Compare immutable creation truth, never the live /agent configuration.
+  // Missing metadata denotes a legacy-null create, including later conversion.
   if (
-    input.agentConfig !== undefined &&
-    stableJson(agentConfigReplayIdentity(existing.agentConfig)) !==
-      stableJson(agentConfigReplayIdentity(input.agentConfig))
+    stableJson(existing.metadata?.[SESSION_CREATE_AGENT_CONFIG_METADATA_KEY] ?? null) !==
+    stableJson(agentConfigReplayIdentity(input.agentConfig))
   ) {
     throw new SessionCreateIdempotencyConflictError();
   }
@@ -33889,7 +33901,10 @@ async function createSessionInTransaction(
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
     withoutRetiredSessionCreateMetadata(
       withBundledSkillSelectionMetadata(
-        metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+        metadataWithAgentConfigCreateIdentity(
+          metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
+          input.agentConfig,
+        ),
         input.bundledSkillIds,
       ),
     ),

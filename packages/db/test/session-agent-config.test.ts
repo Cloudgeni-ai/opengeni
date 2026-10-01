@@ -164,6 +164,94 @@ describe("sessions.agent_config (0559)", () => {
     ).rejects.toBeInstanceOf(SessionCreateIdempotencyConflictError);
   }, 60_000);
 
+  test("keyed-create replay retains immutable identity after a live agent update", async () => {
+    const grant = await workspace();
+    const key = `agent-${crypto.randomUUID()}`;
+    const original = config("none", "Original");
+    const changed = config("none", "Updated");
+    const first = await createSessionWithIdempotencyKeyResult(client.db, {
+      ...sessionInput(grant),
+      agentConfig: original,
+      createIdempotencyKey: key,
+      metadata: { _opengeni_session_create_agent_config_v1: changed },
+    });
+    if (first.denied) throw new Error("unexpected denial");
+    await appendSessionEventsWithLockedSessionUpdate(
+      client.db,
+      grant.workspaceId!,
+      first.session.id,
+      () => ({
+        events: [
+          {
+            type: "session.agent.updated",
+            payload: { before: original, after: changed, version: 2 },
+          },
+        ],
+        update: { agentConfig: changed, toolPolicyVersion: 2, expectedToolPolicyVersion: 1 },
+      }),
+      { activity: "semantic" },
+    );
+    const replay = await createSessionWithIdempotencyKeyResult(client.db, {
+      ...sessionInput(grant),
+      agentConfig: { ...original, source: "workspace_default" },
+      createIdempotencyKey: key,
+    });
+    if (replay.denied) throw new Error("unexpected denial");
+    expect(replay.created).toBe(false);
+    expect(replay.session.id).toBe(first.session.id);
+    expect(replay.session.agent?.identity).toBe("Updated");
+    await expect(
+      createSessionWithIdempotencyKeyResult(client.db, {
+        ...sessionInput(grant),
+        agentConfig: changed,
+        createIdempotencyKey: key,
+      }),
+    ).rejects.toBeInstanceOf(SessionCreateIdempotencyConflictError);
+  }, 60_000);
+
+  test("omitted and null create identities stay equivalent after legacy conversion", async () => {
+    const grant = await workspace();
+    const key = `agent-${crypto.randomUUID()}`;
+    const first = await createSessionWithIdempotencyKeyResult(client.db, {
+      ...sessionInput(grant),
+      createIdempotencyKey: key,
+      metadata: { _opengeni_session_create_agent_config_v1: config("all") },
+    });
+    if (first.denied) throw new Error("unexpected denial");
+    await appendSessionEventsWithLockedSessionUpdate(
+      client.db,
+      grant.workspaceId!,
+      first.session.id,
+      () => ({
+        events: [
+          {
+            type: "session.agent.updated",
+            payload: { before: null, after: config("none"), version: 2 },
+          },
+        ],
+        update: { agentConfig: config("none"), toolPolicyVersion: 2, expectedToolPolicyVersion: 1 },
+      }),
+      { activity: "semantic" },
+    );
+    for (const agentConfig of [undefined, null]) {
+      const replay = await createSessionWithIdempotencyKeyResult(client.db, {
+        ...sessionInput(grant),
+        createIdempotencyKey: key,
+        ...(agentConfig === undefined ? {} : { agentConfig }),
+      });
+      if (replay.denied) throw new Error("unexpected denial");
+      expect(replay.created).toBe(false);
+      expect(replay.session.id).toBe(first.session.id);
+    }
+    await expect(
+      createSessionWithIdempotencyKeyResult(client.db, {
+        ...sessionInput(grant),
+        createIdempotencyKey: key,
+        agentConfig: config("none"),
+      }),
+    ).rejects.toBeInstanceOf(SessionCreateIdempotencyConflictError);
+  }, 60_000);
+
   test("the locked update writes configuration and instructions under the tool-policy CAS", async () => {
     const grant = await workspace();
     const session = await createSession(client.db, sessionInput(grant));
