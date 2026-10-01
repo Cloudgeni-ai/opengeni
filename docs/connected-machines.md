@@ -693,6 +693,21 @@ installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
 
+Enrollment approval lasts until it is revoked; it is not a monthly login.
+The command and relay transport credentials last 30 days. The agent renews them
+with seven days remaining, using its existing install key and current enrollment
+generation. A machine returning after a longer offline period uses the same
+renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
+renewal cannot change ownership, scope or screen-control consent. Updated
+credentials load into the existing process, preserving host operations.
+
+Deploy the API renewal endpoint before upgrading agents. An older API returns
+404 and the agent retries with jitter while retaining its existing credentials.
+Older agents still need a one-time authorized reconnect after expiration; a
+restart alone cannot refresh credentials. Legacy connection files whose API
+origin has never been confirmed also require an explicit reconnect rather than
+sending their credentials to a guessed deployment.
+
 Mac app installations update the complete signed application, including bundled
 browser/computer helpers. The updater selects the signed manifest's
 `universal-apple-darwin-app` ZIP, verifies its signature and checksum, stages it

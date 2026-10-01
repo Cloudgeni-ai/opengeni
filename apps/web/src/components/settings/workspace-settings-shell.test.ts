@@ -195,7 +195,6 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
-        "Models",
         "API keys",
         "Developer",
         "Insights",
@@ -211,7 +210,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([6, 3]);
+      ).toEqual([5, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -220,6 +219,7 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
+        // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
         "Billing & usage",
@@ -242,7 +242,7 @@ describe("settings rail", () => {
           ?.getAttribute("class")
           ?.split(" ")
           .find((name) => name.startsWith("lucide-") && name !== "lucide");
-      for (const label of ["General", "Models", "Developer"]) {
+      for (const label of ["General", "Developer"]) {
         const workspaceIcon = iconOf(workspaceSection, label);
         expect(workspaceIcon).toBeDefined();
         expect(iconOf(organizationSection, label)).toBe(workspaceIcon);
@@ -270,11 +270,13 @@ describe("settings rail", () => {
     workspacePermissions = ["sessions:create"];
     const view = await renderShell({ kind: "settings", section: null });
     try {
+      // Models shows a member their own Personal workspace's model settings.
       expect(linkLabels(view.section("organization"))).toEqual([
         "Organization identity",
+        "Models",
         "Security & data",
       ]);
-      // Two pages stay one group, not two lone rows.
+      // A short list stays one group, not lone rows.
       expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("General");

@@ -486,6 +486,10 @@ const effectiveBudgets = {
     // main with usage allowances and the pill dodge: 2,533,812 raw on Bun 1.4
     // macOS/arm64 with the notice grouped into session-shared-primitives.
     wholeKibEnvelope(2_533_812, 1.5 * kib),
+    // Main after #3071 (organization Models page) and #3039: Linux/x64 CI
+    // measures 2,533,407 raw, 31 bytes over the previous envelope. Record the
+    // measurement with the established 1.5 KiB allowance; other caps unchanged.
+    wholeKibEnvelope(2_533_407, 1.5 * kib),
     // Usage allowances: typed allowance refusal rendering in the session timeline
     // plus usage event types in shared contracts, on top of main f874217f5
     // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.

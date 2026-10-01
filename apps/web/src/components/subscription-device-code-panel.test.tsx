@@ -18,11 +18,33 @@ for (const provider of ["codex", "supergrok"] as const) {
         />,
       );
       expect(html).not.toContain("href=");
-      expect(html).toContain("Authorization address unavailable.");
+      expect(html).toContain("sign-in page is unavailable.");
       expect(html).toContain('role="alert"');
       expect(html).toContain("ABCD-1234");
       expect(html).toContain('aria-label="Copy code"');
     }
+  });
+}
+
+for (const [provider, site] of [
+  ["codex", "ChatGPT"],
+  ["supergrok", "xAI"],
+] as const) {
+  test(`${provider} sign-in step says each thing once`, () => {
+    const html = renderToStaticMarkup(
+      <SubscriptionDeviceCodePanel
+        provider={provider}
+        userCode="ABCD-1234"
+        verificationUri="https://example.com/device"
+      />,
+    );
+    expect(html).toContain(`Enter this code on the ${site} page that opened.`);
+    expect(html.split("never sees your password").length - 1).toBe(1);
+    expect(html.split('role="status"').length - 1).toBe(1);
+    expect(html).toContain("Waiting for you to sign in");
+    expect(html).toContain("Open sign-in page");
+    expect(html).toContain('href="https://example.com/device"');
+    expect(html).not.toContain("navigate away");
   });
 }
 

@@ -1,14 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
+import postgres from "postgres";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { OpenGeniClient } from "@opengeni/sdk";
 import { type ApiRouteDeps } from "@opengeni/core";
 import {
-  acquireSharedTestDatabase,
+  acquireOwnerMigratedTestDatabase,
   testSettings,
   MemoryEventBus,
-  type SharedTestDatabase,
+  type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import {
   createDb,
@@ -18,23 +20,86 @@ import {
   withSessionRlsActorContext,
   createOrganizationApiKey,
   ensureExternalIdentity,
+  migrate,
+  provisionRoles,
+  withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
+import { rawRows } from "../../../packages/db/src/database";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
-let shared: SharedTestDatabase;
+let shared: OwnerMigratedTestDatabase;
 let db: DbClient;
+const appRole = `external_membership_app_${crypto.randomUUID().replaceAll("-", "")}`;
+const appPassword = crypto.randomUUID();
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("external-membership-operations");
+  const acquired = await acquireOwnerMigratedTestDatabase("external-membership-operations");
   if (!acquired) throw new Error("External membership operations require real PostgreSQL");
   shared = acquired;
-  db = createDb(shared.appUrl);
+  // SECURITY DEFINER does not bypass FORCE RLS for the production migration owner.
+  await migrate(shared.ownerUrl, "public", { applicationDatabaseRoles: [appRole] });
+  await provisionRoles(shared.adminUrl, {
+    appRole,
+    appPassword,
+    rlsStrategy: "force",
+    artifactOutboxDispatcherPassword: "",
+    artifactMaterializerPassword: "",
+    hostExportPassword: "",
+    temporalPassword: "",
+    temporalDatabases: [],
+  });
+  const appUrl = new URL(shared.adminUrl);
+  appUrl.username = appRole;
+  appUrl.password = appPassword;
+  db = createDb(appUrl.toString());
 }, 180_000);
 afterAll(async () => {
-  await db?.close();
-  await shared?.release();
-});
+  try {
+    await db?.close();
+  } finally {
+    if (shared) {
+      try {
+        if ((await shared.admin`select 1 from pg_roles where rolname = ${appRole}`).length) {
+          await shared.admin`DROP OWNED BY ${shared.admin(appRole)}`;
+          await shared.admin`DROP ROLE ${shared.admin(appRole)}`;
+        }
+      } finally {
+        await shared.release();
+      }
+    }
+  }
+}, 60_000);
+
+test("rolling owner-RLS repair replay preserves definitions, ownership and ACLs", async () => {
+  const definitions = () => shared.admin`select p.proname, pg_get_functiondef(p.oid) as definition,
+    p.proowner, p.proacl::text as acl from pg_proc p
+    where p.oid in ('prepare_workspace_membership_removal_settlements(jsonb)'::regprocedure,
+      'workspace_membership_removal_command(jsonb)'::regprocedure) order by p.proname`;
+  const before = await definitions();
+  const repair = await Bun.file(
+    new URL(
+      "../../../packages/db/drizzle/0558_external_membership_removal_owner_rls.sql",
+      import.meta.url,
+    ),
+  ).text();
+  const owner = postgres(shared.ownerUrl, { max: 1 });
+  try {
+    // Simulate SQL commit followed by a lost migration-ledger receipt. Replay
+    // must work under the same non-bypass owner, not merely skip via migrate().
+    await owner.begin(async (tx) => {
+      await tx.unsafe(repair);
+    });
+    await owner.begin(async (tx) => {
+      await tx.unsafe(repair);
+    });
+    expect(await definitions()).toEqual(before);
+  } finally {
+    await owner.end();
+  }
+  await migrate(shared.ownerUrl, "public", { applicationDatabaseRoles: [appRole] });
+  expect(await definitions()).toEqual(before);
+}, 180_000);
 
 async function fixture() {
   const [account] =
@@ -221,6 +286,127 @@ test("revocation before first grant commit records a durable absence fence", asy
   expect(await f.members()).toEqual([]);
   expect(await f.revoke()).toMatchObject({ replay: true, removed: false });
 });
+
+test.each([
+  "prepare_workspace_membership_removal_settlements",
+  "workspace_membership_removal_command",
+] as const)(
+  "%s scopes its owner-only membership reads without leaking authority",
+  async (routine) => {
+    const f = await fixture();
+    const actorSubjectId = `api_key:${f.key.id}`;
+    const [posture] = await shared.admin`select r.rolsuper, r.rolbypassrls, p.prosecdef,
+    c.relforcerowsecurity,
+      has_table_privilege(${appRole}, c.oid, 'INSERT,UPDATE,DELETE') as app_can_write,
+      has_table_privilege(${appRole}, 'opengeni_private.session_tenancy_fenced_access_capabilities', 'SELECT,INSERT,UPDATE,DELETE') as app_can_access_capabilities
+    from pg_proc p join pg_roles r on r.oid = p.proowner
+    cross join pg_class c where p.oid = ${`${routine}(jsonb)`}::regprocedure
+      and c.oid = 'organization_memberships'::regclass`;
+    expect(posture).toEqual({
+      rolsuper: false,
+      rolbypassrls: false,
+      prosecdef: true,
+      relforcerowsecurity: true,
+      app_can_write: false,
+      app_can_access_capabilities: false,
+    });
+    const command = {
+      action: "remove",
+      organizationId: f.accountId,
+      workspaceId: f.workspace.id,
+      actorSubjectId,
+      targetSubjectId: f.identity.subjectId,
+      operationId: crypto.randomUUID(),
+    };
+    const call = (workspaceId = f.workspace.id) =>
+      sql`select ${sql.raw(routine)}(${JSON.stringify({ ...command, workspaceId })}::jsonb) as result`;
+    // The public boolean oracle is not authorization: pass the real owner to
+    // observe leaked invocation tokens, and current_user to pin app isolation.
+    const capabilityState = sql`select session_tenancy_fence_owner_policy_active(
+      ${shared.ownerRole}, ${shared.ownerRole}, 'public'::regnamespace::oid,
+      ${f.workspace.id}::uuid, false) as owner_active,
+      session_tenancy_fence_owner_policy_active(current_user, ${shared.ownerRole},
+        'public'::regnamespace::oid, ${f.workspace.id}::uuid, false) as app_active`;
+    await withWorkspaceSubjectRls(db.db, f.workspace.id, actorSubjectId, async (tx) => {
+      await tx.execute(
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', 'test:outer', true)`,
+      );
+      const marker = async () =>
+        rawRows(
+          tx,
+          sql`select current_setting('opengeni.organization_tenancy_lifecycle') as marker`,
+        );
+      const [row] = await rawRows(tx, call());
+      expect(row?.result).toEqual(routine.startsWith("prepare_") ? [] : { removed: false });
+      expect(await marker()).toEqual([{ marker: "test:outer" }]);
+      expect(await rawRows(tx, capabilityState)).toEqual([
+        { owner_active: false, app_active: false },
+      ]);
+      // A caller-supplied lifecycle marker grants no direct app access.
+      await tx.execute(
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true)`,
+      );
+      await expect(
+        tx.transaction(async (nested) =>
+          rawRows(nested, sql`select id from organization_memberships`),
+        ),
+      ).rejects.toMatchObject({ cause: { code: "42501" } });
+      await tx.execute(
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', 'test:outer', true)`,
+      );
+    });
+    await f.add();
+    await withWorkspaceSubjectRls(db.db, f.workspace.id, actorSubjectId, async (tx) => {
+      await tx.execute(
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', 'test:outer', true)`,
+      );
+      const [row] = await rawRows(tx, call());
+      if (routine.startsWith("prepare_")) expect(row?.result).toEqual([]);
+      else expect(row?.result).toMatchObject({ removed: true });
+      expect(
+        await rawRows(
+          tx,
+          sql`select current_setting('opengeni.organization_tenancy_lifecycle') as marker`,
+        ),
+      ).toEqual([{ marker: "test:outer" }]);
+      expect(await rawRows(tx, capabilityState)).toEqual([
+        { owner_active: false, app_active: false },
+      ]);
+    });
+    // End the key's FOR SHARE lock before revoking it through the fixture pool.
+    await shared.admin`update api_keys set revoked_at = now() where id = ${f.key.id}`;
+    await withWorkspaceSubjectRls(db.db, f.workspace.id, actorSubjectId, async (tx) => {
+      await tx.execute(
+        sql`select set_config('opengeni.organization_tenancy_lifecycle', 'test:outer', true)`,
+      );
+      // Live service authority still applies, and an exceptional exit restores
+      // the caller's marker just like the no-membership early return above.
+      await expect(tx.transaction(async (nested) => rawRows(nested, call()))).rejects.toMatchObject(
+        {
+          cause: { code: "42501", message: "workspace member administration required" },
+        },
+      );
+      expect(
+        await rawRows(
+          tx,
+          sql`select current_setting('opengeni.organization_tenancy_lifecycle') as marker`,
+        ),
+      ).toEqual([{ marker: "test:outer" }]);
+      expect(await rawRows(tx, capabilityState)).toEqual([
+        { owner_active: false, app_active: false },
+      ]);
+    });
+    await shared.admin`update api_keys set revoked_at = null where id = ${f.key.id}`;
+    // Seeing the target organization row must not make its Personal workspace
+    // administrable through either native removal pass.
+    await expect(
+      withWorkspaceSubjectRls(db.db, f.identity.personalWorkspaceId, actorSubjectId, async (tx) =>
+        rawRows(tx, call(f.identity.personalWorkspaceId)),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "P0002", message: "shared workspace not found" } });
+  },
+  30_000,
+);
 
 async function waitForBlockedOperations(count: number) {
   const deadline = Date.now() + 10_000;
@@ -420,11 +606,19 @@ test("keyed cancellation tears down private, child, live and scheduled work only
       }),
     );
     const turnId = crypto.randomUUID();
-    await shared.admin`insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id,
-      temporal_workflow_id, status, execution_generation, position, prompt, model, reasoning_effort,
-      latency_mode, sandbox_backend, initiator_kind, initiator_subject_id, initiating_human_subject_id)
-      values (${turnId}, ${f.accountId}, ${workspaceId}, ${session.id}, ${crypto.randomUUID()}, ${`membership-${turnId}`},
-        'queued', 1, 1, 'Queued work', 'test-model', 'medium', 'standard', 'none', 'subject', ${subjectId}, ${subjectId})`;
+    await shared.admin.begin(async (tx) => {
+      // The seed still runs through owner-owned triggers; give them the same
+      // runtime protocol and tenant/actor scope as a real accepted turn.
+      await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true),
+        set_config('opengeni.account_id', ${f.accountId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true)`;
+      await tx`insert into session_turns (id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, execution_generation, position, prompt, model, reasoning_effort,
+        latency_mode, sandbox_backend, initiator_kind, initiator_subject_id, initiating_human_subject_id)
+        values (${turnId}, ${f.accountId}, ${workspaceId}, ${session.id}, ${crypto.randomUUID()}, ${`membership-${turnId}`},
+          'queued', 1, 1, 'Queued work', 'test-model', 'medium', 'standard', 'none', 'subject', ${subjectId}, ${subjectId})`;
+    });
     return { sessionId: session.id, turnId };
   }
   const target = await queued(f.workspace.id, f.identity.subjectId);
@@ -437,7 +631,11 @@ test("keyed cancellation tears down private, child, live and scheduled work only
   await shared.admin.begin(async (tx) => {
     // Test-only owner fixture: materialize an already claimed attempt without
     // starting an inference worker. The removal itself uses the public API.
-    await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+    await tx`select set_config('opengeni.session_inference_claim', '1', true),
+      set_config('opengeni.session_variable_set_attachments_v1', '1', true),
+      set_config('opengeni.account_id', ${f.accountId}, true),
+      set_config('opengeni.workspace_id', ${f.workspace.id}, true),
+      set_config('opengeni.subject_id', ${f.identity.subjectId}, true)`;
     await tx`update sessions set active_turn_id = ${live.turnId}, status = 'running' where id = ${live.sessionId}`;
     await tx`update session_turns set status = 'running', active_attempt_id = ${attemptId} where id = ${live.turnId}`;
     await tx`insert into session_turn_attempts (id, account_id, workspace_id, session_id, turn_id, execution_generation,

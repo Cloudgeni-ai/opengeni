@@ -4,6 +4,7 @@ import { ModalCommandControl } from "../src/sandbox/providers/modal-command-cont
 import {
   withCommandSupervisionReady as withReady,
   withSupervisedLaunchReservation,
+  ProviderCommandStartOutcomeUnknownError,
 } from "../src/sandbox/provider-command-session";
 import {
   ModalCommandStartPreDispatchUnavailableError,
@@ -164,10 +165,31 @@ test("exact-instance capability requires native kernel probe, protocol and termi
 test("ambiguous supervised start retains exactly its client-chosen idle invocation without replay", async () => {
   const f = fixture();
   f.failStart();
-  const command = await withCommandSupervisionReady(true, () => f.control.start({ cmd: "once" }));
+  const error = await withCommandSupervisionReady(true, () =>
+    f.control.start({ cmd: "once" }),
+  ).catch((failure) => failure);
+  expect(error).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+  const command = error.command;
   expect(f.starts).toHaveLength(1);
   expect(command.execId).toBe(f.starts[0]!.execId);
   expect(command.supervision).toBeDefined();
+});
+
+test("ambiguous PTY and runAs Starts retain the exact locator, never fabricate running or replay", async () => {
+  for (const args of [
+    { cmd: "once", tty: true },
+    { cmd: "once", runAs: "root" },
+  ]) {
+    const f = fixture();
+    const cause = Object.assign(new Error("14 UNAVAILABLE: Connection dropped"), { code: 14 });
+    f.failStart(cause);
+    const error = await f.control.start(args).catch((failure) => failure);
+    expect(error).toBeInstanceOf(ProviderCommandStartOutcomeUnknownError);
+    expect(error.cause).toBe(cause);
+    expect(error.command.execId).toBe(f.starts[0]!.execId);
+    expect(f.starts).toHaveLength(1);
+    expect(error.command.supervision).toBeUndefined();
+  }
 });
 
 test("control uses a separate exact-task helper and validates invocation-bound receipts", async () => {

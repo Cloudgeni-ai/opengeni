@@ -695,9 +695,9 @@ kubectl -n opengeni create secret generic opengeni-migrations \
   --from-env-file=.agent/generated/single-node/secrets/migrations.env
 ```
 
-This bootstrap does not require a model-provider API key. A workspace admin can
-connect a ChatGPT/Codex subscription from workspace settings, or connect it once
-from Organization settings → Models for inheritance by shared workspaces, after the
+This bootstrap does not require a model-provider API key. An organization owner or
+admin can connect a ChatGPT/Codex subscription once from Organization settings →
+Models and choose which workspaces use it (all by default, or only some), after the
 application starts. If the deployment instead uses API-billed models, add the
 selected provider's credential to `opengeni-runtime` separately. Keep the
 generated directory as a private recovery artifact or move the values into a
@@ -3494,6 +3494,22 @@ relay image, set `relay.metricsPort: null` to keep the legacy layout. The manage
 example values files carry a commented `monitoring` block.
 
 `ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), a model-aware automatic context-compaction start that remains durably pending for 15 minutes, traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Compaction start/completion counters initialize at zero for rate diagnostics; a trigger-maintained exact-attempt pending projection and control-worker freshness gauge preserve alert truth across concurrent activities, terminal skips, and turn-worker restarts without exporting tenant identities. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+
+When one Prometheus evaluates several OpenGeni releases, node recording-rule
+consumers select their exact namespace, Helm release and environment. Rule-group
+labels identify the output; they do not restrict an expression's input series.
+Keep the deployment selectors on both node-map joins and workload-node filters:
+removing them causes duplicate joins or borrows another release's node alert.
+The chart regression test renders co-located releases and verifies firing,
+recovery and missing-workload isolation using real Prometheus rule evaluation:
+
+```bash
+OPENGENI_TEST_PROMTOOL=/path/to/promtool bun test ./deploy/helm/opengeni/test/node-recording-isolation.test.ts
+```
+
+The render assertions always run. The evaluation check runs when `promtool` is
+on `PATH` or the explicit path is supplied; a skipped evaluation is not proof
+that the rules are healthy in a live deployment.
 
 Minimum production dashboards should cover:
 

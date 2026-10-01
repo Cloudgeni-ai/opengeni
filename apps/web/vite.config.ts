@@ -151,7 +151,7 @@ export default defineConfig({
               // keep those tiny parsers here instead of a separate startup
               // request.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|developer-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
             },
@@ -226,8 +226,12 @@ export default defineConfig({
               // shared primitive with these routes and make the complete
               // management surface reachable from an active session. The shared
               // settings drawer and runtime controls belong behind this boundary too.
+              // The default Sandbox environment row (workspace General only)
+              // draws the settings RowSelect; left to entry-aware merging it
+              // lands in a chunk the workspace route imports and pulls this
+              // whole surface into a sessions load.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -239,8 +243,13 @@ export default defineConfig({
               // from a direct session load. Connection access renders a Models
               // form page, so it lives here, not in model-connection-settings,
               // whose shared icons the eager workspace graph imports.
+              // Organization provider connections and Codex subscriptions are imported by the Models
+              // pages above and by the lazy organization Models section; outside
+              // this group they land in the section's chunk and form a cycle
+              // (settings-pages <-> organization-models-section) that leaves
+              // React undefined when the section evaluates.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

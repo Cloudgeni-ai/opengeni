@@ -608,6 +608,12 @@ const request = await verifyCredentialProviderRequest({
 });
 ```
 
+To check an endpoint now, `testWorkspaceWebhook(client, workspaceId, webhookId)` sends a
+signed `webhook.test` event (acknowledge it with any 2xx) and
+`testWorkspaceCredentialProvider(client, workspaceId)` sends a request with
+`purpose: "test"`; both come from `@opengeni/sdk/workspace-integrations` and return
+what the endpoint answered, naming returned credentials but never their values.
+
 `listWorkspaceSandboxImages` returns the deployment's allowlisted images; set one
 with `updateWorkspaceSettings(workspaceId, { defaultSandboxImage })`.
 

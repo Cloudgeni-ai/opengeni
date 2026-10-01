@@ -28,7 +28,7 @@
 // FLAG GATE: the whole feature is behind sandboxSelfhostedEnabled (default OFF) —
 // when off the routes 404 (the surface is invisible) and boot is unaffected.
 
-import { randomBytes } from "node:crypto";
+import { createPublicKey, randomBytes, verify } from "node:crypto";
 import {
   resolveEnrollmentSigningSecret,
   resolveRelayTokenSecret,
@@ -36,10 +36,13 @@ import {
 } from "@opengeni/config";
 import {
   DeviceEnrollmentState,
+  enrollmentRenewalProof,
   signEnrollmentBearer,
   signEnrollToken,
   signRelayToken,
   verifyEnrollToken,
+  verifyEnrollmentBearer,
+  type RenewEnrollmentRequest,
   type DeviceEnrollmentLookupResponse,
   type DeviceEnrollmentPollResponse,
   type DeviceEnrollmentStartResponse,
@@ -71,7 +74,8 @@ export const DEVICE_POLL_INTERVAL_SECONDS = 5;
 // The bearer the agent presents to the NATS auth-callout. A bring-your-own-compute
 // machine is PERSISTENT (unlike an ephemeral Modal box, whose lifetime ~= an agent
 // token's hour), so this is long-lived — 30 days, matching the relay token below —
-// and re-minted on every poll/re-enroll. The old 1-hour value (sized for a Modal
+// and renewed automatically by install-key proof, or re-minted on poll/re-enroll.
+// The old 1-hour value (sized for a Modal
 // box) caused a self-hosted agent to drop PERMANENTLY one hour after connecting: the
 // bearer expired and the auth-callout rejected every reconnect ("re-enroll may be
 // required"). A long-lived bearer is safe because the auth-callout RE-CHECKS the
@@ -83,10 +87,69 @@ export const ENROLLMENT_BEARER_TTL_SECONDS = 30 * 24 * 3600;
 // NOT per-stream: the agent presents it on every channel registration for the life
 // of its run, and the producer side has no per-viewer epoch fence (that is the
 // VIEWER's `ogs_` token's job). So it is long-lived — 30 days — re-minted on every
-// poll/re-enroll. The relay re-verifies it (authenticity + the channel-key ws+agent
+// renewal/poll/re-enroll. The relay re-verifies it (authenticity + the channel-key ws+agent
 // scope) on every StreamOpen; a revoked enrollment's machine goes offline at the
 // control plane regardless, so a long-lived relay token cannot reach a dead agent.
 export const RELAY_TOKEN_TTL_SECONDS = 30 * 24 * 3600;
+
+/** Renew an existing grant, including after a long offline interval. The expired
+ * bearer is only an authenticated enrollment/generation locator here: current
+ * install-key possession and live enrollment authority are both required. Normal
+ * NATS/relay authentication continues to reject expired transport credentials.
+ * Nothing creates/reactivates an enrollment or changes its consent or scope. */
+export async function renewEnrollmentCredentials(
+  services: EnrollmentServices,
+  input: RenewEnrollmentRequest,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<EnrollmentCredentialsResponse | null> {
+  if (Math.abs(nowSeconds - input.signedAt) > 120) return null;
+  const secret = resolveEnrollmentSigningSecret(services.settings);
+  if (!secret) return null;
+  const claims = await verifyEnrollmentBearer(secret, input.bearer, 0);
+  if (
+    !claims ||
+    claims.agentId !== claims.enrollmentId ||
+    claims.subjectPrefix !== `agent.${claims.workspaceId}.${claims.agentId}`
+  )
+    return null;
+  const enrollment = await getEnrollment(services.db, claims.workspaceId, claims.enrollmentId);
+  if (
+    !enrollment ||
+    enrollment.status !== "active" ||
+    enrollment.credentialGeneration !== claims.credentialGeneration
+  )
+    return null;
+  try {
+    const rawKey = Buffer.from(enrollment.pubkey, "base64");
+    const signature = Buffer.from(input.signature, "base64");
+    if (rawKey.length !== 32 || signature.length !== 64) return null;
+    const key = createPublicKey({
+      key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), rawKey]),
+      format: "der",
+      type: "spki",
+    });
+    if (
+      !verify(
+        null,
+        Buffer.from(enrollmentRenewalProof(input.bearer, input.signedAt)),
+        key,
+        signature,
+      )
+    )
+      return null;
+  } catch {
+    return null;
+  }
+  // A concurrent revoke/re-enrollment still wins: issued credentials retain the
+  // captured generation, which the control-plane claim rechecks transactionally.
+  return buildEnrollmentCredentials(services, {
+    secret,
+    workspaceId: enrollment.workspaceId,
+    agentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
+    consentedScreenControl: enrollment.allowScreenControl,
+  });
+}
 // The headless enroll token (`oget_`; design 11 §A2.1) TTL. 1h: long enough to
 // script a fleet rollout, short enough to bound exposure of a workspace-scoped
 // secret that IS the grant (no human approve). Re-mintable by an authorized user.

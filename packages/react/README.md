@@ -639,13 +639,22 @@ returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
 
+If the chat's latest browser was lost or failed, the viewer names it and explains
+why it is unavailable instead of showing the ordinary empty state. It offers the
+existing new-browser controls without reopening the lost controller or selecting
+another chat's browser. Explicitly closed browsers still use the empty state;
+older failures do not replace a newer closed browser. This loss notice also takes
+precedence over `renderEmpty`. Preview the deadline-loss case with
+`browser.html?mode=mock&lost=1` (add `width=360&theme=light` for a narrow light dock).
+
 Native dropdown popups may not appear in page frames. With a controller that
 advertises focused input observations, clicking one opens its choices beside
 the click. Ordinary clicks use a bounded focus probe instead of a full page
 snapshot; only a focused native dropdown (or a child-frame focus hint) requests
-semantic options. **Choose option** remains an explicit fallback for older
-controllers and controls that cannot be identified automatically. Selection uses the
-normal browser action API. The viewer retains that
+semantic options. Current controllers show no permanent **Choose option** button
+over the page; older controllers retain that explicit fallback. **Alt+Down** opens
+the focused dropdown and reads its options on either controller generation.
+Selection uses the normal browser action API. The viewer retains that
 observation's target/document/frame fence. Private, oversized, or ambiguous
 choices remain unavailable; the page's keyboard controls still work. This
 fallback requires a controller with focused native-select metadata support and
@@ -906,6 +915,8 @@ intentional changes should regenerate those snapshots and review the diff.
   paragraphs, user bubbles, and nested or standalone Markdown keep their normal
   width; oversized tables retain table-only horizontal scrolling. No host prop
   or viewport-wide layout override is required.
+  Remeasurement during host rerenders or tail streaming does not temporarily
+  resize the live table or displace an unpinned history reader.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render

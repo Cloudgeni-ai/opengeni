@@ -141,7 +141,7 @@ for (const kind of ["document", "spreadsheet", "presentation"]) {
 
 for (const [status, title, retry] of [
   [404, "This artifact isn't available", false],
-  [403, "This artifact isn't available", false],
+  [403, "You can't open this artifact", false],
   [422, "This artifact link isn't valid", false],
   [503, "Could not open this artifact", true],
 ] as const) {
@@ -177,6 +177,9 @@ for (const [status, title, retry] of [
       expect(container.textContent).not.toMatch(/OpenGeni API/i);
       expect(container.textContent).not.toContain(String(status));
       if (status === 503) expect(container.textContent).toContain("Reference: req_edit-1");
+      // A permission refusal explains the missing access instead of "may have been removed".
+      expect(container.textContent?.includes("Ask a workspace admin")).toBe(status === 403);
+      expect(container.textContent?.includes("may have been removed")).toBe(status === 404);
     } finally {
       await act(async () => root.unmount());
       container.remove();

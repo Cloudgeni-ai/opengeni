@@ -115,15 +115,15 @@ export function CreditRequiredPromptView({
           </div>
         ) : !canBuyCredits ? (
           <p className="text-sm text-fg-muted">
-            Ask an organization owner to add credits, or connect a model in workspace settings.
+            Ask an organization owner to add credits, or an admin to connect a model.
           </p>
         ) : null}
         <DialogFooter>
           <Button asChild type="button">
             <Link
-              to="/workspaces/$workspaceId/settings"
+              to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
-              search={{ section: "models" }}
+              search={{ section: "models", workspace: workspaceId }}
               onClick={() => onOpenChange(false)}
               {...analyticsAction("connect_model")}
             >
@@ -195,9 +195,9 @@ export function EmptyCreditsNotice({
         ) : null}
         <Button asChild type="button" size="sm">
           <Link
-            to="/workspaces/$workspaceId/settings"
+            to="/workspaces/$workspaceId/organization"
             params={{ workspaceId }}
-            search={{ section: "models" }}
+            search={{ section: "models", workspace: workspaceId }}
             {...analyticsAction("connect_model")}
           >
             Connect a model

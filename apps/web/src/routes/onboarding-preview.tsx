@@ -46,6 +46,19 @@ const previewMethods = {
   async supergrokConnectPoll(workspaceId: string, state: string) {
     return previewMethods.codexConnectPoll(workspaceId, state);
   },
+  // Onboarding connects subscriptions for the organization.
+  async organizationSupergrokConnectStart() {
+    return previewMethods.supergrokConnectStart();
+  },
+  async organizationSupergrokConnectPoll(_organizationId: string, state: string) {
+    return previewMethods.codexConnectPoll("", state);
+  },
+  async requestJson(_method: string, path: string, body?: { state?: string }) {
+    if (path.endsWith("/codex/connect/start")) return previewMethods.codexConnectStart();
+    if (path.endsWith("/codex/connect/poll"))
+      return previewMethods.codexConnectPoll("", body?.state ?? "");
+    throw new Error(`Not in the preview: ${path}`);
+  },
   async createConnection() {
     return {};
   },
@@ -177,6 +190,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
     <ModelAccessOnboardingPanel
       client={previewClient}
       organizationId="preview-organization"
+      organizationName="Acme Robotics"
       workspaceId="preview-workspace"
       billingMode="stripe"
       codexEnabled

@@ -21,6 +21,9 @@ import {
   rotateOrganizationWebhookSecret,
   rotateWorkspaceCredentialProviderSecret,
   rotateWorkspaceWebhookSecret,
+  getWorkspaceInheritedIntegrations,
+  testWorkspaceCredentialProvider,
+  testWorkspaceWebhook,
   updateOrganizationWebhook,
 } from "@opengeni/sdk/workspace-integrations";
 
@@ -319,8 +322,60 @@ test("integration administration helpers are absent from the eager client", () =
     "rotateOrganizationWebhookSecret",
     "rotateWorkspaceCredentialProviderSecret",
     "rotateWorkspaceWebhookSecret",
+    "testWorkspaceCredentialProvider",
+    "testWorkspaceWebhook",
+    "getWorkspaceInheritedIntegrations",
     "updateOrganizationWebhook",
   ]) {
     expect(name in new OpenGeniClient({ baseUrl: "https://fixture.invalid" })).toBe(false);
   }
+});
+
+test("a verified webhook.test event names the workspace but no session", async () => {
+  const secret = "whsec_test";
+  const body = JSON.stringify({
+    id: crypto.randomUUID(),
+    type: "webhook.test",
+    lane: "workspace",
+    workspaceId: crypto.randomUUID(),
+    sessionId: null,
+    turnId: null,
+    occurredAt: new Date().toISOString(),
+    data: { webhookId: crypto.randomUUID() },
+  });
+  const { event } = await verifyWebhookEvent({
+    body,
+    headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+    secret,
+  });
+  expect(event.type).toBe("webhook.test");
+  expect(event.sessionId).toBeNull();
+
+  // Only usage and test events may omit the session.
+  const sessionless = body.replace('"webhook.test"', '"turn.completed"');
+  await expect(
+    verifyWebhookEvent({
+      body: sessionless,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, sessionless) },
+      secret,
+    }),
+  ).rejects.toThrow("signature verification failed");
+});
+
+test("test and inherited helpers use exact workspace-scoped routes", async () => {
+  const calls: unknown[][] = [];
+  const client: Pick<OpenGeniClient, "requestJson"> = {
+    async requestJson<T>(...args: unknown[]): Promise<T> {
+      calls.push(args);
+      return {} as T;
+    },
+  };
+  await testWorkspaceWebhook(client, "ws/one", "hook/one");
+  await testWorkspaceCredentialProvider(client, "ws/one");
+  await getWorkspaceInheritedIntegrations(client, "ws/one");
+  expect(calls).toEqual([
+    ["POST", "/v1/workspaces/ws%2Fone/webhooks/hook%2Fone/test"],
+    ["POST", "/v1/workspaces/ws%2Fone/credential-provider/test"],
+    ["GET", "/v1/workspaces/ws%2Fone/inherited-integrations"],
+  ]);
 });
