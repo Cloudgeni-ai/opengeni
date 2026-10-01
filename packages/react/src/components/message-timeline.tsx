@@ -73,6 +73,7 @@ import {
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
+import { type TimelinePillPlacement, useTimelinePillPlacement } from "./timeline-pill-placement";
 import {
   animateTimelineSettlement,
   captureTimelineSettlement,
@@ -316,6 +317,20 @@ const PIN_THRESHOLD_PX = 48;
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 /** Breathing room above the question when following stops at an answer. */
 const QUESTION_NAV_MARGIN_PX = 12;
+// Floating pills rest at these spots and slide sideways, in this order, when
+// their resting spot would cover a control (see useTimelinePillPlacement).
+const JUMP_PILL_PLACEMENTS: readonly TimelinePillPlacement[] = ["center", "end", "start"];
+const QUESTION_PILL_PLACEMENTS: readonly TimelinePillPlacement[] = ["end", "center", "start"];
+const JUMP_PILL_PLACEMENT_CLASS: Record<TimelinePillPlacement, string> = {
+  center: "inset-x-0 mx-auto",
+  end: "right-4 sm:right-6",
+  start: "left-4 sm:left-6",
+};
+const QUESTION_PILL_PLACEMENT_CLASS: Record<TimelinePillPlacement, string> = {
+  center: "justify-center",
+  end: "justify-end",
+  start: "justify-start",
+};
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -709,6 +724,21 @@ export function MessageTimeline({
   const resizeFollowRafRef = useRef<number | null>(null);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
+  const jumpPillRef = useRef<HTMLButtonElement | null>(null);
+  const questionPillRef = useRef<HTMLDivElement | null>(null);
+  const jumpPillShown = autoFollow && (!pinned || hasNewer || canSkipTipCatchup);
+  const jumpPillPlacement = useTimelinePillPlacement({
+    pillRef: jumpPillRef,
+    scrollerRef: scrollRef,
+    active: jumpPillShown,
+    preference: JUMP_PILL_PLACEMENTS,
+  });
+  const questionPillPlacement = useTimelinePillPlacement({
+    pillRef: questionPillRef,
+    scrollerRef: scrollRef,
+    active: questionNav !== null,
+    preference: QUESTION_PILL_PLACEMENTS,
+  });
   const [questionTarget, setQuestionTarget] = useState<number | null>(null);
   const [questionPending, setQuestionPending] = useState(false);
   const [questionError, setQuestionError] = useState<string | null>(null);
@@ -2526,9 +2556,18 @@ export function MessageTimeline({
                           data-og-question-nav=""
                           // Below the pinned work-header strip (py-1.5 row, 44px on coarse
                           // pointers), never over it: the header stays a full-width target.
-                          className="pointer-events-none absolute inset-x-0 top-11 z-10 flex justify-end px-4 sm:px-6 pointer-coarse:top-14"
+                          data-og-pill-placement={questionPillPlacement}
+                          className={cn(
+                            "pointer-events-none absolute inset-x-0 top-11 z-10 flex px-4 sm:px-6 pointer-coarse:top-14",
+                            QUESTION_PILL_PLACEMENT_CLASS[questionPillPlacement],
+                          )}
                         >
-                          <div className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur">
+                          <motion.div
+                            ref={questionPillRef}
+                            layout="position"
+                            transition={{ duration: 0.18, ease: "easeOut" }}
+                            className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur"
+                          >
                             <button
                               type="button"
                               data-og-jump-to-question=""
@@ -2546,7 +2585,7 @@ export function MessageTimeline({
                                 {questionError}
                               </span>
                             )}
-                          </div>
+                          </motion.div>
                         </motion.div>
                       ) : null}
                     </AnimatePresence>
@@ -2568,10 +2607,13 @@ export function MessageTimeline({
                       ) : null}
                     </AnimatePresence>
                     <AnimatePresence>
-                      {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
+                      {jumpPillShown ? (
                         <motion.button
+                          ref={jumpPillRef}
                           type="button"
                           data-og-jump-to-latest=""
+                          data-og-pill-placement={jumpPillPlacement}
+                          layout="position"
                           initial={{ opacity: 0, y: 8 }}
                           animate={{ opacity: 1, y: 0 }}
                           exit={{ opacity: 0, y: 8 }}
@@ -2631,7 +2673,8 @@ export function MessageTimeline({
                             }
                           }}
                           className={cn(
-                            "absolute inset-x-0 bottom-4 mx-auto w-fit",
+                            "absolute bottom-4 w-fit",
+                            JUMP_PILL_PLACEMENT_CLASS[jumpPillPlacement],
                             "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
                             "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                             "hover:border-og-border-strong",
