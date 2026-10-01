@@ -91,10 +91,11 @@ const SECTION_ICONS = {
 } as const;
 
 // Agent learning is still a settings URL, but it opens the Learning page of Knowledge.
+// Models is not a workspace page: every model setting, each workspace's included,
+// lives on Organization > Models, and the old workspace URL redirects there.
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
-  "models",
   "api-keys",
   "developer",
 ];
@@ -223,9 +224,13 @@ export function useSettingsRail(input: {
     managedWorkspace?.organizationName ??
     knownName ??
     (accountId ? orgLabel(accountId, context.accessContext.accountGrants) : null);
+  // Models stays named when it refuses someone (members choose models in the
+  // composer), so the page and the rail don't jump to another page.
   const organizationSection =
     access && location.kind === "organization"
-      ? resolveOrganizationSettingsSection(location.section, access.visibleSections)
+      ? location.section === "models"
+        ? "models"
+        : resolveOrganizationSettingsSection(location.section, access.visibleSections)
       : null;
 
   function openWorkspace(nextWorkspaceId: string) {

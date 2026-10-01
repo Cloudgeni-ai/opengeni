@@ -2,7 +2,12 @@ import type { CodexAccount, ModelConnectionAccessResponse } from "@opengeni/sdk"
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
+import {
+  CodexDeviceCodePanel,
+  codexAccountName,
+  codexUsageReadings,
+  planLabel,
+} from "@/components/codex-connection";
 import {
   ConnectionAccessFormPage,
   ConnectionAccessRows,
@@ -14,6 +19,7 @@ import {
   RenameAccountDialog,
   organizationReachLabel,
   type ModelsScopeLabels,
+  useModelsListLabel,
 } from "@/components/models/models-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
@@ -27,7 +33,9 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { FieldStack } from "@/components/ui/field";
 import { Notice } from "@/components/ui/notice";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { RelativeTime } from "@/components/ui/relative-time";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { UsageMeterGroup } from "@/components/ui/usage-meter";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 
 /* ----------------------------------------------------------------------------
@@ -77,8 +85,9 @@ export function OrgCodexAccountPage({
   /** Its usage limit resets, which only an account owned by a workspace can redeem. */
   resets?: ReactNode;
 }) {
+  const listLabel = useModelsListLabel();
   const account = codex.accounts.find((candidate) => candidate.id === accountId) ?? null;
-  const back = { label: "Models", onClick: places.backToList };
+  const back = { label: listLabel, onClick: places.backToList };
   if (codex.loading) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -123,6 +132,7 @@ function OrgCodexAccountDetail({
   usage: ReactNode;
   resets: ReactNode;
 }) {
+  const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = codexAccountName(account);
@@ -133,9 +143,24 @@ function OrgCodexAccountDetail({
     connectionId: account.id,
   });
   const reconnect = account.status !== "active";
+  // The last usage Opengeni saved, while no workspace that uses it reports live usage here.
+  const cachedReadings = codexUsageReadings(
+    { weekly: account.weekly ?? null, fiveHour: account.fiveHour ?? null },
+    Date.now(),
+  );
+  const cachedUsage = cachedReadings.some((reading) => reading.percent !== null) ? (
+    <UsageMeterGroup
+      windows={cachedReadings}
+      checked={
+        account.usageCheckedAt ? (
+          <RelativeTime date={account.usageCheckedAt} prefix="Checked" />
+        ) : undefined
+      }
+    />
+  ) : null;
   return (
     <DetailPage
-      back={{ label: "Models", onClick: places.backToList }}
+      back={{ label: listLabel, onClick: places.backToList }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader
@@ -182,7 +207,11 @@ function OrgCodexAccountDetail({
             </Notice>
           </DetailSection>
         ) : null}
-        {usage ? <DetailSection title="Usage">{usage}</DetailSection> : null}
+        {usage ? (
+          <DetailSection title="Usage">{usage}</DetailSection>
+        ) : cachedUsage ? (
+          <DetailSection title="Usage">{cachedUsage}</DetailSection>
+        ) : null}
         <DetailSection title="Settings">
           <SettingRowGroup className="-my-3">
             {codex.accounts.length > 1 ? (
@@ -219,10 +248,10 @@ function OrgCodexAccountDetail({
           </SettingRowGroup>
         </DetailSection>
         {resets ? <DetailSection title="Usage limit resets">{resets}</DetailSection> : null}
-        {usage ? null : (
+        {usage || cachedUsage ? null : (
           <DetailSection>
             <p className="text-xs leading-4.5 text-fg-muted">
-              Usage shows on the Models page of each workspace that uses this account.
+              Usage shows here once a workspace has used this account.
             </p>
           </DetailSection>
         )}

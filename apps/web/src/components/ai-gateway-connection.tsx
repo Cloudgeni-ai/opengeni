@@ -34,7 +34,12 @@ import {
   type ConnectionAccessTarget,
 } from "@/components/connection-access-settings";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { ModelsFormPage, NOT_IN_USE, ProviderTile } from "@/components/models/models-ui";
+import {
+  ModelsFormPage,
+  NOT_IN_USE,
+  ProviderTile,
+  useModelsListLabel,
+} from "@/components/models/models-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -246,7 +251,7 @@ function claudeWorkspaceConfig(
   };
 }
 
-function isProviderConnection(
+export function isProviderConnection(
   connection: ConnectionMetadata,
   config: ProviderConnectionConfig,
 ): boolean {
@@ -1272,6 +1277,7 @@ export function ProviderConnectionPage({
   onConnect: () => void;
   onEditAccess?: (() => void) | undefined;
 }) {
+  const listLabel = useModelsListLabel();
   const { config } = state;
   const status = providerStatus(state);
   const [replacing, setReplacing] = useState(false);
@@ -1352,7 +1358,7 @@ export function ProviderConnectionPage({
   );
   return (
     <DetailPage
-      back={onBack ? { label: "Models", onClick: onBack } : undefined}
+      back={onBack ? { label: listLabel, onClick: onBack } : undefined}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       {header}
@@ -1450,6 +1456,7 @@ export function ProviderConnectPage({
   /** Runs once the key is saved, before its page opens (the form stays pending). */
   afterSave?: (() => Promise<void>) | undefined;
 }) {
+  const listLabel = useModelsListLabel();
   const { config } = state;
   const [key, setKey] = useState("");
   if (config.provider === "claude_subscription")
@@ -1464,7 +1471,7 @@ export function ProviderConnectPage({
     );
   return (
     <ModelsFormPage
-      backLabel={state.connected ? config.title : "Models"}
+      backLabel={state.connected ? config.title : listLabel}
       headerAside={<ProviderTile provider={config.provider} />}
       title={state.connected ? `Replace ${config.title} API key` : `Connect ${config.title}`}
       description={config.summary}

@@ -1,19 +1,20 @@
-/* URL state for Settings > Models, shared by the router and the page. The
-   list, an account's page and each form are addressed by the settings URL, so
+/* URL state for Organization settings > Models, shared by the router and the
+   page. Every model setting lives on that one page; the list, an account's
+   page, a workspace's model page and each form are addressed by its URL, so
    Back, reload and shared links land on the same page:
-     ?section=models                                  the list
-     ?section=models&account=codex:<id>               a workspace account's page
-     ?section=models&account=org:codex:<id>           an organization account's page
-     ?section=models&view=connect                     Connect account (for everyone, or
-                                                      this workspace when that's all you can do)
-     ?section=models&view=connect-workspace           Connect for this workspace only
-     ?section=models&view=connect:codex               one provider's step, for this workspace
-     ?section=models&view=connect-org:codex           one provider's step, for everyone
-     ?section=models&view=allowed-models              Allowed models (form page)
-     ?section=models&account=...&view=model-access    Models an account can serve
+     ?section=models                                     accounts, workspaces, settings
+     ?section=models&account=org:codex:<id>              an organization account's page
+     ?section=models&view=connect                        Connect account
+     ?section=models&view=connect-org:codex              one provider's step
+     ?section=models&workspace=<id>                      one workspace's model page
+     ?section=models&workspace=<id>&account=codex:<id>   an account owned by that workspace
+     ?section=models&workspace=<id>&view=connect:codex   connect one for that workspace only
+     ?section=models&workspace=<id>&view=allowed-models  its Allowed models (form page)
+     ?section=models&account=...&view=model-access       Models an account can serve
 
-   The organization's own Models URL (Organization settings > Models) redirects
-   here, mapping its account and view to the organization forms above. */
+   `workspace` also names the workspace a page was opened from, so an
+   organization account or Connect account opened there returns to it.
+   A workspace's old Settings > Models URL redirects here (workspaceModelsRedirect). */
 
 export type ModelsProvider =
   | "codex"
@@ -111,23 +112,19 @@ export function connectStepOf(
 }
 
 /**
- * Organization settings > Models used to be its own page. It redirects to the
- * one Models page: the list stays the list, an account keeps its page (now an
- * organization account key) and a connect step keeps its step (for everyone).
+ * A workspace's Settings > Models URL now opens that workspace's page in
+ * Organization settings > Models, keeping the account or form it pointed at.
  */
-export function organizationModelsRedirect(input: {
+export function workspaceModelsRedirect(input: {
+  workspaceId: string;
   account: string | undefined;
   view: ModelsView | undefined;
-}): { account?: string; view?: ModelsView } {
-  const key = input.account ? accountKeyOf(input.account) : null;
-  const account = key ? accountKey(key.provider, key.id, true) : undefined;
-  const step = connectStepOf(input.view);
-  const view: ModelsView | undefined = step
-    ? `connect-org:${step.provider}`
-    : input.view === "model-access" && account
-      ? "model-access"
-      : input.view === "connect"
-        ? "connect"
-        : undefined;
-  return { ...(account ? { account } : {}), ...(view ? { view } : {}) };
+}): { section: "models"; workspace: string; account?: string; view?: ModelsView } {
+  return {
+    section: "models",
+    workspace: input.workspaceId,
+    ...(input.account ? { account: input.account } : {}),
+    // The workspace-only picker is Connect account now.
+    ...(input.view ? { view: input.view === "connect-workspace" ? "connect" : input.view } : {}),
+  };
 }

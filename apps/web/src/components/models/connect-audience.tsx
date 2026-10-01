@@ -127,8 +127,8 @@ export async function applyConnectAudience(
 
 /**
  * "Who can use it" at the top of a provider's connect step. `here` is the
- * workspace the page is open in: in a shared workspace it is checked first
- * under "Only selected workspaces"; in a Personal workspace the copy says
+ * workspace Connect account was opened from, if any: a shared one is checked
+ * first under "Only selected workspaces"; for a Personal one the copy says
  * truthfully whether the account reaches it.
  */
 export function ConnectAudienceFields({
@@ -142,7 +142,7 @@ export function ConnectAudienceFields({
 }: {
   kind: ConnectionAccessKind;
   organizationName: string;
-  here: { id: string; name: string; personal: boolean };
+  here?: { id: string; name: string; personal: boolean } | null | undefined;
   /** The organization's shared workspaces; null while loading. */
   workspaces: { id: string; name: string }[] | null;
   value: ConnectAudience;
@@ -153,7 +153,7 @@ export function ConnectAudienceFields({
   const selected = value.kind === "selected" ? value : null;
   const everyoneDescription = personalSupported
     ? "Every workspace, including new ones and everyone's Personal workspace."
-    : here.personal
+    : here?.personal
       ? "Every shared workspace, including new ones. Not this one: organization API keys can't be used in Personal workspaces."
       : `Every shared workspace, including new ones. ${PERSONAL_KEYS_REASON}`;
   return (
@@ -168,8 +168,8 @@ export function ConnectAudienceFields({
             next === "selected"
               ? {
                   kind: "selected",
-                  workspaceIds: here.personal ? [] : [here.id],
-                  personalWorkspaces: personalSupported && here.personal,
+                  workspaceIds: here && !here.personal ? [here.id] : [],
+                  personalWorkspaces: personalSupported && Boolean(here?.personal),
                 }
               : EVERYONE,
           )
@@ -196,7 +196,7 @@ export function ConnectAudienceFields({
               <CheckboxField
                 key={workspace.id}
                 label={
-                  workspace.id === here.id ? `${workspace.name} (this workspace)` : workspace.name
+                  workspace.id === here?.id ? `${workspace.name} (this workspace)` : workspace.name
                 }
                 disabled={disabled}
                 checked={selected.workspaceIds.includes(workspace.id)}

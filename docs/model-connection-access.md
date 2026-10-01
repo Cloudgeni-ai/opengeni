@@ -55,12 +55,17 @@ assigned organization pool resolves to the first eligible assigned account,
 without changing the organization default. Policy never authorizes a fallback
 to a different provider or payment source.
 
-In the web app, Settings > Models is one page in the workspace's settings
-(there is no separate organization Models page; its old URL redirects). It
-shows one row per account this workspace can use, each tagged by who it is for
-("Everyone in <organization>", "Selected workspaces", "Shared by
-<organization>" when the viewer can't read the policy, "This workspace only",
-"Only you"). Organization owners and admins connect organization accounts:
+In the web app every model setting lives on Organization settings > Models
+(`apps/web/src/components/models/organization-models-section.tsx`); a
+workspace's old Settings > Models URL opens that workspace's page there. The
+page lists every account that pays (credits, the organization's accounts tagged
+"Everyone in <organization>" or "Selected workspaces", and each workspace's own
+accounts tagged "<workspace> only"), then every workspace with its default
+model and Allowed models, each opening that workspace's model page, which lists
+the accounts the workspace uses ("Shared by <organization>" when the viewer
+can't read the policy, "Only you" for a private SuperGrok account). Owners and
+admins see everything; a workspace admin who isn't one sees the workspaces they
+administer and, read-only, the accounts those use; members have no Models page. Organization owners and admins connect organization accounts:
 the connect step asks which workspaces can use it, every workspace by default
 or "Only selected workspaces" (shared workspaces plus one all-or-nothing
 "Personal workspaces" choice, shown off with its reason for organization API

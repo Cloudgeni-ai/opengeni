@@ -28,6 +28,7 @@ import {
   RenameAccountDialog,
   resetsLabel,
   type ModelsScopeLabels,
+  useModelsListLabel,
 } from "@/components/models/models-ui";
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
@@ -766,8 +767,9 @@ export function CodexAccountPage({
   accountId: string;
   places: CodexPlaces;
 }) {
+  const listLabel = useModelsListLabel();
   const account = codex.accounts.find((candidate) => candidate.id === accountId) ?? null;
-  const back = { label: "Models", onClick: places.backToList };
+  const back = { label: listLabel, onClick: places.backToList };
   if (codex.loading) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -804,6 +806,7 @@ function CodexAccountDetail({
   account: CodexAccount;
   places: CodexPlaces;
 }) {
+  const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = codexAccountName(account);
@@ -867,7 +870,7 @@ function CodexAccountDetail({
 
   return (
     <DetailPage
-      back={{ label: "Models", onClick: places.backToList }}
+      back={{ label: listLabel, onClick: places.backToList }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader

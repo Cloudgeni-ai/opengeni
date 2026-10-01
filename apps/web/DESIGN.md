@@ -116,7 +116,7 @@ page footer, or a menu.
 
 - Primary: the page header's create or connect action ("New schedule", "Create API key", "Invite
   people"); a section's add action when the header has none for it ("Connect account" on
-  Settings > Models); the action in an empty state ("Connect account", "Create schedule", "Start
+  Organization > Models); the action in an empty state ("Connect account", "Create schedule", "Start
   your first session"); the confirm of a non-destructive dialog or form page ("Create schedule",
   "Save"); the unblocking action in a notice, banner or menu ("Connect a model", "Open Models",
   "Reconnect", "Reload now").
@@ -385,13 +385,25 @@ Learned on Settings > Models, 27 Sep 2026.
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists
   the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
-- **One Models page, every account tagged by who it is for.** Learned 30 Sep 2026. Workspace and
-  organization accounts are one list; the first meta fact says who can use each: "Everyone in
-  Acme", "This workspace only" ("Personal workspace only"), "Only you". The page subtitle says
-  what a new chat starts with and who pays. Connect defaults to the widest scope the person can
-  manage (everyone, for organization owners and admins); "Only this workspace" is a secondary
-  navigational row under the provider list, explained (separate billing or keys for one team).
-  People who can't connect see the list read-only and one line naming who can.
+- **Every model setting in one place: Organization > Models.** Decided 1 Oct 2026. The page is
+  three parts: **Accounts** (one list of everything that pays: credits, the organization's
+  accounts tagged by where they're available, "Everyone in Acme" or "Selected workspaces", and
+  each workspace's own accounts tagged "Design preview only"), **Workspaces** (one row per
+  workspace with its default model and payer plus its Allowed models, "GPT-6 Astra · Codex · All
+  models", and the person's own Personal workspace last), then the organization-wide Codex and
+  SuperGrok settings. A workspace row opens that workspace's model page (`?workspace=`): Default
+  model (with who pays and the one can't-run warning), Allowed models, the accounts it uses
+  (muted "Not in use" with the reason when one is set aside), its Codex and SuperGrok settings and
+  the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
+- **Connect is for the organization.** Connect account makes an organization account and asks
+  which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An
+  account owned by one workspace is offered only where it is genuinely needed, with the reason in
+  place: Codex Apps, usage limit resets, an API key in a Personal workspace, and workspace admins
+  who aren't organization admins (their workspace page connects for that workspace only).
+- **Who sees Models.** Organization owners and admins: everything. Workspace admins: the
+  workspaces they administer and, read-only, the accounts those use, with "Only organization owners
+  and admins can add accounts." Members have no Models page (the composer's model picker shows who
+  pays); a direct link says "Only admins manage models. Ask an admin to add one."
 - **Toolbar pieces stay in the toolbar.** `ToolbarSearch` always sits inside a `Toolbar`. A `Select`
   in a narrow `SettingRow` gets a fixed width so the column doesn't jump between values.
 
@@ -499,10 +511,10 @@ admin manages without access, does the header add the name as quiet 12px meta). 
 headings. Inside a section, pages fall into at most two groups set apart by space, never by a
 second level of labels: Workspace = its settings and dashboards, then its runtime (Variable sets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
-Workspaces, Organization identity), then what it provides, pays for and protects (Integrations,
-Billing & usage, Developer, Security & data). Models is one page, in the Workspace section: it
-lists what the workspace can use, including the organization's accounts (section 7), so the
-organization has no Models page of its own. Sections are split by one hairline.
+Workspaces, Organization identity), then what it provides, pays for and protects (Models,
+Integrations, Billing & usage, Developer, Security & data). Models is an Organization page only:
+every model setting, each workspace's included, lives there (section 7), and a workspace's old
+Models URL opens that workspace's page in it. Sections are split by one hairline.
 There are no per-section switchers. Workspace, organization and personal settings all draw this
 same rail, so the scope of every page is visible and nothing jumps to a second rail. Switching
 workspace or organization in the picker keeps the same kind of page;

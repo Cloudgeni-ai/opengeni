@@ -1,5 +1,5 @@
-// Organization settings: General, People, Workspaces, Integrations,
-// Organization identity, Billing & usage, Developer and Security & data.
+// Organization settings: General, People, Workspaces, Organization identity,
+// Models, Integrations, Billing & usage, Developer and Security & data.
 // They render inside the settings shell's Organization section
 // (components/settings/workspace-settings-shell.tsx); pages this person can't
 // use are hidden from the rail (lib/organization-settings-access.ts).
@@ -9,6 +9,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from 
 import { toast } from "sonner";
 
 import type { ReturnTo } from "@/lib/return-to";
+import type { ModelsView } from "@/lib/models-route";
 import { OrganizationBillingPage } from "@/components/organization/billing-page";
 import { OrganizationGeneralPage } from "@/components/organization/general-page";
 import { OrganizationIdentityPage } from "@/components/organization/identity-page";
@@ -49,6 +50,10 @@ import {
 } from "@/lib/workspace-deletion";
 import type { OrganizationMembershipRole } from "@/types";
 
+const LazyOrganizationModelsSection = lazy(async () => {
+  const module = await import("@/components/models/organization-models-section");
+  return { default: module.OrganizationModelsSection };
+});
 const LazyOrganizationApiKeysSection = lazy(async () => {
   const module = await import("@/components/organization-api-keys-section");
   return { default: module.OrganizationApiKeysSection };
@@ -58,6 +63,8 @@ export function OrgSettingsRoute({
   workspaceId,
   checkout,
   section: requestedSection,
+  modelsAccount,
+  modelsView,
   returnTo,
   organizationView,
   person,
@@ -67,6 +74,10 @@ export function OrgSettingsRoute({
   workspaceId: string;
   checkout?: "success" | "cancelled";
   section?: OrganizationAdminSection;
+  /** Models: the account page that is open. */
+  modelsAccount?: string | undefined;
+  /** Models: the form page that is open. */
+  modelsView?: ModelsView | undefined;
   /** Where a cross-scope link came from; the back link returns there. */
   returnTo?: ReturnTo | undefined;
   /** People or Workspaces: the form page that is open. */
@@ -75,7 +86,10 @@ export function OrgSettingsRoute({
   person?: string | undefined;
   /** People: the invitation whose page is open. */
   invitation?: string | undefined;
-  /** Workspaces: the workspace whose page is open. */
+  /**
+   * Workspaces: the workspace whose page is open. Models: the workspace whose
+   * model page is open, or that a page was opened from.
+   */
   workspace?: string | undefined;
 }) {
   const context = useAppContext();
@@ -97,6 +111,8 @@ export function OrgSettingsRoute({
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
+    administrator,
+    administeredWorkspaceIds,
     visibleSections,
   } = organizationSettingsAccess({
     accessContext: context.accessContext,
@@ -213,7 +229,10 @@ export function OrgSettingsRoute({
     [accessibleWorkspaceIds, accountId, client, context, navigate, singleUser, workspaceId],
   );
 
+  // Members choose models in the composer; Models is for the people who manage them.
+  const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
   const subPage =
+    (section === "models" && Boolean(modelsAccount || modelsView || workspace)) ||
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && organizationView === "new-key") ||
@@ -237,13 +256,20 @@ export function OrgSettingsRoute({
       <OrganizationSettingsFrame
         workspaceId={workspaceId}
         fallbackLabel={fallbackLabel}
-        section={section}
+        section={modelsRefused ? "models" : section}
+        hideDescription={modelsRefused}
         hideHeader={subPage}
         actorRole={actorRole}
       >
-        {section === "general" ? <OrganizationGeneralPage /> : null}
+        {modelsRefused ? (
+          <p className="m-0 text-sm leading-5 text-fg-muted">
+            Only admins manage models. Ask an admin to add one.
+          </p>
+        ) : null}
 
-        {section === "people" ? (
+        {!modelsRefused && section === "general" ? <OrganizationGeneralPage /> : null}
+
+        {!modelsRefused && section === "people" ? (
           <OrganizationPeoplePage
             workspaceId={workspaceId}
             person={person}
@@ -252,7 +278,7 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
-        {section === "workspaces" ? (
+        {!modelsRefused && section === "workspaces" ? (
           <OrganizationWorkspacesPage
             workspaceId={workspaceId}
             workspace={workspace}
@@ -268,7 +294,23 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
-        {section === "identity" ? (
+        {!modelsRefused && section === "models" ? (
+          <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+            <OrganizationModelsSectionWithName
+              key={`${identityKey}:models`}
+              anchorWorkspaceId={workspaceId}
+              organizationId={accountId}
+              fallbackLabel={fallbackLabel}
+              administrator={administrator}
+              administeredWorkspaceIds={administeredWorkspaceIds}
+              workspace={workspace}
+              account={modelsAccount}
+              view={modelsView}
+            />
+          </Suspense>
+        ) : null}
+
+        {!modelsRefused && section === "identity" ? (
           <OrganizationIdentityPage
             workspaceId={workspaceId}
             identityKey={identityKey}
@@ -277,7 +319,7 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
-        {section === "integrations" ? (
+        {!modelsRefused && section === "integrations" ? (
           <OrganizationIntegrationsSection
             key={`${identityKey}:integrations`}
             client={client}
@@ -287,7 +329,7 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
-        {section === "developer" ? (
+        {!modelsRefused && section === "developer" ? (
           <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
             <LazyOrganizationApiKeysSection
               key={`${identityKey}:organization-api-keys`}
@@ -312,7 +354,7 @@ export function OrgSettingsRoute({
           </Suspense>
         ) : null}
 
-        {section === "billing" ? (
+        {!modelsRefused && section === "billing" ? (
           <BillingSection returnTo={returnTo}>
             <OrganizationBillingPage
               key={`${identityKey}:billing`}
@@ -323,7 +365,7 @@ export function OrgSettingsRoute({
           </BillingSection>
         ) : null}
 
-        {section === "security" ? <OrganizationSecurityPage /> : null}
+        {!modelsRefused && section === "security" ? <OrganizationSecurityPage /> : null}
       </OrganizationSettingsFrame>
     </OrganizationDirectoryProvider>
   );
@@ -338,12 +380,15 @@ function OrganizationSettingsFrame({
   fallbackLabel,
   section,
   hideHeader,
+  hideDescription = false,
   actorRole,
   children,
 }: {
   workspaceId: string;
   fallbackLabel: string;
   section: OrganizationAdminSection;
+  /** The page only says who can use it, so its usual subtitle would mislead. */
+  hideDescription?: boolean;
   /** A sub-page (a person, a workspace, a form) brings its own back link and title. */
   hideHeader: boolean;
   actorRole: OrganizationMembershipRole | null;
@@ -374,7 +419,9 @@ function OrganizationSettingsFrame({
     <>
       <PageHeader
         title={organizationSettingsLabel(section)}
-        description={organizationSettingsDescription(section, organizationLabel)}
+        description={
+          hideDescription ? undefined : organizationSettingsDescription(section, organizationLabel)
+        }
         actions={actions}
       />
       <div className="mt-6">{body}</div>
@@ -400,5 +447,28 @@ function BillingSection({
       <DetailPageHeader title="Billing & usage" />
       <div className="mt-6 min-w-0">{children}</div>
     </DetailPage>
+  );
+}
+
+/** Models, named with the organization's real name once it has loaded. */
+function OrganizationModelsSectionWithName({
+  fallbackLabel,
+  ...props
+}: {
+  anchorWorkspaceId: string;
+  organizationId: string;
+  fallbackLabel: string;
+  administrator: boolean;
+  administeredWorkspaceIds: readonly string[];
+  workspace: string | undefined;
+  account: string | undefined;
+  view: ModelsView | undefined;
+}) {
+  const directory = useOptionalOrganizationDirectory();
+  return (
+    <LazyOrganizationModelsSection
+      {...props}
+      organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
+    />
   );
 }

@@ -14,6 +14,7 @@ import {
   organizationReachLabel,
   RenameAccountDialog,
   type ModelsScopeLabels,
+  useModelsListLabel,
 } from "@/components/models/models-ui";
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
@@ -72,14 +73,14 @@ function needsReconnect(account: SuperGrokAccount): boolean {
   return account.status !== "active";
 }
 
-function planOf(account: SuperGrokAccount): string {
+export function planOf(account: SuperGrokAccount): string {
   const plan = account.plan ?? account.quota?.subscriptionTier;
   return plan
     ? `SuperGrok ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`
     : "SuperGrok plan";
 }
 
-function percentLeft(account: SuperGrokAccount): number | null {
+export function percentLeft(account: SuperGrokAccount): number | null {
   const used = account.quota?.usedPercent;
   return typeof used === "number" ? Math.max(0, Math.min(100, Math.round(100 - used))) : null;
 }
@@ -312,7 +313,7 @@ export function SuperGrokSettingRows({
   );
 }
 
-function SuperGrokRow({
+export function SuperGrokRow({
   grok,
   account,
   places,
@@ -365,8 +366,9 @@ export function SuperGrokAccountPage({
   places: SuperGrokPlaces;
   client: OpenGeniBrowserClient;
 }) {
+  const listLabel = useModelsListLabel();
   const account = grok.accounts.find((candidate) => candidate.id === accountId) ?? null;
-  const back = { label: "Models", onClick: places.backToList };
+  const back = { label: listLabel, onClick: places.backToList };
   if (grok.loading) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -401,6 +403,7 @@ function SuperGrokAccountDetail({
   places: SuperGrokPlaces;
   client: OpenGeniBrowserClient;
 }) {
+  const listLabel = useModelsListLabel();
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const name = superGrokAccountName(account);
@@ -421,7 +424,7 @@ function SuperGrokAccountDetail({
     : scopeOf(grok, account, places);
   return (
     <DetailPage
-      back={{ label: "Models", onClick: places.backToList }}
+      back={{ label: listLabel, onClick: places.backToList }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
       <DetailPageHeader
@@ -597,7 +600,7 @@ function SuperGrokAccountDetail({
   );
 }
 
-function formatReset(value: string): string {
+export function formatReset(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value

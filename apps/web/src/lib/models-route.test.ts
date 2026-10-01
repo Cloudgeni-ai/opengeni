@@ -4,9 +4,9 @@ import {
   accountKey,
   accountKeyOf,
   connectStepOf,
-  organizationModelsRedirect,
   parseModelsAccount,
   parseModelsView,
+  workspaceModelsRedirect,
 } from "./models-route";
 
 describe("Models URLs", () => {
@@ -36,19 +36,31 @@ describe("Models URLs", () => {
     expect(connectStepOf("connect")).toBeNull();
   });
 
-  test("the old organization Models URL lands on the same page of the one Models page", () => {
-    expect(organizationModelsRedirect({ account: undefined, view: undefined })).toEqual({});
-    expect(organizationModelsRedirect({ account: "codex:acct-1", view: undefined })).toEqual({
-      account: "org:codex:acct-1",
+  test("a workspace's old Models URL opens its page in Organization settings > Models", () => {
+    expect(
+      workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: undefined }),
+    ).toEqual({ section: "models", workspace: "ws-1" });
+    expect(
+      workspaceModelsRedirect({ workspaceId: "ws-1", account: "codex:acct-1", view: undefined }),
+    ).toEqual({ section: "models", workspace: "ws-1", account: "codex:acct-1" });
+    expect(
+      workspaceModelsRedirect({
+        workspaceId: "ws-1",
+        account: "org:gateway:vercel",
+        view: "model-access",
+      }),
+    ).toEqual({
+      section: "models",
+      workspace: "ws-1",
+      account: "org:gateway:vercel",
+      view: "model-access",
     });
-    expect(organizationModelsRedirect({ account: "gateway:vercel", view: "model-access" })).toEqual(
-      { account: "org:gateway:vercel", view: "model-access" },
-    );
-    expect(organizationModelsRedirect({ account: undefined, view: "connect:supergrok" })).toEqual({
-      view: "connect-org:supergrok",
-    });
-    expect(organizationModelsRedirect({ account: undefined, view: "connect" })).toEqual({
-      view: "connect",
-    });
+    expect(
+      workspaceModelsRedirect({
+        workspaceId: "ws-1",
+        account: undefined,
+        view: "connect-workspace",
+      }),
+    ).toEqual({ section: "models", workspace: "ws-1", view: "connect" });
   });
 });

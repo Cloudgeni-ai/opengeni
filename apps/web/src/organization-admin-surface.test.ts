@@ -83,10 +83,10 @@ const tenancyDocs = await Bun.file(
 
 describe("organization administration surface", () => {
   test("manages Gateway and OpenRouter as peer organization BYOK providers", () => {
-    // One Models page: the organization's URL redirects to the workspace's, which
-    // manages the organization's accounts for its owners and admins.
-    expect(routeSource).not.toContain("OrganizationModelsPage");
-    expect(appSource).toContain("organizationModelsRedirect(");
+    // One Models page, in Organization settings: a workspace's old Models URL
+    // redirects to that workspace's page there.
+    expect(routeSource).toContain("<OrganizationModelsSectionWithName");
+    expect(appSource).toContain("workspaceModelsRedirect(");
     expect(organizationModelsSource).toContain("useOrganizationProviderConnection(");
     expect(organizationModelsSource).toContain('vercel: "vercel_gateway"');
     expect(organizationModelsSource).toContain('openrouter: "openrouter"');
@@ -124,6 +124,7 @@ describe("organization administration surface", () => {
       "general",
       "people",
       "workspaces",
+      "models",
       "integrations",
       "identity",
       "billing",
@@ -151,8 +152,9 @@ describe("organization administration surface", () => {
     // Owners and admins in an administrator session: one rule, shared with the picker.
     expect(accessSource).toContain("administersOrganization(input)");
     expect(workspacesLibSource).toContain('role === "owner" || role === "admin"');
-    // Models is not an organization page any more: it is one page in the workspace's settings.
-    expect(accessSource).not.toContain('visible.add("models")');
+    // Models is an organization page for owners, admins and workspace admins.
+    expect(accessSource).toContain('visible.add("models")');
+    expect(accessSource).toContain("administeredWorkspaceIds.length > 0");
     expect(organizationCodexSource).toContain("setLoadError(");
     expect(workspaceCodexSource).toContain("Couldn't load the organization's Codex accounts.");
     expect(workspaceCodexSource).toContain("Try again");

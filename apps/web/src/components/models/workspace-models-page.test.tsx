@@ -11,6 +11,7 @@ import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { ModelsView } from "@/lib/models-route";
+import type { ModelsWorkspace } from "./organization-models-list";
 
 /* ----------------------------------------------------------------------------
    Settings > Models in a workspace: rows, the account page, and the source,
@@ -197,7 +198,11 @@ const context: {
   updateWorkspaceSettings: async () => null,
 };
 
-let navigateTo: (search: { account?: string; view?: ModelsView }) => void = () => {};
+let navigateTo: (search: {
+  account?: string;
+  view?: ModelsView;
+  workspace?: string;
+}) => void = () => {};
 let lastNavigation: { to?: string; search: Record<string, unknown> } | null = null;
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
@@ -299,6 +304,8 @@ beforeAll(() => undefined);
 
 beforeEach(() => {
   organizationAdmin = false;
+  organizationList = false;
+  organizationWorkspaces = [];
   personalWorkspace = false;
   for (const fn of Object.values(client)) fn.mockClear();
   accounts = {
@@ -323,12 +330,24 @@ const ACCOUNTS_SECTION = "Subscriptions, API keys and credits that pay for model
 
 let organizationAdmin = false;
 let personalWorkspace = false;
+let organizationWorkspaces: ModelsWorkspace[] = [];
+
+let organizationList = false;
 
 function Harness({ canManage, organizationId }: { canManage: boolean; organizationId?: string }) {
-  const [search, setSearch] = useState<{ account?: string; view?: ModelsView }>({});
-  navigateTo = setSearch;
+  const [search, setSearch] = useState<{ account?: string; view?: ModelsView; workspace?: string }>(
+    organizationList ? {} : { workspace: "workspace-a" },
+  );
+  // Tests open pages of this workspace's model page unless they start on the organization's list.
+  navigateTo = (next) =>
+    setSearch(
+      organizationList || "workspace" in next ? next : { ...next, workspace: "workspace-a" },
+    );
   return (
     <WorkspaceModelsPage
+      anchorWorkspaceId="workspace-a"
+      workspacePage={Boolean(search.workspace)}
+      workspaces={organizationWorkspaces}
       workspaceId="workspace-a"
       workspaceName="Design preview"
       personal={personalWorkspace}
@@ -496,7 +515,7 @@ describe("Models list", () => {
       expect(text).toContain("Not in use");
       // Every account says who it is for. Without organization rights the
       // organization's "Available in" can't be read, so it says who shares it.
-      expect(text).toContain("This workspace only");
+      expect(text).toContain("Design preview only");
       expect(text).toContain("Shared by Acme");
     } finally {
       await cleanup(view);
@@ -520,7 +539,7 @@ describe("Models list", () => {
       expect(
         view.container.querySelector("footer")?.closest("[data-slot=form-frame]")?.className,
       ).toContain("[&>form>footer]:hidden");
-      await act(async () => button(view.container, "Models")!.click());
+      await act(async () => button(view.container, "Design preview")!.click());
       await flush();
       expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
     } finally {
@@ -760,7 +779,7 @@ describe("Codex account page", () => {
         enabled: false,
         expectedVersion: 3,
       });
-      await act(async () => button(view.container, "Models")!.click());
+      await act(async () => button(view.container, "Design preview")!.click());
       await flush();
       expect(view.container.textContent).toContain(ACCOUNTS_SECTION);
     } finally {
@@ -784,7 +803,7 @@ describe("Codex account page", () => {
       );
       expect(items).toEqual(["Rename", "Copy account ID", "Disconnect"]);
       const text = view.container.textContent ?? "";
-      expect(text).toContain("ChatGPT Pro·team@example.com·This workspace");
+      expect(text).toContain("ChatGPT Pro·team@example.com·Design preview only");
       expect(text).not.toContain("Technical details");
       expect(text).not.toContain("Belongs to");
       expect(text).not.toContain("Connected");
@@ -1262,6 +1281,103 @@ describe("One Models page for the organization and the workspace", () => {
       expect(view.container.textContent).toContain(
         "This key will belong to your Personal workspace, so only you use it.",
       );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Organization > Models lists the accounts and every workspace, each opening its page", async () => {
+    organizationAdmin = true;
+    organizationList = true;
+    routeOrganizationReads();
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: true,
+    }));
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-b",
+        name: "Finance ops",
+        personal: false,
+        canManage: false,
+        savedDefaultModel: null,
+      },
+      {
+        id: "workspace-me",
+        name: "Personal workspace",
+        personal: true,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      const text = view.container.textContent ?? "";
+      // The organization's account, tagged by where it's available, and each
+      // workspace's own account, tagged with its workspace.
+      expect(text).toContain("Company plan");
+      expect(text).toContain("Everyone in Acme");
+      expect(text).toContain("Team plan");
+      expect(text).toContain("Design preview only");
+      expect(button(view.container, /Connect account/)).toBeDefined();
+      // Every workspace, with its rules; one this person can't change says who can.
+      expect(text).toContain("Workspaces");
+      expect(text).toContain("Finance ops");
+      expect(text).toContain("Only its workspace admins can change its models.");
+      expect(text).toContain("Your Personal workspace");
+      const workspaceRow = [
+        ...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]"),
+      ].find((row) => row.querySelector("[data-row-action]")?.textContent === "Design preview")!;
+      await act(async () => workspaceRow.querySelector<HTMLElement>("[data-row-action]")!.click());
+      expect(lastNavigation?.to).toBe("/workspaces/$workspaceId/organization");
+      expect(lastNavigation?.search).toEqual({ section: "models", workspace: "workspace-a" });
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a workspace admin sees their workspaces and what they use, read-only", async () => {
+    organizationList = true;
+    organizationWorkspaces = [
+      {
+        id: "workspace-a",
+        name: "Design preview",
+        personal: false,
+        canManage: true,
+        savedDefaultModel: null,
+      },
+    ];
+    const view = await render();
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Team plan");
+      expect(text).toContain("Only organization owners and admins can add accounts.");
+      expect(button(view.container, /Connect account/)).toBeUndefined();
+      // The organization's own accounts are never read for them.
+      expect(client.requestJson).not.toHaveBeenCalledWith(
+        "GET",
+        "/v1/organizations/organization-a/codex/accounts",
+      );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a workspace's model page goes back to the organization's list", async () => {
+    const view = await render();
+    try {
+      expect(view.container.querySelector("h1")?.textContent).toBe("Design preview");
+      await act(async () => button(view.container, "Models")!.click());
+      expect(lastNavigation?.search).toEqual({ section: "models" });
     } finally {
       await cleanup(view);
     }

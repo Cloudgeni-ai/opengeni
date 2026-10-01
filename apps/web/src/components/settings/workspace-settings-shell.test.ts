@@ -195,7 +195,6 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
-        "Models",
         "API keys",
         "Developer",
         "Insights",
@@ -211,7 +210,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([6, 3]);
+      ).toEqual([5, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -220,7 +219,8 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
-        // Models is one page, in the Workspace section; the organization's accounts are on it.
+        // Every model setting, each workspace's included, lives on Organization > Models.
+        "Models",
         "Integrations",
         "Billing & usage",
         "Developer",
@@ -228,7 +228,7 @@ describe("settings rail", () => {
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 4]);
+      ).toEqual([4, 5]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");

@@ -13,13 +13,14 @@ const local = { productAccessMode: "local", auth: { mode: "none" } } as const;
 function context(
   role: "owner" | "admin" | "member" | undefined,
   permissions: string[],
+  workspaceGrants: { workspaceId: string; accountId: string; permissions: string[] }[] = [],
 ): AccessContext {
   return {
     mode: "managed",
     subjectId: "user:alex",
     defaultAccountId: "acme",
     accountGrants: [{ accountId: "acme", subjectId: "user:alex", role, permissions }],
-    workspaceGrants: [],
+    workspaceGrants: workspaceGrants.map((grant) => ({ ...grant, subjectId: "user:alex" })),
   } as unknown as AccessContext;
 }
 
@@ -27,10 +28,11 @@ function visible(
   role: "owner" | "admin" | "member" | undefined,
   permissions: string[],
   clientConfig: typeof managed | typeof local = managed,
+  workspaceGrants: { workspaceId: string; accountId: string; permissions: string[] }[] = [],
 ): string[] {
   return [
     ...organizationSettingsAccess({
-      accessContext: context(role, permissions),
+      accessContext: context(role, permissions, workspaceGrants),
       clientConfig: clientConfig as never,
       accountId: "acme",
     }).visibleSections,
@@ -55,6 +57,7 @@ describe("organization settings access", () => {
         "general",
         "identity",
         "integrations",
+        "models",
         "people",
         "security",
         "workspaces",
@@ -64,6 +67,36 @@ describe("organization settings access", () => {
 
   test("members see only what they can use: identity (read-only) and security", () => {
     expect(visible("member", ["account:read"])).toEqual(["identity", "security"]);
+  });
+
+  test("a workspace admin also sees Models, for the workspaces they administer", () => {
+    const grants = [
+      { workspaceId: "ws-team", accountId: "acme", permissions: ["workspace:admin"] },
+      { workspaceId: "ws-other", accountId: "acme", permissions: ["workspace:read"] },
+      { workspaceId: "ws-elsewhere", accountId: "other", permissions: ["workspace:admin"] },
+    ];
+    expect(visible("member", ["account:read"], managed, grants)).toEqual([
+      "identity",
+      "models",
+      "security",
+    ]);
+    expect(
+      organizationSettingsAccess({
+        accessContext: context("member", ["account:read"], grants),
+        clientConfig: managed as never,
+        accountId: "acme",
+      }).administeredWorkspaceIds,
+    ).toEqual(["ws-team"]);
+    // A Personal workspace grant (no workspace:admin) is not administering one.
+    expect(
+      visible("member", ["account:read"], managed, [
+        {
+          workspaceId: "ws-me",
+          accountId: "acme",
+          permissions: ["workspace:read", "connections:write"],
+        },
+      ]),
+    ).toEqual(["identity", "security"]);
   });
 
   test("the single local user administers without a People page", () => {
