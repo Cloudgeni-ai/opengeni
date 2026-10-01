@@ -600,6 +600,15 @@ diff --git a/dist/sandbox/shared/session.js b/dist/sandbox/shared/session.js
 index d6698518838dcab5f7a4b8843e1da5f6eacbf654..dc9d760fa417f85bb70f6af330a675c6850fd731 100644
 --- a/dist/sandbox/shared/session.js
 +++ b/dist/sandbox/shared/session.js
+@@ -20,7 +20,7 @@ async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+         await session.close();
+     }
+     catch (closeError) {
+-        throw new agents_core_1.UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`);
++        throw Object.assign(new agents_core_1.UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`), { cause: new AggregateError([manifestError, closeError], 'Sandbox manifest application and close both failed') });
+     }
+     throw manifestError;
+ }
 @@ -59,14 +59,14 @@ async function withProviderError(providerName, provider, operation, fn, context
          }
          const cause = providerErrorMessage(error);
@@ -621,6 +630,15 @@ diff --git a/dist/sandbox/shared/session.mjs b/dist/sandbox/shared/session.mjs
 index b3cf905259abeca724c282ebd16b725a7b10e0f9..fe0faaba628d168f6e56f6840f21d35310d9af32 100644
 --- a/dist/sandbox/shared/session.mjs
 +++ b/dist/sandbox/shared/session.mjs
+@@ -7,7 +7,7 @@ export async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+         await session.close();
+     }
+     catch (closeError) {
+-        throw new UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`);
++        throw Object.assign(new UserError(`Failed to apply a ${providerName} sandbox manifest and close the sandbox. Manifest error: ${providerErrorMessage(manifestError)} Close error: ${providerErrorMessage(closeError)}`), { cause: new AggregateError([manifestError, closeError], 'Sandbox manifest application and close both failed') });
+     }
+     throw manifestError;
+ }
 @@ -46,14 +46,14 @@ export async function withProviderError(providerName, provider, operation, fn, c
          }
          const cause = providerErrorMessage(error);

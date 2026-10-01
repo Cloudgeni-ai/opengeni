@@ -425,23 +425,19 @@ group while inheriting the exact active route. A selfhosted-only child with no
 inherited or explicit machine fails at create rather than reaching an unbound
 runtime.
 
-A machine-home session does not pre-provision a hidden managed box. When the
-deployment has a managed sandbox backend, its fleet nevertheless exposes the
-session's synthetic managed group as a separate explicit target. Selecting
-`session`/`default` clears the active machine pointer, verifies that managed
-group through the ordinary viewer/lease lifecycle, and lets the next operation
-or turn use it. This is an intentional user route change, not an
-offline-machine fallback; deployments configured with only `none` or
-`selfhosted` expose no managed group.
+Machine-home sessions never pre-provision hidden managed boxes. With a managed
+deployment backend, the fleet exposes the synthetic managed group explicitly.
+Selecting `session`/`default` clears the active machine pointer and verifies that
+group through the ordinary viewer/lease lifecycle before the next operation/turn
+uses it. This intentional user route change is not offline-machine fallback;
+`none`/`selfhosted`-only deployments expose no managed group.
 
-Connected Machine event ingestion cannot make every runner wait behind one
-global database queue. The API drains the NATS event subscription immediately
-into exact-process queues: different connection subjects progress concurrently
-within a fixed database-concurrency bound, each subject preserves event order,
-and only consecutive pending heartbeats collapse latest-wins. GoingOffline and
-update-progress events remain ordering barriers. A database slowdown can
-therefore delay current telemetry, but a backlog of old heartbeats from a killed
-runner cannot renew its short ownership lease once per stale sample for minutes.
+Connected Machine event ingestion drains NATS immediately into exact-process
+queues, not one global database queue. Connection subjects progress concurrently
+within a fixed database-concurrency bound and preserve order; only consecutive
+pending heartbeats collapse latest-wins. GoingOffline/update-progress events
+remain ordering barriers. Database slowdown delays telemetry, but stale
+killed-runner heartbeats cannot repeatedly renew its short ownership lease.
 Canonical:
 `apps/api/src/sandbox/metrics-ingestion.ts`.
 
@@ -480,24 +476,23 @@ stdin; already admitted writes remain blockers until settled. Provider loss,
 missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
-Modal `TaskExecStart` recovery requires a read-only task/router lookup or local
-channel-readiness gate to fail before any Start RPC is issued. Native commands
-and the pinned SDK's internal setup/filesystem/archive commands share this rule.
-Typed proof reaches bounded same-turn recovery, including setup before eventing;
-SDK catch wrappers retain its cause. Server-supplied DNS text and post-dispatch
-errors never prove non-execution. Uncertain Starts become typed outcome-unknown
-results, not transport retries. Supervised retries first settle their exact
-never-started reservation; retained or outcome-unknown causes block recovery.
-Published runtime consumers receive an unpatched Modal SDK. Runtime owns its
-native error class and recognizes SDK boundary errors through a local own-Symbol
-data marker, never patch-only imports, error names, codes, or diagnostic text.
+Modal `TaskExecStart` recovery requires read-only task/router lookup or local
+channel-readiness failure before any Start RPC. Native and pinned-SDK
+setup/filesystem/archive commands share this rule. Typed proof and preserved SDK
+causes permit finite five-replacement same-turn recovery, including pre-eventing
+setup. Server DNS text and post-dispatch errors never prove non-execution.
+Uncertain Starts return typed outcome-unknown results, never transport retries.
+Supervised retries settle the exact never-started reservation first; retained or
+outcome-unknown causes block recovery. Published consumers use unpatched Modal:
+runtime owns its native error class and recognizes SDK boundaries by a local
+own-Symbol data marker, never patch-only imports, names, codes or diagnostic text.
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
-larger budget plus reaper period, including historical Modal leases after backend
-changes. Drain budgets include dispatch/capture/retry within the lifecycle ceiling.
-Warm-capture reclamation/heartbeat cleanup preserve holders through the original
-deadline despite turn closure: no takeover or extended authority.
+larger budget plus reaper period, even for historical Modal leases after backend
+changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling.
+Warm-capture reclamation/heartbeat cleanup retain holders through the original
+deadline after turn closure: no takeover or authority extension.
 
 Legacy stopping-error containment requires owner quiescence and cancellation grace.
 Supervision-key presence—even malformed—blocks enrollment/capture/publication/teardown.
@@ -508,11 +503,11 @@ plus handoff grace (one-hour cap). Expired/replacement claims never replenish
 budgets; zero-wait probes remain immediate. Expiry grants no capture/writer authority.
 Policy: `packages/db/src/sandbox-transition-wait.ts`.
 
-A settled capture rejection releases only its exact unpublished claim, allowing
-waiters to re-arm the intact instance. Unresolved timeouts and publication/teardown
-failures retain ownership. Fresh claims receive fresh provider request IDs;
-uninterrupted replacements retain the stored ID so late results remain adoptable
-without reusing pre-mutation snapshots after a release.
+Settled capture rejection releases only its exact unpublished claim so waiters
+can re-arm the intact instance. Unresolved timeouts and publication/teardown
+failures retain ownership. Fresh claims get fresh provider request IDs;
+uninterrupted replacements retain stored IDs for late-result adoption, never
+reuse pre-mutation snapshots after release.
 
 Rotation recovery: [lifecycle](run-lifecycle.md).
 
@@ -1477,37 +1472,37 @@ Three compute shapes:
 Each backend has one registered capability descriptor and implementation.
 Additions require contracts, runtime, SDK/deployment parity, tests, and map updates.
 
-Managed sandboxes are grouped, lease-owned, and lazily provisioned after session
+Managed sandboxes are grouped, lease-owned and lazily provisioned after session
 creation. Leases track provider identity, epoch, holders, workspace mutation
-generation, archive/recovery state, and teardown authority. The active session
-pointer selects a target without rewriting durable home policy.
+generation, archive/recovery state and teardown authority. Active-target selection
+never rewrites durable home policy.
 
 Repository skill discovery skips definite path misses. Other failures reach
 turn settlement; rotation resumes through the durable lifecycle wake.
 
-Immutable sandbox environment setup is lease-boundary single-flight. Exact lease epoch, provider
-instance, and non-secret setup hash own a durable claim/revision/settlement receipt.
-Siblings join/reuse it through backed-off durable reads; after owner loss, a
-deadline successor re-enters the box-local marker guard. Receipts never contain
-or cover per-turn credentials, repository authorization, Codemode tokens, cloud
-login, attachments, or generated media.
+Immutable environment setup is lease-boundary single-flight: exact lease epoch,
+provider instance and non-secret setup hash bind durable claim/revision/settlement
+receipts. Siblings join/reuse via backed-off durable reads; after owner loss,
+a deadline successor re-enters the box-local marker guard. Receipts exclude
+per-turn credentials, repository authorization, Codemode tokens, cloud login,
+attachments and generated media.
 
-Sandbox Environments layer versioned setup and checks on the deployment-owned platform sandbox
-base; they cannot replace that base image. A verified provider-native Sandbox Environment image
-is only a physical cold-create optimization and never changes the logical lease
-image, workspace archive, session snapshot, or credential authority.
+Sandbox Environments add versioned setup/checks to the deployment-owned base,
+never replace it. Verified provider-native images optimize cold creation only,
+without changing logical lease image, workspace archive, session snapshot or
+credential authority.
 
 Sandbox snapshots/provider-native checkpoints are recovery artifacts, not history.
 Capture requires proof against unaccounted racing writers. Failed/unverifiable
 captures are not empty successes; teardown must preserve the only recoverable workspace state.
 
-Provider-deadline rotation preempts turns when its durable lead-time request
-fences mutations. Finalizers drain tool and credential writers before releasing
-holders. Only the zero-holder reaper may adopt an in-flight same-request capture,
-publish the exact workspace generation, then terminate the provider. The Agents
-SDK closes its readable stream before completion rejects; EOF is not success.
-The worker awaits completion and routes rejection through
-`sandbox_deadline_rotation` before `turn.completed`.
+Provider-deadline rotation fences mutations and preempts turns at its durable
+lead-time request. Finalizers drain tool/credential writers before releasing
+holders. Only the zero-holder reaper may adopt same-request in-flight capture,
+publish the exact workspace generation, then terminate the provider. SDK stream
+closure precedes rejected completion; EOF is not success. The worker awaits
+completion and routes rejection through `sandbox_deadline_rotation` before
+`turn.completed`.
 
 BrowserSession/ComputerSession holders remain durable despite old heartbeats.
 Before Modal expiry, checkpoint-capable managed browsers suspend through existing
@@ -1526,14 +1521,14 @@ image updates. Admission locks and checks provider identity; replacements and
 capture/rotation bypasses are forbidden. New work enforces the deployment image.
 See `docs/run-lifecycle.md` for rotation and capture ordering.
 
-Modal commands use authenticated task-router byte offsets owned by the retained
-process. Output and cursor commit atomically under an expected-cursor fence;
-losing readers reread without duplicating output or settling uncaptured tails.
-Router credentials remain in memory. Legacy batch readers only drain existing
-commands; their locators are never reinterpreted as offsets. The reaper drains
-progressing output within a bounded claim, since exit requires both streams at EOF.
-Lease readiness uses a fixed native probe with the same pre-dispatch guard;
-uncertain Starts observe their exact invocation within the existing readiness budget.
+Retained Modal commands own authenticated task-router byte offsets. Output/cursor
+commit atomically under expected-cursor fences; losing readers reread without
+duplicating output or settling uncaptured tails. Router credentials remain in
+memory. Legacy batch readers drain existing commands only, never reinterpret
+locators as offsets. The reaper drains progressing output within bounded claims;
+exit requires both streams' EOF. Fixed native lease-readiness probes share the
+pre-dispatch guard; uncertain Starts observe their exact invocation within the
+existing readiness budget.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
@@ -1545,9 +1540,9 @@ the exact Modal lease's rotation lead boundary, then reaper cadence; cancellatio
 capture and settlement proofs remain unchanged.
 
 Scheduled deadline rotation stops legacy commands where possible, then captures
-after bounded grace under a quiesced owner, exact lease fence, and no other
-holders or mutation admissions. Surviving commands settle lost after capture;
-supervised commands keep separate proof. Details:
+after bounded grace with a quiesced owner, exact lease fence and no other
+holders/mutation admissions. Survivors settle lost after capture; supervised
+commands retain separate proof. Details:
 `docs/design/modal-workspace-durability-2026-09-23.md`.
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
