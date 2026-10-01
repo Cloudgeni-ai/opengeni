@@ -482,6 +482,11 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Usage allowances: typed allowance refusal rendering in the session timeline
+    // plus usage event types in shared contracts, on top of main f874217f5
+    // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
+    // Keep the established 1.5 KiB allowance; other caps stay fixed.
+    wholeKibEnvelope(2_531_746, 1.5 * kib),
     // Launch sign-up attribution: memory-only first-touch capture at boot and
     // attributed sign-up/social request bodies in the shared API helper. Base
     // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /
@@ -585,6 +590,8 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Usage allowances on main f874217f5: 713,634 gzip (Linux/x64 CI).
+    wholeKibEnvelope(713_634, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
     // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
     // remain below their existing caps; retain the standard gzip variance allowance.
