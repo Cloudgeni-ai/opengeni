@@ -3,6 +3,7 @@
 CREATE INDEX CONCURRENTLY IF NOT EXISTS workspace_memberships_legacy_member_0555_idx
 ON workspace_memberships (id)
 WHERE role = 'member'
+  AND subject_id NOT LIKE 'external_user:%'
   AND (
     (permissions @> '[
         "workspace:read", "sessions:create", "sessions:read", "sessions:control",

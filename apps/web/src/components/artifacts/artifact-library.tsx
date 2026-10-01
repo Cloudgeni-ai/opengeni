@@ -612,8 +612,21 @@ export function ArtifactLibrary({
       ? "artifacts"
       : (artifactKinds.find(([kind]) => kind === filters.kind)?.[1] ?? "").toLocaleLowerCase();
 
+  // The flag comes from the viewer's loaded grant, which can be stale: once
+  // the catalog returns a Site or editable artifact, the server has decided.
+  const readsArtifactKinds = (kind: ArtifactKind) =>
+    kind === "site" || isEditableArtifactKind(kind);
   const hiddenKindSelected =
-    artifactKindsHidden && (filters.kind === "site" || isEditableArtifactKind(filters.kind));
+    artifactKindsHidden &&
+    filters.kind !== "all" &&
+    readsArtifactKinds(filters.kind) &&
+    !loading &&
+    items.length === 0;
+  const hiddenKindsNotice =
+    artifactKindsHidden &&
+    filters.kind === "all" &&
+    !(error && isPermissionDenied(error)) &&
+    !items.some((item) => readsArtifactKinds(item.kind));
 
   let body: ReactNode;
   if (hiddenKindSelected) {
@@ -781,7 +794,7 @@ export function ArtifactLibrary({
           </div>
         ) : null}
       </div>
-      {artifactKindsHidden && filters.kind === "all" && !(error && isPermissionDenied(error)) ? (
+      {hiddenKindsNotice ? (
         <Notice title="Sites and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
       ) : null}
       <div className="min-w-0">{body}</div>

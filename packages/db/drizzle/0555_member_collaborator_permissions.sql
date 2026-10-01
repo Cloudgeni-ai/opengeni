@@ -13,12 +13,25 @@
 -- Install the new named preset and a DB-boundary guard before the
 -- independently committed backfill. Old writers may overlap the rollout; only
 -- the exact pre-0516 or post-0516 named Member set is normalized, regardless
--- of JSONB array order. Custom and external permission sets are untouched.
+-- of JSONB array order. Custom sets are untouched, and so are external
+-- (`external_user:`) memberships: an organization service key stores them as
+-- role 'member' with a caller-chosen set that must never be widened here.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
 DO $member_collaborator_permissions$
 BEGIN
+  -- 0555 replaces the body of 0516's writer guard in place (below), so the
+  -- guard must still be installed exactly where 0516 put it.
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_trigger
+    WHERE tgrelid = 'workspace_memberships'::regclass
+      AND tgname = 'normalize_legacy_member_connection_read_0516'
+      AND tgfoid = 'opengeni_private.normalize_legacy_member_connection_read_0516()'::regprocedure
+      AND tgenabled = 'O'
+  ) THEN
+    RAISE EXCEPTION 'member writer guard changed before 0555';
+  END IF;
   -- Refuse to migrate a locally changed preset. The function below restates
   -- all three presets, so Viewer and Admin are guarded too.
   IF opengeni_private.workspace_member_role_permissions('viewer') IS DISTINCT FROM '[
@@ -113,10 +126,14 @@ AS $body$
 $body$;
 REVOKE ALL ON FUNCTION opengeni_private.workspace_member_legacy_permissions_0555() FROM PUBLIC;
 
--- One writer guard for every older named Member set. It replaces 0516's guard
--- (which would only lift a pre-0516 set to the now-stale post-0516 one) in
--- this same transaction, so no write observes the table without a guard.
-CREATE FUNCTION opengeni_private.normalize_legacy_member_permissions_0555()
+-- One writer guard for every older named Member set. Replacing the body of
+-- 0516's trigger function, rather than dropping and recreating the trigger,
+-- takes no lock on workspace_memberships, which every authorization reads.
+-- The new body is visible to every statement that starts after this commit,
+-- and the 0556 concurrent index build waits out any transaction still running
+-- the old one before the 0557 backfill begins. The function keeps its name,
+-- owner and EXECUTE ACL; the attributes restate 0516's exactly.
+CREATE OR REPLACE FUNCTION opengeni_private.normalize_legacy_member_connection_read_0516()
 RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog
@@ -126,6 +143,7 @@ DECLARE
   pre_0555 jsonb := opengeni_private.workspace_member_legacy_permissions_0555();
 BEGIN
   IF NEW.role = 'member'
+    AND NEW.subject_id NOT LIKE 'external_user:%'
     AND (
       (NEW.permissions @> pre_0516 AND pre_0516 @> NEW.permissions)
       OR (NEW.permissions @> pre_0555 AND pre_0555 @> NEW.permissions)
@@ -145,12 +163,3 @@ BEGIN
   RETURN NEW;
 END
 $body$;
-REVOKE ALL ON FUNCTION opengeni_private.normalize_legacy_member_permissions_0555() FROM PUBLIC;
-
-DROP TRIGGER normalize_legacy_member_connection_read_0516 ON workspace_memberships;
-DROP FUNCTION opengeni_private.normalize_legacy_member_connection_read_0516();
-
-CREATE TRIGGER normalize_legacy_member_permissions_0555
-  BEFORE INSERT OR UPDATE ON workspace_memberships
-  FOR EACH ROW
-  EXECUTE FUNCTION opengeni_private.normalize_legacy_member_permissions_0555();

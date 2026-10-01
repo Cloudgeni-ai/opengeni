@@ -1052,7 +1052,10 @@ attaching a machine for a session), terminal attach, sandbox file writes, and
 inline MCP servers stay Admin-only. Each such
 rollout normalizes only rows whose permissions exactly equal an older named
 Member set (any JSONB order), through a writer trigger for overlapping old
-binaries plus a batched backfill; custom sets are never rewritten.
+binaries plus a batched backfill; custom sets are never rewritten. Since 0555
+external (`external_user:`) memberships are excluded too: an organization
+service key stores them as role `member` with a caller-chosen permission set,
+which a preset change must not widen.
 Organization owners and administrators may create and rename shared
 workspaces, grant or replace access, and revoke access. Ordinary organization
 members, cross-organization membership ids, and every Personal workspace fail

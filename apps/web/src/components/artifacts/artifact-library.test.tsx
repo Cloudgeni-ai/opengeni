@@ -379,6 +379,21 @@ test("hidden Sites and documents are explained instead of reported as missing", 
       />
     ));
     expect(container.textContent).not.toContain(access);
+    // A stale grant never hides what the server returned.
+    const site: ArtifactCatalogItem = { ...file, id: "site", kind: "site", title: "Status board" };
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[site]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("Status board");
+    expect(container.textContent).not.toContain(access);
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} items={[file, site]} filters={defaultArtifactFilters} />
+    ));
+    expect(container.textContent).not.toContain("Sites and documents are hidden");
     // A viewer who can read artifacts sees no notice.
     await renderInRouter(root, () => (
       <ArtifactLibrary

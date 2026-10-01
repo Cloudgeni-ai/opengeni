@@ -1,15 +1,18 @@
 -- deployment-mode: rolling
 -- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
 -- Lift every row still holding an exact older named Member set (pre-0516 or
--- post-0516, in any JSONB order) to the 0555 named set. The partial index keeps
--- candidate discovery and the empty completion probe bounded. Each 500-row
--- batch commits independently. A contended candidate fails promptly instead of
--- being skipped and incorrectly recorded as done. workspace_memberships has no
--- row-level security, so the migration owner sees every candidate.
+-- post-0516, in any JSONB order) to the 0555 named set. External
+-- (`external_user:`) memberships keep their caller-chosen set. The partial
+-- index keeps candidate discovery and the empty completion probe bounded.
+-- Each 500-row batch commits independently. A contended candidate fails
+-- promptly instead of being skipped and incorrectly recorded as done.
+-- workspace_memberships has no row-level security, so the migration owner
+-- sees every candidate.
 WITH candidates AS MATERIALIZED (
   SELECT membership.id
   FROM workspace_memberships membership
   WHERE membership.role = 'member'
+    AND membership.subject_id NOT LIKE 'external_user:%'
     AND (
       (membership.permissions @> '[
           "workspace:read", "sessions:create", "sessions:read", "sessions:control",

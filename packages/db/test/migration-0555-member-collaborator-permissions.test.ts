@@ -76,13 +76,14 @@ test("migration guards every preset, replaces the 0516 writer guard, and batches
   expect(source).toContain("member permission preset changed before 0555");
   expect(source).toContain("viewer permission preset changed before 0555");
   expect(source).toContain("admin permission preset changed before 0555");
-  expect(source).toContain("BEFORE INSERT OR UPDATE ON workspace_memberships");
+  expect(source).toContain("member writer guard changed before 0555");
+  // The writer guard's body is replaced in place: no lock on the hot table.
   expect(source).toContain(
-    "DROP TRIGGER normalize_legacy_member_connection_read_0516 ON workspace_memberships",
+    "CREATE OR REPLACE FUNCTION opengeni_private.normalize_legacy_member_connection_read_0516()",
   );
-  expect(source).toContain(
-    "REVOKE ALL ON FUNCTION opengeni_private.normalize_legacy_member_permissions_0555() FROM PUBLIC",
-  );
+  expect(source).not.toMatch(/\b(DROP|CREATE) TRIGGER\b/u);
+  expect(source).not.toMatch(/\bALTER TABLE\b/u);
+  expect(source).toContain("NEW.subject_id NOT LIKE 'external_user:%'");
 
   const index = readFileSync(new URL(`../drizzle/${rollout[1]}`, import.meta.url), "utf8");
   expect(index.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -93,6 +94,8 @@ test("migration guards every preset, replaces the 0516 writer guard, and batches
   // The backfill matches exact named sets only: containment both ways.
   expect(backfill).toContain("membership.permissions @> '[");
   expect(backfill).toContain("]'::jsonb @> membership.permissions");
+  expect(backfill).toContain("membership.subject_id NOT LIKE 'external_user:%'");
+  expect(index).toContain("subject_id NOT LIKE 'external_user:%'");
 });
 
 test("named members gain collaborator reads; custom sets and old writers stay correct", async () => {
@@ -139,6 +142,13 @@ test("named members gain collaborator reads; custom sets and old writers stay co
     },
     { subject: "named-viewer", role: "viewer", permissions: viewer },
     { subject: "named-admin", role: "admin", permissions: admin },
+    // An organization service key stores external grants as role 'member'
+    // with a caller-chosen set; matching an older preset must not widen it.
+    {
+      subject: "external_user:00000000-0000-4000-8000-000000000555",
+      role: "member",
+      permissions: oldPreset,
+    },
   ];
   for (const fixture of fixtures) await insert(fixture.subject, fixture.role, fixture.permissions);
   // A pre-0516 named row that never met the 0516 backfill or writer guard.
@@ -172,7 +182,11 @@ test("named members gain collaborator reads; custom sets and old writers stay co
       p.prosecdef as "securityDefiner", p.provolatile::text as volatility,
       p.proconfig as configuration, p.proacl::text[] as acl
     from pg_proc p
-    where p.oid = 'opengeni_private.workspace_member_role_permissions(text)'::regprocedure`;
+    where p.oid in (
+      'opengeni_private.workspace_member_role_permissions(text)'::regprocedure,
+      'opengeni_private.normalize_legacy_member_connection_read_0516()'::regprocedure
+    )
+    order by p.proname`;
   const before = await functionFacts();
   await owner`delete from schema_migrations where name in ${owner([...rollout])}`;
   await migrate(owned.ownerUrl);
@@ -194,7 +208,9 @@ test("named members gain collaborator reads; custom sets and old writers stay co
     select tgname::text as name from pg_trigger
     where tgrelid = 'workspace_memberships'::regclass and not tgisinternal
     order by tgname`;
-  expect(triggers.map(({ name }) => name)).toEqual(["normalize_legacy_member_permissions_0555"]);
+  expect(triggers.map(({ name }) => name)).toEqual([
+    "normalize_legacy_member_connection_read_0516",
+  ]);
 
   const read = () =>
     owner!<
@@ -241,6 +257,13 @@ test("named members gain collaborator reads; custom sets and old writers stay co
   // Still-running old writers keep writing either older named Member set.
   await insert("old-writer-insert", "member", [...oldPreset].reverse());
   await insert("pre-0516-writer-insert", "member", pre0516);
+  const externalInsert = "external_user:00000000-0000-4000-8000-000000000556";
+  await insert(externalInsert, "member", pre0516);
+  await owner`
+    update workspace_memberships
+    set permissions = ${owner.json(pre0516)}::jsonb
+    where workspace_id = ${workspace!.id}
+      and subject_id = 'external_user:00000000-0000-4000-8000-000000000555'`;
   await owner`
     update workspace_memberships
     set permissions = ${owner.json(oldPreset)}::jsonb
@@ -266,6 +289,11 @@ test("named members gain collaborator reads; custom sets and old writers stay co
     expect(afterRow(subject).projectedRole).toBe("member");
   }
   expect(afterRow("custom-role").permissions).toEqual(oldPreset);
+  // External grants keep exactly what the service key asked for, both ways.
+  expect(afterRow(externalInsert).permissions).toEqual(pre0516);
+  expect(afterRow("external_user:00000000-0000-4000-8000-000000000555").permissions).toEqual(
+    pre0516,
+  );
   expect(afterRow("viewer-with-old-member-set").permissions).toEqual(oldPreset);
   expect(afterRow("custom-member").permissions).toEqual(["workspace:read"]);
 
