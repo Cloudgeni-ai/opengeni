@@ -70,8 +70,8 @@ async function claudeFailure(error: unknown, status?: number) {
         /* drain */
       }
     else await model.getResponse(request);
-  } catch (error) {
-    caught = error;
+  } catch (failure) {
+    caught = failure;
   }
   expect(requests).toBe(1);
   expect(caught).toBeDefined();
