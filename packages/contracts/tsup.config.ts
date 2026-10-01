@@ -4,15 +4,19 @@ import { defineConfig } from "tsup";
 // stay external so consumers can deduplicate their schema and hashing runtimes.
 export default defineConfig({
   entry: [
+    "src/allowance-refusal.ts",
+    "src/usage-allowances.ts",
     "src/mcp-endpoint.ts",
     "src/index.ts",
     "src/connect.ts",
+    "src/browser-storage.ts",
     "src/plugin-discovery.ts",
     "src/external-identities.ts",
     "src/host-mcp-bindings.ts",
     "src/atlassian.ts",
     "src/canonical-human-identities.ts",
     "src/client-error-report.ts",
+    "src/analytics-consent-report.ts",
     "src/connection-authority.ts",
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",
@@ -23,6 +27,7 @@ export default defineConfig({
     "src/managed-sign-in-methods.ts",
     "src/model-picker-order.ts",
     "src/code-search.ts",
+    "src/workspace-integration-wire.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",

@@ -119,6 +119,23 @@ export type SessionDraft = {
   firstPartyMcpTools: Set<FirstPartyMcpToolName>;
 };
 
+/**
+ * Label for the composer's empty Sandbox Environment choice. The empty choice
+ * sends no rigId, so the server binds the workspace default and the default
+ * Variable Sets it carries. Name that default so people can see what they
+ * would replace by picking another environment; say "None" when the
+ * workspace has no default, because the empty choice then means no
+ * environment at all.
+ */
+export function workspaceDefaultRigOptionLabel(
+  workspaceDefaultRigId: string | null | undefined,
+  rigs: readonly { id: string; name: string }[],
+): string {
+  if (!workspaceDefaultRigId) return "None";
+  const rig = rigs.find((candidate) => candidate.id === workspaceDefaultRigId);
+  return rig ? `Workspace default: ${rig.name}` : "Workspace default";
+}
+
 export function emptySessionDraft(
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
   defaultSandboxBackend?: SandboxBackend,

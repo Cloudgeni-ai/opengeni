@@ -159,7 +159,7 @@ const artifact = createRoute({
             params={{ workspaceId }}
             search={fromSession ? { fromSession } : {}}
           >
-            All artifacts
+            Artifacts
           </Link>
           <Preview />
         </div>

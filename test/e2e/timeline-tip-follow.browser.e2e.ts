@@ -232,7 +232,7 @@ describe("timeline tip-follow browser regression", () => {
       // Kick a settle glide, then wheel up mid-glide: the reader must win.
       await page.evaluate(() => window.tipFollowHarness!.lateGrow(200));
       await page.waitForTimeout(120);
-      const scroller = page.locator("[data-tip-follow] .og-root > div");
+      const scroller = page.locator("[data-tip-follow] [data-og-timeline-scroller]");
       await scroller.hover();
       await page.mouse.wheel(0, -240);
       await page.waitForTimeout(400);

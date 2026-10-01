@@ -126,7 +126,10 @@ const budgets = {
   // gzip bytes there: main 6eb431b03 measures 80,769 and the head 82,325 on
   // Bun 1.3.14 macOS/arm64. Keep the standard whole-KiB headroom.
   initialFileGzip: wholeKibEnvelope(82_325),
-  initialFiles: 17,
+  // Usage allowances add typed refusal rendering to the session timeline and
+  // usage event types to shared contracts; Rolldown splits one shared members
+  // chunk into two (807 gzip bytes). Aggregate initial gzip stays under its cap.
+  initialFiles: 18,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,
@@ -445,7 +448,16 @@ const budgets = {
   // Base 7135113e5 already measures 34,868 gzip bytes on macOS and Linux.
   // Clean main d08dbb6029 measures 35,388 gzip CSS bytes; merged Knowledge
   // measures 35,411 with the same Bun 1.4/macOS production configuration.
-  cssGzip: wholeKibEnvelope(35_411),
+  // The settings, admin and workspace pages rebuilt on shared design-system
+  // primitives add their utilities to the one app stylesheet: main 3dc46a830
+  // measures 36,831 gzip bytes and the merged rebuild 42,744 (Bun 1.4
+  // Linux/x64). The DEV-only UI kit has its own stylesheet and is excluded
+  // from this scan, so only product utilities remain.
+  // The neutral retheme (settings cards, menu anatomy, hover and glow tokens,
+  // resource-page frame) adds its utilities: main 6f4be148e measures 43,000
+  // gzip bytes and the merged retheme 44,100 (Bun 1.4 Linux/x64). Keep the
+  // next whole-KiB envelope; every other cap remains fixed.
+  cssGzip: wholeKibEnvelope(44_100),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -470,6 +482,11 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Usage allowances: typed allowance refusal rendering in the session timeline
+    // plus usage event types in shared contracts, on top of main f874217f5
+    // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
+    // Keep the established 1.5 KiB allowance; other caps stay fixed.
+    wholeKibEnvelope(2_531_746, 1.5 * kib),
     // Launch sign-up attribution: memory-only first-touch capture at boot and
     // attributed sign-up/social request bodies in the shared API helper. Base
     // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /
@@ -477,6 +494,12 @@ const effectiveBudgets = {
     // 1.5 KiB headroom; gzip, file-count, initial, per-file, lazy, and CSS caps
     // stay fixed.
     wholeKibEnvelope(2_455_310, 1.5 * kib),
+    // Layered base border-color/focus-radius rules (the focus selector is
+    // repeated inside @layer base) plus the settings truthfulness fixes: base
+    // 92cbe65c6 measures 2,456,501 raw / 693,335 gzip and this change
+    // 2,458,018 / 693,922 across the same 33 files (Bun 1.4.2 Linux/x64).
+    // Keep the established 1.5 KiB allowance; gzip and other caps stay fixed.
+    wholeKibEnvelope(2_458_018, 1.5 * kib),
     // Artifact link resolution and host message-presentation plumbing: 2,445,478
     // raw / 691,865 gzip on Bun 1.4 macOS/arm64. Media/PDF viewers remain lazy.
     wholeKibEnvelope(2_445_478, 1.5 * kib),
@@ -518,9 +541,57 @@ const effectiveBudgets = {
     // 693,801 gzip across 33 files locally. Keep the established 1.5 KiB
     // headroom; gzip, file-count and other caps stay fixed.
     wholeKibEnvelope(2_454_752, 1.5 * kib),
+    // Compact exchange timeline: each delegated question folds behind one
+    // live status row, with the exchange projection and presented-image facts
+    // shared by the session-only entry. Base 3fbd98bab measures 2,456,156 raw
+    // / 693,311 gzip across 33 files; the candidate 2,475,118 / 700,029 across
+    // 35 (Bun 1.3.14 macOS/arm64), and 2,475,114-2,475,118 raw / 700,026-700,042
+    // gzip in Linux/x64 Bun 1.4 CI. The +18,962 raw / +6,718 gzip delta is the
+    // timeline code itself; its two extra shared chunks stay under the file cap.
+    // Keep the established 1.5 KiB headroom; initial, per-file, lazy, and CSS
+    // caps stay fixed.
+    wholeKibEnvelope(2_475_118, 1.5 * kib),
+    // Result-bearing child completion adds the child final-answer schema to
+    // the shared contracts chunk (its copy helpers tree-shake out). Merged with
+    // main c4d0d1a1a the graph measures 2,477,442 raw bytes on Bun 1.3.14
+    // macOS/arm64 and Linux/x64 CI, 386 bytes over the previous envelope. Keep
+    // the established 1.5 KiB headroom; gzip and every other cap stay fixed.
+    wholeKibEnvelope(2_477_442, 1.5 * kib),
+    // Shared design-system rebuild of settings, admin and workspace pages
+    // (list rows, setting rows, detail/form pages, destructive confirms, line
+    // tabs, segmented controls). The pages stay lazy; what reaches this graph
+    // is the single app stylesheet, which gains the new primitives' utilities
+    // (+44,119 raw / +5,913 gzip CSS bytes; the DEV-only /dev/ui-kit is
+    // excluded from the production scan). Merged with main 3dc46a830 the graph
+    // measures 2,523,033 raw / 706,357 gzip bytes across 36 files on Bun 1.4
+    // Linux/x64 (main alone: 2,477,469 / 700,765). Keep the established
+    // 1.5 KiB headroom; initial, per-file and lazy caps stay fixed.
+    wholeKibEnvelope(2_523_033, 1.5 * kib),
+    // The Artifacts preview gallery and the settings rail add utilities to the
+    // same single stylesheet (+1,384 raw CSS bytes), and the new lazy routes'
+    // chunk names lengthen the eager preload maps. Their helpers stay out of the
+    // eager graph (lib/artifact-library-view). Measured 2,525,642 raw bytes on
+    // Bun 1.4 Linux/x64; keep the established 1.5 KiB headroom.
+    wholeKibEnvelope(2_525_642, 1.5 * kib),
+    // Scheduled-task attention: the Schedules rail item's dot polls the owner's
+    // failed-access list, so its hook and the attention/drift contracts join
+    // the always-loaded rail; the notices and refresh stay on the lazy
+    // Schedules pages. Main d1f472414 measures 2,526,574 raw / 705,254 gzip;
+    // merged, 2,527,533 / 705,435 across 36 files (Bun 1.3.14 macOS/arm64, which
+    // matched Linux/x64 CI to the byte for this graph today). Keep the
+    // established 1.5 KiB headroom; gzip and every other cap stay fixed.
+    wholeKibEnvelope(2_527_533, 1.5 * kib),
+    // Workspace webhook, credential provider, and sandbox image SDK methods on
+    // the shared client (the Developer settings page stays lazy). Merged with
+    // main 57f030caa the graph measures 2,529,339 raw / 705,801 gzip across 36
+    // files (Bun 1.4 Linux/x64). Keep the established 1.5 KiB headroom; gzip
+    // and every other cap stay fixed.
+    wholeKibEnvelope(2_529_339, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Usage allowances on main f874217f5: 713,634 gzip (Linux/x64 CI).
+    wholeKibEnvelope(713_634, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
     // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
     // remain below their existing caps; retain the standard gzip variance allowance.
@@ -577,6 +648,18 @@ const effectiveBudgets = {
     // macOS and 659,488 in Linux CI. Keep the existing minimum 1-KiB
     // headroom policy and round the envelope to whole KiB.
     wholeKibEnvelope(659_492),
+    // Same compact exchange timeline measurement documented in the raw bound
+    // above: the largest observed gzip graph is 700,042 bytes (Linux/x64 CI).
+    // Retain the established 1.5 KiB platform-skew allowance.
+    wholeKibEnvelope(700_042, 1.5 * kib),
+    // Same design-system stylesheet growth documented in the raw bound above.
+    wholeKibEnvelope(706_357, 1.5 * kib),
+    // Retiring the For you and Agents routes lowers the direct-session raw graph
+    // by 545 bytes (2,514,093), but the automatic shared-chunk split re-partitions
+    // around the smaller route set (34 -> 36 files, under the 39 cap) and gzip
+    // grows to 709,242 (+2,522; Bun 1.4 Linux/x64). Retain the established
+    // 1.5 KiB allowance; raw, initial, per-file, lazy, and CSS caps stay fixed.
+    wholeKibEnvelope(709_242, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

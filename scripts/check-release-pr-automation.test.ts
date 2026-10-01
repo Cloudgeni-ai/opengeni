@@ -4160,7 +4160,8 @@ describe("workflow contracts", () => {
             [
               "bun scripts/run-browser-e2e.ts \\",
               "  ./test/e2e/timeline-scroll.browser.e2e.ts \\",
-              "  ./test/e2e/timeline-tip-follow.browser.e2e.ts",
+              "  ./test/e2e/timeline-tip-follow.browser.e2e.ts \\",
+              "  ./test/e2e/timeline-exchange-fold.browser.e2e.ts",
             ].join("\n") + "\n",
         },
       ],

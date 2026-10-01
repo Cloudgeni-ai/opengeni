@@ -880,9 +880,9 @@ application database role list through
 0348; and never restart a pre-0348 image. The migration checks
 `pg_stat_activity` before and after its exclusive writer fence and aborts with
 SQLSTATE `55000` if a configured application login remains. The Personal-only
-product mutations are also API-contract fenced, and the web sends the exact
-release contract revision, so a stale client cannot cross the cutover after
-service resumes.
+product mutations are also API-contract fenced for cookie-authenticated browser
+sessions, and the web sends the exact release contract revision, so a stale tab
+cannot cross the cutover after service resumes.
 
 The canonical repository acceptance for this lifecycle is
 `test/e2e/organization-onboarding-acceptance.e2e.ts`. It composes the real
@@ -964,6 +964,23 @@ outcome-unknown delivery. A sole active owner's role/suspend/remove controls
 remain visible but disabled with the instruction to assign another active owner
 first. The setup screen renders the frozen invitation preview and states that
 no Personal workspace is shared.
+
+Organization usage (`GET /v1/billing/usage-summary`, Organization settings >
+Billing & usage) is the one place billing readers see Personal workspaces, and
+only as amounts. Period totals always counted Personal usage; migration 0543
+adds `personalWorkspaces`: one row per member whose Personal workspace had
+visible usage in the period, keyed by that member's organization membership
+id, carrying the same metric totals as a shared workspace row. The rows never
+carry the Personal workspace id, its name, a session, or any content, zero-use
+Personal workspaces are absent, and the list is the 50 that spent the most
+with `personalWorkspaceCount` saying how many had usage. The same actor-visible
+session rule as the totals applies, so another member's Only me chats do not
+count in a reader's view. The console names each row from the People roster the
+reader can already see, and a Personal row never links anywhere: seeing its
+cost grants no access to the workspace, its sessions or its Insights. The
+aggregate reads the canonical Personal pointers through the membership
+lifecycle read scope inside the existing SECURITY DEFINER function and restores
+the caller's scope before it reads any usage fact.
 
 Migration `0331_managed_organization_creation.sql` introduced the
 managed-cookie-only `POST /v1/organizations` factory with a provisional initial
@@ -1224,7 +1241,16 @@ subject and causal human from the standard context GUCs, writes a
 `variable_set.materialized` audit event with actor kind `session_attach` and
 the live session authority tuple from the exact locked session row, and an
 old image that sets no subject records the explicit `service:session`
-sentinel rather than nothing.
+sentinel rather than nothing. Since migration 0531 that lane selects from the
+same candidate sets as an agent turn of the same session: the session's own
+selection plus the defaults of its frozen Sandbox Environment version (never a
+later version's defaults). Its authorization stays its own and is not
+identical to the turn's: a personal set still needs the attaching human as
+owner with a live session or always `variable_set.use` grant (a turn instead
+uses its accepted attempt snapshot), and the session-status and workspace
+checks are unchanged. Any other set is a 42501 denial with its denial fact,
+which the terminal, Files, Git and viewer routes answer as a 403 rather than a
+500.
 
 Signed object-storage URLs are the remaining deliberately-bounded bearer
 surface: provider-native signing has no revocation, so revocation prevents

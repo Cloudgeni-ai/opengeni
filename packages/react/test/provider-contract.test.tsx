@@ -73,7 +73,7 @@ describe("OpenGeniProvider deployment contract", () => {
     await rendered.unmount();
   });
 
-  test("blocks stale embedded clients with explicit reload guidance before reconnect", async () => {
+  test("the stock console opt-in blocks stale clients with reload guidance before reconnect", async () => {
     const actual = "future-contract";
     sessionStorage.setItem(
       `opengeni.reloadForApiContract:${actual}`,
@@ -88,7 +88,7 @@ describe("OpenGeniProvider deployment contract", () => {
       },
     });
     const rendered = await renderComponent(
-      <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+      <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID} reloadOnApiContractChange>
         <div>stale child</div>
       </OpenGeniProvider>,
     );
@@ -98,12 +98,42 @@ describe("OpenGeniProvider deployment contract", () => {
       "[data-opengeni-api-contract-mismatch]",
     );
     expect(screen).not.toBeNull();
-    expect(screen?.textContent).toContain("OpenGeni updated");
+    expect(screen?.textContent).toContain("Opengeni updated");
     expect(screen?.textContent).toContain(`Client ${OPENGENI_API_CONTRACT_REVISION}`);
     expect(screen?.textContent).toContain(`API ${actual}`);
     expect(workspaceReads).toBe(0);
 
     await rendered.unmount();
     sessionStorage.removeItem(`opengeni.reloadForApiContract:${actual}`);
+  });
+
+  test("embedded hosts are never blocked or reloaded when OpenGeni changes its contract", async () => {
+    const actual = "future-contract-embedded";
+    let workspaceReads = 0;
+    const client = fakeClient({
+      getClientConfig: async () => ({ apiContractRevision: actual }) as never,
+      getWorkspace: async () => {
+        workspaceReads += 1;
+        return { inferenceControl: { revision: 0 } } as never;
+      },
+      streamWorkspaceLiveEvents: (_workspaceId, options) =>
+        (async function* () {
+          await new Promise<void>((resolve) =>
+            options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          yield* [];
+        })(),
+    });
+    const rendered = await renderComponent(
+      <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+        <div>host child</div>
+      </OpenGeniProvider>,
+    );
+    await flush(200);
+    expect(rendered.container.querySelector("[data-opengeni-api-contract-mismatch]")).toBeNull();
+    expect(sessionStorage.getItem(`opengeni.reloadForApiContract:${actual}`)).toBeNull();
+    expect(rendered.container.textContent).toContain("host child");
+    expect(workspaceReads).toBe(1);
+    await rendered.unmount();
   });
 });

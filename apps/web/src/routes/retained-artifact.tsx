@@ -1,20 +1,23 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider } from "@opengeni/react";
-import {
-  AlertTriangleIcon,
-  ArrowLeftIcon,
-  DownloadIcon,
-  FileIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { DownloadIcon, RefreshCwIcon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { RetainedFilePreview } from "@/components/artifacts/retained-file-preview";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Button } from "@/components/ui/button";
-import { CopyableMono, PageHeader } from "@/components/common";
+import { CopyableMono } from "@/components/common";
+import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
+import { Notice } from "@/components/ui/notice";
+import { RowButton } from "@/components/ui/page-actions";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  ARTIFACT_DETAIL_FRAME,
+  ArtifactKindTile,
+  useArtifactsBackLink,
+} from "@/components/artifacts/artifact-page-chrome";
+import { userErrorText } from "@/lib/api-error";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
 import { retainedArtifactLoadErrorPresentation } from "@/lib/retained-artifact-load-error";
 
@@ -61,6 +64,7 @@ function RetainedArtifactDetail({
   embedded: boolean;
 }) {
   const { client, accessKeyVersion } = useAppContext();
+  const back = useArtifactsBackLink(workspaceId, fromSession);
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
   const [state, setState] = useState<{
     key: string;
@@ -132,99 +136,139 @@ function RetainedArtifactDetail({
       if (generation === downloads.generation)
         saveRetainedArtifact(artifact, result.bytes, filename);
     } catch (error) {
-      if (generation === downloads.generation)
-        setDownloadError(error instanceof Error ? error.message : "Download failed. Try again.");
+      if (generation === downloads.generation) setDownloadError(userErrorText(error, "Try again."));
     } finally {
       if (generation === downloads.generation) setDownloading(false);
     }
   };
+  const header = artifact ? (
+    <DetailPageHeader
+      leading={
+        <ArtifactKindTile kind={artifact.contentType.startsWith("image/") ? "image" : "file"} />
+      }
+      title={filename}
+      meta={[
+        fileTypeLabel(artifact.contentType, loaded?.filename),
+        formatBytes(artifact.originalBytes),
+      ]}
+      actions={
+        <RowButton onClick={() => void download()} disabled={downloading}>
+          <DownloadIcon aria-hidden="true" />
+          {downloading
+            ? "Opening…"
+            : artifact.kind === "generated_video"
+              ? "Open video"
+              : "Download"}
+        </RowButton>
+      }
+    />
+  ) : null;
   return (
-    <ContentPage width="standard">
-      {!embedded ? (
-        <Link
-          to="/workspaces/$workspaceId/artifacts"
-          params={{ workspaceId }}
-          search={fromSession ? { fromSession } : {}}
-          className="mb-5 flex min-h-10 items-center gap-2 text-sm text-fg-muted hover:text-fg"
-        >
-          <ArrowLeftIcon className="size-4" />
-          All artifacts
-        </Link>
-      ) : null}
-      {!loaded ? <p role="status">Loading artifact…</p> : null}
-      {loaded?.error ? (
-        <RetainedArtifactLoadError
-          error={loaded.error}
-          onRetry={() => setRetry((value) => value + 1)}
-        />
-      ) : null}
-      {artifact ? (
-        <>
-          <PageHeader
-            icon={<FileIcon className="size-4" />}
-            title={filename}
-            description={artifact.contentType}
-            actions={
-              <Button variant="outline" onClick={() => void download()} disabled={downloading}>
-                <DownloadIcon className="mr-2 size-4" />
-                {downloading
-                  ? "Opening…"
-                  : artifact.kind === "generated_video"
-                    ? "Open video"
-                    : "Download"}
-              </Button>
-            }
-          />
-          {downloadError ? (
-            <p role="alert" className="mb-4 text-sm text-danger">
-              {downloadError}
+    <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
+      <DetailPage back={embedded ? undefined : back}>
+        {!loaded ? (
+          <>
+            <div className="flex items-start gap-4" aria-busy="true">
+              <Skeleton className="size-10 rounded-[10px]" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-6 w-64 max-w-full" />
+                <Skeleton className="h-4 w-40 max-w-full" />
+              </div>
+            </div>
+            <p role="status" className="sr-only">
+              Loading artifact…
             </p>
-          ) : null}
-          <div className="min-h-48 rounded-lg bg-surface-2 p-4">
-            <RetainedFilePreview
-              workspaceId={workspaceId}
-              artifact={artifact}
-              title={filename}
-              filename={loaded?.filename}
-              workbenchTextPreview={embedded}
-              fullSizeImage
-            />
-          </div>
-        </>
-      ) : null}
+          </>
+        ) : null}
+        {loaded?.error ? (
+          <RetainedArtifactLoadError
+            error={loaded.error}
+            onRetry={() => setRetry((value) => value + 1)}
+          />
+        ) : null}
+        {artifact ? (
+          <>
+            {header}
+            {downloadError ? (
+              <Notice
+                tone="failed"
+                live="assertive"
+                className="mt-6"
+                title={
+                  artifact.kind === "generated_video"
+                    ? "Couldn't open the video"
+                    : "Couldn't download the file"
+                }
+              >
+                {downloadError}
+              </Notice>
+            ) : null}
+            <div className="mt-6 min-h-48 min-w-0 rounded-[14px] bg-surface-2 p-4 max-sm:p-2">
+              <RetainedFilePreview
+                workspaceId={workspaceId}
+                artifact={artifact}
+                title={filename}
+                filename={loaded?.filename}
+                workbenchTextPreview={embedded}
+                fullSizeImage
+              />
+            </div>
+          </>
+        ) : null}
+      </DetailPage>
     </ContentPage>
   );
+}
+
+/** "PNG", "PDF", "CSV": the file's type as a person names it, never a MIME string. */
+function fileTypeLabel(contentType: string, filename?: string): string {
+  const extension = filename?.match(/\.([A-Za-z0-9]{1,5})$/)?.[1];
+  const subtype = contentType.split(";")[0]?.split("/")[1] ?? "";
+  const word = extension ?? (/^[a-z0-9]{1,5}$/i.test(subtype) ? subtype : "");
+  const kind = contentType.startsWith("image/")
+    ? "image"
+    : contentType.startsWith("video/")
+      ? "video"
+      : "file";
+  return word
+    ? `${word.toUpperCase()} ${kind}`
+    : kind === "file"
+      ? "File"
+      : kind === "image"
+        ? "Image"
+        : "Video";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function RetainedArtifactLoadError({ error, onRetry }: { error: Error; onRetry: () => void }) {
   const presentation = retainedArtifactLoadErrorPresentation(error);
   return (
-    <div
-      role="alert"
-      aria-live="assertive"
-      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+    <Notice
+      tone="failed"
+      live="assertive"
+      title={presentation.title}
+      actionLayout="responsive"
+      action={
+        presentation.retryable ? (
+          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+            <RefreshCwIcon aria-hidden="true" />
+            Retry
+          </Button>
+        ) : undefined
+      }
     >
-      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium">{presentation.title}</div>
-        <p className="mt-0.5 text-xs leading-4 text-fg-muted">{presentation.description}</p>
-        {presentation.supportReference ? (
-          <div className="mt-2 min-w-0">
-            <div className="text-xs text-fg-subtle">Support reference</div>
-            <CopyableMono value={presentation.supportReference} />
-          </div>
-        ) : null}
-      </div>
-      {presentation.retryable ? (
-        <button
-          type="button"
-          onClick={onRetry}
-          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
-        >
-          <RefreshCwIcon className="size-3" />
-          Retry
-        </button>
+      <p>{presentation.description}</p>
+      {presentation.supportReference ? (
+        <div className="mt-2 min-w-0">
+          <div className="text-xs text-fg-subtle">Support reference</div>
+          <CopyableMono value={presentation.supportReference} />
+        </div>
       ) : null}
-    </div>
+    </Notice>
   );
 }

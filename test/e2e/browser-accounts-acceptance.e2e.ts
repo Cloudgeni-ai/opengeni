@@ -54,12 +54,13 @@ import {
   sanitizeRaceRequest,
   sanitizeRaceResult,
 } from "./browser-account-race-diagnostics";
+import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -442,6 +443,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       (pathname === "/v1/auth/get-session" ||
         pathname === "/v1/auth/session-set" ||
         pathname === "/v1/workspaces" ||
+        pathname === "/v1/organization-invitations" ||
         (pathname === "/v1/billing" &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
             requestUrl.searchParams.get("accountId") ?? "",
@@ -1648,32 +1650,6 @@ function logoutAllActorFenceResponseProblem(
     : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
 }
 
-function exactLogoutAllSessionListSearch(search: string): boolean {
-  // Retain the pre-page API shape during a rolling upgrade. The current rail
-  // owns exactly three finite session pages: active roots, archived roots, and
-  // the complete pins projection. Reject cursors, searches, duplicate keys,
-  // and every other query rather than treating any session-list 401 as benign.
-  if (search === "") return true;
-  const params = new URLSearchParams(search);
-  const keys = [...params.keys()];
-  if (new Set(keys).size !== keys.length) return false;
-  const exactSingleton = (name: string, value: string): boolean => {
-    const values = params.getAll(name);
-    return values.length === 1 && values[0] === value;
-  };
-  if (!exactSingleton("view", "page")) return false;
-  const isActiveRoots =
-    keys.length === 3 && exactSingleton("limit", "50") && exactSingleton("parentSessionId", "null");
-  const isArchivedRoots =
-    keys.length === 4 &&
-    exactSingleton("limit", "50") &&
-    exactSingleton("parentSessionId", "null") &&
-    exactSingleton("archivedOnly", "true");
-  const isPins =
-    keys.length === 3 && exactSingleton("limit", "1") && exactSingleton("pinsOnly", "true");
-  return isActiveRoots || isArchivedRoots || isPins;
-}
-
 function exactBoundedWorkspaceLiveStreamSearch(search: string): boolean {
   const params = new URLSearchParams(search);
   const exactSingleton = (name: string, value: string): boolean => {
@@ -1989,7 +1965,7 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
 
 async function signIn(page: Page, account: AccountFixture): Promise<void> {
   await page.goto(publicOrigin, { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor();
+  await page.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor();
   await page.evaluate(() => {
     const debugWindow = window as Window & {
       __accountAcceptanceMessages?: Array<{
@@ -3130,6 +3106,21 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const invitationRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/organization-invitations?limit=100`,
+    };
+    expect(requestFailureProblem(invitationRead)).toBeNull();
+    for (const changed of [
+      { actorEpoch: null },
+      { dispatchPhase: "initialization", responsePhase: "initialization" },
+      { failure: "net::ERR_CONNECTION_RESET" },
+      { method: "POST" },
+      { url: `${publicOrigin}/v1/organization-invitations/invitation/accept` },
+      { url: `${publicOrigin}/v1/organization-invitations-other` },
+    ]) {
+      expect(requestFailureProblem({ ...invitationRead, ...changed })).not.toBeNull();
+    }
     const billingRead = {
       ...oldActorRead,
       url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
@@ -4999,7 +4990,7 @@ describe("provider-neutral browser account acceptance", () => {
       await page.getByRole("heading", { name: "Sign out all browser accounts?" }).waitFor();
       await page.getByRole("button", { name: "Sign out all", exact: true }).click();
       try {
-        await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
+        await page.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor({
           timeout: 30_000,
         });
       } catch (error) {
@@ -5055,7 +5046,7 @@ describe("provider-neutral browser account acceptance", () => {
       )?.value;
       expect(authorityAfterLogoutAll).toHaveLength(43);
       expect(authorityAfterLogoutAll).not.toBe(authorityBeforeLogoutAll);
-      await secondTab.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
+      await secondTab.getByRole("heading", { name: "Sign in to Opengeni" }).waitFor({
         timeout: 30_000,
       });
       const signedOutSecondTabProjection = await sessionSet(secondTab);

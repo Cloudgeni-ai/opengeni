@@ -820,9 +820,9 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         ["artifacts:read"],
         `/v1/workspaces/${grant.workspaceId}/published-artifacts?sourceSessionId=${inaccessible.sessionId}`,
       );
-      // Legacy local authorization can admit the metadata query, but tenant
-      // filtering must still return no artifact from the other workspace.
-      expect(WorkspaceArtifactListResponse.parse(await deniedList.json()).artifacts).toEqual([]);
+      // A session outside this workspace is invisible, so the provenance
+      // filter refuses it exactly like a missing session.
+      expect(deniedList.status).toBe(404);
       const invalidList = await request(
         grant,
         ["artifacts:read"],

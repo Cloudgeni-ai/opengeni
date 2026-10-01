@@ -1,5 +1,49 @@
 # @opengeni/artifact-tool
 
+## 0.3.35
+
+### Patch Changes
+
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+
+## 0.3.34
+
+### Patch Changes
+
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+
 ## 0.3.33
 
 ### Patch Changes

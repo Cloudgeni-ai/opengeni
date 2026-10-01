@@ -66,6 +66,7 @@ export class CdpConnection {
   private readonly listeners = new Map<string, Set<EventListener>>();
   private messageTail: Promise<void> = Promise.resolve();
   private failure: CdpTransportError | null = null;
+  private readonly disconnectListeners = new Set<() => void>();
 
   private constructor(private readonly socket: WebSocket) {
     socket.binaryType = "arraybuffer";
@@ -234,6 +235,17 @@ export class CdpConnection {
     });
   }
 
+  onDisconnect(listener: () => void): () => void {
+    if (this.failure) {
+      listener();
+      return () => undefined;
+    }
+    this.disconnectListeners.add(listener);
+    return () => {
+      this.disconnectListeners.delete(listener);
+    };
+  }
+
   close(): void {
     if (
       this.socket.readyState === WebSocket.OPEN ||
@@ -312,6 +324,14 @@ export class CdpConnection {
       pending.reject(error);
     }
     this.listeners.clear();
+    for (const listener of this.disconnectListeners) {
+      try {
+        listener();
+      } catch {
+        /* failure notification must not strand pending commands */
+      }
+    }
+    this.disconnectListeners.clear();
   }
 }
 

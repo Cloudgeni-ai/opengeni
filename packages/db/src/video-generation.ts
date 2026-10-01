@@ -15,6 +15,8 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { checkWorkspaceAllowance } from "./usage-allowances";
+import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
 
 export const ACTIVE_VIDEO_GENERATION_STATUSES = [
   "preparing",
@@ -1362,7 +1364,23 @@ async function debitVideoGenerationCredits(
   if (operation.pricedCostMicros <= 0 || operation.fundingSource !== "opengeni_credits") {
     throw new Error("Managed video credit debit has an invalid funding binding");
   }
+  if (!operation.turnId) {
+    throw new VideoGenerationCreditError("Paid video initiating turn is unavailable");
+  }
+  // Model settlement locks the account before the ledger trigger's workspace
+  // allowance fence. Preserve that order during prepaid media admission.
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  const attribution = await creditDebitAttributionForTurn(tx, {
+    accountId: operation.accountId,
+    workspaceId: operation.workspaceId,
+    turnId: operation.turnId,
+  });
+  const refusal = await checkWorkspaceAllowance(tx, {
+    accountId: operation.accountId,
+    workspaceId: operation.workspaceId,
+    subjectId: attribution.kind === "turn" ? attribution.initiatingHumanSubjectId : null,
+  });
+  if (refusal) throw Object.assign(new VideoGenerationCreditError(refusal.message), refusal);
   const [balanceRow] = await tx
     .select({
       balanceMicros: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
@@ -1385,6 +1403,7 @@ async function debitVideoGenerationCredits(
       sourceId: operation.id,
       idempotencyKey: `credit:video_generation_debit:${operation.id}`,
       metadata: {
+        turnId: operation.turnId,
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
@@ -1436,6 +1455,7 @@ async function refundVideoGenerationCredits(
       sourceId: operation.id,
       idempotencyKey: `credit:video_generation_refund:${operation.id}`,
       metadata: {
+        turnId: operation.turnId,
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,

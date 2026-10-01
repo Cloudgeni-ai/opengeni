@@ -53,6 +53,12 @@ export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
+export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
+  "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
+  "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
+] as const;
+const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+export const SLACK_FILE_UPLOAD_OPERATIONS_TABLE = "slack_file_upload_operations";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
@@ -230,6 +236,10 @@ const ORGANIZATION_PRIVATE_SESSION_ROUTINES = Object.keys(
   ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES,
 );
 const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sessions_enabled(uuid)";
+/** Operator-only audited setter for the trial-credit kill switch (migration 0521). */
+const VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE =
+  "set_verified_signup_trial_credits_enabled(boolean, text, text)";
+const VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE = "verified_signup_trial_switch_revisions";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -623,6 +633,9 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "maintain_usage_allowances(integer, integer)",
+  "usage_allowance_command(jsonb)",
+  "usage_allowance_capability_active(uuid, uuid)",
   ...UNIFIED_KNOWLEDGE_ROUTINES,
   MCP_OPERATION_CAPABILITY_ROUTINE,
   "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
@@ -680,6 +693,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
  */
 export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
+  "usage_allowance_capability_active(uuid, uuid)",
 ] as const;
 const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
@@ -687,16 +701,32 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "usage_allowance_members(uuid, uuid)",
+  "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
+  "count_workspace_allowance_debit()",
+  "capture_usage_allowance_attribution()",
+  "reverse_video_allowance_refund()",
+  "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
+  "emit_usage_allowance_notifications(uuid, uuid, jsonb, text, timestamp with time zone, text)",
+  "usage_allowance_period(jsonb, timestamp with time zone)",
+  "validate_usage_allowance_config(jsonb)",
+  "validate_usage_allowance_rule(jsonb)",
+  "guard_slack_file_upload_operation()",
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
+  VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "usage_allowance_period(jsonb, timestamp with time zone)",
+  "validate_usage_allowance_config(jsonb)",
+  "validate_usage_allowance_rule(jsonb)",
+  "guard_slack_file_upload_operation()",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
@@ -901,6 +931,7 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_credential_providers",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
@@ -935,6 +966,8 @@ export const FORCE_RLS_TABLES = [
   "organization_user_setup_deliveries",
   "organization_user_setup_delivery_attempts",
   "organization_user_setup_intents",
+  "organization_webhook_deliveries",
+  "organization_webhooks",
   "organization_workspace_lifecycle_events",
   "organization_workspace_operation_receipts",
   "personal_document_once_consumption_receipts",
@@ -1072,6 +1105,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_captures",
   "workspace_codex_subscription_preferences",
   "workspace_control_events",
+  "workspace_credential_providers",
   "workspace_gateway_custom_models",
   "workspace_inference_controls",
   "workspace_instruction_policy_activation_events",
@@ -1092,6 +1126,8 @@ export const FORCE_RLS_TABLES = [
   "workspace_variable_sets",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
+  "workspace_webhook_deliveries",
+  "workspace_webhooks",
   "xai_capacity_waiters",
   "xai_credential_leases",
   "xai_rotation_settings",
@@ -1211,9 +1247,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "model_call_facts",
   "new_session_drafts",
   "organization_codex_rotation_settings",
+  "organization_credential_providers",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_webhook_deliveries",
+  "organization_webhooks",
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
@@ -1282,6 +1321,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_captures",
   "workspace_codex_subscription_preferences",
   "workspace_control_events",
+  "workspace_credential_providers",
   "workspace_gateway_custom_models",
   "workspace_inference_controls",
   "workspace_instruction_policy_heads",
@@ -1290,6 +1330,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_screenshot_quotas",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
+  "workspace_webhook_deliveries",
+  "workspace_webhooks",
   "workspaces",
   "xai_capacity_waiters",
   "xai_credential_leases",
@@ -1667,6 +1709,9 @@ export type RuntimePrivateTablePosture = {
   insert: boolean;
   update: boolean;
   delete: boolean;
+  truncate?: boolean;
+  references?: boolean;
+  trigger?: boolean;
 };
 
 export type RuntimeDatabasePosture = {
@@ -1968,6 +2013,9 @@ export async function inspectRuntimeDatabasePosture(
         can_insert: boolean;
         can_update: boolean;
         can_delete: boolean;
+        can_truncate: boolean;
+        can_references: boolean;
+        can_trigger: boolean;
       }>(
         await tx.execute(sql`
           select
@@ -1980,15 +2028,22 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on the inventory stamp are also unsafe; in
             -- particular INSERT can mint authority without a table grant.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              (c.relname = 'modal_inventory_read_capabilities' and
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              (c.relname = 'modal_inventory_read_capabilities' and
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              (c.relname = 'modal_inventory_read_capabilities' and
+              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities') or
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
-            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
+            has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
+            has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
+            (has_table_privilege(current_user, c.oid, 'REFERENCES') or
+              has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
+            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'opengeni_private'
@@ -2002,11 +2057,24 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
+              'usage_allowance_capabilities',
+              'workspace_usage_allowances',
+              'workspace_member_allowances',
+              'workspace_allowance_grants',
+              'workspace_allowance_counters',
+              'workspace_allowance_periods',
+              'workspace_allowance_notifications',
+              'usage_allowance_attribution_receipts',
+              'workspace_video_allowance_allocations',
+              'workspace_allowance_clear_receipts',
               'session_file_attachments',
               'session_file_read_capabilities',
               'modal_inventory_read_capabilities',
-              ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
+              ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
+              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE}
             )
         `),
       ).map((row) => ({
@@ -2020,6 +2088,9 @@ export async function inspectRuntimeDatabasePosture(
         insert: row.can_insert,
         update: row.can_update,
         delete: row.can_delete,
+        truncate: row.can_truncate,
+        references: row.can_references,
+        trigger: row.can_trigger,
       }));
 
       const targetRoutines = resultRows<{
@@ -2118,6 +2189,19 @@ export async function inspectRuntimeDatabasePosture(
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
 }
+
+/** Additive private inventory; absent from older binaries' exact data tables. */
+export const RUNTIME_ALLOWANCE_PRIVATE_TABLES = [
+  "workspace_usage_allowances",
+  "workspace_member_allowances",
+  "workspace_allowance_grants",
+  "workspace_allowance_counters",
+  "workspace_allowance_periods",
+  "workspace_allowance_notifications",
+  "usage_allowance_attribution_receipts",
+  "workspace_video_allowance_allocations",
+  "workspace_allowance_clear_receipts",
+] as const;
 
 /** Pure deterministic evaluator used by startup/readiness and unit tests. */
 export function evaluateRuntimeDatabasePosture(
@@ -2337,9 +2421,10 @@ export function evaluateRuntimeDatabasePosture(
       continue;
     }
     const routine = matches[0]!;
-    if (!routine.securityDefiner) {
+    const invoker = RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET.has(routine.name);
+    if (routine.securityDefiner === invoker) {
       violations.push(
-        `owner-internal target-schema helper ${routine.name} is not SECURITY DEFINER`,
+        `owner-internal target-schema helper ${routine.name} is not SECURITY ${invoker ? "INVOKER" : "DEFINER"}`,
       );
     }
     const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
@@ -2374,6 +2459,24 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
     if (
+      routine.name.startsWith("usage_allowance_") ||
+      routine.name === "maintain_usage_allowances(integer, integer)"
+    ) {
+      const owners = new Set(
+        RUNTIME_ALLOWANCE_PRIVATE_TABLES.map(
+          (name) => posture.privateTables.find((table) => table.name === name)?.owner,
+        ),
+      );
+      if (
+        (!options.protectedTables ||
+          posture.privateTables.some((table) => table.name === "usage_allowance_capabilities")) &&
+        (owners.size !== 1 || owners.has(undefined) || !owners.has(routine.owner))
+      ) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} allowance authority owners do not match`,
+        );
+      }
+    } else if (
       routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
       routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
     ) {
@@ -3540,6 +3643,23 @@ export function evaluateRuntimeDatabasePosture(
     violations.push("opengeni_private has no helper routines");
   }
 
+  // The trial-credit kill switch is operator state. Runtime roles may read it
+  // for the gauge (SELECT is optional) but must never append or rewrite it.
+  const trialSwitchTable = posture.privateTables.find(
+    (table) => table.name === VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
+  );
+  if (
+    trialSwitchTable &&
+    (trialSwitchTable.owner === expectedRole ||
+      trialSwitchTable.insert ||
+      trialSwitchTable.update ||
+      trialSwitchTable.delete)
+  ) {
+    violations.push(
+      "runtime role has forbidden write authority on the verified signup trial switch",
+    );
+  }
+
   const connectionBackfillCapabilityTables = posture.privateTables.filter(
     (table) => table.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
   );
@@ -3638,6 +3758,74 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const slackFileUploadTables = posture.privateTables.filter(
+    (table) => table.name === SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
+  );
+  if (slackFileUploadTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("Slack file upload private relation is missing or ambiguous");
+  } else {
+    const table = slackFileUploadTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("Slack file upload relation lacks active FORCE-RLS session isolation");
+    }
+    if (
+      !table.select ||
+      !table.insert ||
+      !table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has unsafe Slack file upload ledger privileges");
+    }
+    const sessionOwner = tableByName.get("sessions")?.owner;
+    if (sessionOwner && table.owner !== sessionOwner)
+      violations.push("Slack file upload owner does not match session authority");
+  }
+
+  const scheduledSlackMessageTables = posture.privateTables.filter(
+    (table) => table.name === SCHEDULED_SLACK_BOT_MESSAGES_TABLE,
+  );
+  if (scheduledSlackMessageTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("scheduled Slack bot message private relation is missing or ambiguous");
+  } else {
+    const table = scheduledSlackMessageTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1) {
+      violations.push("scheduled Slack bot message relation lacks active FORCE-RLS isolation");
+    }
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.owner === expectedRole
+    ) {
+      violations.push("runtime role has forbidden direct scheduled Slack bot message authority");
+    }
+    const postLedgerOwner = tableByName.get("slack_bot_post_operations")?.owner;
+    if (postLedgerOwner && table.owner !== postLedgerOwner)
+      violations.push("scheduled Slack bot message owner does not match Slack post authority");
+    for (const name of SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+      ]);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      ) {
+        violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
+      }
+    }
+  }
+
   for (const name of ["session_file_attachments", "session_file_read_capabilities"]) {
     const table = posture.privateTables.find((candidate) => candidate.name === name);
     if (!table) {
@@ -3691,6 +3879,58 @@ export function evaluateRuntimeDatabasePosture(
   const organizationUsageCapability = posture.privateTables.find(
     (table) => table.name === "organization_usage_read_capabilities",
   );
+  const usageAllowanceCapability = posture.privateTables.find(
+    (table) => table.name === "usage_allowance_capabilities",
+  );
+  if (!options.protectedTables || usageAllowanceCapability) {
+    const authorityOwner = tableByName.get("workspaces")?.owner;
+    for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner === expectedRole ||
+        table.owner !== authorityOwner ||
+        !table.rlsEnabled ||
+        !table.rlsForced ||
+        !table.rlsActive ||
+        (table.policyCount ?? 0) < 1 ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`usage allowance private table ${name} is missing or unsafe`);
+      }
+    }
+  }
+  if (
+    usageAllowanceCapability &&
+    (usageAllowanceCapability.owner === expectedRole ||
+      usageAllowanceCapability.owner !==
+        posture.privateTables.find((table) => table.name === "workspace_usage_allowances")?.owner ||
+      usageAllowanceCapability.select ||
+      usageAllowanceCapability.insert ||
+      usageAllowanceCapability.update ||
+      usageAllowanceCapability.delete)
+  ) {
+    violations.push("usage allowance capability has unsafe owner or direct runtime privileges");
+  }
+  const allowanceAttribution = posture.privateTables.find(
+    (table) => table.name === "usage_allowance_attribution_receipts",
+  );
+  if (
+    allowanceAttribution &&
+    (allowanceAttribution.owner !==
+      posture.privateTables.find((table) => table.name === "workspace_usage_allowances")?.owner ||
+      !allowanceAttribution.rlsEnabled ||
+      !allowanceAttribution.rlsForced ||
+      !allowanceAttribution.rlsActive)
+  ) {
+    violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
+  }
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );
@@ -3713,6 +3953,19 @@ export function evaluateRuntimeDatabasePosture(
       !inventory.configuration?.includes("search_path=pg_catalog")
     ) {
       violations.push("Modal inventory capability has unsafe owner, ACL or runtime privileges");
+    }
+    const createInventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_pending_modal_provider_creates()",
+    );
+    if (
+      createInventory &&
+      (!createInventory.execute ||
+        createInventory.publicExecute ||
+        !createInventory.securityDefiner ||
+        createInventory.owner !== capability.owner ||
+        !createInventory.configuration?.includes("search_path=pg_catalog"))
+    ) {
+      violations.push("Modal create inventory has unsafe owner, ACL or runtime privileges");
     }
   }
   if (organizationUsageCapability) {
@@ -3745,9 +3998,69 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const integrationRoutine = [
+    [
+      "resolve_organization_credential_provider_v1(uuid, uuid)",
+      "organization_credential_providers",
+      true,
+    ],
+    [
+      "resolve_integration_initiating_human_v1(uuid, uuid, text, uuid)",
+      "external_identities",
+      true,
+    ],
+    [
+      "integration_webhook_payload_v1(uuid, uuid, uuid, text, uuid, uuid, bigint, timestamp with time zone, jsonb, text)",
+      "session_turns",
+      false,
+    ],
+    ["enqueue_organization_webhook_deliveries_v1()", "organization_webhook_deliveries", true],
+    [
+      "claim_organization_webhook_deliveries_v1(uuid, integer, integer)",
+      "organization_webhook_deliveries",
+      true,
+    ],
+    [
+      "settle_organization_webhook_delivery_v1(uuid, uuid, integer, text, integer)",
+      "organization_webhook_deliveries",
+      true,
+    ],
+    [
+      "prune_organization_webhook_deliveries_v1(integer, integer)",
+      "organization_webhook_deliveries",
+      true,
+    ],
+  ] as const;
+  const quotedIntegrationSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+  const integrationSearchPaths = [
+    `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
+    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
+  ];
+  if (tableByName.has("organization_credential_providers")) {
+    for (const [name] of integrationRoutine) {
+      if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
+        violations.push(`integration routine ${name} is missing or ambiguous`);
+      }
+    }
+  }
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
+    }
+    const integrationContract = integrationRoutine.find(([name]) => name === routine.name);
+    if (integrationContract) {
+      const [, tableName, definer] = integrationContract;
+      if (
+        routine.publicExecute ||
+        !routine.execute ||
+        routine.securityDefiner !== definer ||
+        routine.owner !== tableByName.get(tableName)?.owner ||
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value))
+      ) {
+        violations.push(
+          `integration routine ${routine.name} has unsafe execution, ownership or search path`,
+        );
+      }
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (

@@ -1,4 +1,10 @@
 import { useState } from "react";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
 import { SiteSessionGroupHeading } from "../src/components/rail/site-session-group-heading";
 import { SiteOriginLink } from "../src/components/session/site-origin-link";
@@ -82,4 +88,9 @@ function Fixture() {
     </main>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+// Site and conversation links are router links, so the fixture needs a router.
+const router = createRouter({
+  routeTree: createRootRoute({ component: Fixture }),
+  history: createMemoryHistory({ initialEntries: ["/"] }),
+});
+createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);

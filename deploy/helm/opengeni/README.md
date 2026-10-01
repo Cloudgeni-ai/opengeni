@@ -1,4 +1,4 @@
-# OpenGeni chart volume hooks
+# OpenGeni chart workload configuration hooks
 
 ## Release identity
 
@@ -18,6 +18,30 @@ namespace. For a Service such as `opengeni-api-metrics` that yields
 `OPENGENI_API_METRICS_PORT`, which collides with an OpenGeni setting and fails
 settings parsing at startup in any pod that does not set it explicitly. Pods
 reach services through DNS.
+
+## Workload-local environment
+
+`api.extraEnv` and `worker.extraEnv` accept Kubernetes EnvVar lists and default to
+`[]`. API entries affect only its container; worker entries affect both control
+and turn containers. Neither list changes the shared ConfigMap or runtime Secret,
+so web, artifact roles, migration and catalog-import Jobs do not inherit them.
+This matters for settings such as `NODE_EXTRA_CA_CERTS`, whose file must exist
+only in the containers with the corresponding volume mount.
+
+```yaml
+api:
+  extraEnv:
+    - name: NODE_EXTRA_CA_CERTS
+      value: /etc/telemetry/tls/ca.crt
+```
+
+Use these with the volume hooks below; the environment list alone does not mount
+or create a certificate. Repeat the settings and mounts under `worker` when
+needed. Native `valueFrom` references are supported; keep credentials in Secrets,
+not literal values. Values are YAML, not evaluated as templates. Malformed or
+duplicate entries, release-identity/role/listener overrides and overrides of
+active chart-generated service settings fail rendering. Other workload-specific
+variables follow Kubernetes' normal explicit-env precedence over `envFrom`.
 
 ## Volumes
 
@@ -68,6 +92,7 @@ Render and test locally with Helm on `PATH`:
 ```sh
 helm template opengeni deploy/helm/opengeni -f my-values.yaml
 bun test ./deploy/helm/opengeni/test/extra-volumes.test.ts
+bun test ./deploy/helm/opengeni/test/extra-env.test.ts
 ```
 
 The render cases skip explicitly if Helm is absent. CI runs every

@@ -213,7 +213,7 @@ describe("get.<domain> install routes", () => {
 
 // The "agent ships inside the control-plane" path: when THIS image bakes a binary
 // into agent/install/baked/, the /agent/* routes serve it directly (200) instead of
-// 302-redirecting — for BOTH `latest` and a pinned `v<ver>` — with the binary as an
+// 302-redirecting for `latest`, with the binary as an
 // octet-stream and the .sha256/.minisig sidecars as text. We stage a throwaway
 // fixture so the test is hermetic and never depends on a real build artifact.
 describe("get.<domain> install routes — baked binary serving", () => {
@@ -238,11 +238,24 @@ describe("get.<domain> install routes — baked binary serving", () => {
     expect(await res.text()).toBe("BAKED-BINARY-BYTES");
   });
 
-  test("GET /agent/v<ver>/<baked-asset> serves the baked binary too (per-SHA image is the source)", async () => {
-    const res = await appFor(testSettings()).request(`/agent/v9.9.9/${BAKED_FIXTURE}`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
-    expect(await res.text()).toBe("BAKED-BINARY-BYTES");
+  test("pinned binaries and sidecars use the requested archive release despite baked assets", async () => {
+    const app = appFor(
+      testSettings({
+        agentReleasesBaseUrl: "https://mirror.example.com/rel/",
+        agentStableVersion: "9.9.9",
+      }),
+    );
+    for (const version of ["9.9.9", "1.2.3"]) {
+      for (const suffix of ["", ".sha256", ".minisig"]) {
+        const asset = `${BAKED_FIXTURE}${suffix}`;
+        const res = await app.request(`/agent/v${version}/${asset}`);
+        expect(res.status).toBe(302);
+        expect(res.headers.get("x-opengeni-agent-source")).toBeNull();
+        expect(res.headers.get("location")).toBe(
+          `https://mirror.example.com/rel/download/agent-v${version}/${asset}`,
+        );
+      }
+    }
   });
 
   test("GET the baked .sha256 / .minisig sidecars as text/plain", async () => {

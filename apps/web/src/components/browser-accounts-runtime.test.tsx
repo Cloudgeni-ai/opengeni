@@ -114,7 +114,7 @@ describe("signed-out browser account recovery", () => {
 
       expect(container.textContent).toContain("Continue with email");
       expect(container.querySelector("h1")).toBeNull();
-      expect(container.querySelector("h2")?.textContent).toBe("Sign in to OpenGeni");
+      expect(container.querySelector("h2")?.textContent).toBe("Sign in to Opengeni");
       expect(container.querySelector(".max-w-sm")).toBeNull();
       expect(container.textContent).toContain("Create an account");
       expect(container.querySelector('[data-registration="true"]')).toBeNull();
@@ -357,11 +357,17 @@ describe("signed-out browser account recovery", () => {
       await flush();
 
       expect(container.querySelector('[data-tenant-surface="true"]')).toBeNull();
-      expect(container.textContent).toContain("Loading browser accounts");
+      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+      // The shared loading indicator is portaled outside the gated tenant tree.
+      expect(
+        document.body.querySelector('[data-page-loading][role="status"][aria-label="Loading"]'),
+      ).not.toBeNull();
 
       await act(async () => releaseSelection());
       await flush();
       expect(container.querySelector('[data-tenant-surface="true"]')).not.toBeNull();
+      expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+      expect(document.body.querySelector("[data-page-loading]")).toBeNull();
     } finally {
       releaseSelection();
       await act(async () => root.unmount());

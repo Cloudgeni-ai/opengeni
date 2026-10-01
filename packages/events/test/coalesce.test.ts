@@ -48,6 +48,21 @@ describe("coalesceSessionEventDeltas", () => {
       { text: "next", messageId: "message-b", coalescedUntil: 3 },
     ]);
   });
+  test("keeps the declared message phase on coalesced deltas", () => {
+    const result = coalesceSessionEventDeltas([
+      event(1, "agent.message.delta", { text: "Check", messageId: "note", phase: "commentary" }),
+      event(2, "agent.message.delta", { text: "ing.", messageId: "note", phase: "commentary" }),
+      event(3, "agent.message.delta", {
+        text: "Done.",
+        messageId: "answer",
+        phase: "final_answer",
+      }),
+    ]);
+    expect(result.map((item) => item.payload)).toEqual([
+      { text: "Checking.", messageId: "note", phase: "commentary", coalescedUntil: 2 },
+      { text: "Done.", messageId: "answer", phase: "final_answer", coalescedUntil: 3 },
+    ]);
+  });
   test("leaves empty and no-delta inputs untouched", () => {
     expect(coalesceSessionEventDeltas([])).toEqual([]);
     const events = [

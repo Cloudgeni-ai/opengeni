@@ -10,7 +10,7 @@ Only select this path when the exact current Connected Machine capability
 snapshot advertises `transactional_fs_write` (Capabilities field 14). Neither
 `filesystem`, `op_stream`, a version guess, nor a previous connection's snapshot
 is sufficient. Old runners leave this additive field false. The native platform
-currently advertises it only on Linux; individual filesystem cases can still
+advertises it on Linux and macOS; individual filesystem cases can still
 return typed unsupported errors. There is no destructive fallback.
 
 Use the authorized process-instance RPC subject and exact nonzero current epoch
@@ -102,13 +102,21 @@ It does not preserve inode identity, timestamps, open-handle visibility, or
 advisory locks: existing readers may continue reading the old inode after rename.
 
 Supported cases are accessible single-link regular files on Linux ext4, XFS,
-Btrfs, tmpfs, or overlayfs, subject to the actual rename/no-replace primitive
+Btrfs, tmpfs, or overlayfs, and macOS APFS, subject to the actual rename/no-replace primitive
 succeeding. Symlinks, hardlinks, special files/modes, extended attributes/ACLs,
 nonordinary inode flags, mismatched ownership, setgid parent directories, network
 or unrecognized filesystems, and unsupported platforms fail closed. Missing
 permissions are not repaired, and no `runAs` or expanded host authority is implied.
 
-For expected-absent creation, `renameat2(RENAME_NOREPLACE)` is the atomic
+On macOS, descriptor-based extended ACL inspection lives in the small
+`opengeni-agent-files-ffi` crate, independent of desktop frameworks and TCC.
+ACLs and inode flags fail closed. The OS-generated `com.apple.provenance`
+attribute is permitted, but replacement requires identical bytes on the original
+and staged inode; other extended attributes remain unsupported. No protected
+metadata is removed or rewritten to make an upload succeed.
+
+For expected-absent creation, Linux `renameat2(RENAME_NOREPLACE)` or macOS
+`renameatx_np(RENAME_EXCL)` is the atomic
 no-clobber publication primitive. An intervening creation causes a conflict,
 never an overwrite. There is no exists-check/overwrite fallback.
 

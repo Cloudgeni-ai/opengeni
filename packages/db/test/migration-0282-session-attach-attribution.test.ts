@@ -174,7 +174,7 @@ describe("migration 0282 session-attach materialization attribution", () => {
     expect(audit!.metadata.causalHumanSubjectId).toBeNull();
   });
 
-  test("an unselected set still fails without manufacturing audit facts", async () => {
+  test("an unselected set fails closed as a recorded denial, never a materialization", async () => {
     if (!available) return;
     const fixture = await sessionFixture();
     const [otherSet] = await admin<{ id: string }[]>`
@@ -191,21 +191,22 @@ describe("migration 0282 session-attach materialization attribution", () => {
         subjectId: `user:deny-${crypto.randomUUID()}`,
       },
     });
-    // The STRICT session-selection join raises P0002 (not 42501): the
-    // transaction rolls back, no materialized fact survives, and the 42501-only
-    // denial filter records no false denial evidence for a linkage miss.
+    // Since migration 0531 a set that is neither selected by the session nor a
+    // default of its frozen Sandbox Environment version is an authorization
+    // denial (42501), not an unmapped P0002: the transaction rolls back, no
+    // materialized fact survives, and the caller records one denial fact.
     const failure = await attempt.then(
       () => null,
       (error: unknown) => error,
     );
     expect(failure).not.toBeNull();
-    expect(JSON.stringify(failure)).toContain("P0002");
+    expect(JSON.stringify(failure)).toContain("42501");
     const [counts] = await admin<Array<{ materialized: number; denied: number }>>`
       select
         count(*) filter (where action = 'variable_set.materialized')::int as materialized,
         count(*) filter (where action = 'variable_set.materialize.denied')::int as denied
       from audit_events
       where workspace_id = ${fixture.workspaceId}`;
-    expect(counts!).toMatchObject({ materialized: 0, denied: 0 });
+    expect(counts!).toMatchObject({ materialized: 0, denied: 1 });
   });
 });

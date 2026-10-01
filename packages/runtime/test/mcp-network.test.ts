@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
 import {
+  createObservability,
+  parseTraceparent,
+  withMcpCallIdentity,
+  withMcpTelemetry,
+  withTraceContext,
+} from "@opengeni/observability";
+import {
   MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS,
+  MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,
   MCP_MAX_INBOUND_REQUEST_BYTES,
   MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -27,6 +35,133 @@ const testSettings = {
 };
 
 describe("MCP network and payload boundary", () => {
+  test("trace propagation preserves Fetch header replacement semantics and never adopts caller identity", async () => {
+    const captured: Headers[] = [];
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async (_input: Request, init) => {
+        captured.push(new Headers(init?.headers));
+        return new Response(null, { status: 204 });
+      },
+      { dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }], pinResolvedDestination: false },
+    );
+    const request = new Request("https://example.test/mcp", {
+      headers: {
+        authorization: "Bearer synthetic",
+        traceparent: `00-${"c".repeat(32)}-${"d".repeat(16)}-01`,
+        tracestate: "secret",
+        baggage: "secret",
+      },
+    });
+    await guarded(request);
+    await guarded(request, { headers: { "x-test": "replacement" } });
+    expect(captured[0]!.get("authorization")).toBe("Bearer synthetic");
+    expect(captured[1]!.get("authorization")).toBeNull();
+    expect(captured[1]!.get("x-test")).toBe("replacement");
+    for (const headers of captured) {
+      expect(headers.has("traceparent")).toBe(false);
+      expect(headers.has("tracestate")).toBe(false);
+      expect(headers.has("baggage")).toBe(false);
+    }
+    expect(request.headers.has("traceparent")).toBe(true);
+  });
+
+  test("exports header and body consumption separately and closes cancellation/failure without replay", async () => {
+    const bodies: any[] = [];
+    const observer = createObservability(
+      {
+        serviceName: "test",
+        environment: "test",
+        observabilityStructuredLogs: true,
+        observabilityMetricsEnabled: false,
+        observabilityOtlpHeaders: "",
+        observabilityOtlpEndpoint: "http://collector",
+      },
+      {
+        component: "worker",
+        exporter: async (_url, body) => {
+          bodies.push(body);
+        },
+      },
+    );
+    const spans = () =>
+      bodies.flatMap((b) => b.resourceSpans.flatMap((r: any) => r.scopeSpans[0].spans));
+    const attributes = (span: any) =>
+      Object.fromEntries(span.attributes.map((a: any) => [a.key, Object.values(a.value)[0]]));
+    let sentParent: string | null = null;
+    let calls = 0;
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async (_input: string, init) => {
+        calls++;
+        sentParent = new Headers(init?.headers).get("traceparent");
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              stream = controller;
+            },
+          }),
+        );
+      },
+      { dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }], pinResolvedDestination: false },
+    );
+    await withTraceContext(parseTraceparent(`00-${"a".repeat(32)}-${"b".repeat(16)}-00`), () =>
+      withMcpTelemetry(observer, "attempt", () =>
+        withMcpCallIdentity("call", async () => {
+          const response = await guarded("https://example.test/mcp");
+          await observer.flush();
+          const header = spans().find((s) => s.name === "mcp.phase.network_headers");
+          expect(sentParent).toBe(`00-${header.traceId}-${header.spanId}-00`);
+          expect(spans().some((s) => s.name === "mcp.phase.network_body")).toBe(false);
+          stream.enqueue(new TextEncoder().encode("result-secret"));
+          stream.close();
+          expect(await response.text()).toBe("result-secret");
+          const cancelled = await guarded("https://example.test/mcp");
+          await cancelled.body!.cancel("secret-reason");
+          const failed = await guarded("https://example.test/mcp");
+          const error = new Error("secret-stream-error");
+          stream.error(error);
+          await expect(failed.text()).rejects.toBe(error);
+        }),
+      ),
+    );
+    await observer.flush();
+    const bodySpans = spans().filter((s) => s.name === "mcp.phase.network_body");
+    expect(bodySpans.map((s) => attributes(s).outcome)).toEqual([
+      "completed",
+      "cancelled",
+      "failed",
+    ]);
+    expect(new Set(spans().map((s) => attributes(s).mcpCallKey)).size).toBe(1);
+    expect(JSON.stringify(spans())).not.toContain("secret");
+    expect(calls).toBe(3);
+  });
+
+  test("propagates host trace identity without trusting caller trace headers", async () => {
+    let seen: Headers | undefined;
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async (_input, init) => {
+        seen = new Headers(init?.headers);
+        return new Response("ok");
+      },
+      { dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }], pinResolvedDestination: false },
+    );
+    await withTraceContext({ traceId: "a".repeat(32), spanId: "b".repeat(16) }, async () => {
+      const response = await guarded("https://example.test/mcp", {
+        headers: {
+          authorization: "Bearer synthetic",
+          traceparent: "untrusted",
+          baggage: "private=value",
+        },
+      });
+      await response.text();
+    });
+    expect(seen?.get("traceparent")).toBe(`00-${"a".repeat(32)}-${"b".repeat(16)}-01`);
+    expect(seen?.get("authorization")).toBe("Bearer synthetic");
+    expect(seen?.has("baggage")).toBe(false);
+  });
   test("keeps the outer Agents SDK connect fence at least as large as configured transports", () => {
     expect(mcpOuterConnectTimeoutMs([])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
     expect(mcpOuterConnectTimeoutMs([5_000, undefined])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
@@ -360,6 +495,32 @@ describe("MCP network and payload boundary", () => {
         MCP_MAX_INBOUND_REQUEST_BYTES,
       ),
     ).rejects.toBeInstanceOf(McpPayloadTooLargeError);
+  });
+
+  test("one provider can use the existing aggregate entry allowance without truncation", () => {
+    const tools = Array.from({ length: MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES }, (_, index) => ({
+      name: `tool_${index}`,
+    }));
+    expect(assertMcpToolListWithinBounds(tools)).toBe(tools);
+    const budget = new McpAggregateToolListBudget();
+    expect(budget.replace("large-provider", tools)).toBe(tools);
+    expect(budget.snapshot().entries).toBe(tools.length);
+    expect(budget.replace("large-provider", tools)).toBe(tools);
+    expect(() => budget.replace("another-provider", [{ name: "extra" }])).toThrow(
+      McpPayloadTooLargeError,
+    );
+    expect(budget.snapshot().entries).toBe(tools.length);
+    expect(() => assertMcpToolListWithinBounds([...tools, { name: "extra" }])).toThrow(
+      "4096-entry safety limit",
+    );
+    expect(() =>
+      assertMcpToolListWithinBounds(
+        Array.from({ length: 50 }, (_, index) => ({
+          name: `large_${index}`,
+          description: "x".repeat(100_000),
+        })),
+      ),
+    ).toThrow(McpPayloadTooLargeError);
   });
 
   test("bounds selected servers and atomically replaces aggregate relist contributions", () => {

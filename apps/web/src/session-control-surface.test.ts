@@ -9,7 +9,7 @@ describe("session control surface architecture", () => {
     for (const [path, workspace] of [
       ["routes/session.tsx", "props.session.workspaceId"],
       ["routes/sessions-index.tsx", "workspaceId"],
-      ["routes/schedules.tsx", "props.workspaceId"],
+      ["components/schedules/schedule-form-page.tsx", "workspaceId"],
     ] as const) {
       const route = await source(path);
       const start = route.indexOf("const connectionAccounts = useConnectionAccounts(");
@@ -49,7 +49,11 @@ describe("session control surface architecture", () => {
     expect(newSession).not.toContain("voiceModel={{");
     expect(newSession).toContain('modelMenu="split"');
     const plus = await source("components/composer-mobile-plus.tsx");
-    expect(plus).toContain('setPanel("settings")');
+    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    expect(plus).toContain('import("./composer-mobile-plus-panel")');
+    expect(plus).toContain("{open ? (");
+    expect(panel).toContain('setPanel("settings")');
+    expect(panel).not.toContain("setSettingsOpen");
     expect(plus).not.toContain("setSettingsOpen");
   });
 
@@ -232,8 +236,10 @@ describe("session control surface architecture", () => {
     expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
     expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
-    expect(route).toContain("onChange={props.onComputeChange}");
-    expect(route).toContain("props.onComputeChange({");
+    // Machine and folder choices live under "+" > Runs on and go through the
+    // explicit compute path, never the launch-selection draft setter.
+    const runsOn = await source("components/session/new-session-settings-menu.tsx");
+    expect(runsOn).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
@@ -423,10 +429,44 @@ describe("session control surface architecture", () => {
     expect(paginationKey).not.toContain("serverSessions");
   });
 
+  test("loads the first page and older sessions independently in each project", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain('sessionPaginationProjectGroup(null, "Default")');
+    expect(list).toContain("limit: 50");
+    expect(list).toContain('if (!channelMode || search || browseStatus === "archived") return;');
+    expect(list).toContain("void loadMoreInGroup(group);");
+    expect(list).toContain("sessionPaginationProjectGroup(section.channelId, section.name)");
+    expect(list).toMatch(/\(!channelMode \|\| search\)\s*&&\s*workspacePagination/);
+  });
+
+  test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain(
+      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    );
+    expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
+    expect(list).toContain("visibleNodes={visibleNodesForGroup(");
+    expect(list).toContain("Show ${revealCount} more");
+  });
+
+  test("separates archive browsing and hydrates sparse creator groups", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("browseSessions.filter((session) => !session.archived)");
+    expect(list).toContain('browseStatus === "archived" || session.archived');
+    expect(list).toContain('label="Archived"');
+    expect(list).toContain('sectionId="archived"');
+    expect(list).toContain("allowNewSession={false}");
+    expect(list).toContain(
+      'if (browseGroupBy !== "creator" || search || browseStatus === "archived") return;',
+    );
+    expect(list).toContain('group.kind === "archived" ? {} : { sortBy: browseSortBy }');
+  });
+
   test("hands keyboard focus across optimistic project-move remounts", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
-    expect(list).toContain('void onMoveToChannel(session, null, "actions")');
+    // Default (channel id null) is the first row of the same project list.
+    expect(list).toContain('[{ id: null, name: "Default" }, ...channels].map');
     expect(list).toContain("pendingSessionFocus.current = {");
     expect(list).toContain("if (!remountSelection.current) return;");
     expect(list).toContain("event.preventDefault();");
@@ -551,7 +591,7 @@ describe("session control surface architecture", () => {
     expect(panel).not.toMatch(
       /^import (?!type )[^;]*from "@\/components\/session\/session-variable-set-picker";/m,
     );
-    expect(panel).toContain(".catch(() => ({ default: SessionVariableSetPickerLoadFailed }))");
+    expect(panel).toContain(".catch(() => SessionVariableSetPickerLoadFailed)");
   });
 
   test("the retired client-side queue model is gone", async () => {

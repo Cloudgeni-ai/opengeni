@@ -157,6 +157,8 @@ RUN set -eux; \
                         "$runtime/node_modules/@opengeni/contracts" \
                         "$runtime/node_modules/@opengeni/sdk" \
                         "$runtime/node_modules/@opengeni/tool-gateway" \
+                        "$runtime/node_modules/@opengeni/observability" \
+                        "$runtime/node_modules/@opentelemetry" \
                         "$runtime/node_modules/@noble"; \
     install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
     cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
@@ -166,6 +168,14 @@ RUN set -eux; \
     cp -a packages/sdk/src "$runtime/node_modules/@opengeni/sdk/src"; \
     install -m 0644 packages/tool-gateway/package.json "$runtime/node_modules/@opengeni/tool-gateway/package.json"; \
     cp -a packages/tool-gateway/src "$runtime/node_modules/@opengeni/tool-gateway/src"; \
+    install -m 0644 packages/observability/package.json "$runtime/node_modules/@opengeni/observability/package.json"; \
+    cp -a packages/observability/src "$runtime/node_modules/@opengeni/observability/src"; \
+    cp -aL packages/observability/node_modules/prom-client "$runtime/node_modules/prom-client"; \
+    prom_modules="$(dirname "$(readlink -f packages/observability/node_modules/prom-client)")"; \
+    cp -aL "$prom_modules/@opentelemetry/api" "$runtime/node_modules/@opentelemetry/api"; \
+    cp -aL "$prom_modules/tdigest" "$runtime/node_modules/tdigest"; \
+    tdigest_modules="$(dirname "$(readlink -f "$prom_modules/tdigest")")"; \
+    cp -aL "$tdigest_modules/bintrees" "$runtime/node_modules/bintrees"; \
     cp -aL packages/tool-gateway/node_modules/ajv "$runtime/node_modules/ajv"; \
     ajv_modules="$(dirname "$(readlink -f packages/tool-gateway/node_modules/ajv)")"; \
     for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \
@@ -288,7 +298,7 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
 ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG UV_VERSION=0.12.18
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1"
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
@@ -310,6 +320,7 @@ RUN set -eux; \
         libatomic1 \
         libstdc++6 \
         openssh-client \
+        postgresql-client \
         procps \
         fuse3 \
         fonts-liberation \
@@ -331,6 +342,7 @@ RUN set -eux; \
         xfwm4 \
         fonts-liberation \
         fonts-noto-color-emoji \
+        fonts-noto-cjk \
     "; \
     for attempt in 1 2 3; do \
         rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
@@ -351,6 +363,7 @@ RUN set -eux; \
     install -d -m 0755 /etc/opengeni; \
     printf '%s\n' /usr/lib/chromium/chromium > /etc/opengeni/browser-engine; \
     test -x /usr/lib/chromium/chromium; \
+    psql --version; \
     dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
     ln -sf /var/lib/dbus/machine-id /etc/machine-id
 
@@ -452,7 +465,10 @@ RUN set -eux; \
 # uv caches live in /var/cache, outside the snapshotted HOME=/workspace, because
 # installed packages under /usr/local are per-box anyway. --exclude-newer freezes
 # the transitive closure to what PyPI had published at that instant, so every
-# rebuild of either image resolves the same versions.
+# rebuild of either image resolves the same versions. psycopg is pinned together
+# with its matching psycopg-binary wheel (exactly what `psycopg[binary]` resolves
+# to on CPython), which bundles its own libpq, so Postgres access never depends
+# on the distro libpq that postgresql-client pulls in.
 RUN set -eux; \
     printf '[global]\nbreak-system-packages = true\nroot-user-action = ignore\ncache-dir = /var/cache/pip\n' > /etc/pip.conf; \
     install -d -m 0755 /etc/uv; \
@@ -478,7 +494,8 @@ RUN set -eux; \
     uv pip install --system --no-cache --compile-bytecode --only-binary :all: \
       --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, pytest, requests'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv
 

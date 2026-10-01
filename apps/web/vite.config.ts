@@ -34,6 +34,23 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Workspace configs read shared provider metadata at module load.
+              // Keep this pure data outside mutually importing settings routes.
+              name: "model-provider-metadata",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-metadata\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // Registration runs when lazy routes evaluate. Keep the loader's
+              // state and registration entry point together, outside route
+              // chunks that can import one another before state initializes.
+              name: "pierre-diffs-loader",
+              test: /packages[\\/]react[\\/]src[\\/](?:diffs\.ts|lib[\\/]pierre-diffs-loader\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Questions and command controls mount only when their session
               // surface is active. Keep their implementations behind those
               // lazy imports instead of recursively merging them into chat.
@@ -54,7 +71,7 @@ export default defineConfig({
               // Inspector changes must not pull account-management forms into
               // the direct-session graph through entry-aware chunk merging.
               name: "model-connection-settings",
-              test: /(?:components[\\/](?:codex-source-settings|connection-access-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
+              test: /(?:components[\\/](?:codex-source-settings|model-connection-section|subscription-account-row|subscription-connect-action|subscription-device-code-panel)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -94,15 +111,27 @@ export default defineConfig({
               priority: 16,
             },
             {
+              // Select, Switch, and ToggleGroup back design-system controls used
+              // only by lazy management pages. Keep them out of ui-runtime, which
+              // is part of startup; shared Popper/scope modules stay there.
+              name: "management-radix-controls",
+              test: /(?:node_modules|\.bun)[\\/]@radix-ui(?:\+|[\\/])react-(?:select|switch|toggle|toggle-group)(?:@|[\\/])/,
+              includeDependenciesRecursively: false,
+              priority: 16,
+            },
+            {
               // Keep Radix, Lucide's eager icon factory, and the two class-name
               // helpers (web `cn` and @opengeni/react `cn` with clsx and
               // tailwind-merge) in one UI runtime. entriesAware route merging
               // can otherwise split Popper scopes, place an icon and its
               // factory across a circular chunk, or fold a tiny universally
               // shared helper into a route-only chunk and drag that route's
-              // code into the initial graph.
+              // code into the initial graph. Button and Input (with cva and
+              // the three icons Button states use) are startup code too; the
+              // lazy settings shell as one more consumer otherwise splits
+              // them into an extra startup request.
               name: "ui-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
@@ -117,10 +146,36 @@ export default defineConfig({
               // Search intent is shared by App's eager search validator and
               // lazy rail/conversation surfaces. Keep it here so recursive
               // session grouping cannot pull the workbench into startup.
+              // App parses organization settings sections and the settings,
+              // models, knowledge, access and API-key search params at startup;
+              // keep those tiny parsers here instead of a separate startup
+              // request.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route|organization-admin|organization-route|models-route|knowledge-route|access-route|api-keys-route|return-to)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
+            },
+            {
+              // The router is startup code that every route reads through a
+              // few hooks. Entry-aware splitting otherwise scatters it over
+              // four or five startup requests by whichever lazy routes use
+              // which hook; keep it one runtime like React itself.
+              name: "router-runtime",
+              test: /(?:node_modules|\.bun)[\\/](?:@tanstack[\\/](?:react-router|router-core|history|store|react-store)|use-sync-external-store)[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 15,
+            },
+            {
+              // The app context, its startup helpers and the shared load-error
+              // state are always loaded. Entry-aware splitting otherwise cuts
+              // this one startup unit into several requests along whichever
+              // lazy routes happen to import part of it (a new import of the
+              // error helpers or a toast was enough to add a startup file).
+              // The icons are the ones the load-error state and toasts draw.
+              name: "startup-context",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
             },
             {
               // The hierarchy rail is substantial and belongs to the lazy
@@ -130,7 +185,17 @@ export default defineConfig({
               // Its shared helpers remain available for normal consumer-aware
               // splitting without pulling the full rail implementation in.
               name: "session-rail",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|workspace-switcher|workspace-name-dialog)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|switcher-block|workspace-switcher|workspace-name-dialog)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 3,
+            },
+            {
+              // These artifact kind glyphs are drawn by conversation cards on a
+              // direct session load and by the lazy editor. Left to entry-aware
+              // grouping they land in the editor chunk, and one icon import drags
+              // the whole editor into the direct session graph.
+              name: "artifact-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:file|image|panels-top-left)\.mjs$/,
               includeDependenciesRecursively: false,
               priority: 3,
             },
@@ -141,7 +206,7 @@ export default defineConfig({
               // session workbench into startup. The personal-workspace badge and
               // session title contract must not carry settings-only dependencies.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -162,9 +227,31 @@ export default defineConfig({
               // management surface reachable from an active session. The shared
               // settings drawer and runtime controls belong behind this boundary too.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:workspace-settings-shell|settings-sidebar|organization-settings-switcher)\.tsx|routes[\\/](?:workspace-learning-admin\.tsx|workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
+            },
+            {
+              // Model, API-key, and managed-access settings pages plus the shared
+              // settings frame are reached only from lazy settings routes. Pin
+              // them so entry-aware merging cannot co-locate one of them with a
+              // session-used helper and make the management surface reachable
+              // from a direct session load. Connection access renders a Models
+              // form page, so it lives here, not in model-connection-settings,
+              // whose shared icons the eager workspace graph imports.
+              name: "settings-pages",
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|models[\\/][\w-]+|settings[\\/](?:agent-activity|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // Design-system primitives used only by settings and other lazy
+              // management routes. Keep them in one lazy unit so entry-aware
+              // merging cannot fold them into chunks a direct session imports.
+              name: "management-ui-primitives",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 19,
             },
             {
               // The Agent learning editor is reached only from lazy surfaces:

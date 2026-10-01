@@ -57,6 +57,74 @@ For session-specific MCP credentials, createSession stores header values encrypt
 
 Prefer short-lived, audience-bound tokens when the customer can issue them. Let the customer's authenticated backend mint or refresh a token for the exact product subject and data boundary. A workspace-wide credential is appropriate only when every session in that workspace may exercise the same provider authority.
 
+## Product-owned repository credentials
+
+For an automated job, use `client.asService(name, context?)` under a server-held
+organization or workspace key, not a synthetic `asUser` identity. Service
+attribution is not permission and grants no human/personal-resource authority.
+
+Configure `putWorkspaceCredentialProvider` once during provisioning and store
+the returned signing secret. The product's HTTPS endpoint verifies the exact
+raw body with `verifyCredentialProviderRequest`, authorizes the signed
+workspace/session scope independently of service labels, and returns short-lived
+`git` credentials with an `expiresAt`. The provider, not a human's personal
+Connection, owns those credentials.
+
+Organization registration and secret rotation are focused server-side helpers,
+not eager client methods:
+
+```ts
+import {
+  putOrganizationCredentialProvider,
+  createOrganizationWebhook,
+  rotateOrganizationCredentialProviderSecret,
+} from "@opengeni/sdk/workspace-integrations";
+
+const { secret } = await putOrganizationCredentialProvider(client, organizationId, {
+  url: "https://product.example/credentials",
+  workspaceFilter: { externalSource: "product:production" },
+});
+await createOrganizationWebhook(client, organizationId, {
+  url: "https://product.example/events",
+  eventTypes: ["turn.completed"],
+  workspaceFilter: { externalSource: "product:production" },
+});
+// Rotate explicitly when needed; store the new once-returned secret.
+// await rotateOrganizationCredentialProviderSecret(client, organizationId);
+```
+
+All functions in `@opengeni/sdk/workspace-integrations` take `client` first.
+This also covers organization reads/updates/deletes, webhook delivery listing
+and redelivery, `getWorkspaceWebhook`, and both scopes' secret-rotation helpers.
+Keep them on the product backend, never import them into the browser to expose
+an organization key.
+
+```ts
+await client.asService("acme:reports", { jobId: jobRecord.id }).createSession(workspaceId, {
+  initialMessage: "Summarize the latest report changes.",
+  idempotencyKey: `reports:${jobRecord.id}`,
+  resources: [{
+    kind: "repository",
+    uri: "https://gitlab.com/acme/reports.git",
+    ref: "main",
+    provider: "gitlab",
+    access: "read",
+  }],
+  skills: productSkills,
+  tools: [],
+  firstPartyMcpTools: [],
+  bundledSkillIds: [],
+});
+```
+
+The credential-provider response supplies the `gitlab.com` host credential;
+never put a token in the repository URI, Skill, context, or prompt. Repository
+cloning requires managed compute. A Connected Machine owns its existing
+checkout and Git authentication; OpenGeni neither clones repositories nor
+injects Git tokens there. When source is available, see
+`docs/workspace-integrations.md` for the signed protocol and
+`docs/product-integration.md` for the full provisioning example.
+
 ## Where credentials are visible
 
 For brokered API Integrations and MCP connections:

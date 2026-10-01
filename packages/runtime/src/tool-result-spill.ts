@@ -46,6 +46,11 @@ export function spilledModelToolResult(
   };
 }
 
+/** True when the model receives this result as is, without a spill or overflow error. */
+export function modelToolResultFits(result: AttemptToolResultValue): boolean {
+  return mcpSerializedSizeBytes(result) <= MCP_MAX_TOOL_RESULT_BYTES;
+}
+
 /**
  * The single per-caller seam over one executor result. Codemode receives the
  * exact result. The model receives its model-visible projection (compact
@@ -65,7 +70,7 @@ export async function projectAttemptToolResultForCaller(
       return result;
     case "model": {
       const visible = identity ? projectKnowledgeToolResultForModel(identity, result) : result;
-      if (mcpSerializedSizeBytes(visible) <= MCP_MAX_TOOL_RESULT_BYTES) return visible;
+      if (modelToolResultFits(visible)) return visible;
       if (!spill) return modelToolResultOverflowError();
       try {
         return await spill({

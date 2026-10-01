@@ -163,7 +163,7 @@ describe("route error boundaries", () => {
     );
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("OpenGeni has been updated");
+      expect(text).toContain("Opengeni has been updated");
       const buttons = [...view.container.querySelectorAll("button")];
       expect(buttons[0]?.textContent).toBe("Reload to update");
       expect(view.reports).toEqual([
@@ -254,7 +254,7 @@ describe("route error boundaries", () => {
           ["chunk_load", "/workspaces/$workspaceId/sessions/$sessionId"],
         ]);
         const text = view.container.textContent ?? "";
-        expect(text).toContain("OpenGeni has been updated");
+        expect(text).toContain("Opengeni has been updated");
         expect(text).not.toContain("Something went wrong");
         expect(view.container.querySelector("button")?.textContent).toBe("Reload to update");
       } finally {
@@ -275,7 +275,7 @@ describe("route error boundaries", () => {
         expect(view.reports).toEqual([
           ["chunk_load", "/workspaces/$workspaceId/sessions/$sessionId"],
         ]);
-        expect(view.container.textContent).toContain("OpenGeni has been updated");
+        expect(view.container.textContent).toContain("Opengeni has been updated");
       } finally {
         sessionStorage.removeItem(tanstackReloadKey);
         await view.cleanup();

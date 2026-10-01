@@ -1,5 +1,94 @@
 # @opengeni/example-northstar-support
 
+## 0.0.160
+
+### Patch Changes
+
+- Updated dependencies [d00a203]
+- Updated dependencies [3f9c757]
+- Updated dependencies [304ddc5]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [1503ad7]
+- Updated dependencies [4f6d83a]
+- Updated dependencies [7a3d134]
+- Updated dependencies [a6644b6]
+- Updated dependencies [aad6598]
+- Updated dependencies [e14db2a]
+- Updated dependencies [9a4a45c]
+- Updated dependencies [01f50bf]
+- Updated dependencies [0aa60a6]
+- Updated dependencies [4b39032]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a6644b6]
+- Updated dependencies [d480872]
+- Updated dependencies [3f9c757]
+- Updated dependencies [454476c]
+- Updated dependencies [4b39032]
+- Updated dependencies [9732749]
+- Updated dependencies [4b39032]
+- Updated dependencies [4b39032]
+- Updated dependencies [a6644b6]
+- Updated dependencies [dcb578d]
+- Updated dependencies [6f28afd]
+- Updated dependencies [b591ea1]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a1b6b8e]
+- Updated dependencies [a82657f]
+- Updated dependencies [3f9c757]
+- Updated dependencies [c2acd21]
+- Updated dependencies [4b39032]
+- Updated dependencies [4b39032]
+- Updated dependencies [9649fcc]
+- Updated dependencies [a5da013]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [12bc3de]
+- Updated dependencies [a6644b6]
+- Updated dependencies [30414a0]
+- Updated dependencies [a6644b6]
+- Updated dependencies [8a9d19e]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [a12f4cf]
+- Updated dependencies [e403746]
+- Updated dependencies [4b39032]
+- Updated dependencies [d1f4724]
+- Updated dependencies [d480872]
+- Updated dependencies [c823664]
+  - @opengeni/react@7.4.0
+  - @opengeni/sdk@7.4.0
+
+## 0.0.159
+
+### Patch Changes
+
+- Updated dependencies [6cbccaa]
+  - @opengeni/react@7.3.1
+
+## 0.0.158
+
+### Patch Changes
+
+- Updated dependencies [78f1d59]
+- Updated dependencies [7f75daa]
+- Updated dependencies [889a360]
+- Updated dependencies [ac83339]
+- Updated dependencies [1fa1216]
+- Updated dependencies [1842911]
+- Updated dependencies [6d4ccb9]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [212de3d]
+- Updated dependencies [cc4bc8e]
+  - @opengeni/react@7.3.0
+  - @opengeni/sdk@7.3.0
+
 ## 0.0.157
 
 ### Patch Changes

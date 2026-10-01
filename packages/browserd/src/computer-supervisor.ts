@@ -384,7 +384,6 @@ export class ComputerSupervisor {
     let environmentLease: ComputerEnvironmentLease | null = null;
     let driver: ComputerSupervisorDriver | null = null;
     try {
-      const initialJournal = journal.loadAndRecover();
       environmentLease = await this.environmentAllocator.allocate({
         computerSessionId: options.computerSessionId,
         controllerGeneration: options.controllerGeneration,
@@ -403,25 +402,30 @@ export class ComputerSupervisor {
         environment,
       });
       let runtime: Runtime | undefined;
-      const controller = new ComputerInteractionController({
-        computerSessionId: options.computerSessionId,
-        controllerGeneration: options.controllerGeneration,
-        driver,
-        initialJournal,
-        onJournalRecord: (record) => journal.write(record),
-        authority: {
-          authorizeDispatch: async (command) => {
-            if (runtime?.lifecycle !== "active") {
-              throw new InteractionControllerError(
-                "resource_unavailable",
-                "computer session is changing state",
-                true,
-              );
-            }
-            await runtime.options.authority?.authorizeDispatch(command);
-          },
-        },
-      });
+      const controllerDriver = driver;
+      const controller = journal.withRecoveredRecords(
+        (initialJournal) =>
+          new ComputerInteractionController({
+            computerSessionId: options.computerSessionId,
+            controllerGeneration: options.controllerGeneration,
+            driver: controllerDriver,
+            initialJournal,
+            onJournalRecord: (record) => journal.write(record),
+            loadJournalRecord: (operationId) => journal.read(operationId),
+            authority: {
+              authorizeDispatch: async (command) => {
+                if (runtime?.lifecycle !== "active") {
+                  throw new InteractionControllerError(
+                    "resource_unavailable",
+                    "computer session is changing state",
+                    true,
+                  );
+                }
+                await runtime.options.authority?.authorizeDispatch(command);
+              },
+            },
+          }),
+      );
       runtime = {
         options,
         sessionDirectory,

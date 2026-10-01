@@ -15,6 +15,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  ToolGatewayInputValidationError,
+  createWorkspaceToolGateway,
+} from "@opengeni/tool-gateway";
+import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
   RunRawModelStreamEvent,
@@ -23,7 +27,13 @@ import {
   getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
-import { RunToolApprovalItem, Usage } from "@openai/agents-core";
+import {
+  Agent,
+  RunItemStreamEvent,
+  RunMessageOutputItem,
+  RunToolApprovalItem,
+  Usage,
+} from "@openai/agents-core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import {
@@ -883,32 +893,37 @@ describe("runtime event normalization", () => {
   });
 
   test("preserves the assistant message phase on completed events", () => {
-    const [commentary] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: {
-        type: "message_output_item",
-        text: "Waiting for the child run to finish.",
-        rawItem: {
-          role: "assistant",
-          status: "completed",
-          phase: "commentary",
-          content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
-        },
-      },
-    } as any);
-    const [finalAnswer] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: {
-        type: "message_output_item",
-        text: "All checks passed.",
-        rawItem: {
-          role: "assistant",
-          status: "completed",
-          phase: "final_answer",
-          content: [{ type: "output_text", text: "All checks passed." }],
-        },
-      },
-    } as any);
+    const agent = new Agent({ name: "phase-test" });
+    const [commentary] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            phase: "commentary",
+            content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
+          } as never,
+          agent,
+        ),
+      ),
+    );
+    const [finalAnswer] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            phase: "final_answer",
+            content: [{ type: "output_text", text: "All checks passed." }],
+          } as never,
+          agent,
+        ),
+      ),
+    );
 
     expect(commentary).toEqual({
       type: "agent.message.completed",
@@ -928,10 +943,21 @@ describe("runtime event normalization", () => {
         itemId: "message-a",
       } as any),
     );
-    const [completed] = normalizeSdkEvent({
-      type: "run_item_stream_event",
-      item: { type: "message_output_item", text: "partial answer", rawItem: { id: "message-a" } },
-    } as any);
+    const [completed] = normalizeSdkEvent(
+      new RunItemStreamEvent(
+        "message_output_created",
+        new RunMessageOutputItem(
+          {
+            type: "message",
+            id: "message-a",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "partial answer" }],
+          } as never,
+          new Agent({ name: "identity-test" }),
+        ),
+      ),
+    );
     expect(delta?.payload).toEqual({ text: "partial", messageId: "message-a" });
     expect(completed?.payload).toEqual({ text: "partial answer", messageId: "message-a" });
   });
@@ -2081,6 +2107,64 @@ describe("runtime event normalization", () => {
         },
       });
       expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain("MCP tool call failed");
+    });
+
+    test("an argument-validation rejection names the missing properties instead of retrying", async () => {
+      const { gateway } = createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "analytics", toolName: "exec" },
+            modelName: "analytics__exec",
+            inputSchema: {
+              type: "object",
+              properties: {
+                command: { type: "string" },
+                context: { type: "string" },
+                llm_model: { type: "string" },
+              },
+              required: ["command", "context", "llm_model"],
+            },
+            source: "mcp",
+            approval: "none",
+            execute: async () => ({ content: [{ type: "text", text: "unreachable" }] }),
+          },
+        ],
+      });
+      const rejected = await gateway
+        .callModel({
+          modelName: "analytics__exec",
+          arguments: { command: "synthetic-command-value" },
+          subjectId: "agent:test",
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(rejected).toBeInstanceOf(ToolGatewayInputValidationError);
+      // The agent's MCP errorFunction is the seam that renders this for the model.
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+      const errorFunction = (agent as any).mcpConfig.errorFunction as (args: {
+        context: unknown;
+        error: unknown;
+      }) => ReturnType<typeof mcpToolErrorOutput>;
+      const out = errorFunction({ context: {}, error: rejected });
+      expect(out).toEqual(mcpToolErrorOutput(rejected));
+      expect(out.isError).toBe(true);
+      const text = out.content[0]?.text ?? "";
+      expect(text).toBe(
+        "The tool was not called because its arguments do not match the tool's input schema: " +
+          'missing required property "context"; missing required property "llm_model". ' +
+          "Correct the named properties and call the tool again.",
+      );
+      expect(text).not.toContain("Please try again");
+      expect(text).not.toContain("synthetic-command-value");
+      // Every other thrown failure keeps the generic retry wording.
+      expect(mcpToolErrorOutput(new Error("upstream 503")).content[0]?.text).toBe(
+        "An error occurred while running the tool. Please try again. Error: upstream 503",
+      );
     });
 
     test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
@@ -4418,18 +4502,18 @@ describe("runtime event normalization", () => {
   // guidance, update this pin as the new canonical default rather than
   // weakening the absent-memory/per-session no-op assertions below.
   const HISTORICAL_DEFAULT_INSTRUCTIONS = [
-    "You are an OpenGeni workspace agent.",
+    "You are an OpenGeni workspace agent: a general assistant for questions, writing, research, analysis, and technical work.",
     "Follow the user's task and the applicable Skill instructions for the current role.",
-    "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
+    "When a task needs files or commands, work inside the sandbox workspace with the filesystem and shell tools.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Installed and selected Skills appear in the session Skill index; follow its reading instructions and any role-specific guidance.",
-    "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
-    "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
-    "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
-    "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
-    "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+    "Provider CLIs such as gh, glab, and az may be pre-authenticated by the host through brokered git credentials or a sandbox preparation profile; try them before asking for credentials.",
+    "When the Git repository you change has a remote and git provider credentials are available, work on a focused branch and open a pull request.",
+    "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if the repository has a remote, say the changes are not pushed, and if the user asks for something you cannot make, say what blocks it.",
+    "Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.",
+    "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
     'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
     "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
@@ -4442,7 +4526,7 @@ describe("runtime event normalization", () => {
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
     `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
     '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
-    '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Proactively use to show how something works; explore \'what happens when\', \'what changes\', or \'help me understand\'; compare or inspect; create simulations, maps, charts, graphs, and mockups. Use standard tools for static scientific figures."}',
+    '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
@@ -4493,9 +4577,7 @@ describe("runtime event normalization", () => {
       instructionsTemplate: template,
     });
     expect(staticInstructions(agent.instructions)).toContain("You are ACME's deployment co-pilot.");
-    expect(staticInstructions(agent.instructions)).not.toContain(
-      "You are an OpenGeni workspace agent.",
-    );
+    expect(staticInstructions(agent.instructions)).not.toContain("general assistant");
     // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
     expect(staticInstructions(agent.instructions)).toContain(
       "you call opengeni__goal_complete with concrete evidence",
@@ -5292,6 +5374,7 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
@@ -5329,17 +5412,30 @@ describe("runtime event normalization", () => {
     ]);
   });
 
-  test("preserves a custom Git HTTPS port in the manifest remote", () => {
-    const manifest = buildManifest(testSettings(), [
+  test("preserves a custom Git HTTPS port through deferred clone and explicit manifest materialization", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://git.example.com:8443/acme/app.git",
+      ref: "main",
+    };
+    const mountPath = "repos/git.example.com%3A8443/acme/app.git";
+    // Bare repositories wait for provider delivery. A directory entry reserves
+    // the same port-aware mount; the clone hook retains the exact remote URI.
+    const manifest = buildManifest(testSettings(), [resource]);
+    expect(manifest.entries[mountPath]).toMatchObject({ type: "dir" });
+    expect(repositoryCloneCommand([resource])).toContain(
+      `start_repository_clone '/workspace/${mountPath}' '${resource.uri}' 'main'`,
+    );
+    // Explicit platform selections retain the SDK materialization path.
+    const explicit = buildManifest(testSettings(), [
       {
-        kind: "repository",
-        uri: "https://git.example.com:8443/acme/app.git",
-        ref: "main",
+        ...resource,
+        connectionId: "explicit-platform-connection",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
+    expect(explicit.entries[mountPath]).toMatchObject({
       type: "git_repo",
-      repo: "https://git.example.com:8443/acme/app.git",
+      repo: resource.uri,
     });
   });
 
@@ -5455,10 +5551,12 @@ describe("runtime event normalization", () => {
     // origin/HEAD is best-effort (branch refs only); a PR ref, tag, or SHA must not
     // fail the clone because `remote set-head` rejects it.
     expect(command).toContain(
-      'if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+      'if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
     );
     expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
-    expect(command).toContain('if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then');
+    expect(command).toContain(
+      'if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+    );
     expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
     expect(command).toContain("Repository resource ready at $target");
@@ -5612,7 +5710,7 @@ describe("runtime event normalization", () => {
       true,
     );
     expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(
-      false,
+      true,
     );
 
     // Home backend IS selfhosted: gated with no caller change (active backend
@@ -5646,6 +5744,46 @@ describe("runtime event normalization", () => {
     expect(
       repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal"),
     ).toBe(true);
+
+    // A best-effort repository always goes through the clone hook on a cloud
+    // box (the manifest's own Git entry cannot tolerate one failure), and is
+    // still never cloned onto a connected machine.
+    const optionalRepo = { ...plainRepo, optional: true };
+    expect(
+      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), optionalRepo),
+    ).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        optionalRepo,
+        "selfhosted",
+      ),
+    ).toBe(false);
+  });
+
+  test("marks only optional repositories as best effort in the clone script", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/picked.git",
+        ref: "main",
+        mountPath: "repos/picked",
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/recent.git",
+        ref: "main",
+        mountPath: "repos/recent",
+        optional: true,
+      },
+    ]);
+    const invocations = command
+      .split("\n")
+      .filter((line) => /^start_(optional_)?repository_clone /u.test(line));
+    expect(invocations).toEqual([
+      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' '' 'provider'",
+      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent' 'provider'",
+    ]);
   });
 
   test("buildOpenGeniAgent requires and exposes the truthful root for selfhosted targets", () => {
@@ -6147,6 +6285,7 @@ describe("runtime event normalization", () => {
         ref: "main",
         mountPath: "repos/acme/private/README.md",
         subpath: "README.md",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
@@ -10930,6 +11069,27 @@ describe("runtime event normalization", () => {
       console.warn = originalWarn;
       expired.close();
       healthy.close();
+    }
+  });
+
+  test("best-effort discovery preserves a bounded catalog with more than 1000 tools", async () => {
+    const names = Array.from({ length: 1_100 }, (_, index) => `catalog_tool_${index}`);
+    const provider = startTestMcpServer({ toolsForAuthorization: () => names });
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [{ id: "catalog", url: provider.url }] }),
+        [{ kind: "mcp", id: "catalog", optional: true }],
+      );
+      try {
+        const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        const exposed = new Set(tools.map((tool) => tool.name));
+        for (const name of names) expect(exposed.has(`catalog__${name}`)).toBe(true);
+        expect(provider.calls).toEqual([]);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      provider.close();
     }
   });
 

@@ -6,6 +6,8 @@ import {
   CancelExternalWorkspaceMemberGrantResponse,
   type AddExternalWorkspaceMemberRequest,
   type CancelExternalWorkspaceMemberGrantRequest,
+  UpdateExternalWorkspaceMemberResponse,
+  type UpdateExternalWorkspaceMemberRequest,
   type ExternalIdentityReference,
 } from "@opengeni/contracts/external-identities";
 import {
@@ -130,5 +132,70 @@ export async function cancelExternalWorkspaceMemberGrant(
     };
     await record(tx, command, { ...result, workspaceId: scope.workspaceId });
     return result;
+  });
+}
+
+/** One keyed permission update of an existing external member's workspace
+ * access. The database applies the effect under the organization fence and
+ * advances the member's authorization revision when the set narrows, so live
+ * authority snapshots re-check; nothing is cancelled or torn down. A replay
+ * returns the original receipt even after later changes. */
+export async function updateExternalWorkspaceMemberOperation(
+  db: Database,
+  scope: ServiceScope & { workspaceId: string; membershipId: string },
+  request: UpdateExternalWorkspaceMemberRequest,
+) {
+  const command = {
+    ...scope,
+    action: "update",
+    operationId: request.operationId,
+    permissions: [...new Set(request.permissions)].sort(),
+  };
+  return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    const prepared = await prepare(tx, command);
+    if (prepared.replay) {
+      const stored = z
+        .object({
+          identity: z.object({ subjectId: z.string(), organizationMembershipId: z.string() }),
+          permissions: z.array(z.string()),
+          narrowed: z.boolean(),
+        })
+        .parse(prepared.result);
+      return UpdateExternalWorkspaceMemberResponse.parse({
+        subjectId: stored.identity.subjectId,
+        organizationMembershipId: stored.identity.organizationMembershipId,
+        permissions: stored.permissions,
+        narrowed: stored.narrowed,
+        replay: true,
+      });
+    }
+    const identity = z
+      .object({ subjectId: z.string(), organizationMembershipId: z.string() })
+      .parse(prepared.identity);
+    const existing = (await listWorkspaceMembers(tx, scope.workspaceId)).find(
+      (member) => member.subjectId === identity.subjectId,
+    );
+    if (!existing) {
+      await tx.execute(
+        sql`do $$ begin raise exception 'external workspace member not found' using errcode = 'P0002'; end $$`,
+      );
+    }
+    const narrowed = (existing?.permissions ?? []).some(
+      (permission) => !command.permissions.includes(permission),
+    );
+    const result = {
+      workspaceId: scope.workspaceId,
+      identity,
+      permissions: command.permissions,
+      narrowed,
+    };
+    await record(tx, command, result);
+    return UpdateExternalWorkspaceMemberResponse.parse({
+      subjectId: identity.subjectId,
+      organizationMembershipId: identity.organizationMembershipId,
+      permissions: command.permissions,
+      narrowed,
+      replay: false,
+    });
   });
 }

@@ -5,12 +5,8 @@ import type { CodexAccountOverview } from "@opengeni/sdk";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
-import {
-  CodexDeviceCodePanel,
-  CompactUsageMeter,
-  ResetCreditInventory,
-  UsageBar,
-} from "./codex-connection";
+import { CodexDeviceCodePanel, ResetCreditInventory, codexUsageReadings } from "./codex-connection";
+import { UsageMeter } from "./ui/usage-meter";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -42,8 +38,32 @@ function setClipboard(writeText: (value: string) => Promise<void>): void {
 }
 
 describe("Codex remaining allowance meters", () => {
+  test("reads percent left, weekly first, and never invents a missing window", () => {
+    const now = Date.parse("2026-09-27T10:00:00Z");
+    const readings = codexUsageReadings(
+      {
+        fiveHour: null,
+        weekly: {
+          used: 22,
+          limit: 100,
+          percent: 22,
+          remaining: 78,
+          resetAt: "2026-10-04T07:57:00Z",
+          resetAfterSeconds: null,
+          limitWindowSeconds: 604800,
+        },
+      },
+      now,
+    );
+    expect(readings.map((reading) => reading.label)).toEqual(["Weekly", "5-hour"]);
+    expect(readings[0]!.percent).toBe(78);
+    expect(readings[0]!.resetsLabel).toMatch(/Oct/);
+    expect(readings[1]!.percent).toBeNull();
+    expect(codexUsageReadings(null, now).every((reading) => reading.percent === null)).toBe(true);
+  });
+
   for (const remaining of [100, 90, 10, 0]) {
-    test(`labels and fills both Models meters with ${remaining}% remaining`, async () => {
+    test(`labels the meter with ${remaining}% left`, async () => {
       const window = {
         used: 100 - remaining,
         limit: 100,
@@ -53,32 +73,19 @@ describe("Codex remaining allowance meters", () => {
         resetAfterSeconds: null,
         limitWindowSeconds: 18000,
       };
+      const reading = codexUsageReadings({ fiveHour: window, weekly: null }, 0)[1]!;
       const container = document.createElement("div");
       document.body.append(container);
       const root = createRoot(container);
       try {
         await act(async () =>
-          root.render(
-            <>
-              <UsageBar label="5h" window={window} now={0} />
-              <CompactUsageMeter label="5h" window={window} />
-            </>,
-          ),
+          root.render(<UsageMeter label={reading.label} percent={reading.percent} />),
         );
-        const bars = container.querySelectorAll<HTMLElement>('[role="progressbar"]');
-        expect(bars.length).toBe(2);
-        for (const bar of bars) {
-          expect(bar.getAttribute("aria-label")).toBe("5h remaining");
-          expect(bar.getAttribute("aria-valuenow")).toBe(String(remaining));
-          expect(bar.getAttribute("aria-valuetext")).toBe(`${remaining}% remaining`);
-          const fill = bar.firstElementChild as HTMLElement;
-          expect(fill.style.width).toBe(`${remaining}%`);
-          expect(fill.classList.contains("bg-status-waiting")).toBe(remaining <= 10);
-        }
-        expect(
-          container.textContent?.match(new RegExp(`${remaining}% remaining`, "g"))?.length,
-        ).toBe(2);
-        expect(container.textContent?.includes("limit reached")).toBe(remaining === 0);
+        const bar = container.querySelector<HTMLElement>('[role="meter"], [role="progressbar"]');
+        expect(bar?.getAttribute("aria-valuenow")).toBe(String(remaining));
+        expect(container.textContent).toContain(
+          remaining === 0 ? "Limit reached" : `${remaining}% left`,
+        );
         expect(container.textContent).not.toContain("% used");
       } finally {
         await act(async () => root.unmount());
@@ -347,11 +354,9 @@ describe("ResetCreditInventory", () => {
       });
 
       expect(container.textContent).toContain(
-        "OpenGeni could not verify a managed human for this browser session.",
+        "Opengeni couldn't confirm who is signed in to this browser",
       );
-      expect(container.textContent).toContain(
-        "Reset credits are view only, and ownership cannot be claimed or changed here.",
-      );
+      expect(container.textContent).toContain("ownership can't be claimed or changed");
       expect(container.querySelectorAll("button")).toHaveLength(0);
       expect(reconnectCalls).toBe(0);
     } finally {

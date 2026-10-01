@@ -358,7 +358,7 @@ describe("custom API control center browser acceptance", () => {
 
       await inbox.getByRole("button", { name: "Pause" }).click();
       await expectText(inbox, "Paused");
-      await assertAccessibleAndBounded(page, '[data-integration-sheet="outlook-mail"]');
+      await assertAccessibleAndBounded(page, "[data-capability-page]");
       await page.screenshot({ path: `${evidenceDir}pass-6-account-facets.png`, fullPage: true });
     } finally {
       await context.close();
@@ -377,7 +377,7 @@ describe("custom API control center browser acceptance", () => {
       // Shared Connect keeps the exact account target and opens consent only
       // from the explicit user gesture, without a local account-naming form.
       let sheet = await openOutlookMailSheet(page);
-      const addAccount = sheet.getByRole("button", { name: "+ Add account" });
+      const addAccount = sheet.getByRole("button", { name: "Add account", exact: true });
       await expectVisible(addAccount);
       await addAccount.click();
       await page.getByRole("radio", { name: "This workspace", exact: false }).check();
@@ -408,11 +408,15 @@ describe("custom API control center browser acceptance", () => {
       sheet = await openOutlookMailSheet(repair);
       const account = sheet.locator('[data-integration-access-item="account-finance"]');
       await expectText(account, "Needs attention");
+      await assertAccessibleAndBounded(repair, "[data-capability-page]");
       const reconnect = account.getByRole("button", { name: "Reconnect" });
       await reconnect.click();
       await expectVisible(repair.getByText("Could not start setup.", { exact: false }));
       expect(repairState.connectStarts).toHaveLength(1);
-      expect(repair.url()).toBe(`${webBaseUrl}/workspaces/${workspaceId}/plugins`);
+      // A failed start stays on the provider's own page, which its URL addresses.
+      expect(repair.url()).toBe(
+        `${webBaseUrl}/workspaces/${workspaceId}/plugins?open=integration%3Aoutlook-mail`,
+      );
       await assertAccessibleAndBounded(repair, '[data-slot="dialog-content"]');
       await repair.screenshot({
         path: `${evidenceDir}pass-7-add-and-reconnect.png`,
@@ -459,35 +463,37 @@ describe("custom API control center browser acceptance", () => {
       await setTheme(page, "dark");
 
       const row = page
-        .getByRole("button", { name: /^Outlook Mail\s/ })
-        .filter({ hasText: "Connected" });
+        .getByRole("list", { name: "Connected", exact: true })
+        .getByRole("button", { name: "Outlook Mail", exact: true });
       await expectVisible(row);
-      expect(await row.locator(".og-capability-catalog-sr-only").textContent()).toBe("Connected");
+      // The named list conveys connection state; healthy rows have no redundant badge.
+      expect(await row.count()).toBe(1);
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
-      const sheet = page.locator('[data-integration-sheet="outlook-mail"]');
-      await expectVisible(sheet);
+      const sheet = page.locator("[data-capability-page]");
+      await expectVisible(sheet.getByRole("heading", { name: "Outlook Mail", exact: true }));
       // Read-only: the account is listed, but nothing here can mutate it.
       await expectText(
         sheet.locator('[data-integration-access-item="account-finance"]'),
         "Outlook Mail — Finance",
       );
       await expectText(sheet, "A workspace administrator manages these accounts.");
-      expect(await sheet.getByRole("button", { name: "+ Add account" }).count()).toBe(0);
+      expect(await sheet.getByRole("button", { name: "Add account", exact: true }).count()).toBe(0);
       expect(await sheet.getByRole("button", { name: "Remove" }).count()).toBe(0);
+      // The provider opens as a page, so only its width is bounded by the viewport.
       const box = await sheet.boundingBox();
       expect(box?.width ?? 0).toBeLessThanOrEqual(390);
-      expect(box?.height ?? 0).toBeLessThanOrEqual(844);
-      await assertAccessibleAndBounded(page, '[data-integration-sheet="outlook-mail"]');
+      await assertAccessibleAndBounded(page, "[data-capability-page]");
       await page.screenshot({
         path: `${evidenceDir}pass-8-mobile-permission-forced-colors.png`,
         fullPage: true,
       });
 
-      await page.keyboard.press("Escape");
+      // The page's back link returns to the catalog row.
+      await page.getByRole("button", { name: "Capabilities", exact: true }).click();
       await sheet.waitFor({ state: "hidden" });
-      await expectFocused(row);
+      await expectVisible(row);
     } finally {
       await context.close();
     }
@@ -561,15 +567,17 @@ async function openCapabilities(page: Page): Promise<void> {
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
 }
 
-/** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
+/** Opens the one Outlook Mail provider row's page (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
+  // These fixtures have a connected account. An unhealthy account adds its
+  // attention status to the resource row's accessible name.
   const row = page
-    .locator(".og-capability-catalog-row")
-    .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
+    .getByRole("list", { name: "Connected", exact: true })
+    .getByRole("button", { name: /^Outlook Mail(?: Needs attention)?$/ });
   await expectVisible(row);
   await row.click();
-  const sheet = page.locator('[data-integration-sheet="outlook-mail"]');
-  await expectVisible(sheet);
+  const sheet = page.locator("[data-capability-page]");
+  await expectVisible(sheet.getByRole("heading", { name: "Outlook Mail", exact: true }));
   return sheet;
 }
 
@@ -1162,18 +1170,6 @@ async function assertAccessibleAndBounded(page: Page, selector: string): Promise
         document.body.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
-}
-
-/** Focus restoration happens on the closing layer's unmount, so poll for it. */
-async function expectFocused(locator: import("playwright").Locator): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  let focused = false;
-  while (Date.now() < deadline) {
-    focused = await locator.evaluate((element) => element === document.activeElement);
-    if (focused) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  expect(focused).toBe(true);
 }
 
 async function expectVisible(locator: import("playwright").Locator): Promise<void> {

@@ -3,7 +3,7 @@
 This document describes the pre-knowledge publication lane and its retained outbox
 receipts. That lane does not subscribe to new canonical Knowledge writes.
 Historical queued deliveries retain their original access and idempotency checks;
-new Knowledge is available through [Agent Knowledge](knowledge.md). Do not tell
+new Knowledge is available through [Knowledge](knowledge.md). Do not tell
 agents that saving Knowledge automatically posts it to Slack.
 
 The details below are historical implementation evidence, not a supported new

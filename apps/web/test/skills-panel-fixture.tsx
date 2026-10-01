@@ -30,6 +30,10 @@ let record: SkillRecord = {
     },
   ],
 };
+const params = new URLSearchParams(location.search);
+if (params.has("inactive")) record = { ...record, status: "disabled", activeRevisionId: null };
+let removed = false;
+let removeCalls = 0;
 const context = {
   authSession: null,
   accessContext: {
@@ -45,7 +49,14 @@ const context = {
   },
   client: {
     async listWorkspaceSkills() {
-      return { skills: [record] };
+      return { skills: removed ? [] : [record], nextCursor: null };
+    },
+    async removeWorkspaceSkill() {
+      removeCalls++;
+      if (params.has("failOnce") && removeCalls === 1)
+        throw new Error("Temporary failure. Try again.");
+      removed = true;
+      return { removed: true, outcome: "applied" };
     },
     async readWorkspaceSkill() {
       return record;

@@ -3,6 +3,10 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
 import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
+import {
+  CompactionProviderResponseError,
+  compactionProviderFailureDiagnostics,
+} from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
 
 import {
@@ -12,7 +16,10 @@ import {
   settleTurnFailure,
 } from "../src/activities/agent-turn/failure-settlement";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
-import { providerRecoveryResult } from "../src/activities/agent-turn/errors";
+import {
+  providerRecoveryResult,
+  shouldRecoverCompactionProviderFailure,
+} from "../src/activities/agent-turn/errors";
 
 const base = {
   rotationEnabled: true,
@@ -78,6 +85,38 @@ describe("definitive Codex credential failure disposition", () => {
           decisionCredentialId: null,
         }),
       ).toBe("wait");
+    }
+  });
+
+  test("a proven plan entitlement loss fails over, waits only on capped alternates, else fails", () => {
+    expect(codexDefinitiveFailureDisposition({ ...base, failureKind: "plan_entitlement" })).toBe(
+      "failover",
+    );
+    expect(
+      codexDefinitiveFailureDisposition({
+        ...base,
+        failureKind: "plan_entitlement",
+        decisionKind: "allCapped",
+        decisionCredentialId: null,
+      }),
+    ).toBe("wait");
+    for (const override of [
+      { pinDisposition: "manual" as const },
+      { rotationEnabled: false },
+      { decisionKind: "none" as const, decisionCredentialId: null },
+      {
+        decisionKind: "allCapped" as const,
+        decisionCredentialId: null,
+        pinDisposition: "manual" as const,
+      },
+    ]) {
+      expect(
+        codexDefinitiveFailureDisposition({
+          ...base,
+          failureKind: "plan_entitlement",
+          ...override,
+        }),
+      ).toBe("terminal");
     }
   });
 
@@ -267,6 +306,7 @@ function codexFailureDeps(
         effectiveCodexCredentialId: "serving",
         effectiveCodexCredentialVersion: 1,
         codexCredentialFailoverLimit: 1,
+        codexProductModelId: "codex/gpt-6-sol",
         codexPolicySnapshot: overrides.codexPolicySnapshot ?? {
           schemaVersion: 1,
           activeCredentialId: "serving",
@@ -884,6 +924,482 @@ describe("definitive Codex failure settlement", () => {
       quarantine.mockRestore();
       failover.mockRestore();
       parentDelivery.mockRestore();
+    }
+  });
+});
+
+function codexEmptyBadRequest(): Error {
+  return Object.assign(new Error("400 status code (no body)"), {
+    status: 400,
+    error: undefined,
+    headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+  });
+}
+
+function planRecheck(
+  overrides: Partial<opengeniDb.CodexCredentialPlanRecheck> = {},
+): opengeniDb.CodexCredentialPlanRecheck {
+  return {
+    previousPlanType: "pro",
+    planType: "pro",
+    source: "usage",
+    credentialVersion: 1,
+    planChangedFrom: null,
+    planChangedAt: overrides.planChangedFrom ? new Date() : null,
+    exclusion: null,
+    ...overrides,
+  };
+}
+
+describe("Codex plan entitlement settlement", () => {
+  const rotationOn = {
+    schemaVersion: 1 as const,
+    activeCredentialId: "serving",
+    rotationEnabled: true,
+    rotationStrategy: "sharded",
+    pinnedCredentialId: null,
+    pinSource: null,
+    lastCredentialId: "serving",
+  };
+
+  test("an empty 400 on a downgraded account re-checks the plan and fails over the same turn", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockImplementation(
+      async () =>
+        [
+          codexAccount("serving", {
+            label: "Work Pro",
+            planType: "free",
+            planEntitlementExclusion: {
+              planType: "free",
+              models: [{ modelId: "codex/gpt-6-sol", excludedAt: new Date() }],
+            },
+          }),
+          codexAccount("alternate"),
+        ] as never,
+    );
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ planType: "free", credentialVersion: 3, planChangedFrom: "pro" }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const settle = mock(async () => true);
+    const { deps, control } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle,
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recheck).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "workspace-1",
+        "serving",
+        {
+          turnId: "turn-1",
+          holderId: "holder-1",
+          generation: 1,
+        },
+      );
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          credentialId: "serving",
+          credentialVersion: 3,
+          quarantine: {
+            kind: "plan_entitlement",
+            modelId: "codex/gpt-6-sol",
+            planType: "free",
+            planObserved: true,
+          },
+        }),
+      );
+      expect(failover).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          recoveryPayload: expect.objectContaining({
+            reason: "codex_credential_failover",
+            credentialId: "serving",
+            failureKind: "plan_entitlement",
+          }),
+        }),
+      );
+      expect(settle).not.toHaveBeenCalled();
+      expect(control.activityStatus).toBe("recovering");
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+    }
+  });
+
+  test("a downgrade a usage read recorded first still fails over the same turn", async () => {
+    // Pro -> Plus was observed before the turn (accounts page usage read), so
+    // the failing turn's re-check reads Plus again. The recorded change from
+    // Pro is the evidence; the empty 400 must not become "unexplained".
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work", planType: "plus" }),
+      codexAccount("alternate"),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ previousPlanType: "plus", planType: "plus", planChangedFrom: "pro" }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const { deps } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle: mock(async () => true),
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: {
+            kind: "plan_entitlement",
+            modelId: "codex/gpt-6-sol",
+            planType: "plus",
+            planObserved: true,
+          },
+        }),
+      );
+      expect(failover).toHaveBeenCalledTimes(1);
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+    }
+  });
+
+  test("an empty 400 on the remote compaction request takes the same re-check and failover", async () => {
+    const compaction = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(codexEmptyBadRequest()),
+      codexEmptyBadRequest(),
+    );
+    expect(compaction.status).toBe(400);
+    expect(shouldRecoverCompactionProviderFailure(compaction)).toBe(true);
+    // Another definitive compaction rejection stays terminal.
+    const invalid = Object.assign(new Error("Invalid value"), {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: { type: "invalid_request_error", code: "invalid_value", message: "Invalid value" },
+    });
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError(compactionProviderFailureDiagnostics(invalid), invalid),
+      ),
+    ).toBe(false);
+
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { planType: "free" }),
+      codexAccount("alternate"),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ planType: "free", planChangedFrom: "pro" }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const { deps } = codexFailureDeps({
+      error: compaction,
+      settle: mock(async () => true),
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "recovering" });
+      expect(recheck).toHaveBeenCalledTimes(1);
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: expect.objectContaining({ kind: "plan_entitlement", planType: "free" }),
+        }),
+      );
+      expect(failover).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          recoveryPayload: expect.objectContaining({ failureKind: "plan_entitlement" }),
+        }),
+      );
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+    }
+  });
+
+  test("explicit plan evidence with an unreadable plan names no plan and binds the turn receipt to none", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work Pro", planType: "pro" }),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({ planType: null, source: null }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined,
+    );
+    const settle = mock(async (_input: unknown) => true);
+    const explicit = Object.assign(new Error("403 model not available on plan"), {
+      status: 403,
+      error: {
+        code: "model_not_available_on_plan",
+        message: "This model is not available on your current plan.",
+      },
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps } = codexFailureDeps({ error: explicit, settle, codexPolicySnapshot: rotationOn });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: {
+            kind: "plan_entitlement",
+            modelId: "codex/gpt-6-sol",
+            planType: "pro",
+            planObserved: false,
+          },
+        }),
+      );
+      const settled = settle.mock.calls[0]![0] as {
+        events: Array<{ type: string; payload: Record<string, unknown> }>;
+      };
+      expect(settled.events[0]?.payload).toMatchObject({
+        code: "codex_plan_entitlement",
+        planType: null,
+        error:
+          'The ChatGPT account "Work Pro" no longer has access to GPT-6 Sol on its current plan. ' +
+          "Upgrade it, use another connected account, or choose another model.",
+      });
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      parentDelivery.mockRestore();
+    }
+  });
+
+  test("without an alternate the turn fails with typed copy naming the account and plan", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work Pro", planType: "free" }),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck({
+        planType: "free",
+        source: "token_refresh",
+        credentialVersion: 2,
+        planChangedFrom: "pro",
+      }),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover");
+    const armWait = spyOn(opengeniDb, "armCodexCapacityWait");
+    const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined,
+    );
+    const settle = mock(async (_input: unknown) => true);
+    const { deps } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle,
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(quarantine).toHaveBeenCalledTimes(1);
+      expect(failover).not.toHaveBeenCalled();
+      expect(armWait).not.toHaveBeenCalled();
+      expect(settle).toHaveBeenCalledTimes(1);
+      const settled = settle.mock.calls[0]![0] as {
+        events: Array<{ type: string; payload: unknown }>;
+      };
+      expect(settled.events[0]).toEqual({
+        type: "turn.failed",
+        payload: {
+          error:
+            'The ChatGPT account "Work Pro" is now on the Free plan, which doesn\'t include GPT-6 Sol. ' +
+            "Upgrade it, use another connected account, or choose another model.",
+          code: "codex_plan_entitlement",
+          retryable: false,
+          planType: "free",
+          model: "codex/gpt-6-sol",
+          detail: "The Codex backend answered HTTP 400 with no error body.",
+        },
+      });
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+      armWait.mockRestore();
+      parentDelivery.mockRestore();
+    }
+  });
+
+  test("an unchanged paid plan keeps the account and fails with typed copy, without looping", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving", { label: "Work Pro" }),
+      codexAccount("alternate"),
+    ] as never);
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan").mockResolvedValue(
+      planRecheck(),
+    );
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease");
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+    const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(
+      undefined,
+    );
+    const settle = mock(async (_input: unknown) => true);
+    const { deps } = codexFailureDeps({
+      error: codexEmptyBadRequest(),
+      settle,
+      codexPolicySnapshot: rotationOn,
+    });
+    try {
+      expect(await settleTurnFailure(deps as never)).toMatchObject({ status: "failed" });
+      expect(quarantine).not.toHaveBeenCalled();
+      expect(recovery).not.toHaveBeenCalled();
+      const settled = settle.mock.calls[0]![0] as {
+        events: Array<{ type: string; payload: unknown }>;
+      };
+      expect(settled.events[0]?.payload).toMatchObject({
+        code: "codex_request_rejected",
+        retryable: false,
+        planType: "pro",
+      });
+      expect(String((settled.events[0]!.payload as { error: string }).error)).toContain(
+        'The ChatGPT account "Work Pro" still reports the Pro plan',
+      );
+    } finally {
+      listAccounts.mockRestore();
+      recheck.mockRestore();
+      quarantine.mockRestore();
+      recovery.mockRestore();
+      parentDelivery.mockRestore();
+    }
+  });
+
+  test("the encrypted-content 400 and quota 429 paths never re-check the plan", async () => {
+    const recheck = spyOn(opengeniDb, "recheckCodexCredentialPlan");
+    const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+      action: "stale",
+    } as never);
+    const history = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue(
+      [] as never,
+    );
+    const encrypted = Object.assign(new Error("400 invalid_encrypted_content"), {
+      status: 400,
+      error: {
+        code: "invalid_encrypted_content",
+        message: "The encrypted content could not be decrypted or parsed.",
+      },
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps: encryptedDeps } = codexFailureDeps({ error: encrypted });
+    try {
+      await settleTurnFailure({
+        ...encryptedDeps,
+        historySink: {
+          ...encryptedDeps.historySink,
+          providerArtifactCandidates: { historyItemIds: [], runStateId: null },
+        },
+        providerTurn: { ...encryptedDeps.providerTurn, lastCodexRequestOpaqueArtifacts: [] },
+      } as never);
+      expect(recovery).toHaveBeenCalledWith(
+        expect.anything(),
+        "workspace-1",
+        expect.objectContaining({ reason: "encrypted_content_rejected" }),
+      );
+      expect(recheck).not.toHaveBeenCalled();
+    } finally {
+      recovery.mockRestore();
+      history.mockRestore();
+    }
+
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving"),
+      codexAccount("alternate"),
+    ] as never);
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
+      action: "recovering",
+      failoverCount: 1,
+      maxFailovers: 1,
+      events: [],
+    });
+    const quota = Object.assign(new Error("429 usage limit reached"), {
+      status: 429,
+      error: { type: "usage_limit_reached", resets_in_seconds: 3600 },
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const { deps: quotaDeps } = codexFailureDeps({ error: quota, codexPolicySnapshot: rotationOn });
+    try {
+      expect(await settleTurnFailure(quotaDeps as never)).toMatchObject({ status: "recovering" });
+      expect(recheck).not.toHaveBeenCalled();
+      expect(quarantine).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          quarantine: expect.objectContaining({ kind: "cooldown", cooldownKind: "quota" }),
+        }),
+      );
+      expect(failover).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          recoveryPayload: expect.objectContaining({ failureKind: "quota" }),
+        }),
+      );
+    } finally {
+      recheck.mockRestore();
+      listAccounts.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
     }
   });
 });

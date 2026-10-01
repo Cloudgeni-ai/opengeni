@@ -7,14 +7,24 @@ import type {
   BrowserObservation,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
-import { AgentBrowserDriver, AgentBrowserJsonRunner, BrowserSupervisor } from "../src";
+import { resolvePinnedHeadlessShell } from "../src/headless-shell";
+import {
+  AgentBrowserDriver,
+  AgentBrowserJsonRunner,
+  BrowserSupervisor,
+  BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+} from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 e2e("runs multiple real browser sessions through one placement supervisor", async () => {
   const directory = await mkdtemp("/tmp/ogb-supervisor-e2e-");
   const socketDirectory = await mkdtemp("/tmp/ogs-");
+  const headlessShell = process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY
+    ? await resolvePinnedHeadlessShell(process.env.OPENGENI_BROWSERD_HEADLESS_SHELL_DIRECTORY)
+    : undefined;
   const supervisor = await BrowserSupervisor.open({
+    ...(headlessShell ? { headlessShell } : {}),
     rootDirectory: join(directory, "state"),
     socketRootDirectory: socketDirectory,
   });
@@ -54,64 +64,93 @@ e2e("runs multiple real browser sessions through one placement supervisor", asyn
   }
 });
 
-e2e("recovers after exact Chromium process loss without reusing target refs", async () => {
-  const directory = await mkdtemp("/tmp/ogb-browser-loss-e2e-");
-  const socketDirectory = await mkdtemp("/tmp/ogl-");
-  let driverLifecycles = 0;
-  let profileDirectory: string | undefined;
-  const supervisor = await BrowserSupervisor.open({
-    rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
-    createDriver: async (driverContext) => {
-      profileDirectory = driverContext.profileDirectory;
-      driverLifecycles += 1;
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: "og",
-        sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-        socketDirectory: driverContext.socketDirectory,
-        profileDirectory: driverContext.profileDirectory,
-        downloadDirectory: driverContext.downloadDirectory,
-        screenshotDirectory: driverContext.screenshotDirectory,
-        headed: false,
-        browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
-      });
-      return new AgentBrowserDriver({
-        browserSessionId: driverContext.browserSessionId,
-        controllerGeneration: driverContext.controllerGeneration,
-        runner,
-        downloadDirectory: driverContext.downloadDirectory,
-        ...(driverContext.downloadEvents ? { downloadEvents: driverContext.downloadEvents } : {}),
-        resolveWorkspaceFiles: driverContext.resolveWorkspaceFiles,
-      });
-    },
-  });
-  const session = reference();
-  try {
-    const created = await supervisor.createSession({
-      ...session,
-      headed: false,
-      initialUrl: fixture("Recovery"),
+e2e.each(["read", "capture"] as const)(
+  "recovers after exact Chromium process loss before %s without reusing target refs",
+  async (operation) => {
+    const directory = await mkdtemp("/tmp/ogb-browser-loss-e2e-");
+    const socketDirectory = await mkdtemp("/tmp/ogl-");
+    let driverLifecycles = 0;
+    let uploads = 0;
+    let profileDirectory: string | undefined;
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: socketDirectory,
+      uploadArtifact: async (path) => {
+        expect((await stat(path)).size).toBeGreaterThan(0);
+        uploads += 1;
+      },
+      createDriver: async (driverContext) => {
+        profileDirectory = driverContext.profileDirectory;
+        driverLifecycles += 1;
+        const runner = await AgentBrowserJsonRunner.create({
+          namespace: "og",
+          sessionName: `r${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+          socketDirectory: driverContext.socketDirectory,
+          profileDirectory: driverContext.profileDirectory,
+          downloadDirectory: driverContext.downloadDirectory,
+          screenshotDirectory: driverContext.screenshotDirectory,
+          headed: false,
+          browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE ?? "/usr/bin/chromium",
+        });
+        return new AgentBrowserDriver({
+          browserSessionId: driverContext.browserSessionId,
+          controllerGeneration: driverContext.controllerGeneration,
+          runner,
+          downloadDirectory: driverContext.downloadDirectory,
+          ...(driverContext.downloadEvents ? { downloadEvents: driverContext.downloadEvents } : {}),
+          resolveWorkspaceFiles: driverContext.resolveWorkspaceFiles,
+        });
+      },
     });
-    if (!profileDirectory) throw new Error("browser driver context missing");
-    const browserPid = await chromiumProfilePid(profileDirectory);
-    process.kill(browserPid, "SIGKILL");
-    await waitForProcessExit(browserPid);
+    const session = reference();
+    try {
+      const created = await supervisor.createSession({
+        ...session,
+        headed: false,
+        initialUrl: fixture("Recovery"),
+      });
+      if (!profileDirectory) throw new Error("browser driver context missing");
+      const browserPid = await chromiumProfilePid(profileDirectory);
+      process.kill(browserPid, "SIGKILL");
+      await waitForProcessExit(browserPid);
 
-    const recovered = await supervisor.listTargets(session);
-    expect(driverLifecycles).toBe(2);
-    expect(recovered).toHaveLength(1);
-    expect(recovered[0]!.id).not.toBe(created.observation.target.id);
-    expect(recovered[0]!.url).toBe(fixture("Recovery"));
+      if (operation === "capture") {
+        const operationId = randomUUID();
+        const input = {
+          ...session,
+          operationId,
+          objectKey: `workspaces/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/browser-state/checkpoints/${operationId}/chromium-profile.ogbs`,
+          afterCapture: "restart" as const,
+          dataKey: Buffer.alloc(32, 8),
+          aad: Buffer.from("lost-browser-capture"),
+          upload: {
+            url: "https://storage.test/upload",
+            requiredHeaders: { "content-type": BROWSER_STATE_ARTIFACT_CONTENT_TYPE },
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        };
+        const captured = await supervisor.captureState(input);
+        expect(captured.manifest.tabs).toEqual([{ url: fixture("Recovery"), selected: true }]);
+        expect(await supervisor.captureState(input)).toEqual(captured);
+        expect(uploads).toBe(1);
+      }
 
-    const stale = await supervisor.action(clickCommand(created.observation));
-    expect(stale.state).toBe("failed");
-    expect(stale.error?.code).toBe("target_not_found");
-  } finally {
-    await supervisor.close();
-    await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
-  }
-});
+      const recovered = await supervisor.listTargets(session);
+      expect(driverLifecycles).toBe(operation === "capture" ? 3 : 2);
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+      expect(recovered[0]!.url).toBe(fixture("Recovery"));
+
+      const stale = await supervisor.action(clickCommand(created.observation));
+      expect(stale.state).toBe("failed");
+      expect(stale.error?.code).toBe("target_not_found");
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+      await rm(socketDirectory, { recursive: true, force: true });
+    }
+  },
+);
 
 function reference() {
   return {

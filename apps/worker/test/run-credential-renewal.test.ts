@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { NormalizedRunCredentialMaterial } from "@opengeni/runtime";
+import { RunMcpCredentials, type NormalizedRunCredentialMaterial } from "@opengeni/runtime";
 import {
   RUN_CREDENTIAL_DEFAULT_REFRESH_MS,
   RUN_CREDENTIAL_MIN_REFRESH_MS,
   nextRunCredentialRenewalDelay,
   startRunCredentialRenewalLoop,
+  runCredentialRenewalExpiry,
 } from "../src/activities/run-credential-renewal";
 
 function material(value: string, expiresAt: Date | null = null): NormalizedRunCredentialMaterial {
@@ -37,6 +38,77 @@ function fakeScheduler() {
 }
 
 describe("host-managed run credential renewal", () => {
+  test("MCP-only renewal uses the earliest entry expiry and the shared cancellation fence", async () => {
+    const scheduler = fakeScheduler();
+    const now = Date.parse("2026-09-30T08:00:00Z");
+    const target = { id: "custom", url: "https://product.example/mcp" };
+    const seed = {
+      ...material("unrelated", new Date(now + 3_600_000)),
+      mcp: [
+        {
+          url: target.url,
+          headers: { authorization: "initial" },
+          expiresAt: new Date(now + 600_000).toISOString(),
+        },
+      ],
+    };
+    const credentials = new RunMcpCredentials([target], { now: () => now });
+    credentials.replace(seed);
+    expect(runCredentialRenewalExpiry(seed)?.getTime()).toBe(now + 600_000);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const controller = startRunCredentialRenewalLoop({
+      initialExpiresAt: runCredentialRenewalExpiry(seed),
+      now: () => now,
+      resolve: async () => {
+        await gate;
+        return { ...seed, mcp: [{ ...seed.mcp[0]!, headers: { authorization: "renewed" } }] };
+      },
+      write: async (next) => credentials.replace(next),
+      schedule: scheduler.schedule,
+      clearSchedule: scheduler.clearSchedule,
+    });
+    expect(scheduler.scheduled[0]!.delayMs).toBe(300_000);
+    const refresh = controller.refreshNow();
+    await controller.stop();
+    release();
+    await refresh;
+    expect(
+      new Headers(credentials.requestInit(target, target.url)!.headers).get("authorization"),
+    ).toBe("initial");
+  });
+
+  test("skipped MCP target renewal retains the last valid headers without failing renewal", async () => {
+    const scheduler = fakeScheduler();
+    const target = { id: "custom", url: "https://product.example/mcp" };
+    const credentials = new RunMcpCredentials([target]);
+    credentials.replace({
+      expiresAt: null,
+      mcp: [{ url: target.url, headers: { authorization: "initial" } }],
+    });
+    const failures: unknown[] = [];
+    const controller = startRunCredentialRenewalLoop({
+      initialExpiresAt: null,
+      resolve: async () => ({
+        ...material(""),
+        mcp: [{ url: "https://unknown.example/mcp", headers: { authorization: "secret-invalid" } }],
+      }),
+      write: async (next) => credentials.replace(next),
+      schedule: scheduler.schedule,
+      clearSchedule: scheduler.clearSchedule,
+      onFailure: (failure) => failures.push(failure),
+    });
+    await controller.refreshNow();
+    expect(
+      new Headers(credentials.requestInit(target, target.url)!.headers).get("authorization"),
+    ).toBe("initial");
+    expect(failures).toEqual([]);
+    expect(JSON.stringify(failures)).not.toContain("secret-invalid");
+    await controller.stop();
+  });
+
   test("caps unknown/long expiries and advances imminent expiry", () => {
     const now = Date.parse("2026-07-21T10:00:00.000Z");
     expect(nextRunCredentialRenewalDelay(null, now)).toBe(RUN_CREDENTIAL_DEFAULT_REFRESH_MS);

@@ -200,6 +200,13 @@ preserved when using structural, bounds, transform, and unrelated edits.
 
 ## Import and export boundaries
 
+Export availability is deployment-defined and listed in the
+`opengeni__editable_artifact_export` tool description. Current deployments
+serve spreadsheet XLSX only; a presentation export (PPTX, PDF, image) is
+refused with `unsupported_format`. Do not attempt or promise one: give the user
+the live artifact's `artifactReference` link instead. Import still works, and
+when the tool description lists a presentation format the export loop is:
+
 ```js
 const deck = await openGeni.artifacts.import(fileId, "presentation", "Imported deck");
 const job = await deck.export("pptx");

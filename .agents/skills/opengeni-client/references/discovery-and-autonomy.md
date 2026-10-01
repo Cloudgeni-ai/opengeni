@@ -37,20 +37,23 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-Ask when an unresolved choice would materially change privacy, authority, user
-experience, cost, irreversible data, or the delivery boundary. First use facts
-already available from the product, repository, live service, or prior direction.
-For reversible preferences, offer a fitting recommendation and continue independent
-work while the user responds. Require an answer before dependent work only when
-the missing decision is necessary for correctness or authorization.
+The four user-owned choices (who shares what, when things run and in which time
+zone, where outputs land, whether the agent may write) are never defaulted
+silently: if the request or repository does not settle one, send the single
+bundled question before building the parts that depend on it, and continue only
+independent discovery while waiting. Skip this only when the user explicitly
+said not to ask; then state the defaults you chose in the handoff. For other
+choices, first use facts already available from the product, repository, live
+service, or prior direction, and use a reversible recommendation instead of a
+question.
 
 Good questions ask for a product decision, such as who may read another person's chats, whether the agent may write data, which actions need confirmation, whether users should see tool activity, or whether a named environment may be deployed.
 
 Poor questions ask the customer to restate their framework, API routes, auth library, CI command, or deployment topology when those are already visible. Do not make the customer choose OpenGeni internals they do not care about; translate their requirement into the appropriate contract.
 
-Group tightly related unresolved decisions when that makes them easier to answer. Do not impose a fixed question count. Do not repeat a question whose answer was already given. If the user explicitly asks the agent to determine the answer, investigate and make a reasoned choice instead of returning the decision to them.
+Asking zero questions is a failure when a user-owned choice below is unresolved and not inferable; asking about inferable facts is the opposite failure. Do not repeat an answered question. If the user explicitly asks the agent to decide, investigate and make a reasoned choice.
 
-For a missing privacy answer, default provisionally to the smaller sharing boundary and explain the operational cost. Do not silently weaken isolation to reduce workspace count.
+When the user explicitly declines to answer the sharing question, default provisionally to the smaller sharing boundary and explain the operational cost. Do not silently weaken isolation to reduce workspace count.
 
 ### Keep product choices lightweight
 
@@ -74,6 +77,10 @@ Use product language for the relevant unresolved choices:
   more reports, or controlled queries for deeper analysis. State the meaningful
   limitation of the recommendation. Confirm broader access or writes separately
   only when they are part of the requested product.
+- **When things run:** on demand, or on a schedule (time and time zone).
+- **Where results land:** the chat, a product record or screen, or a channel;
+  delivery goes through product tools, or signed workspace webhooks where the
+  deployment offers them.
 
 For example, if all three choices are unresolved for a simple dashboard, propose
 “Private chats, no learning between chats, and current-page data only” with a short

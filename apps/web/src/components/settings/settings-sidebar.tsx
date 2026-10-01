@@ -1,7 +1,20 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, MenuIcon } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+
+import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
+import { ContentPage } from "@/components/ui/content-layout";
+import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
+import { SectionVariantProvider } from "@/components/ui/section-variant";
+import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
 import {
   Sheet,
   SheetContent,
@@ -9,122 +22,292 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { BrandMark } from "@/components/brand-mark";
 import { cn } from "@/lib/utils";
+import { SettingsActionsSlotContext } from "./settings-header-actions";
 
+/**
+ * The settings shell for workspace, organization and personal settings.
+ *
+ * Settings is a mode of the left rail: entering settings swaps the main rail
+ * (sessions) for the settings rail, and its back link leaves settings and
+ * restores the main rail. The rail lists every settings page the person can
+ * use in one place, in labeled sections: Workspace, Organization and Your
+ * account, each naming the workspace or organization it configures. Below
+ * 1024px the rail folds into a header with the back link, the current page
+ * and a Menu button that opens the rail in a drawer.
+ *
+ * Pages inside the shell drop their header icon; the settings rail gives context.
+ */
+
+/** Rail 240px beside the content; one column with a header row below 1024px. */
 export const SETTINGS_SHELL_CLASS =
-  "grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1";
-export const SETTINGS_NAV_CLASS = "mt-2 flex flex-col gap-1";
-export function settingsNavItemClass(selected: boolean) {
-  return cn(
-    "flex min-h-10 min-w-0 items-center gap-2.5 rounded-md px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand lg:w-full",
-    selected
-      ? "bg-surface-2 font-medium text-fg"
-      : "text-fg-muted hover:bg-surface-2 hover:text-fg",
-  );
+  "grid h-full min-h-0 w-full min-w-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1";
+
+const NARROW_QUERY = "(max-width: 1023px)";
+
+export interface SettingsRailItem {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  /** The router link for this destination, without children (`<Link to=... />`). */
+  link: ReactElement;
+  /** A purple dot for "needs you". */
+  attention?: boolean;
 }
 
-export function SettingsSidebar({
-  workspaceId,
-  backToWorkspaceSettings = false,
-  label,
-  identity,
-  currentPage,
-  children,
-}: {
-  workspaceId?: string;
-  backToWorkspaceSettings?: boolean;
+export interface SettingsRailGroup {
+  label?: string;
+  items: SettingsRailItem[];
+}
+
+/**
+ * One scope of settings: "Workspace", "Organization" or "Your account". Its
+ * header is the only heading in the section: the scope, with the workspace or
+ * organization it configures as quiet meta. Groups inside are set apart by
+ * space, without labels.
+ */
+export interface SettingsRailSection {
+  id: string;
+  /** The scope, in sentence case: "Workspace". */
   label: string;
-  identity: ReactNode;
+  /** Which one: "Design preview", "Acme Robotics", the account's email. */
+  meta?: string;
+  groups: SettingsRailGroup[];
+}
+
+export interface SettingsShellPage {
+  title: string;
+  description?: ReactNode;
+  /** The page's one primary action. Pages can also portal it in with SettingsHeaderActions. */
+  actions?: ReactNode;
+}
+
+export interface SettingsShellProps {
+  /** Accessible name of the settings rail, "Settings". */
+  label: string;
+  /** The link that leaves this area ("Back to sessions"), without children. */
+  back: { link: ReactElement; label: string };
+  /** The brand link at the top of the rail, without children. */
+  home: ReactElement;
+  /** The one picker under the back link: the same workspace picker as the main rail. */
+  scope?: ReactNode;
+  /** Workspace, Organization and Your account, in that order. */
+  sections: SettingsRailSection[];
+  /** The item that is current. */
+  activeId: string | null;
+  /** The current page's name, for the narrow header. */
   currentPage: string;
+  /** The current page's scope for the narrow header: "Organization · Acme Robotics". */
+  currentScope?: string;
+  /**
+   * The page header of a settings page. `null` when the page brings its own: a
+   * sub-page (an account, a key, a form) or a full page (Agents, Variable sets).
+   */
+  page: SettingsShellPage | null;
+  /**
+   * `settings`: the shell draws the standard-width scroller around the page.
+   * `page`: the page brings its own `ContentPage` (Agents, Variable sets).
+   */
+  layout?: "settings" | "page";
+  /** Workspace-wide state above the page (the paused banner). */
+  notice?: ReactNode;
   children: ReactNode;
-}) {
+}
+
+function useNarrow(): boolean {
   const [narrow, setNarrow] = useState(() =>
-    typeof window !== "undefined" ? window.innerWidth < 1024 : false,
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(NARROW_QUERY).matches
+      : false,
   );
-  const [open, setOpen] = useState(false);
   useEffect(() => {
-    const query = window.matchMedia("(max-width: 1023px)");
-    const update = () => {
-      setNarrow(query.matches);
-      if (!query.matches) setOpen(false);
-    };
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(NARROW_QUERY);
+    const update = () => setNarrow(query.matches);
     update();
     query.addEventListener("change", update);
     return () => query.removeEventListener("change", update);
   }, []);
-  useEffect(() => setOpen(false), [workspaceId, currentPage]);
+  return narrow;
+}
 
-  const backTo = workspaceId
-    ? backToWorkspaceSettings
-      ? "/workspaces/$workspaceId/settings"
-      : "/workspaces/$workspaceId/sessions"
-    : "/";
-  const backLabel = workspaceId
-    ? backToWorkspaceSettings
-      ? "Back to workspace settings"
-      : "Back to sessions"
-    : "Back to OpenGeni";
-
-  const sidebar = (
-    <aside
-      aria-label={label}
-      className="h-full min-h-0 overflow-y-auto overscroll-y-contain border-border bg-surface/35 lg:border-r"
-      onClick={(event) => {
-        if (event.target instanceof Element && event.target.closest("a[href]")) setOpen(false);
-      }}
-    >
-      <div className="flex min-h-full min-w-0 flex-col px-3 py-3 lg:py-4">
-        <Link
-          to={workspaceId ? "/workspaces/$workspaceId/sessions" : "/"}
-          params={workspaceId ? { workspaceId } : undefined}
-          className="flex h-9 shrink-0 items-center gap-2 rounded-md px-2 text-sm font-semibold text-fg transition-colors hover:bg-surface-2"
-        >
-          <span className="flex size-6 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <BrandMark className="size-4" />
-          </span>
-          OpenGeni
-        </Link>
-        <Link
-          to={backTo}
-          params={workspaceId ? { workspaceId } : undefined}
-          className="mt-3 inline-flex h-8 shrink-0 items-center gap-2 rounded-md px-2 text-xs text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:mt-5"
-        >
-          <ArrowLeftIcon aria-hidden="true" className="size-3.5" />
-          {backLabel}
-        </Link>
-        <div className="mt-4 min-w-0 px-2 lg:mt-6">
-          <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">{label}</p>
-          {identity}
-        </div>
-        {children}
-      </div>
-    </aside>
-  );
-  if (!narrow) return sidebar;
+/** Renders a router link element with our own children and classes. */
+function LinkShell({
+  link,
+  className,
+  children,
+  ...props
+}: {
+  link: ReactElement;
+  className?: string;
+  children: ReactNode;
+  "aria-label"?: string;
+}) {
+  const linkProps = link.props as { className?: string };
+  const Element = link.type as React.ElementType;
   return (
-    <header className="flex min-w-0 items-center gap-3 border-b border-border bg-surface/35 px-4 py-2">
-      <Link
-        to={backTo}
-        params={workspaceId ? { workspaceId } : undefined}
-        aria-label={backLabel}
-        className="flex size-10 shrink-0 items-center justify-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-brand"
+    <Element {...(link.props as object)} {...props} className={cn(className, linkProps.className)}>
+      {children}
+    </Element>
+  );
+}
+
+function SettingsRailSectionView({
+  section,
+  activeId,
+  first,
+}: {
+  section: SettingsRailSection;
+  activeId: string | null;
+  first: boolean;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={section.label}
+      data-settings-section={section.id}
+      className={cn("flex min-w-0 flex-col gap-3", !first && "border-t border-border pt-4")}
+    >
+      <div className="min-w-0 px-2.5">
+        <p className="text-sm leading-5 font-medium text-fg">{section.label}</p>
+        {section.meta ? (
+          <p className="truncate text-xs leading-4.5 text-fg-muted" title={section.meta}>
+            {section.meta}
+          </p>
+        ) : null}
+      </div>
+      {section.groups.map((group, index) => (
+        <NavGroup key={group.label ?? `group-${index}`} label={group.label}>
+          {group.items.map((item) => {
+            const Icon = item.icon;
+            return (
+              <NavItem
+                key={item.id}
+                asChild
+                label={item.label}
+                icon={<Icon />}
+                active={activeId === item.id}
+                attention={item.attention}
+              >
+                {item.link}
+              </NavItem>
+            );
+          })}
+        </NavGroup>
+      ))}
+    </div>
+  );
+}
+
+function SettingsRail({
+  label,
+  back,
+  home,
+  scope,
+  sections,
+  activeId,
+  className,
+  onNavigate,
+}: Pick<SettingsShellProps, "label" | "back" | "home" | "scope" | "sections" | "activeId"> & {
+  className?: string;
+  onNavigate?: () => void;
+}) {
+  const ref = useRef<HTMLElement>(null);
+  // The rail is long (workspace and organization pages): keep the current page in view.
+  useLayoutEffect(() => {
+    ref.current
+      ?.querySelector<HTMLElement>('[aria-current="page"]')
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [activeId]);
+  return (
+    <SettingsNav
+      ref={ref}
+      variant="rail"
+      aria-label={label}
+      data-settings-rail
+      className={cn(
+        "og-rail-glow h-full w-full overflow-x-hidden overflow-y-auto overscroll-y-contain px-2",
+        className,
+      )}
+      onClick={(event) => {
+        if (event.target instanceof Element && event.target.closest("a[href]")) onNavigate?.();
+      }}
+      header={
+        <div className="flex min-w-0 flex-col gap-3">
+          <LinkShell
+            link={home}
+            aria-label="Opengeni home"
+            className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
+          >
+            <BrandMark className="w-5" />
+            <Wordmark className="text-[18px]" />
+          </LinkShell>
+          <NavItem asChild label={back.label} icon={<ArrowLeftIcon />}>
+            {back.link}
+          </NavItem>
+          {scope ? <div className="min-w-0">{scope}</div> : null}
+        </div>
+      }
+    >
+      {sections.map((section, index) => (
+        <SettingsRailSectionView
+          key={section.id}
+          section={section}
+          activeId={activeId}
+          first={index === 0}
+        />
+      ))}
+    </SettingsNav>
+  );
+}
+
+export function SettingsShell({
+  label,
+  back,
+  home,
+  scope,
+  sections,
+  activeId,
+  currentPage,
+  currentScope,
+  page,
+  layout = "settings",
+  notice,
+  children,
+}: SettingsShellProps) {
+  const narrow = useNarrow();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [actionsSlot, setActionsSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!narrow) setMenuOpen(false);
+  }, [narrow]);
+  useEffect(() => setMenuOpen(false), [activeId, currentPage]);
+
+  const railProps = { label, back, home, scope, sections, activeId };
+
+  const navigation = narrow ? (
+    <header className="flex min-w-0 items-center gap-2 border-b border-border bg-bg px-2 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))]">
+      <LinkShell
+        link={back.link}
+        aria-label={back.label}
+        className="flex size-11 shrink-0 items-center justify-center rounded-md text-fg-muted outline-none transition-colors hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-brand/55"
       >
         <ArrowLeftIcon aria-hidden="true" className="size-4" />
-      </Link>
+      </LinkShell>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-2xs text-fg-subtle">{label}</p>
-        <p className="truncate text-sm font-medium">{currentPage}</p>
+        <p className="truncate text-xs leading-4.5 text-fg-muted">{currentScope ?? label}</p>
+        <p className="truncate text-sm font-medium text-fg">{currentPage}</p>
       </div>
-      <Sheet open={open} onOpenChange={setOpen}>
+      <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
         <SheetTrigger asChild>
           <Button
-            variant="secondary"
+            type="button"
+            variant="outline"
             size="sm"
-            className="min-h-10 shrink-0"
+            className="shrink-0 pointer-coarse:h-11"
             aria-label={`Open ${label.toLowerCase()} menu`}
           >
-            <MenuIcon aria-hidden="true" className="size-4" />
+            <MenuIcon aria-hidden="true" />
             Menu
           </Button>
         </SheetTrigger>
@@ -133,12 +316,78 @@ export function SettingsSidebar({
           className="w-[min(20rem,calc(100vw-2rem))] max-w-none gap-0 border-border bg-bg p-0 sm:max-w-none"
         >
           <SheetTitle className="sr-only">{label}</SheetTitle>
-          <SheetDescription className="sr-only">
-            Switch workspace or organization and choose a settings page.
-          </SheetDescription>
-          {sidebar}
+          <SheetDescription className="sr-only">Choose a settings page.</SheetDescription>
+          <SettingsRail {...railProps} onNavigate={() => setMenuOpen(false)} />
         </SheetContent>
       </Sheet>
     </header>
+  ) : (
+    <div className="min-h-0 min-w-0 border-r border-border">
+      <SettingsRail {...railProps} className="border-r-0" />
+    </div>
+  );
+
+  const body = (
+    <>
+      {page ? (
+        <PageHeader
+          title={page.title}
+          description={page.description}
+          actions={
+            <>
+              {page.actions}
+              <span ref={setActionsSlot} className="contents" />
+            </>
+          }
+        />
+      ) : null}
+      <div className={page ? "mt-8" : undefined}>{children}</div>
+    </>
+  );
+
+  return (
+    <div className={SETTINGS_SHELL_CLASS}>
+      {navigation}
+      {/* A labelled region: the app shell already provides the one <main>. */}
+      <section
+        aria-label={page?.title ?? currentPage}
+        data-canvas
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      >
+        {notice}
+        <SettingsActionsSlotContext.Provider value={actionsSlot}>
+          <PageHeaderStyleProvider icon="hide">
+            {/* Settings sections are grouped cards: heading above, rows in one card. */}
+            <SectionVariantProvider variant="group">
+              {layout === "page" ? (
+                // A full page keeps its own scroller but starts its title at the
+                // same height as every other settings page.
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:[&>[data-slot=content-page]>[data-slot=content-page-inner]]:pt-8">
+                  {children}
+                </div>
+              ) : (
+                <ContentPage
+                  width="standard"
+                  // Pages that bring their own ContentPage (a detail page) join this
+                  // scroller instead of nesting a second scroller and gutter.
+                  className="pb-16 lg:pt-8 [&_[data-slot=content-page]]:overflow-visible [&_[data-slot=content-page-inner]]:max-w-none [&_[data-slot=content-page-inner]]:p-0"
+                >
+                  {body}
+                </ContentPage>
+              )}
+            </SectionVariantProvider>
+          </PageHeaderStyleProvider>
+        </SettingsActionsSlotContext.Provider>
+      </section>
+    </div>
+  );
+}
+
+/** Home link for a settings rail: sessions of a workspace, or the app root. */
+export function settingsHomeLink(workspaceId?: string): ReactElement {
+  return workspaceId ? (
+    <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} />
+  ) : (
+    <Link to="/" />
   );
 }

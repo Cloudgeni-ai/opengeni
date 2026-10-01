@@ -648,7 +648,7 @@ describe("structured preference Workspace State administration", () => {
         expect.objectContaining({
           expectedCurrentRevisionId: null,
           expectedScopeVersion: pending.scopeVersion,
-          reason: "Finished saving from Agent Knowledge",
+          reason: "Finished saving from Knowledge",
         }),
       );
       expect(reloadWorkspaceState).toHaveBeenCalledTimes(1);

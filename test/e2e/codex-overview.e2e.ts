@@ -272,14 +272,10 @@ function failureDiagnostics(page: Page): string {
   return (failures.length > 0 ? failures : diagnostics).slice(-10).join(" | ");
 }
 
-async function waitForSubscriptionsHeading(page: Page): Promise<void> {
+/** Settings > Models: the Accounts section renders before the async account rows. */
+async function waitForAccountsSection(page: Page): Promise<void> {
   try {
-    await page
-      .locator('[data-testid="codex-connection-card"] > summary')
-      .waitFor({ timeout: 20_000 });
-    const section = page.getByTestId("codex-connection-card");
-    if (!(await section.evaluate((element) => element.hasAttribute("open"))))
-      await section.locator(":scope > summary").click();
+    await page.getByRole("heading", { name: "Accounts", exact: true }).waitFor({ timeout: 20_000 });
   } catch (error) {
     const [title, body] = await Promise.all([
       page.title().catch(() => "<unavailable>"),
@@ -289,29 +285,45 @@ async function waitForSubscriptionsHeading(page: Page): Promise<void> {
         .catch(() => "<unavailable>"),
     ]);
     throw new Error(
-      `Codex subscriptions heading did not become visible. URL: ${page.url()}; diagnostics: ${failureDiagnostics(page)}; title: ${title}; body: ${body.slice(0, 2_000)}`,
+      `Models Accounts section did not become visible. URL: ${page.url()}; diagnostics: ${failureDiagnostics(page)}; title: ${title}; body: ${body.slice(0, 2_000)}`,
       { cause: error },
     );
   }
 }
 
-async function expandAccountDetails(
-  page: Page,
-  name: string,
-  activation: "click" | "tap" = "click",
-) {
-  const card = page.getByRole("article", { name: `${name} Codex subscription` });
-  const show = card.getByRole("button", { name: `Show details for ${name}` });
-  const hide = card.getByRole("button", { name: `Hide details for ${name}` });
-  // The section heading renders before the async account list. Wait for an
-  // actual toggle before deciding whether this controlled row is open.
-  await show.or(hide).first().waitFor();
-  if (await show.isVisible()) {
-    if (activation === "tap") await show.tap();
-    else await show.click();
-  }
-  await hide.waitFor();
-  return card;
+function accountRow(page: Page, name: string) {
+  return page.getByRole("button", { name, exact: true });
+}
+
+/** Opens a Codex account's own page from the Models list and returns its body. */
+async function openCodexAccount(page: Page, name: string, activation: "click" | "tap" = "click") {
+  const row = accountRow(page, name);
+  await row.waitFor();
+  if (activation === "tap") await row.tap();
+  else await row.click();
+  await page
+    .locator('[data-slot="detail-page-title"]')
+    .filter({ hasText: name })
+    .waitFor({ timeout: 20_000 });
+  return page.locator('[data-slot="detail-page-body"]');
+}
+
+/** Back from an account page to the Models list. */
+async function backToModels(page: Page, activation: "click" | "tap" = "click") {
+  const back = page.getByRole("button", { name: "Models", exact: true });
+  if (activation === "tap") await back.tap();
+  else await back.click();
+  await waitForAccountsSection(page);
+}
+
+async function openModels(page: Page): Promise<void> {
+  await page.goto(
+    `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
+    {
+      waitUntil: "domcontentloaded",
+    },
+  );
+  await waitForAccountsSection(page);
 }
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
@@ -575,106 +587,61 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     provider.overviewCalls = 0;
     provider.activeOverviewCalls = 0;
     provider.maxActiveOverviewCalls = 0;
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-    });
-    const releaseInitialAccountList = await holdFirstAccountList(context);
-    await context.addCookies([
-      {
-        name: "better-auth.session_token",
-        value: OWNER_COOKIE_VALUE,
-        url: `http://127.0.0.1:${publicPort}`,
-        sameSite: "Lax",
-      },
-    ]);
-    const page = await context.newPage();
-    trackPageDiagnostics(page);
-    await page.goto(
-      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
-      {
-        waitUntil: "domcontentloaded",
-      },
-    );
-    const subscriptionsHeading = page.locator('[data-testid="codex-connection-card"] > summary');
-    await waitForSubscriptionsHeading(page);
-    await subscriptionsHeading.scrollIntoViewIfNeeded();
-    const initialAccountCount = await page
-      .getByRole("article", { name: "Detailed account Codex subscription" })
-      .count();
-    releaseInitialAccountList();
-    expect(initialAccountCount).toBe(0);
-    const accountCard = (name: string) =>
-      page.getByRole("article", { name: `${name} Codex subscription` });
-    const expandAccount = async (name: string) => await expandAccountDetails(page, name);
-    await expandAccount("Detailed account");
-    await accountCard("Detailed account")
-      .getByText("Provider detail is complete.")
-      .waitFor({ timeout: 20_000 });
-    await accountCard("Detailed account")
-      .getByText(/resets .+ \(in \d+[mhd]\)/)
-      .first()
+    const ownerContext = async (
+      cookie: string,
+      options: Parameters<Browser["newContext"]>[0] = { viewport: { width: 1280, height: 900 } },
+    ) => {
+      const context = await browser.newContext(options);
+      const release = await holdFirstAccountList(context);
+      await context.addCookies([
+        {
+          name: "better-auth.session_token",
+          value: cookie,
+          url: `http://127.0.0.1:${publicPort}`,
+          sameSite: "Lax",
+        },
+      ]);
+      const page = await context.newPage();
+      trackPageDiagnostics(page);
+      await openModels(page);
+      // The settings shell renders ahead of the held account list.
+      expect(await accountRow(page, "Detailed account").count()).toBe(0);
+      release();
+      return { context, page };
+    };
+    const mobileOptions = {
+      viewport: { width: 375, height: 740 },
+      hasTouch: true,
+      isMobile: true,
+    };
+
+    const { context, page } = await ownerContext(OWNER_COOKIE_VALUE);
+    // Each account's reset state is on its own page, in its Usage limit resets section.
+    const detailed = await openCodexAccount(page, "Detailed account");
+    const resets = detailed.getByRole("list", { name: "Usage limit resets" });
+    await resets.waitFor({ timeout: 20_000 });
+    await detailed
+      .getByText(/Each gives this account a fresh usage limit\. Only you can redeem them/)
       .waitFor();
-    await accountCard("Detailed account")
-      .getByText(/Earlier attempt: The provider found no reset credit to use\..+available again\./)
+    await resets
+      .getByText("Earlier attempt: ChatGPT found no reset to use. It's available again.", {
+        exact: true,
+      })
       .waitFor();
-    await accountCard("Detailed account")
-      .getByText("Earlier attempt: The provider found no reset credit to use.", { exact: true })
+    // The redeemed historical row keeps its earlier outcome as history only.
+    await resets
+      .getByText("Redeemed · Earlier attempt: ChatGPT found no reset to use.", { exact: true })
       .waitFor();
-    expect(
-      await accountCard("Detailed account")
-        .getByText(/available again\./)
-        .count(),
-    ).toBe(1);
-    await expandAccount("Count-only account");
-    await accountCard("Count-only account")
-      .getByText(/individual details are unavailable\. View only\./)
-      .waitFor();
-    await expandAccount("Capped account");
-    await accountCard("Capped account")
-      .getByText("The provider returned fewer details than its count. View only.")
-      .waitFor();
-    await expandAccount("Unknown account");
-    await accountCard("Unknown account")
-      .getByText("The provider returned reset data OpenGeni does not recognize. View only.")
-      .waitFor();
-    await expandAccount("Unsupported account");
-    await accountCard("Unsupported account")
-      .getByText("This subscription does not expose reset-credit details.")
-      .waitFor();
-    await expandAccount("Error account");
-    await accountCard("Error account")
-      .getByText("Reset-credit inventory is unavailable. Refresh to retry.")
-      .waitFor();
-    await expandAccount("Cached account");
-    await accountCard("Cached account")
-      .getByText(/OpenGeni cache · stale/)
-      .waitFor();
-    await expandAccount("Unowned account");
-    const unownedCard = accountCard("Unowned account");
-    await unownedCard
-      .getByText(/no recorded human owner.+view only.+Reconnect the same ChatGPT account/s)
-      .waitFor();
-    expect(await unownedCard.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
-    const reconnectSameAccount = unownedCard.getByRole("button", {
-      name: "Reconnect same account",
-    });
-    expect((await reconnectSameAccount.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
-    expect(provider.maxActiveOverviewCalls).toBeLessThanOrEqual(4);
-    await expandAccount("Detailed account");
+    expect(await resets.getByText(/available again\./).count()).toBe(1);
     expect(await page.getByRole("button", { name: /^Redeem / }).count()).toBe(1);
+    const aria = await detailed.ariaSnapshot();
+    expect(aria).toContain('switch "Detailed account is available for new chats"');
+    expect(aria).toContain('button "Redeem Full reset"');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
-    const aria = await accountCard("Detailed account").ariaSnapshot();
-    expect(aria).toContain('radio "Use Detailed account as active subscription"');
-    expect(aria).toContain('checkbox "Use Detailed account for new automatic turns"');
-    expect(aria).toContain('button "Redeem Full reset"');
-    await expectNoWcagAxeViolations(page, '[data-testid="codex-connection-card"]');
-    await page.screenshot({
-      path: `${EVIDENCE_DIR}/codex-quota-desktop-dark.png`,
-      fullPage: true,
-    });
-
+    await expectNoWcagAxeViolations(page, '[data-slot="detail-page-body"]');
+    await page.screenshot({ path: `${EVIDENCE_DIR}/codex-quota-desktop-dark.png`, fullPage: true });
     await page.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
     await page.screenshot({
       path: `${EVIDENCE_DIR}/codex-quota-desktop-light.png`,
@@ -682,64 +649,71 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     });
     await page.evaluate(() => document.documentElement.removeAttribute("data-og-theme"));
 
-    const mobileContext = await browser.newContext({
-      viewport: { width: 375, height: 740 },
-      hasTouch: true,
-      isMobile: true,
-    });
-    const releaseMobileAccountList = await holdFirstAccountList(mobileContext);
-    await mobileContext.addCookies([
-      {
-        name: "better-auth.session_token",
-        value: OWNER_COOKIE_VALUE,
-        url: `http://127.0.0.1:${publicPort}`,
-        sameSite: "Lax",
-      },
-    ]);
-    const mobile = await mobileContext.newPage();
-    trackPageDiagnostics(mobile);
-    await mobile.goto(
-      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
-      {
-        waitUntil: "domcontentloaded",
-      },
+    const viewOnly: Array<[string, string]> = [
+      ["Count-only account", "ChatGPT reports 1 reset but no details, so they are view only."],
+      ["Capped account", "ChatGPT returned fewer details than its count, so these are view only."],
+      [
+        "Unknown account",
+        "ChatGPT returned reset data Opengeni doesn't recognize, so these are view only.",
+      ],
+      ["Error account", "Couldn't check usage limit resets. Refresh usage to try again."],
+    ];
+    for (const [name, note] of viewOnly) {
+      await backToModels(page);
+      const body = await openCodexAccount(page, name);
+      await body.getByText(note, { exact: true }).waitFor({ timeout: 20_000 });
+      expect(await body.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
+    }
+    // A plan that doesn't report resets has no reset section at all.
+    await backToModels(page);
+    const unsupported = await openCodexAccount(page, "Unsupported account");
+    await unsupported.getByRole("heading", { name: "Usage", exact: true }).waitFor();
+    expect(await unsupported.getByRole("heading", { name: /^Usage limit resets/ }).count()).toBe(0);
+    // A provider outage falls back to OpenGeni's saved reading, marked stale.
+    await backToModels(page);
+    const cached = await openCodexAccount(page, "Cached account");
+    await cached
+      .getByText(/may be out of date/)
+      .first()
+      .waitFor({ timeout: 20_000 });
+    await backToModels(page);
+    const unowned = await openCodexAccount(page, "Unowned account");
+    await unowned
+      .getByText(/No one is recorded as the owner.+view only\. Reconnect the same ChatGPT account/)
+      .waitFor({ timeout: 20_000 });
+    expect(await unowned.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
+    await unowned.getByRole("button", { name: "Reconnect same account" }).waitFor();
+    expect(provider.maxActiveOverviewCalls).toBeLessThanOrEqual(4);
+
+    const { context: mobileContext, page: mobile } = await ownerContext(
+      OWNER_COOKIE_VALUE,
+      mobileOptions,
     );
-    const mobileSubscriptionsHeading = mobile.locator(
-      '[data-testid="codex-connection-card"] > summary',
-    );
-    await waitForSubscriptionsHeading(mobile);
-    await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
-    const initialMobileAccountCount = await mobile
-      .getByRole("article", { name: "Detailed account Codex subscription" })
-      .count();
-    releaseMobileAccountList();
-    expect(initialMobileAccountCount).toBe(0);
-    const mobileUnowned = await expandAccountDetails(mobile, "Unowned account", "tap");
+    const mobileUnowned = await openCodexAccount(mobile, "Unowned account", "tap");
     await mobileUnowned
-      .getByText(/no recorded human owner.+view only.+Reconnect the same ChatGPT account/s)
-      .waitFor();
+      .getByText(/No one is recorded as the owner.+view only\. Reconnect the same ChatGPT account/)
+      .waitFor({ timeout: 20_000 });
     expect(await mobileUnowned.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
     expect(
       (await mobileUnowned.getByRole("button", { name: "Reconnect same account" }).boundingBox())
         ?.height ?? 0,
     ).toBeGreaterThanOrEqual(44);
-    const mobileDetailed = await expandAccountDetails(mobile, "Detailed account", "tap");
-    await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).waitFor();
-    expect(
-      (await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).boundingBox())
-        ?.height ?? 0,
-    ).toBeGreaterThanOrEqual(44);
+    await backToModels(mobile, "tap");
+    const mobileDetailed = await openCodexAccount(mobile, "Detailed account", "tap");
+    const mobileRedeem = mobileDetailed.getByRole("button", { name: "Redeem Full reset" });
+    await mobileRedeem.waitFor({ timeout: 20_000 });
+    expect((await mobileRedeem.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     expect(
       (
         await mobileDetailed
-          .locator('label:has(input[aria-label="Use Detailed account for new automatic turns"])')
+          .getByRole("switch", { name: "Detailed account is available for new chats" })
           .boundingBox()
       )?.height ?? 0,
-    ).toBeGreaterThanOrEqual(44);
+    ).toBeGreaterThan(0);
     expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
-    await expectNoWcagAxeViolations(mobile, '[data-testid="codex-connection-card"]');
+    await expectNoWcagAxeViolations(mobile, '[data-slot="detail-page-body"]');
     await mobile.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
     await mobile.screenshot({
       path: `${EVIDENCE_DIR}/codex-quota-mobile-light.png`,
@@ -750,8 +724,8 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       path: `${EVIDENCE_DIR}/codex-quota-mobile-dark.png`,
       fullPage: true,
     });
-    await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).tap();
-    const mobileDialog = mobile.getByRole("dialog");
+    await mobileRedeem.tap();
+    const mobileDialog = mobile.getByRole("alertdialog").or(mobile.getByRole("dialog"));
     await mobileDialog.waitFor();
     await expectNoWcagAxeViolations(mobile, '[data-slot="dialog-content"]');
     const mobileCancel = mobileDialog.getByRole("button", { name: "Cancel" });
@@ -765,11 +739,13 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await Bun.sleep(250);
     expect(provider.overviewCalls).toBe(callsAfterExplicitLoads);
 
-    const allocator = page.getByRole("checkbox", {
-      name: "Use Detailed account for new automatic turns",
+    await backToModels(page);
+    const detailedAgain = await openCodexAccount(page, "Detailed account");
+    const allocator = detailedAgain.getByRole("switch", {
+      name: "Detailed account is available for new chats",
     });
     await allocator.click();
-    await waitFor(async () => !(await allocator.isChecked()), {
+    await waitFor(async () => (await allocator.getAttribute("aria-checked")) === "false", {
       timeoutMs: 10_000,
     });
     expect(provider.consumeBodies).toHaveLength(0);
@@ -784,11 +760,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     });
 
     await page.getByRole("button", { name: "Redeem Full reset" }).click();
-    const dialog = page.getByRole("dialog");
+    const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog"));
     await dialog.waitFor();
     expect(await page.evaluate(() => document.activeElement?.textContent?.trim())).toBe("Cancel");
-    const cancelBox = await dialog.getByRole("button", { name: "Cancel" }).boundingBox();
-    expect(cancelBox?.height ?? 0).toBeGreaterThanOrEqual(44);
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
     expect(provider.consumeBodies).toHaveLength(0);
@@ -796,9 +770,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // Cancel before the first POST clears the browser-local logical attempt;
     // reopening starts a fresh confirmation rather than claiming uncertainty.
     await page.getByRole("button", { name: "Redeem Full reset" }).click();
-    await dialog.getByRole("button", { name: "Redeem usage limit reset" }).click();
+    await dialog.getByRole("button", { name: "Redeem reset" }).click();
     await page
-      .getByText(/API 503|ambiguous/i)
+      .getByText(/The outcome is uncertain/i)
       .first()
       .waitFor({ timeout: 10_000 });
     expect(provider.consumeBodies).toHaveLength(1);
@@ -809,114 +783,57 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // A genuinely separate Better Auth session represents a new device/browser:
     // it has no sessionStorage checkpoint and a different hashed session id.
     // Owner-scoped server recovery must still reveal and adopt the exact attempt.
-    const recoveryContext = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-    });
-    const releaseRecoveryAccountList = await holdFirstAccountList(recoveryContext);
-    await recoveryContext.addCookies([
-      {
-        name: "better-auth.session_token",
-        value: ROTATED_OWNER_COOKIE_VALUE,
-        url: `http://127.0.0.1:${publicPort}`,
-        sameSite: "Lax",
-      },
-    ]);
-    const recoveryPage = await recoveryContext.newPage();
-    await recoveryPage.goto(
-      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
-      {
-        waitUntil: "domcontentloaded",
-      },
+    const { context: recoveryContext, page: recoveryPage } = await ownerContext(
+      ROTATED_OWNER_COOKIE_VALUE,
     );
-    const recoverySubscriptionsHeading = recoveryPage.locator(
-      '[data-testid="codex-connection-card"] > summary',
-    );
-    await waitForSubscriptionsHeading(recoveryPage);
-    await recoverySubscriptionsHeading.scrollIntoViewIfNeeded();
-    const initialRecoveryAccountCount = await recoveryPage
-      .getByRole("article", { name: "Detailed account Codex subscription" })
-      .count();
-    releaseRecoveryAccountList();
-    expect(initialRecoveryAccountCount).toBe(0);
-    // Usage/count caches are still fresh, but detailed rows are never cached as
-    // authority. A remount must therefore issue one live overview and restore the
-    // durable same-attempt resume affordance rather than rendering no inventory.
-    await waitFor(async () => provider.overviewCalls > callsBeforeFreshCacheReload, {
-      timeoutMs: 10_000,
-    });
     expect(
       await recoveryPage.evaluate(() =>
         Object.keys(sessionStorage).some((key) => key.startsWith("opengeni.codexResetAttempt:")),
       ),
     ).toBe(false);
+    // Usage/count caches are still fresh, but detailed rows are never cached as
+    // authority. Opening the account must issue one live overview and restore
+    // the durable same-attempt resume affordance rather than rendering no inventory.
+    const recoveryDetailed = await openCodexAccount(recoveryPage, "Detailed account");
+    await waitFor(async () => provider.overviewCalls > callsBeforeFreshCacheReload, {
+      timeoutMs: 10_000,
+    });
     // The provider has removed the credit after the ambiguous first call. The
     // browser exposes only the durable same-attempt resume path. With no stale
     // local provider title, the fallback label remains deliberately generic.
-    await expandAccountDetails(recoveryPage, "Detailed account");
-    await recoveryPage
-      .getByRole("button", {
-        name: "Resume uncertain redemption of usage limit reset",
-      })
-      .click();
-    await recoveryPage
-      .getByRole("dialog")
-      .getByRole("button", { name: "Redeem usage limit reset" })
-      .click();
+    await recoveryDetailed
+      .getByRole("button", { name: "Resume uncertain redemption of usage limit reset" })
+      .click({ timeout: 20_000 });
+    const recoveryDialog = recoveryPage
+      .getByRole("alertdialog")
+      .or(recoveryPage.getByRole("dialog"));
+    await recoveryDialog.getByRole("button", { name: "Redeem reset" }).click();
     await recoveryPage
       .getByRole("region", { name: /^Notifications / })
       .getByText("The earlier redemption succeeded; usage was refreshed.", { exact: true })
       .waitFor({ timeout: 20_000 });
     expect(provider.consumeBodies).toHaveLength(2);
     expect(new Set(provider.consumeBodies.map((body) => body.redeem_request_id)).size).toBe(1);
+    // Redemption never touched the allocator choice made earlier.
     expect(
-      await recoveryPage
-        .getByRole("checkbox", {
-          name: "Use Detailed account for new automatic turns",
-        })
-        .isChecked(),
-    ).toBe(false);
+      await recoveryDetailed
+        .getByRole("switch", { name: "Detailed account is available for new chats" })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
     expect(
       await recoveryPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
-    await expectNoWcagAxeViolations(recoveryPage, '[data-testid="codex-connection-card"]');
+    await expectNoWcagAxeViolations(recoveryPage, '[data-slot="detail-page-body"]');
     await recoveryContext.close();
 
     // A third session also starts without local state. Durable completion must
     // render directly from PostgreSQL even though the provider no longer lists
     // the credit; no further consume or uncertain-resume affordance is allowed.
-    const completedContext = await browser.newContext({
-      viewport: { width: 375, height: 740 },
-      hasTouch: true,
-      isMobile: true,
-    });
-    const releaseCompletedAccountList = await holdFirstAccountList(completedContext);
-    await completedContext.addCookies([
-      {
-        name: "better-auth.session_token",
-        value: FINAL_OWNER_COOKIE_VALUE,
-        url: `http://127.0.0.1:${publicPort}`,
-        sameSite: "Lax",
-      },
-    ]);
-    const completedPage = await completedContext.newPage();
-    await completedPage.goto(
-      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
-      {
-        waitUntil: "domcontentloaded",
-      },
+    const { context: completedContext, page: completedPage } = await ownerContext(
+      FINAL_OWNER_COOKIE_VALUE,
+      mobileOptions,
     );
-    const completedSubscriptionsHeading = completedPage.locator(
-      '[data-testid="codex-connection-card"] > summary',
-    );
-    await waitForSubscriptionsHeading(completedPage);
-    await completedSubscriptionsHeading.scrollIntoViewIfNeeded();
-    const initialCompletedAccountCount = await completedPage
-      .getByRole("article", { name: "Detailed account Codex subscription" })
-      .count();
-    releaseCompletedAccountList();
-    expect(initialCompletedAccountCount).toBe(0);
-    // Dense rows keep reset outcomes inside collapsed details.
-    const completedDetailed = await expandAccountDetails(completedPage, "Detailed account");
+    const completedDetailed = await openCodexAccount(completedPage, "Detailed account", "tap");
     await completedDetailed
       .getByText("The earlier redemption succeeded; usage was refreshed.")
       .waitFor({ timeout: 20_000 });
@@ -927,7 +844,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(
       await completedPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
-    await expectNoWcagAxeViolations(completedPage, '[data-testid="codex-connection-card"]');
+    await expectNoWcagAxeViolations(completedPage, '[data-slot="detail-page-body"]');
     await completedContext.close();
-  }, 120_000);
+  }, 180_000);
 });

@@ -6,7 +6,7 @@ import { useAppContext } from "@/context";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { Button } from "@/components/ui/button";
 import { Link } from "@tanstack/react-router";
-import { DeferredChatMedia } from "./deferred-chat-media";
+import { DeferredChatMedia } from "@opengeni/react/artifacts";
 
 const CHAT_IMAGE_HEIGHT = 360;
 

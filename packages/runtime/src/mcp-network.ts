@@ -1,5 +1,6 @@
+import { beginMcpPhase, traceparent } from "@opengeni/observability";
 import type { Settings } from "@opengeni/config";
-import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
+import { CODEMODE_ARGUMENTS_MAX_BYTES, MCP_MAX_CATALOG_TOOL_ENTRIES } from "@opengeni/contracts";
 import {
   isNonPublicAddress,
   pinnedFetch,
@@ -18,7 +19,11 @@ export const MCP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MCP_MAX_INBOUND_REQUEST_BYTES = CODEMODE_ARGUMENTS_MAX_BYTES + 64 * 1024;
 export const MCP_MAX_TOOL_DEFINITION_BYTES = 128 * 1024;
 export const MCP_MAX_TOOL_LIST_BYTES = 4 * 1024 * 1024;
-export const MCP_MAX_TOOL_LIST_ENTRIES = 1_000;
+export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = MCP_MAX_CATALOG_TOOL_ENTRIES;
+// One provider may use the available catalog allowance. The shared budget
+// still accounts for every provider together; a separate lower count ceiling
+// silently excluded otherwise bounded catalogs from best-effort discovery.
+export const MCP_MAX_TOOL_LIST_ENTRIES = MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES;
 export const MCP_MAX_TOOL_RESULT_BYTES = 1024 * 1024;
 export const MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES = 256 * 1024;
 export const MCP_MAX_SELECTED_SERVERS = 64;
@@ -27,7 +32,6 @@ export const MCP_MAX_CONCURRENT_SERVER_OPERATIONS = 8;
 // It defaults to 10 seconds and can otherwise preempt a larger per-server
 // transport timeout before that server finishes its own handshake.
 export const MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS = 10_000;
-export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = 4_096;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_BYTES = 16 * 1024 * 1024;
 
 export const MCP_REPLAY_SAFE_METHODS = [
@@ -394,8 +398,9 @@ export class McpPayloadTooLargeError extends Error {
     readonly label: string,
     readonly actualBytes: number,
     readonly maxBytes: number,
+    readonly unit: "byte" | "entry" = "byte",
   ) {
-    super(`${label} exceeds the ${maxBytes}-byte safety limit`);
+    super(`${label} exceeds the ${maxBytes}-${unit} safety limit`);
     this.name = "McpPayloadTooLargeError";
   }
 }
@@ -419,7 +424,12 @@ export function assertMcpPayloadWithinBytes(value: unknown, maxBytes: number, la
 
 export function assertMcpToolListWithinBounds<T>(tools: readonly T[]): readonly T[] {
   if (tools.length > MCP_MAX_TOOL_LIST_ENTRIES) {
-    throw new McpPayloadTooLargeError("MCP tool list", tools.length, MCP_MAX_TOOL_LIST_ENTRIES);
+    throw new McpPayloadTooLargeError(
+      "MCP tool list",
+      tools.length,
+      MCP_MAX_TOOL_LIST_ENTRIES,
+      "entry",
+    );
   }
   for (const tool of tools) {
     const toolBytes = mcpSerializedSizeBytes(tool);
@@ -447,6 +457,7 @@ export function assertMcpServerSelectionWithinBounds<T>(servers: readonly T[]): 
       "selected MCP server count",
       servers.length,
       MCP_MAX_SELECTED_SERVERS,
+      "entry",
     );
   }
   return servers;
@@ -495,7 +506,7 @@ export class McpAggregateToolListBudget {
     const previous = this.contributions.get(sourceId) ?? { entries: 0, bytes: 0 };
     const nextEntries = this.totalEntries - previous.entries + contribution.entries;
     if (nextEntries > this.maxEntries) {
-      throw new McpPayloadTooLargeError(this.label, nextEntries, this.maxEntries);
+      throw new McpPayloadTooLargeError(this.label, nextEntries, this.maxEntries, "entry");
     }
     const nextBytes = this.totalBytes - previous.bytes + contribution.bytes;
     if (nextBytes > this.maxBytes) {
@@ -587,61 +598,94 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
       requireHttpsOutsideLocalTest: options.requireHttpsOutsideLocalTest ?? true,
     };
     let response: Response;
+    const observation = beginMcpPhase("network_headers");
+    // RequestInit headers replace Request headers in Fetch; do not accidentally
+    // restore a credential the caller deliberately omitted from an override.
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    headers.delete("traceparent");
+    headers.delete("tracestate");
+    headers.delete("baggage");
+    const parent = observation.traceContext && traceparent(observation.traceContext);
+    if (parent) headers.set("traceparent", parent);
+    const tracedInit = { ...init, headers };
     try {
       if (options.pinResolvedDestination === false) {
         await resolvePinnedDestination(input instanceof Request ? input.url : input, settings, {
           ...destinationOptions,
         });
-        response = await fetchImpl(input, { ...init, redirect: "manual" });
+        response = await observation.run(() =>
+          fetchImpl(input, { ...tracedInit, redirect: "manual" }),
+        );
       } else {
-        response = await pinnedFetch(input, init, settings, {
-          ...(options.usePinnedRequestTransport ? {} : { fetchImpl: fetchImpl as FetchLike }),
-          ...destinationOptions,
-        });
+        response = await observation.run(() =>
+          pinnedFetch(input, tracedInit, settings, {
+            ...(options.usePinnedRequestTransport ? {} : { fetchImpl: fetchImpl as FetchLike }),
+            ...destinationOptions,
+          }),
+        );
       }
+      observation.end(response.ok ? "completed" : "rejected");
     } catch (error) {
+      observation.end("failed");
       recordMcpTransportRequestFailure(error, {
         httpMethod,
         ...(rpcMethod ? { rpcMethod } : {}),
       });
       throw error;
     }
-    return boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES);
+    return observation.run(() =>
+      boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES),
+    );
   };
 }
 
 export function boundMcpResponseBody(response: Response, maxBytes: number): Response {
+  const observation = beginMcpPhase("network_body");
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    observation.end("rejected");
     void response.body?.cancel().catch(() => undefined);
     throw new McpPayloadTooLargeError("MCP response", declaredLength, maxBytes);
   }
   if (!response.body) {
+    observation.end();
     return response;
   }
 
-  const reader = response.body.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = response.body.getReader();
+  } catch (error) {
+    observation.end("failed");
+    throw error;
+  }
   let receivedBytes = 0;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const chunk = await reader.read();
         if (chunk.done) {
+          observation.end();
           controller.close();
           return;
         }
         receivedBytes += chunk.value.byteLength;
         if (receivedBytes > maxBytes) {
+          observation.end("rejected");
           await reader.cancel().catch(() => undefined);
           controller.error(new McpPayloadTooLargeError("MCP response", receivedBytes, maxBytes));
           return;
         }
         controller.enqueue(chunk.value);
       } catch (error) {
+        observation.end("failed");
         controller.error(error);
       }
     },
     async cancel(reason) {
+      observation.end("cancelled");
       await reader.cancel(reason).catch(() => undefined);
     },
   });

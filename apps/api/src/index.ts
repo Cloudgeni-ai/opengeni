@@ -49,11 +49,13 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
 } from "./editable-artifact-websocket";
+import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
@@ -448,7 +450,10 @@ export async function startApi(
       behavior: "http_and_websocket_fail_closed",
     });
   }
-  const artifactWebSockets = new EditableArtifactWebSocketTransport(routeDeps.editableArtifacts);
+  const artifactWebSockets = new EditableArtifactWebSocketTransport(
+    routeDeps.editableArtifacts,
+    editableArtifactSourceSessionAuthorizer(routeDeps),
+  );
   const interactionFrameProxies = new InteractionFrameProxyTransport(
     resolveFirstPartyDelegationSecret(settings),
   );
@@ -490,6 +495,11 @@ export async function startApi(
     ? startSlackInteractionPump(routeDeps)
     : undefined;
   const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
+  const stopWorkspaceWebhookDispatchPump = startWorkspaceWebhookDispatchPump({
+    db: dbClient.db,
+    settings,
+    observability,
+  });
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     cleanupConnectorAuthorization: async (claim) =>
@@ -564,6 +574,7 @@ export async function startApi(
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopWorkspaceWebhookDispatchPump();
       await Promise.allSettled([
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),

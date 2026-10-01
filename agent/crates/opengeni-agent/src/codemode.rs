@@ -162,7 +162,7 @@ impl CodemodeError {
         };
         json!({ "error": { "operationId": operation_id, "state": state,
             "code": code, "message": self.to_string(),
-            "recovery": operation_id.map(|_| "Read the existing operation under current authority. Do not automatically start another call.") } })
+            "recovery": operation_id.map(|_| "Observe the existing operation only while its original agent attempt is active. If that attempt ended, inspect retained command output or session tool receipts instead; a new attempt cannot read the old operation. Do not automatically start another call.") } })
     }
 
     fn observing(self, operation_id: &str) -> Self {

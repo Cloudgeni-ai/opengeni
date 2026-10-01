@@ -274,6 +274,8 @@ fn disconnect(args: &DisconnectArgs, api_url: &str) -> anyhow_lite::Result {
 /// clean SIGINT/SIGTERM stops it.
 #[allow(clippy::too_many_lines)]
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
+    // Capture before any managed update replaces the running executable inode.
+    update::installed_executable().map_err(string_err)?;
     // A verified self-update may have exec'd this new binary from the exact old
     // generated systemd unit. Refresh that narrowly-proven definition before
     // admission, then let the manager restart us directly in `supervisor`.
@@ -457,18 +459,18 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
 }
 
 fn restart_after_verified_update() -> anyhow_lite::Result {
-    let executable = std::env::current_exe().map_err(to_boxed)?;
+    let executable = update::installed_executable().map_err(string_err)?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     info!(path = %executable.display(), "starting verified self-update successor");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let error = std::process::Command::new(&executable).args(&args).exec();
+        let error = std::process::Command::new(executable).args(&args).exec();
         return Err(to_boxed(error));
     }
     #[cfg(windows)]
     {
-        std::process::Command::new(&executable)
+        std::process::Command::new(executable)
             .args(&args)
             .spawn()
             .map_err(to_boxed)?;

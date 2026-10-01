@@ -1,4 +1,10 @@
 import { currentSessionAttachmentReadAccess } from "./database";
+import {
+  CreditDebitAttribution,
+  creditDebitAttributionMetadata,
+  currentCreditDebitAttribution,
+} from "./credit-debit-attribution";
+import { checkWorkspaceAllowance } from "./usage-allowances";
 import { readSessionFileAttachments } from "./session-file-attachments";
 export {
   acceptSessionFileAttachments,
@@ -7,15 +13,25 @@ export {
 } from "./session-file-attachments";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
+  childTerminalResultFinalAnswer,
+  childTerminalResultFinalAnswerSequences,
+  childTerminalResultFinalAnswerWithGoalContinuations,
+  type ChildTerminalResultFinalAnswer,
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
   SandboxRecoveryResponse,
+  SandboxFreshWorkspaceRecovery,
+  SandboxFreshWorkspaceReason,
+  automaticSandboxRecoveryDiscontinuity,
+  freshWorkspaceSandboxRecoveryDiscontinuity,
   sandboxRecoveryDiscontinuity,
   type SandboxRecoveryProjection,
   type SandboxRecoveryRequest,
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  sessionTurnSurfaceOrNull,
+  type SessionTurnSurface,
 } from "@opengeni/contracts";
 import {
   readReasoningConfiguration,
@@ -25,6 +41,7 @@ import {
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
+  childRecentTurnOutcomesSql,
   childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
@@ -43,6 +60,15 @@ export const retryFailedSessionInTransaction = createRetryFailedSessionInTransac
   sessionEffectiveSandboxRecoveryBlocked,
 );
 import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
+import {
+  mergeCodexPlanEntitlementExclusion,
+  readCodexPlanEntitlementExclusion,
+  serializeCodexPlanEntitlementExclusion,
+  type CodexPlanEntitlementExclusion,
+} from "./codex-plan-entitlement";
+export * from "./codex-plan-entitlement";
+export * from "./scheduled-task-access";
+export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
   CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
@@ -64,6 +90,8 @@ import { scanSessionMessages } from "./session-message-search";
 import { withDatabaseStatementTimeout } from "./database";
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
+export * from "./scheduled-slack-bot-messages";
+export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { codexSelectionDiagnostics } from "./codex-selection-diagnostics";
@@ -75,7 +103,7 @@ import {
 import { z } from "zod";
 import {
   latestStartedSessionTurnQuery,
-  withLatestStartedSessionPolicy,
+  withEffectiveSessionPolicy,
 } from "./session-execution-policy";
 import {
   assignedConnectionDefault,
@@ -96,6 +124,10 @@ import {
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
+  scheduledRunHumanWaitsInRlsContext,
+} from "./scheduled-human-wait";
+import {
   appendGoalReportRequirements,
   goalReportRequirements,
   GOAL_REPORT_REQUIREMENTS_KEY,
@@ -112,6 +144,7 @@ import {
   readSkillMetadata,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
+  storedBundledSkillSelectionIdentity,
   type BundledSkillId,
   type SkillRecord,
 } from "@opengeni/contracts";
@@ -162,6 +195,8 @@ import {
   SessionGoalSnapshot,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
+  ConnectionAccountSelectionDiagnostic,
+  ScheduledTaskAdmissionRefusal,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
@@ -217,6 +252,8 @@ import type {
   GitHubRepositoryScope,
   HostEventExport,
   HostEventExportBatch,
+  HostLifecycleFactExport,
+  HostLifecycleFactExportBatch,
   HostUsageExport,
   HostUsageExportBatch,
   ManagedAccount,
@@ -390,6 +427,8 @@ import {
   HostEventExport as HostEventExportContract,
   HostEventExportBatch as HostEventExportBatchContract,
   HostExportConsumerId,
+  HostLifecycleFactExport as HostLifecycleFactExportContract,
+  HostLifecycleFactExportBatch as HostLifecycleFactExportBatchContract,
   HostUsageExport as HostUsageExportContract,
   HostUsageExportBatch as HostUsageExportBatchContract,
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -417,6 +456,7 @@ import { SandboxTransitionWaitBudget } from "./sandbox-transition-wait";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 import {
   canonicalizePersistedHistoryItem,
+  codexPlanKey,
   omitOutputOnlyHistoryItemFields,
   isCodexBilledModel,
   refreshCodexToken,
@@ -451,8 +491,10 @@ import {
 import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
+  contextForCausalTurn,
   creatorColumns,
   frozenInitiatorForCommandActor,
+  frozenScheduledOccurrenceInitiator,
   initiatorColumns,
   initiatorFromStorage,
   UNATTRIBUTED_LEGACY_INITIATOR,
@@ -612,7 +654,9 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
+export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
+export * from "./session-model-settings";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
@@ -623,10 +667,12 @@ export * from "./company-profile";
 export * from "./company-profile-agent-policy";
 export * from "./company-profile-agent-admin";
 export * from "./workspace-learning-policy";
+export * from "./usage-allowances";
 export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
 export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
 export * from "./memory-governance";
@@ -640,6 +686,7 @@ export * from "./task-notes";
 export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
+export * from "./verified-signup-trial-switch";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -660,7 +707,9 @@ export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-
 export {
   loadIntegrationOAuthPendingState,
   storeIntegrationOAuthPendingState,
+  consumeIntegrationOAuthPendingState,
 } from "./integration-oauth-pending-states";
+export * from "./workspace-integrations";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
@@ -768,6 +817,7 @@ import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
   fetchCodexUsageForAccount as fetchCodexUsageForAccountCore,
+  recheckCodexCredentialPlan as recheckCodexCredentialPlanCore,
   type CodexAccountUsageSnapshot,
   type CodexAuthDeps,
   type CodexCredentialCooldownKind,
@@ -875,7 +925,7 @@ export class SessionSpawnDeniedDbError extends Error {
 // Durable host export
 // ---------------------------------------------------------------------------
 
-export type HostExportKind = "session_event" | "usage_event";
+export type HostExportKind = "session_event" | "usage_event" | "lifecycle_fact";
 
 /**
  * A leased row did not satisfy this consumer build's export contract. Only
@@ -925,8 +975,9 @@ type HostExportRow = {
   lease_through: string | number | bigint;
   export_cursor: string | number | bigint;
   source_id: string;
-  account_id: string;
-  workspace_id: string;
+  // Null only for lifecycle facts (person-level, or organization-level facts).
+  account_id: string | null;
+  workspace_id: string | null;
   session_id: string | null;
   root_session_id: string | null;
   turn_id: string | null;
@@ -942,18 +993,31 @@ type HostExportRow = {
   initiator: unknown;
   initiator_context: unknown;
   origin: string | null;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
   payload: unknown;
   payload_codec_version: number | null;
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
 
-type HostExportClaimRow = Omit<HostExportRow, "root_session_id" | "payload_codec_version">;
+type HostExportClaimRow = Omit<
+  HostExportRow,
+  "root_session_id" | "payload_codec_version" | "surface" | "model_provider" | "tool_family"
+>;
 
 type HostExportClaimSidecarRow = {
   export_cursor: string | number | bigint;
   root_session_id: string | null;
   payload_codec_version: number | null;
+};
+
+type HostExportClaimAnalyticsSidecarRow = {
+  export_cursor: string | number | bigint;
+  surface: string | null;
+  model_provider: string | null;
+  tool_family: string | null;
 };
 
 function hostExportCursor(value: string | number | bigint): string {
@@ -965,7 +1029,7 @@ function hostExportTimestamp(value: Date | string): string {
 }
 
 function validateHostExportKind(kind: HostExportKind): void {
-  if (kind !== "session_event" && kind !== "usage_event") {
+  if (kind !== "session_event" && kind !== "usage_event" && kind !== "lifecycle_fact") {
     throw new Error(`Unknown host export kind: ${kind}`);
   }
 }
@@ -1047,6 +1111,18 @@ export async function claimHostExportBatch(
 export async function claimHostExportBatch(
   db: Database,
   input: {
+    kind: "lifecycle_fact";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
     kind: HostExportKind;
     consumerId: string;
     leaseToken: string;
@@ -1055,7 +1131,19 @@ export async function claimHostExportBatch(
     limit?: number;
     maxBytes?: number;
   },
-): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | HostUsageExportBatch | HostLifecycleFactExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
   const rows = await db.transaction(async (tx) => {
     const transaction = tx as unknown as Database;
@@ -1095,16 +1183,34 @@ export async function claimHostExportBatch(
     const sidecarByExportCursor = new Map(
       sidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
     );
+    const analyticsSidecars = await rawRows<HostExportClaimAnalyticsSidecarRow>(
+      transaction,
+      sql`
+        select * from opengeni_host_export.host_export_claim_analytics_sidecars(
+          ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+        )
+      `,
+    );
+    const analyticsByExportCursor = new Map(
+      analyticsSidecars.map((row) => [hostExportCursor(row.export_cursor), row]),
+    );
     const materializedRows = claimedRows.map((row): HostExportRow => {
       const cursor = hostExportCursor(row.export_cursor);
       const sidecar = sidecarByExportCursor.get(cursor);
       if (!sidecar) {
         throw new Error(`Host export sidecar lookup omitted leased cursor ${cursor}`);
       }
+      const analytics = analyticsByExportCursor.get(cursor);
+      if (!analytics) {
+        throw new Error(`Host export analytics sidecar lookup omitted leased cursor ${cursor}`);
+      }
       return {
         ...row,
         root_session_id: sidecar.root_session_id,
         payload_codec_version: sidecar.payload_codec_version,
+        surface: analytics.surface,
+        model_provider: analytics.model_provider,
+        tool_family: analytics.tool_family,
       };
     });
     return materializedRows;
@@ -1124,6 +1230,9 @@ export async function claimHostExportBatch(
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
+        surface: row.surface,
+        modelProvider: row.model_provider,
+        toolFamily: row.tool_family,
         event: {
           id: row.source_id,
           workspaceId: row.workspace_id,
@@ -1156,6 +1265,46 @@ export async function claimHostExportBatch(
     });
   }
 
+  if (input.kind === "lifecycle_fact") {
+    const facts = rows.map((row): HostLifecycleFactExport => {
+      const payload =
+        row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+          ? (row.payload as Record<string, unknown>)
+          : {};
+      const initiator =
+        row.initiator && typeof row.initiator === "object" && !Array.isArray(row.initiator)
+          ? (row.initiator as Record<string, unknown>)
+          : null;
+      const parsed = HostLifecycleFactExportContract.safeParse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        fact: {
+          id: row.source_id,
+          type: row.event_type,
+          attribute: payload.attribute ?? null,
+          subjectKind: payload.subjectKind,
+          subjectId: initiator?.subjectId ?? null,
+          occurredAt: hostExportTimestamp(row.occurred_at),
+        },
+      });
+      if (!parsed.success) {
+        throw hostExportPayloadError(input, row, parsed.error.issues);
+      }
+      return parsed.data;
+    });
+    return HostLifecycleFactExportBatchContract.parse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      consumerId: first.consumer_id,
+      leaseToken: first.lease_token,
+      checkpoint: hostExportCursor(first.checkpoint),
+      throughCursor: hostExportCursor(first.lease_through),
+      events: facts,
+    });
+  }
+
   const events = rows.map((row): HostUsageExport => {
     const parsed = HostUsageExportContract.safeParse({
       schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
@@ -1169,6 +1318,8 @@ export async function claimHostExportBatch(
       initiator: row.initiator,
       initiatorContext: row.initiator_context,
       origin: row.origin,
+      surface: row.surface,
+      modelProvider: row.model_provider,
       usage: row.payload,
     });
     if (!parsed.success) {
@@ -1755,6 +1906,9 @@ export async function bootstrapWorkspace(
           ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
           role: "owner",
           permissions: input.accountPermissions ?? allAccountPermissions,
+          // Same shape as managed grants, so clients show the organization's
+          // real name instead of an id fragment.
+          metadata: { accountName: account.name },
         },
       ],
       workspaceGrants: memberships.map((row) => ({
@@ -5605,7 +5759,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * null for a human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
- * cannot widen itself through a schedule.
+ * cannot widen itself through a schedule. Only its owner's explicit access
+ * refresh re-freezes the tools and permissions, within that person's grants;
+ * the session policy never changes after create.
  */
 export type ScheduledTaskCreatorPolicy = {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
@@ -5664,7 +5820,29 @@ export type UpdateScheduledTaskInput = Partial<{
   beforeUpdateCommit: (tx: Database) => Promise<void>;
 
   captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
+  /**
+   * Refuse the update unless the locked row still has this execution digest:
+   * the head a person reviewed before an explicit access refresh.
+   */
+  expectedExecutionDigest: string;
+  /**
+   * Re-freeze an agent-created task's OpenGeni tools and permissions (the
+   * owner's explicit access refresh). Applies only to a row whose creator
+   * tools are already frozen; the creator session policy is never rewritten.
+   */
+  creatorFirstPartyPolicy: {
+    firstPartyMcpTools: FirstPartyMcpToolName[];
+    firstPartyMcpPermissions: Permission[];
+  };
 }>;
+
+/** The task changed after the caller read it; nothing was written. */
+export class ScheduledTaskHeadChangedError extends Error {
+  constructor() {
+    super("scheduled task changed after it was read");
+    this.name = "ScheduledTaskHeadChangedError";
+  }
+}
 
 export type CreateKnowledgeMemoryInput = {
   accountId: string;
@@ -6403,6 +6581,8 @@ export type EnqueueSessionTurnInput = {
   triggerEventId: string;
   temporalWorkflowId: string;
   source: SessionTurnSource;
+  /** Content-free product surface the request entered through. */
+  surface?: SessionTurnSurface | null;
   prompt: string;
   modelContext?: string | null;
   resources: ResourceRef[];
@@ -6946,6 +7126,7 @@ export function durableUserHistoryItem(
   annotations: readonly TimelineAnnotation[] = [],
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
+  sentAt?: Date | null,
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -6953,7 +7134,13 @@ export function durableUserHistoryItem(
   return {
     type: "message",
     role: "user",
-    content: renderUserMessageContentForModel(prompt, annotations, modelContext, goalSnapshot),
+    content: renderUserMessageContentForModel(
+      prompt,
+      annotations,
+      modelContext,
+      goalSnapshot,
+      sentAt,
+    ),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
       ? {
@@ -10129,13 +10316,49 @@ async function withConnectionSubjectRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
+const connectionAccessPolicyColumns = {
+  allowedModelIds: schema.connections.allowedModelIds,
+  allowedWorkspaceIds: schema.connections.allowedWorkspaceIds,
+  allowPersonalWorkspaces: schema.connections.allowPersonalWorkspaces,
+  accessPolicyVersion: schema.connections.accessPolicyVersion,
+  accessPolicyUpdatedBy: schema.connections.accessPolicyUpdatedBy,
+  accessPolicyUpdatedAt: schema.connections.accessPolicyUpdatedAt,
+};
+
+// Internal-only: credential replacement preserves the locked connection's access policy.
+// Public connection creation must not accept these administration-owned fields.
+type ConnectionAccessPolicySnapshot = Pick<
+  typeof schema.connections.$inferSelect,
+  | "allowedModelIds"
+  | "allowedWorkspaceIds"
+  | "allowPersonalWorkspaces"
+  | "accessPolicyVersion"
+  | "accessPolicyUpdatedBy"
+  | "accessPolicyUpdatedAt"
+>;
+
+function connectionAccessPolicySnapshot(
+  row: ConnectionAccessPolicySnapshot,
+): ConnectionAccessPolicySnapshot {
+  return {
+    allowedModelIds: row.allowedModelIds,
+    allowedWorkspaceIds: row.allowedWorkspaceIds,
+    allowPersonalWorkspaces: row.allowPersonalWorkspaces,
+    accessPolicyVersion: row.accessPolicyVersion,
+    accessPolicyUpdatedBy: row.accessPolicyUpdatedBy,
+    accessPolicyUpdatedAt: row.accessPolicyUpdatedAt,
+  };
+}
+
 async function createConnectionInScope(
   db: Database,
   input: CreateConnectionInput,
+  accessPolicy?: ConnectionAccessPolicySnapshot,
 ): Promise<ConnectionMetadataWithVerification> {
   const [row] = await db
     .insert(schema.connections)
     .values({
+      ...accessPolicy,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       subjectId: input.subjectId ?? null,
@@ -10272,7 +10495,11 @@ export async function createConnection(
   );
 }
 
-type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+export type WorkspaceProviderApiKeyConnectionKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -10282,9 +10509,18 @@ type WorkspaceProviderApiKeyConnectionSpec = {
   label: string;
 };
 
-function workspaceProviderApiKeyConnectionSpec(
+export function workspaceProviderApiKeyConnectionSpec(
   providerKind: WorkspaceProviderApiKeyConnectionKind,
 ): WorkspaceProviderApiKeyConnectionSpec {
+  if (providerKind === "anthropic" || providerKind === "claude_subscription") {
+    return {
+      providerDomain: "api.anthropic.com",
+      credentialRole: providerKind,
+      operationIdMetadataKey: `${providerKind}CredentialOperationId`,
+      operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
+      label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
   return providerKind === "vercel_gateway"
     ? {
         providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -10310,11 +10546,11 @@ async function lockWorkspaceProviderApiKeyConnection(
   const lockKey =
     providerKind === "vercel_gateway"
       ? `workspace-vercel-ai-gateway:${workspaceId}`
-      : `workspace-openrouter:${workspaceId}`;
+      : `workspace-${providerKind}:${workspaceId}`;
   await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
 }
 
-async function upsertWorkspaceProviderApiKeyConnection(
+export async function upsertWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: UpsertWorkspaceProviderApiKeyConnectionInput,
@@ -10328,7 +10564,7 @@ async function upsertWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10362,25 +10598,30 @@ async function upsertWorkspaceProviderApiKeyConnection(
             : null;
         }
         if (rows.some((row) => row.status !== "revoked")) return null;
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          // Reconnecting cannot reset an administrator's restrictions. Rows are newest first.
+          rows[0] ? connectionAccessPolicySnapshot(rows[0]) : undefined,
+        );
       }),
   );
 }
 
-async function rotateWorkspaceProviderApiKeyConnection(
+export async function rotateWorkspaceProviderApiKeyConnection(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RotateWorkspaceProviderApiKeyConnectionInput,
@@ -10394,7 +10635,7 @@ async function rotateWorkspaceProviderApiKeyConnection(
         const tx = txRaw as unknown as Database;
         await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
-          .select(connectionMetadataColumns)
+          .select({ ...connectionMetadataColumns, ...connectionAccessPolicyColumns })
           .from(schema.connections)
           .where(
             and(
@@ -10443,25 +10684,29 @@ async function rotateWorkspaceProviderApiKeyConnection(
             throw new Error(`${spec.label} connection changed during rotation`);
           }
         }
-        return await createConnectionInScope(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: null,
-          providerDomain: spec.providerDomain,
-          kind: "api_key",
-          status: "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata,
-          createdBySubjectId: input.updatedBySubjectId,
-          updatedBySubjectId: input.updatedBySubjectId,
-        });
+        return await createConnectionInScope(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: null,
+            providerDomain: spec.providerDomain,
+            kind: "api_key",
+            status: "active",
+            credentialEncrypted: input.credentialEncrypted,
+            grantedScopes: input.grantedScopes ?? [],
+            expiresAt: input.expiresAt ?? null,
+            metadata,
+            createdBySubjectId: input.updatedBySubjectId,
+            updatedBySubjectId: input.updatedBySubjectId,
+          },
+          connectionAccessPolicySnapshot(targetRow),
+        );
       }),
   );
 }
 
-async function revokeWorkspaceProviderApiKeyConnections(
+export async function revokeWorkspaceProviderApiKeyConnections(
   db: Database,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   input: RevokeWorkspaceProviderApiKeyConnectionsInput,
@@ -11542,6 +11787,23 @@ export type SlackInteraction = {
    * make the ledger's byte comparison raise.
    */
   routedWorkspaceLabel: string | null;
+  /**
+   * One line naming what the bound session started with, frozen when the
+   * session bound so an acknowledgement repair renders the same bytes. Null
+   * means no line. No longer written; kept so interactions that already posted
+   * it re-render identically.
+   */
+  sessionDefaultsLine: string | null;
+  /**
+   * The opening sentence of the task's first Slack message, frozen when the
+   * session binds so every re-render (repair, Stop/Resume, settle) produces the
+   * same bytes for the digest-bound post and update ledgers.
+   *
+   * Also the message-format discriminator: null means the interaction keeps the
+   * format it had before this field existed (Status button, task controls card,
+   * and a workspace line on every message).
+   */
+  startMessageLine: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -12161,6 +12423,9 @@ export async function getOrCreateSlackInteraction(
     // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
     | "firstTaskHint"
     | "routedWorkspaceLabel"
+    // Owned by `bindSlackInteractionSession`, frozen with the bound session.
+    | "sessionDefaultsLine"
+    | "startMessageLine"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -12448,6 +12713,41 @@ export async function getSlackInteractionActionHandle(
   });
 }
 
+/**
+ * The still-pending handles one interaction rendered on one exact message,
+ * oldest first. The message is identified by the post operation that created
+ * it, which is what every handle on it carries as `messageOperationId`.
+ */
+export async function listPendingSlackInteractionMessageActionHandles(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    messageOperationId: string;
+  },
+): Promise<SlackInteractionActionHandle[]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.slackInteractionActionHandles)
+      .where(
+        and(
+          eq(schema.slackInteractionActionHandles.accountId, input.accountId),
+          eq(schema.slackInteractionActionHandles.workspaceId, input.workspaceId),
+          eq(schema.slackInteractionActionHandles.interactionId, input.interactionId),
+          eq(schema.slackInteractionActionHandles.messageOperationId, input.messageOperationId),
+          eq(schema.slackInteractionActionHandles.status, "pending"),
+        ),
+      )
+      .orderBy(
+        asc(schema.slackInteractionActionHandles.createdAt),
+        asc(schema.slackInteractionActionHandles.id),
+      );
+    return rows.map(mapSlackInteractionActionHandle);
+  });
+}
+
 export async function settleSlackInteractionActionHandles(
   db: Database,
   input: {
@@ -12456,6 +12756,13 @@ export async function settleSlackInteractionActionHandles(
     handleId: string;
     result: string;
     stale?: boolean;
+    /**
+     * Settle every other pending handle rendered on the same message as
+     * superseded (the default: one card, one decision). A message whose single
+     * button is replaced in place by a freshly reserved one (Stop becoming
+     * Resume) passes false, so the replacement stays pending.
+     */
+    supersedeSiblings?: boolean;
   },
 ): Promise<SlackInteractionActionHandle | null> {
   return await withRlsContext(
@@ -12478,23 +12785,25 @@ export async function settleSlackInteractionActionHandles(
           .limit(1);
         if (!current) return null;
         if (current.status === "pending") {
-          await tx
-            .update(schema.slackInteractionActionHandles)
-            .set({
-              status: "stale",
-              result: "superseded",
-              completedAt: sql`now()`,
-              updatedAt: sql`now()`,
-            })
-            .where(
-              and(
-                eq(
-                  schema.slackInteractionActionHandles.messageOperationId,
-                  current.messageOperationId,
+          if (input.supersedeSiblings !== false) {
+            await tx
+              .update(schema.slackInteractionActionHandles)
+              .set({
+                status: "stale",
+                result: "superseded",
+                completedAt: sql`now()`,
+                updatedAt: sql`now()`,
+              })
+              .where(
+                and(
+                  eq(
+                    schema.slackInteractionActionHandles.messageOperationId,
+                    current.messageOperationId,
+                  ),
+                  eq(schema.slackInteractionActionHandles.status, "pending"),
                 ),
-                eq(schema.slackInteractionActionHandles.status, "pending"),
-              ),
-            );
+              );
+          }
           const [settled] = await tx
             .update(schema.slackInteractionActionHandles)
             .set({
@@ -12560,6 +12869,41 @@ export async function getSlackInteractionByClientEventId(
       interaction: mapSlackInteraction(row.interaction),
       eventSessionId: row.eventSessionId,
     };
+  });
+}
+
+/** Exact bound session only: a child never inherits its root's Slack destination. */
+export async function getSlackInteractionForSession(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<SlackInteraction | null> {
+  return await withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ interaction: schema.slackInteractions })
+      .from(schema.slackInteractions)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.accountId, schema.slackInteractions.accountId),
+          eq(schema.sessions.workspaceId, schema.slackInteractions.workspaceId),
+          eq(schema.sessions.id, schema.slackInteractions.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.slackInteractions.accountId, input.accountId),
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.sessionId, input.sessionId),
+          sql`(
+            ${schema.slackInteractions.visibility} <> 'private'
+            or nullif(current_setting('opengeni.subject_id', true), '') is null
+            or ${schema.slackInteractions.owningSubjectId} = nullif(current_setting('opengeni.subject_id', true), '')
+            or ${schema.slackInteractions.owningSubjectId} = nullif(current_setting('opengeni.initiating_human_subject_id', true), '')
+          )`,
+        ),
+      )
+      .limit(1);
+    return row ? mapSlackInteraction(row.interaction) : null;
   });
 }
 
@@ -12632,12 +12976,21 @@ export async function bindSlackInteractionSession(
   db: Database,
   input: Pick<SlackInteraction, "id" | "accountId" | "workspaceId" | "owningSubjectId"> & {
     sessionId: string;
+    /**
+     * Written only by the bind that wins; a replayed bind of the same session
+     * returns the line the first bind froze and never rewrites it.
+     */
+    startMessageLine?: string | null;
   },
 ): Promise<SlackInteraction | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.slackInteractions)
-      .set({ sessionId: input.sessionId, updatedAt: sql`now()` })
+      .set({
+        sessionId: input.sessionId,
+        startMessageLine: input.startMessageLine ?? null,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.slackInteractions.id, input.id),
@@ -13170,6 +13523,12 @@ function mapSlackInteraction(
       "routedWorkspaceLabel",
       "routed_workspace_label",
     ),
+    sessionDefaultsLine: slackRowNullableString(
+      row,
+      "sessionDefaultsLine",
+      "session_defaults_line",
+    ),
+    startMessageLine: slackRowNullableString(row, "startMessageLine", "start_message_line"),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -14624,7 +14983,7 @@ export async function loadConnectionCredentialForBroker(
   );
 }
 
-async function getWorkspaceProviderApiKeyConnectionMetadata(
+export async function getWorkspaceProviderApiKeyConnectionMetadata(
   db: Database,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
@@ -14670,13 +15029,14 @@ export async function workspaceOpenRouterConnectionActive(
   return (await getWorkspaceOpenRouterConnectionMetadata(db, workspaceId)) !== null;
 }
 
-async function loadWorkspaceProviderApiKey(
+export async function loadWorkspaceProviderApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
   turnModelId?: string | null,
 ): Promise<string | null> {
+  if (providerKind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return null;
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
     (connection) =>
@@ -17025,7 +17385,11 @@ export async function updateScheduledTask(
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [previousLinkRevision] = await scopedDb
-      .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
+      .select({
+        authorityRevision: schema.scheduledTasks.authorityRevision,
+        executionDigest: schema.scheduledTasks.executionDigest,
+        creatorFirstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
+      })
       .from(schema.scheduledTasks)
       .where(
         and(
@@ -17035,6 +17399,15 @@ export async function updateScheduledTask(
       )
       .for("update")
       .limit(1);
+    if (
+      input.expectedExecutionDigest !== undefined &&
+      previousLinkRevision?.executionDigest !== input.expectedExecutionDigest
+    ) {
+      throw new ScheduledTaskHeadChangedError();
+    }
+    if (input.creatorFirstPartyPolicy && !previousLinkRevision?.creatorFirstPartyMcpTools) {
+      throw new Error("only an agent-created scheduled task has a creator tool policy to refresh");
+    }
     if (
       input.refreshPersonalResourceAuthority &&
       input.clonePersonalResourceAuthorityFromRevision !== undefined
@@ -17073,6 +17446,14 @@ export async function updateScheduledTask(
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.creatorFirstPartyPolicy
+          ? {
+              creatorFirstPartyMcpTools: [...input.creatorFirstPartyPolicy.firstPartyMcpTools],
+              creatorFirstPartyMcpPermissions: [
+                ...input.creatorFirstPartyPolicy.firstPartyMcpPermissions,
+              ],
+            }
+          : {}),
         ...(input.refreshPersonalResourceAuthority ||
         input.clonePersonalResourceAuthorityFromRevision !== undefined
           ? {
@@ -17260,18 +17641,31 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
 /**
  * The frozen creator boundary of a scheduled task. Read at fire time (and by
  * recovery of an already-admitted run, which is why a tombstoned task still
- * answers): the columns are written once at create and never updated, so the
- * read is deterministic for the task's whole life. Null when the task has no
- * row at all.
+ * answers). The session policy column is written once at create and never
+ * updated, so recovery re-reads it deterministically. The tools and
+ * permissions change only through the owner's explicit access refresh, and an
+ * admitted run never re-reads them: its accepted execution carries the
+ * resolved tools and permissions. Null when the task has no row at all.
  */
 export async function getScheduledTaskCreatorPolicy(
   db: Database,
   workspaceId: string,
   taskId: string,
 ): Promise<ScheduledTaskCreatorPolicy | null> {
+  return (await listScheduledTaskCreatorPolicies(db, workspaceId, [taskId])).get(taskId) ?? null;
+}
+
+/** Batch form of {@link getScheduledTaskCreatorPolicy}; tasks without a row are absent. */
+export async function listScheduledTaskCreatorPolicies(
+  db: Database,
+  workspaceId: string,
+  taskIds: readonly string[],
+): Promise<Map<string, ScheduledTaskCreatorPolicy>> {
+  if (taskIds.length === 0) return new Map();
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
+    const rows = await scopedDb
       .select({
+        id: schema.scheduledTasks.id,
         firstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
         firstPartyMcpPermissions: schema.scheduledTasks.creatorFirstPartyMcpPermissions,
         sessionPolicy: schema.scheduledTasks.creatorSessionPolicy,
@@ -17280,28 +17674,38 @@ export async function getScheduledTaskCreatorPolicy(
       .where(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
+          inArray(schema.scheduledTasks.id, [...new Set(taskIds)]),
         ),
-      )
-      .limit(1);
-    if (!row) return null;
-    return {
-      firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
-      firstPartyMcpPermissions: row.firstPartyMcpPermissions
-        ? [...row.firstPartyMcpPermissions]
-        : null,
-      sessionPolicy: row.sessionPolicy
-        ? {
-            agentAccess: row.sessionPolicy.agentAccess ?? null,
-            scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
-            memoryScope:
-              row.sessionPolicy.memoryScope === "session"
-                ? "off"
-                : (row.sessionPolicy.memoryScope ?? null),
-          }
-        : null,
-    };
+      );
+    return new Map(rows.map((row) => [row.id, scheduledTaskCreatorPolicyFromRow(row)]));
   });
+}
+
+function scheduledTaskCreatorPolicyFromRow(row: {
+  firstPartyMcpTools: FirstPartyMcpToolName[] | null;
+  firstPartyMcpPermissions: Permission[] | null;
+  sessionPolicy: {
+    agentAccess?: string | null;
+    scopeSubjectId?: string | null;
+    memoryScope?: string | null;
+  } | null;
+}): ScheduledTaskCreatorPolicy {
+  return {
+    firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
+    firstPartyMcpPermissions: row.firstPartyMcpPermissions
+      ? [...row.firstPartyMcpPermissions]
+      : null,
+    sessionPolicy: row.sessionPolicy
+      ? {
+          agentAccess: row.sessionPolicy.agentAccess ?? null,
+          scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
+          memoryScope:
+            row.sessionPolicy.memoryScope === "session"
+              ? "off"
+              : (row.sessionPolicy.memoryScope ?? null),
+        }
+      : null,
+  };
 }
 
 export async function requireScheduledTask(
@@ -17410,6 +17814,42 @@ export async function listScheduledTasks(
       .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
       .limit(limit)
       .offset(offset);
+    return rows.map(mapScheduledTask);
+  });
+}
+
+/**
+ * Active agent-turn tasks that chose connector accounts, owned by `subjectId`
+ * (and, with `includeOwnerless`, tasks without an owner). Only these can have
+ * a fresh occurrence refused before it creates a run because a chosen account
+ * is gone, so the owner's access attention list checks each one's account
+ * plan. A caller without a subject passes an empty id, which owns nothing.
+ */
+export async function listActiveScheduledTasksWithConnectionAccounts(
+  db: Database,
+  workspaceId: string,
+  input: { subjectId: string; includeOwnerless: boolean; limit: number },
+): Promise<ScheduledTask[]> {
+  const limit = Math.max(1, Math.min(500, Math.floor(input.limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const owner = eq(schema.scheduledTasks.ownerSubjectId, input.subjectId);
+    const rows = await scopedDb
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+          eq(schema.scheduledTasks.status, "active"),
+          sql`${schema.scheduledTasks.action} ->> 'kind' = 'agent_turn'`,
+          sql`(case when jsonb_typeof(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts') = 'array'
+            then jsonb_array_length(${schema.scheduledTasks.agentConfig} -> 'connectionAccounts')
+            else 0 end) > 0`,
+          input.includeOwnerless ? or(owner, isNull(schema.scheduledTasks.ownerSubjectId)) : owner,
+        ),
+      )
+      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
+      .limit(limit);
     return rows.map(mapScheduledTask);
   });
 }
@@ -17662,6 +18102,200 @@ export async function deleteScheduledTask(
         changed,
       };
     });
+  });
+}
+
+/** A terminal refusal is evidence, not accepted execution or permission to retry. */
+export async function recordScheduledTaskAdmissionFailure(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    diagnostic: ConnectionAccountSelectionDiagnostic;
+  },
+): Promise<ScheduledTaskRun> {
+  const diagnostic = ConnectionAccountSelectionDiagnostic.parse(input.diagnostic);
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    // Same task lock as accepted admission; both outcomes share the existing
+    // producer unique key. A committed winner is immutable even after repair.
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: "failed",
+        error: "connection_account_unavailable",
+        admissionDiagnostic: diagnostic,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
+  });
+}
+
+/** Reasons a scheduled occurrence is refused before accepting execution. */
+export type ScheduledTaskAdmissionRefusalReason =
+  | "scheduled_authority_unavailable"
+  | "machine_target_unavailable"
+  | "machine_enrollment_inactive"
+  | "variable_set_unavailable"
+  | "rig_version_unavailable"
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit"
+  | "monthly_agent_run_limit";
+
+/**
+ * Record a refused occurrence as an immutable run receipt under its producer
+ * identity (migration 0539). A transient refusal is `skipped`, a terminal one
+ * `failed`; neither carries accepted execution. An existing receipt for the
+ * producer wins, so redelivery never duplicates a run: the caller replays it.
+ */
+export async function recordScheduledTaskAdmissionRefusal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision: number;
+    taskExecutionDigest: string;
+    triggerType: ScheduledTaskTriggerType;
+    producerKey: string;
+    scheduledAt?: Date | null;
+    reason: ScheduledTaskAdmissionRefusalReason;
+    retryable: boolean;
+  },
+): Promise<ScheduledTaskRun> {
+  if (!input.producerKey.trim()) throw new Error("scheduled refusal requires producer identity");
+  const refusal = ScheduledTaskAdmissionRefusal.parse({
+    version: 1,
+    reason: input.reason,
+    retryable: input.retryable,
+  });
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) throw new Error("Scheduled task not found");
+    const readPrior = async () => {
+      const [prior] = await tx
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (prior && (prior.taskId !== input.taskId || prior.triggerType !== input.triggerType)) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      return prior;
+    };
+    const prior = await readPrior();
+    if (prior) return mapScheduledTaskRun(prior);
+    if (
+      task.status !== "active" ||
+      task.deletedAt ||
+      task.authorityRevision !== input.taskAuthorityRevision ||
+      task.executionDigest !== input.taskExecutionDigest
+    ) {
+      throw new Error("scheduled task changed before refusal recording");
+    }
+    const now = new Date();
+    const [inserted] = await tx
+      .insert(schema.scheduledTaskRuns)
+      .values({
+        accountId: task.accountId,
+        workspaceId: input.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: input.taskAuthorityRevision,
+        taskExecutionDigest: input.taskExecutionDigest,
+        triggerType: input.triggerType,
+        producerKey: input.producerKey,
+        scheduledAt: input.scheduledAt ?? null,
+        firedAt: now,
+        completedAt: now,
+        actionKind: "agent_turn",
+        status: refusal.retryable ? "skipped" : "failed",
+        error: refusal.reason,
+        admissionRefusal: refusal,
+      })
+      .onConflictDoNothing({
+        target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
+        where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+      })
+      .returning();
+    const result = inserted ?? (await readPrior());
+    if (!result) throw new Error("scheduled refusal receipt missing");
+    return mapScheduledTaskRun(result);
   });
 }
 
@@ -18692,7 +19326,19 @@ export async function listScheduledTaskRuns(
       )
       .orderBy(desc(schema.scheduledTaskRuns.createdAt))
       .limit(limit);
-    return rows.map(mapScheduledTaskRun);
+    const runs = rows.map(mapScheduledTaskRun);
+    // A dispatched run whose own turn waits on a person is visible as such
+    // instead of looking merely "dispatched" until someone answers.
+    const waits = await scheduledRunHumanWaitsInRlsContext(scopedDb, workspaceId, {
+      runIds: runs.filter((run) => run.status === "dispatched").map((run) => run.id),
+    });
+    const byRun = new Map(waits.map((wait) => [wait.runId, wait]));
+    return runs.map((run) => {
+      const wait = byRun.get(run.id);
+      return wait
+        ? { ...run, awaitingHuman: { since: wait.since, expiresAt: wait.expiresAt } }
+        : run;
+    });
   });
 }
 
@@ -23096,6 +23742,9 @@ export async function upsertCodexSubscriptionCredential(
           chatgptAccountId: input.chatgptAccountId,
           scopes: input.scopes,
           planType: input.planType,
+          // Connecting reads the plan from the fresh id_token.
+          planCheckedAt: input.planType === null ? null : now,
+          planEntitlementExclusion: null,
           isFedramp: input.isFedramp,
           expiresAt: input.expiresAt,
           lastRefreshAt: input.lastRefreshAt,
@@ -23123,6 +23772,12 @@ export async function upsertCodexSubscriptionCredential(
             credentialEncrypted: input.credentialEncrypted,
             scopes: input.scopes,
             planType: input.planType,
+            // A reconnect is a fresh plan observation; earlier model refusals
+            // belonged to the replaced token family, but a plan change it
+            // reveals stays recorded as evidence.
+            planCheckedAt: input.planType === null ? null : now,
+            ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
+            planEntitlementExclusion: null,
             isFedramp: input.isFedramp,
             expiresAt: input.expiresAt,
             lastRefreshAt: input.lastRefreshAt,
@@ -23254,6 +23909,8 @@ export async function upsertOrganizationCodexSubscriptionCredential(
         chatgptAccountId: input.chatgptAccountId,
         scopes: input.scopes,
         planType: input.planType,
+        planCheckedAt: input.planType === null ? null : now,
+        planEntitlementExclusion: null,
         isFedramp: input.isFedramp,
         expiresAt: input.expiresAt,
         lastRefreshAt: input.lastRefreshAt,
@@ -23273,6 +23930,9 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           credentialEncrypted: input.credentialEncrypted,
           scopes: input.scopes,
           planType: input.planType,
+          planCheckedAt: input.planType === null ? null : now,
+          ...(input.planType === null ? {} : codexPlanChangeRecordSet(input.planType, now)),
+          planEntitlementExclusion: null,
           isFedramp: input.isFedramp,
           expiresAt: input.expiresAt,
           lastRefreshAt: input.lastRefreshAt,
@@ -24030,6 +24690,9 @@ export async function loadCodexCredentialForRun(
       chatgptAccountId: row.chatgptAccountId,
       scopes: row.scopes,
       planType: row.planType,
+      planPreviousType: row.planPreviousType,
+      planChangedAt: row.planChangedAt,
+      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       isFedramp: row.isFedramp,
       expiresAt: row.expiresAt,
       lastRefreshAt: row.lastRefreshAt,
@@ -24043,6 +24706,47 @@ export async function loadCodexCredentialForRun(
       exhaustedRevision: row.exhaustedRevision,
     };
   });
+}
+
+/**
+ * Column updates for one provider plan observation. The plan entitlement
+ * exclusion names the plan it was observed under; a different plan retires it
+ * in the same statement.
+ */
+function codexPlanObservationSet(planType: string, observedAt: Date) {
+  return {
+    planType,
+    planCheckedAt: observedAt,
+    ...codexPlanChangeRecordSet(planType, observedAt),
+    planEntitlementExclusion: sql`case
+      when lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})
+        then null
+      else ${schema.codexSubscriptionCredentials.planEntitlementExclusion}
+    end`,
+  };
+}
+
+/**
+ * Record a plan change (the plan before it, and when it was observed) only
+ * when a known plan moves to a different one. An observation of the same plan
+ * keeps the earlier record, so whichever writer notices a downgrade first
+ * (usage read, token refresh, reconnect, or a failing turn's re-check) leaves
+ * the evidence for the next ambiguous refusal. UPDATE expressions read the old
+ * row, so `plan_type` here is the plan before this observation.
+ */
+function codexPlanChangeRecordSet(planType: string, observedAt: Date) {
+  const changed = sql`${schema.codexSubscriptionCredentials.planType} is not null
+      and lower(${schema.codexSubscriptionCredentials.planType}) is distinct from lower(${planType})`;
+  return {
+    planPreviousType: sql`case when ${changed}
+      then left(${schema.codexSubscriptionCredentials.planType}, 128)
+      else ${schema.codexSubscriptionCredentials.planPreviousType}
+    end`,
+    planChangedAt: sql`case when ${changed}
+      then ${observedAt.toISOString()}::timestamptz
+      else ${schema.codexSubscriptionCredentials.planChangedAt}
+    end`,
+  };
 }
 
 /**
@@ -24065,6 +24769,11 @@ export async function recordCodexTokenRefresh(
     credentialEncrypted: string;
     expiresAt: Date | null;
     lastRefreshAt: Date;
+    /**
+     * `chatgpt_plan_type` from the refreshed id_token, when the provider
+     * returned one. A changed plan retires any plan entitlement exclusion.
+     */
+    planType?: string | null | undefined;
     authority?: CodexAcceptedCredentialAuthority | undefined;
   },
 ): Promise<boolean> {
@@ -24081,6 +24790,9 @@ export async function recordCodexTokenRefresh(
         credentialEncrypted: input.credentialEncrypted,
         expiresAt: input.expiresAt,
         lastRefreshAt: input.lastRefreshAt,
+        ...(typeof input.planType === "string" && input.planType.length > 0
+          ? codexPlanObservationSet(input.planType, input.lastRefreshAt)
+          : {}),
         status: "active",
         lastError: null,
         version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
@@ -24478,6 +25190,13 @@ export type CodexAccountStatus = {
   label: string | null;
   accountEmail: string | null;
   planType: string | null;
+  /** Last provider plan observation; absent on pre-plan-tracking fixtures. */
+  planCheckedAt?: Date | null;
+  /** Plan before the most recent observed plan change, and when it was seen. */
+  planPreviousType?: string | null;
+  planChangedAt?: Date | null;
+  /** Models the current plan was proven not to include (see codex-plan-entitlement). */
+  planEntitlementExclusion?: CodexPlanEntitlementExclusion | null;
   status: string; // active | needs_relogin | error
   /** New automatic allocations only; health/refresh and existing turns remain independent. */
   allocatorEnabled: boolean;
@@ -24703,6 +25422,8 @@ type CodexLeaseCandidateRow = {
   label: string | null;
   account_email: string | null;
   plan_type: string | null;
+  plan_checked_at?: Date | string | null;
+  plan_entitlement_exclusion?: unknown;
   status: string;
   allocator_enabled: boolean;
   expires_at: Date | string | null;
@@ -24738,6 +25459,8 @@ function mapCodexLeaseCandidate(
     label: row.label,
     accountEmail: row.account_email,
     planType: row.plan_type,
+    planCheckedAt: codexMetadataDate(row.plan_checked_at),
+    planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.plan_entitlement_exclusion),
     status: row.status,
     allocatorEnabled: row.allocator_enabled,
     isActive: row.id === activeCredentialId,
@@ -24827,6 +25550,9 @@ async function listCodexLeaseCandidatesInTransaction(
       -- additive column exists.
       to_jsonb(c) ->> 'exhausted_kind' as exhausted_kind,
       to_jsonb(c) ->> 'exhausted_revision' as exhausted_revision,
+      -- Plan entitlement columns follow the same compatibility pattern.
+      to_jsonb(c) ->> 'plan_checked_at' as plan_checked_at,
+      to_jsonb(c) -> 'plan_entitlement_exclusion' as plan_entitlement_exclusion,
       c.selection_count,
       c.last_selected_at,
       ${
@@ -25019,8 +25745,9 @@ export async function acquireCodexCredentialLease<
         active_attempt_id: string | null;
         execution_generation: number;
         metadata: Record<string, unknown> | null;
+        model: string;
       }>`
-        select id, session_id, status, active_attempt_id, execution_generation, metadata
+        select id, session_id, status, active_attempt_id, execution_generation, metadata, model
         from session_turns
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
@@ -28121,7 +28848,24 @@ export type CodexCredentialLeaseQuarantine =
       status: "needs_relogin" | "error";
       lastError: string;
     }
-  | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind };
+  | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind }
+  | {
+      /**
+       * The re-checked ChatGPT plan does not include `modelId`. The credential
+       * stays connected and healthy for other models; only this (plan, model)
+       * pair leaves allocation until a different plan is observed.
+       */
+      kind: "plan_entitlement";
+      modelId: string;
+      /** Plan the refusal is bound to (freshly observed, or the recorded plan). */
+      planType: string | null;
+      /**
+       * False when the provider did not report a current plan during the
+       * re-check. The turn receipt then names no plan, so no later plan
+       * observation can make this account eligible again for the same turn.
+       */
+      planObserved?: boolean;
+    };
 
 export type CodexCredentialLeaseQuarantineResult =
   | {
@@ -28266,6 +29010,7 @@ export async function quarantineCodexCredentialForLease(
               input.quarantine.kind === "cooldown"
                 ? schema.codexSubscriptionCredentials.exhaustedRevision
                 : sql<number>`0`,
+            planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
           })
           .from(schema.codexSubscriptionCredentials)
           .where(
@@ -28292,6 +29037,10 @@ export async function quarantineCodexCredentialForLease(
             currentCredentialVersion: credential.version,
           } as const;
         }
+        const planKey =
+          input.quarantine.kind === "plan_entitlement"
+            ? codexPlanKey(input.quarantine.planType)
+            : null;
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)
           .set(
@@ -28301,11 +29050,23 @@ export async function quarantineCodexCredentialForLease(
                   lastError: input.quarantine.lastError,
                   updatedAt: new Date(),
                 }
-              : {
-                  exhaustedUntil: input.quarantine.until,
-                  exhaustedKind: input.quarantine.cooldownKind,
-                  exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
-                },
+              : input.quarantine.kind === "plan_entitlement"
+                ? {
+                    planEntitlementExclusion: serializeCodexPlanEntitlementExclusion(
+                      mergeCodexPlanEntitlementExclusion(
+                        readCodexPlanEntitlementExclusion(credential.planEntitlementExclusion),
+                        input.quarantine.planType,
+                        input.quarantine.modelId,
+                        new Date(),
+                      ),
+                    ),
+                    updatedAt: new Date(),
+                  }
+                : {
+                    exhaustedUntil: input.quarantine.until,
+                    exhaustedKind: input.quarantine.cooldownKind,
+                    exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+                  },
           )
           .where(
             and(
@@ -28352,10 +29113,16 @@ export async function quarantineCodexCredentialForLease(
                 [input.credentialId]:
                   input.quarantine.kind === "status"
                     ? { kind: "status", credentialVersion: credential.version }
-                    : {
-                        kind: input.quarantine.cooldownKind,
-                        cooldownRevision: credential.exhaustedRevision + 1,
-                      },
+                    : input.quarantine.kind === "plan_entitlement"
+                      ? {
+                          kind: "plan",
+                          credentialVersion: credential.version,
+                          planType: input.quarantine.planObserved === false ? null : planKey,
+                        }
+                      : {
+                          kind: input.quarantine.cooldownKind,
+                          cooldownRevision: credential.exhaustedRevision + 1,
+                        },
               },
               codexCredentialFailovers: failoverCount,
               codexCredentialFailoverLimit: maxFailovers,
@@ -28495,6 +29262,10 @@ export async function listCodexAccountStatuses(
         label: schema.codexSubscriptionCredentials.label,
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
+        planCheckedAt: schema.codexSubscriptionCredentials.planCheckedAt,
+        planPreviousType: schema.codexSubscriptionCredentials.planPreviousType,
+        planChangedAt: schema.codexSubscriptionCredentials.planChangedAt,
+        planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
         status: schema.codexSubscriptionCredentials.status,
         allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
         allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
@@ -28526,6 +29297,9 @@ export async function listCodexAccountStatuses(
     return rows.map((row) => ({
       ...row,
       source: accountSource,
+      planCheckedAt: codexMetadataDate(row.planCheckedAt),
+      planChangedAt: codexMetadataDate(row.planChangedAt),
+      planEntitlementExclusion: readCodexPlanEntitlementExclusion(row.planEntitlementExclusion),
       expiresAt: codexMetadataDate(row.expiresAt),
       lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
       allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
@@ -29702,6 +30476,8 @@ async function mutateCodexAccountUsage(
           exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
           exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
           exhaustedRevision: schema.codexSubscriptionCredentials.exhaustedRevision,
+          planType: schema.codexSubscriptionCredentials.planType,
+          planEntitlementExclusion: schema.codexSubscriptionCredentials.planEntitlementExclusion,
         })
         .from(schema.codexSubscriptionCredentials)
         .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), condition))
@@ -29715,9 +30491,25 @@ async function mutateCodexAccountUsage(
         snapshot.clearQuotaCooldownRevision === previous.exhaustedRevision &&
         previous.exhaustedKind === "quota" &&
         previous.exhaustedUntil !== null;
+      // /wham/usage reports the account's current plan independently of its
+      // quota windows (a Free account may return no windows at all).
+      const observedPlanType =
+        typeof snapshot.planType === "string" && snapshot.planType.trim().length > 0
+          ? snapshot.planType.trim()
+          : null;
+      const planExclusionRetired =
+        observedPlanType !== null &&
+        previous.planType?.toLowerCase() !== observedPlanType.toLowerCase() &&
+        readCodexPlanEntitlementExclusion(previous.planEntitlementExclusion) !== null;
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({
+          ...(observedPlanType !== null
+            ? codexPlanObservationSet(
+                observedPlanType,
+                snapshot.planCheckedAt ?? snapshot.checkedAt ?? new Date(),
+              )
+            : {}),
           ...(snapshot.checkedAt !== undefined
             ? {
                 primaryUsedPercent: snapshot.primaryUsedPercent ?? null,
@@ -29757,7 +30549,10 @@ async function mutateCodexAccountUsage(
           previous.secondaryUsedPercent !== (snapshot.secondaryUsedPercent ?? null) ||
           timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null) ||
           (clearQuotaCooldown && previous.exhaustedUntil! > snapshot.checkedAt));
-      return { result: rowUpdated, changed: capacityChanged };
+      return {
+        result: rowUpdated,
+        changed: capacityChanged || (rowUpdated && planExclusionRetired),
+      };
     },
   );
 }
@@ -32924,7 +33719,7 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
-    stableJson(bundledSkillSelectionFromMetadata(existing.metadata) ?? null) !==
+    stableJson(storedBundledSkillSelectionIdentity(existing.metadata) ?? null) !==
     stableJson(input.bundledSkillIds ? [...input.bundledSkillIds].sort() : null)
   ) {
     throw new SessionCreateIdempotencyConflictError();
@@ -34857,6 +35652,126 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
   meaningfulSequence?: number;
 };
 
+/**
+ * Turn sources a person starts: a human or API message, or an operator's
+ * manual `/compact`. Such a turn brings no machine input the agent is waiting
+ * for, so unless it declares its own wait or consumes awaited machine input,
+ * it does not retire the held session wait. Every wait reader filters through
+ * `sessionInputWaitDecidingTurnSql`.
+ */
+const SESSION_INPUT_WAIT_PERSON_TURN_SOURCES = [
+  "user",
+  "api",
+  "compaction",
+] as const satisfies readonly SessionTurnSource[];
+
+/**
+ * Machine input a held wait is waiting for: every `immediate` kind. A person's
+ * queued turn claims pending machine input as coalesced context, so a delivered
+ * member of one of these kinds makes that turn retire the wait exactly like the
+ * system turn it replaced. Deferred child notices never end a wait, so a
+ * person's turn that coalesced only those leaves it held.
+ */
+const SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS = (
+  Object.entries(SESSION_SYSTEM_UPDATE_WAKE_CLASS) as Array<[SessionSystemUpdateKind, string]>
+)
+  .filter(([, wakeClass]) => wakeClass === "immediate")
+  .map(([kind]) => kind);
+
+/**
+ * The one predicate for "finished turns that decide the session wait": the
+ * declaring turn itself, every turn a person did not start, and a person's turn
+ * that consumed awaited machine input. The newest finished turn matching it
+ * decides the disposition; if that is not the declaring turn, the wait is
+ * superseded. Worker settlement, peek/claim/wake admission, public projections,
+ * and descendant counts all use this so they cannot drift apart.
+ *
+ * A person's turn consumes awaited machine input in two ways: its claim
+ * delivered a pending immediate-class update to it, or its model read a
+ * child's complete answer (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`) that is a
+ * part of a child result then superseded as `consumed_by_parent_read`: the
+ * answer, a goal continuation, or an omitted earlier part (see
+ * `childTerminalResultFinalAnswerSequences`). That result never wakes the
+ * parent, so without the second rule the wait would stay held until its
+ * deadline. A part that a completed attempt had already read by the time the
+ * declaring turn finished is not what the wait is for, so re-reading only such
+ * parts leaves the wait held; reading a newer continuation of an answer read
+ * before the wait still retires it. Turns are compared by `finished_at`, the
+ * same order that picks the deciding turn. Only a turn that finished at or
+ * after the declaring turn can outrank it, so the read check runs for those
+ * alone: every wait reader evaluates this for each finished turn, and checking
+ * the whole history would cost a scan of the session per earlier turn.
+ */
+function sessionInputWaitDecidingTurnSql(
+  turn: {
+    id: SQLWrapper;
+    source: SQLWrapper;
+    workspaceId: SQLWrapper;
+    sessionId: SQLWrapper;
+    finishedAt: SQLWrapper;
+    metadata: SQLWrapper;
+  },
+  waitTurnId: SQLWrapper | string,
+): SQL {
+  const consumedAnswersKey = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
+  const consumedAnswers = (metadata: SQLWrapper) =>
+    sql`jsonb_array_elements(case when jsonb_typeof(${metadata} -> ${consumedAnswersKey}) = 'array'
+      then ${metadata} -> ${consumedAnswersKey} else '[]'::jsonb end)`;
+  // By its unique (workspace, id) key: the declaring turn is this session's.
+  const waitDeclaredAt = sql`(select declaring.finished_at from ${schema.sessionTurns} declaring
+    where declaring.workspace_id = ${turn.workspaceId} and declaring.id = ${waitTurnId})`;
+  return sql`(${turn.id} = ${waitTurnId} or ${turn.source} not in (${sql.join(
+    SESSION_INPUT_WAIT_PERSON_TURN_SOURCES.map((source) => sql`${source}`),
+    sql`, `,
+  )}) or exists (
+    select 1 from ${schema.sessionSystemUpdates} consumed
+    where consumed.workspace_id = ${turn.workspaceId}
+      and consumed.session_id = ${turn.sessionId}
+      and consumed.state = 'delivered'
+      and consumed.delivered_turn_id = ${turn.id}
+      and consumed.kind in (${sql.join(
+        SESSION_INPUT_WAIT_RETIRING_UPDATE_KINDS.map((kind) => sql`${kind}`),
+        sql`, `,
+      )})
+  ) or (
+    ${turn.finishedAt} >= ${waitDeclaredAt}
+    and exists (
+      select 1 from ${schema.sessionSystemUpdates} consumed_read
+      cross join lateral ${consumedAnswers(turn.metadata)} consumed_answer
+      where consumed_read.workspace_id = ${turn.workspaceId}
+        and consumed_read.session_id = ${turn.sessionId}
+        and consumed_read.state = 'superseded'
+        and consumed_read.kind = 'child_terminal_result'
+        and consumed_answer ->> 'childSessionId' = consumed_read.payload ->> 'childSessionId'
+        and (
+          consumed_answer -> 'sequence' = consumed_read.payload -> 'finalAnswer' -> 'sequence'
+          or consumed_read.payload -> 'finalAnswer' -> 'goalContinuations'
+            @> jsonb_build_array(jsonb_build_object('sequence', consumed_answer -> 'sequence'))
+          or consumed_read.payload -> 'finalAnswer' -> 'omittedSequences'
+            @> jsonb_build_array(consumed_answer -> 'sequence')
+        )
+        and not exists (
+          select 1 from ${schema.sessionTurns} earlier
+          cross join lateral ${consumedAnswers(sql`earlier.metadata`)} earlier_answer
+          where earlier.workspace_id = ${turn.workspaceId}
+            and earlier.session_id = ${turn.sessionId}
+            and earlier.finished_at <= ${waitDeclaredAt}
+            and earlier_answer ->> 'childSessionId' = consumed_answer ->> 'childSessionId'
+            and earlier_answer -> 'sequence' = consumed_answer -> 'sequence'
+            and exists (
+              select 1 from ${schema.sessionTurnAttempts} earlier_attempt
+              where earlier_attempt.workspace_id = earlier.workspace_id
+                and earlier_attempt.id = case when earlier_answer ->> 'attemptId' ~ ${UUID_TEXT_PATTERN_SQL}
+                  then (earlier_answer ->> 'attemptId')::uuid end
+                and earlier_attempt.session_id = earlier.session_id
+                and earlier_attempt.turn_id = earlier.id
+                and earlier_attempt.outcome = 'completed'
+            )
+        )
+    )
+  ))`;
+}
+
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
 async function withCurrentSessionInputWait(
   db: Database,
@@ -34876,6 +35791,7 @@ async function withCurrentSessionInputWait(
         eq(schema.sessionTurns.workspaceId, workspaceId),
         eq(schema.sessionTurns.sessionId, schema.sessions.id),
         isNotNull(schema.sessionTurns.finishedAt),
+        sessionInputWaitDecidingTurnSql(schema.sessionTurns, schema.sessions.inputWaitTurnId),
       ),
     )
     .orderBy(
@@ -34944,7 +35860,7 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
-  return withLatestStartedSessionPolicy(
+  return withEffectiveSessionPolicy(
     db,
     workspaceId,
     (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
@@ -35294,6 +36210,17 @@ export async function sessionTreeStatsForSessions(
                     select finished.id from ${schema.sessionTurns} finished
                     where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
                       and finished.finished_at is not null
+                      and ${sessionInputWaitDecidingTurnSql(
+                        {
+                          id: sql`finished.id`,
+                          source: sql`finished.source`,
+                          workspaceId: sql`finished.workspace_id`,
+                          sessionId: sql`finished.session_id`,
+                          finishedAt: sql`finished.finished_at`,
+                          metadata: sql`finished.metadata`,
+                        },
+                        sql`waiting_session.input_wait_turn_id`,
+                      )}
                     order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
                   )
               )
@@ -36631,7 +37558,7 @@ export async function getSessionForSubject(
     ) {
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
-    const [session] = await withLatestStartedSessionPolicy(
+    const [session] = await withEffectiveSessionPolicy(
       scopedDb,
       workspaceId,
       await withCurrentSessionInputWait(scopedDb, workspaceId, [
@@ -38135,6 +39062,26 @@ function excludeUnclaimedHumanPromptEventFilter(workspaceId: string): SQL {
 }
 
 /**
+ * SQL twin of `isStreamedAssistantMessageCompletion` in `@opengeni/contracts`.
+ * Every branch is coalesced: a missing key must keep the row, never make the
+ * negated predicate unknown.
+ */
+function excludeStreamedAssistantMessageEventFilter(): SQL {
+  const event = schema.sessionEvents;
+  return sql`not (
+    ${event.type} = 'agent.message.completed'
+    and (
+      coalesce(${event.payload} ->> 'phase', '') in ('commentary', 'final_answer')
+      or coalesce(
+        jsonb_typeof(${event.payload} -> 'messageId') = 'string'
+          and ${event.payload} ->> 'messageId' <> '',
+        false
+      )
+    )
+  )`;
+}
+
+/**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
  * MCP metadata, repositories, settings, or full event/history bodies.
@@ -38901,6 +39848,13 @@ export type ListSessionEventsOptions = {
    * exact.
    */
   excludeUnclaimedHumanPrompts?: boolean;
+  /**
+   * Omit per-message assistant completions (they carry a provider `messageId`
+   * or a `phase`). The settling `turn.completed` carries the answer, so a
+   * reader of settled changes excludes them in SQL: a long run of progress
+   * notes can then neither wake it nor fill its page ahead of the outcome.
+   */
+  excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -39030,10 +39984,15 @@ export async function listSessionEventPage(
       if (options.excludeUnclaimedHumanPrompts) {
         filters.push(excludeUnclaimedHumanPromptEventFilter(workspaceId));
       }
+      if (options.excludeStreamedAssistantMessages) {
+        filters.push(excludeStreamedAssistantMessageEventFilter());
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows
-        // carrying a duplicate reference cannot compete with current truth.
+        // carrying a duplicate reference cannot compete with current truth. A
+        // completed progress note is not a result, so it cannot be the latest
+        // terminal event while a turn is still working.
         filters.push(
           and(
             or(
@@ -39041,6 +40000,8 @@ export async function listSessionEventPage(
               eq(schema.sessionEvents.turnAssociation, "current"),
             )!,
             isNull(schema.sessionEvents.duplicateOfEventId),
+            sql`not (${schema.sessionEvents.type} = 'agent.message.completed'
+              and coalesce(${schema.sessionEvents.payload} ->> 'phase', '') = 'commentary')`,
           )!,
         );
       }
@@ -41418,7 +42379,7 @@ export async function appendSessionHistoryItems(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await tx
+        const saved = await tx
           .insert(schema.sessionHistoryItems)
           .values(
             withLosslessContentWriteVersion(
@@ -41447,26 +42408,39 @@ export async function appendSessionHistoryItems(
               schema.sessionHistoryItems.sessionId,
               schema.sessionHistoryItems.position,
             ],
-          });
-        // A position conflict is idempotent only when the exact conversation
-        // item is already there. Never acknowledge a different item as saved.
-        const saved = await tx
-          .select({
+          })
+          .returning({
             position: schema.sessionHistoryItems.position,
             turnId: schema.sessionHistoryItems.turnId,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              inArray(
-                schema.sessionHistoryItems.position,
-                input.items.map((entry) => entry.position),
-              ),
-            ),
+          });
+        // A position conflict is idempotent only when the exact conversation
+        // item is already there. Never acknowledge a different item as saved.
+        // Fresh inserts already return their durable representation. Re-reading
+        // numeric positions under RLS can scan the session's history while we
+        // hold its write fence, so only fetch rows skipped by ON CONFLICT.
+        const insertedPositions = new Set(saved.map((row) => row.position));
+        const conflictingPositions = input.items
+          .map((entry) => entry.position)
+          .filter((position) => !insertedPositions.has(position));
+        if (conflictingPositions.length > 0)
+          saved.push(
+            ...(await tx
+              .select({
+                position: schema.sessionHistoryItems.position,
+                turnId: schema.sessionHistoryItems.turnId,
+                item: schema.sessionHistoryItems.item,
+                itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+              })
+              .from(schema.sessionHistoryItems)
+              .where(
+                and(
+                  eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+                  eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                  inArray(schema.sessionHistoryItems.position, conflictingPositions),
+                ),
+              )),
           );
         const byPosition = new Map(saved.map((row) => [row.position, row]));
         for (const entry of input.items) {
@@ -44105,12 +45079,29 @@ export type SandboxRecoveryState = {
   };
 };
 
+export type SandboxProviderCreateAttempt = {
+  version: 1;
+  operationId: string;
+  leaseEpoch: number;
+  providerBindingKey: string;
+  rematerializationId: string | null;
+  selectedRevision: string | null;
+  imageId: string | null;
+  imageRef: string | null;
+  appId: string;
+  providerName: string;
+  requestSha256: string;
+  startedAt: string;
+  instanceId: string | null;
+};
+
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
 // comes back as a number for an integer column, but we type it number|string
 // and Number()-coerce so the same code is correct regardless of column type.
 // Typed with an index signature so it satisfies db.execute<TRow extends
 // Record<string, unknown>>.
 type LeaseRow = {
+  provider_create_attempt?: SandboxProviderCreateAttempt | null;
   unobservable_command_drain_ids?: string[] | null;
   id: string;
   account_id: string;
@@ -44173,6 +45164,9 @@ type LeaseRow = {
 export interface LeaseSnapshot {
   /** Consent is not archive completeness; begin/commit revalidate the receipt. */
   historicalRecoveryAuthorized?: boolean;
+  /** Exact audited decision to continue a definitively lost workspace on a new
+   * EMPTY box. The spawner hydrates nothing and commits in fresh mode. */
+  freshWorkspaceRecoveryId?: string;
   /** Exact idle-only enrollment. Commands remain active until provider stop. */
   unobservableCommandDrainIds?: string[] | null;
   id: string;
@@ -44237,6 +45231,7 @@ export interface LeaseSnapshot {
    * lease liveness and epoch fields above. Legacy envelopes project to
    * conservative unknown/unverified values. */
   recovery: SandboxRecoveryState;
+  providerCreateAttempt?: SandboxProviderCreateAttempt | null;
   /** Conservative provider creation clock. Modal's hard timeout is measured
    * from this instant and cannot be extended by resume. */
   providerCreatedAt: Date | null;
@@ -44287,6 +45282,10 @@ export interface AcquireLeaseInput {
   // durable capture-and-drain rotation, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
+  /** Direct control of an already-owned interaction instance. Admit only that
+   * live provider, retaining its image across deployment changes. Never spawn
+   * or rotate a replacement for this request. Capture/rotation fences still apply. */
+  retainedInstanceId?: string;
   // The frozen rig version this run rides (M3). Stamped on the cold-create + CAS
   // and conflicted exactly like `image`: a live multi-holder box under a DIFFERENT
   // rig version throws SandboxRigConflictError; a solo holder requests durable
@@ -44716,8 +45715,17 @@ type SandboxWarmBillingSnapshot = {
   rateMicrosPerSecond: number;
   accountId: string;
   workspaceId: string;
+  attribution?: CreditDebitAttribution;
   stopChargeAt?: string;
 };
+
+export class SandboxDebitAttributionUnavailableError extends SandboxPaidComputeAdmissionError {
+  readonly code = "credit_debit_attribution_unavailable";
+  constructor(workspaceId: string, sandboxGroupId: string) {
+    super(workspaceId, sandboxGroupId);
+    this.message = "Paid sandbox compute has no frozen initiating attribution";
+  }
+}
 
 function warmBillingSnapshot(
   row: Pick<LeaseRow, "resume_state" | "account_id" | "workspace_id">,
@@ -44734,9 +45742,45 @@ function warmBillingSnapshot(
       (typeof snapshot.stopChargeAt === "string" &&
         Number.isFinite(Date.parse(snapshot.stopChargeAt)))) &&
     snapshot.accountId === row.account_id &&
-    snapshot.workspaceId === row.workspace_id
+    snapshot.workspaceId === row.workspace_id &&
+    (snapshot.attribution === undefined ||
+      CreditDebitAttribution.safeParse(snapshot.attribution).success)
     ? snapshot
     : null;
+}
+
+/**
+ * The exact durable attempt holder is the worker's admission receipt. Direct,
+ * viewer and interaction requests instead carry host-authenticated context.
+ * Neither subjectId (a session disclosure label) nor a creator is a human.
+ */
+async function sandboxWarmAdmissionAttribution(
+  tx: Database,
+  input: AcquireLeaseInput,
+): Promise<CreditDebitAttribution> {
+  if (input.kind === "turn" && input.holderId.startsWith("turn-attempt:")) {
+    const attemptId = input.holderId.slice("turn-attempt:".length);
+    if (!z.uuid().safeParse(attemptId).success) return { kind: "unknown" };
+    const rows = await tx.execute<{
+      turn_id: string;
+      initiating_human_subject_id: string | null;
+    }>(sql`SELECT t.id AS turn_id, t.initiating_human_subject_id
+      FROM session_turn_attempts a
+      JOIN session_turns t ON t.id=a.turn_id AND t.account_id=a.account_id
+        AND t.workspace_id=a.workspace_id AND t.session_id=a.session_id
+      JOIN sessions s ON s.id=t.session_id AND s.account_id=t.account_id
+        AND s.workspace_id=t.workspace_id
+      WHERE a.id=${attemptId}::uuid AND a.account_id=${input.accountId}::uuid
+        AND a.workspace_id=${input.workspaceId}::uuid
+        AND s.sandbox_group_id=${input.sandboxGroupId}::uuid`);
+    if (!rows[0]) return { kind: "unknown" };
+    return CreditDebitAttribution.parse({
+      kind: "turn",
+      turnId: rows[0].turn_id,
+      initiatingHumanSubjectId: rows[0].initiating_human_subject_id,
+    });
+  }
+  return currentCreditDebitAttribution();
 }
 
 /**
@@ -44922,6 +45966,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
     recovery,
+    providerCreateAttempt: row.provider_create_attempt ?? null,
     providerCreatedAt:
       row.provider_created_at === null
         ? null
@@ -44986,6 +46031,20 @@ function leaseBackendRequiresResumableInstance(row: LeaseRow): boolean {
   // Fail closed for an unknown/new provider until its exact address contract is
   // registered. `none` is intentionally the sole providerless backend today.
   return fields === undefined || fields.length > 0;
+}
+
+function hasRearmableWorkspace(row: LeaseRow): boolean {
+  // Pre-recovery envelopes retain their existing provider-identity checks.
+  // Once readiness is recorded, an address alone cannot override that state:
+  // a creator may have died after attribution but before workspace verification.
+  if (row.resume_state?.opengeniRecovery === undefined) return true;
+  const recovery = recoveryStateFromLeaseRow(row);
+  return (
+    recovery.provider.status === "exists" &&
+    recovery.provider.instanceId === row.instance_id &&
+    recovery.workspace.status === "ready" &&
+    (recovery.restore.status === "not_required" || recovery.restore.status === "ready")
+  );
 }
 
 function archiveCaptureRemainingMs(
@@ -45241,7 +46300,130 @@ const WORKSPACE_ARCHIVE_SESSION_KEYS = [
   "workspaceArchiveAt",
 ] as const;
 
+/** A pending system decision to continue a definitively lost managed sandbox on
+ * a new EMPTY workspace. It lives on the lease so every cold/warming rebuild of
+ * resume_state carries it until the exact empty publication verifies it. */
+const FRESH_WORKSPACE_RECOVERY_KEY = "opengeniFreshWorkspaceRecovery";
+
+type FreshWorkspaceRecoveryMarker = {
+  version: 1;
+  operationId: string;
+  sessionId: string;
+  status: "accepted" | "verified";
+  authorizedAt: string;
+  verifiedAt?: string;
+};
+
+function freshWorkspaceRecoveryMarker(
+  resumeState: Record<string, unknown> | null | undefined,
+): FreshWorkspaceRecoveryMarker | null {
+  const value = resumeState?.[FRESH_WORKSPACE_RECOVERY_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const marker = value as Record<string, unknown>;
+  return marker.version === 1 &&
+    typeof marker.operationId === "string" &&
+    UUID_PATTERN.test(marker.operationId) &&
+    typeof marker.sessionId === "string" &&
+    (marker.status === "accepted" || marker.status === "verified") &&
+    typeof marker.authorizedAt === "string"
+    ? (marker as FreshWorkspaceRecoveryMarker)
+    : null;
+}
+
+function pendingFreshWorkspaceRecovery(
+  resumeState: Record<string, unknown> | null | undefined,
+): FreshWorkspaceRecoveryMarker | null {
+  const marker = freshWorkspaceRecoveryMarker(resumeState);
+  return marker?.status === "accepted" ? marker : null;
+}
+
+/** Durable evidence that the exact provider object of this lease lineage was
+ * definitively lost. Only the two loss transitions write it (the reaper's
+ * missing-before-capture cold commit and an exact warm-instance NOT_FOUND);
+ * replacement failures carry it forward but never create it, and a verified
+ * warm publication ends the lineage. */
+const PROVIDER_LOSS_KEY = "opengeniProviderLoss";
+const PROVIDER_NOT_FOUND_BEFORE_CAPTURE = "provider_not_found_before_workspace_capture";
+/** A failed or reset replacement box: not evidence about the lost workspace. */
+const REPLACEMENT_FAILED_DIAGNOSTIC = "replacement_failed";
+
+type ProviderLossRecord = {
+  version: 1;
+  source: "drain_probe" | "warm_resume";
+  leaseId: string;
+  lostEpoch: number;
+  instanceId: string | null;
+  workspaceGeneration: number;
+  observedAt: string;
+  /** The lost object's recorded hard provider deadline, when known. */
+  providerDeadlineAt: string | null;
+};
+
+function providerLossRecord(
+  resumeState: Record<string, unknown> | null | undefined,
+): ProviderLossRecord | null {
+  const value = resumeState?.[PROVIDER_LOSS_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return record.version === 1 &&
+    (record.source === "drain_probe" || record.source === "warm_resume") &&
+    typeof record.leaseId === "string" &&
+    typeof record.lostEpoch === "number" &&
+    Number.isSafeInteger(record.lostEpoch) &&
+    (typeof record.instanceId === "string" || record.instanceId === null) &&
+    typeof record.workspaceGeneration === "number" &&
+    Number.isSafeInteger(record.workspaceGeneration) &&
+    typeof record.observedAt === "string" &&
+    Number.isFinite(Date.parse(record.observedAt)) &&
+    (record.providerDeadlineAt === null ||
+      (typeof record.providerDeadlineAt === "string" &&
+        Number.isFinite(Date.parse(record.providerDeadlineAt))))
+    ? (record as ProviderLossRecord)
+    : null;
+}
+
+function timestampIso(value: Date | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+/** The loss record a definitive loss transition commits for `row`. */
+function providerLossRecordForLostRow(
+  row: LeaseRow,
+  source: ProviderLossRecord["source"],
+  observedAt: string,
+): ProviderLossRecord {
+  return {
+    version: 1,
+    source,
+    leaseId: row.id,
+    lostEpoch: Number(row.lease_epoch),
+    instanceId: row.instance_id,
+    workspaceGeneration: Number(row.workspace_generation),
+    observedAt,
+    providerDeadlineAt: timestampIso(row.provider_deadline_at),
+  };
+}
+
 function resumeStateWithPreservedArchives(
+  resumeState: Record<string, unknown> | null,
+  archiveSource: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const preserved = resumeStateWithPreservedArchiveFields(resumeState, archiveSource);
+  // A pending empty-workspace decision and the loss evidence behind it are not
+  // archive truth, so they survive even when the lost lease had no archive.
+  const fresh = pendingFreshWorkspaceRecovery(archiveSource);
+  const loss = providerLossRecord(archiveSource);
+  if (!fresh && !loss) return preserved;
+  return {
+    ...(preserved ?? {}),
+    ...(fresh ? { [FRESH_WORKSPACE_RECOVERY_KEY]: fresh } : {}),
+    ...(loss ? { [PROVIDER_LOSS_KEY]: loss } : {}),
+  };
+}
+
+function resumeStateWithPreservedArchiveFields(
   resumeState: Record<string, unknown> | null,
   archiveSource: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
@@ -45268,6 +46450,12 @@ function resumeStateWithPreservedArchives(
           opengeniHistoricalArchiveRecoveryId: archiveSource.opengeniHistoricalArchiveRecoveryId,
         }
       : {}),
+    ...(archiveSource?.opengeniAutomaticCheckpointRecovery &&
+    typeof archiveSource.opengeniAutomaticCheckpointRecovery === "object"
+      ? {
+          opengeniAutomaticCheckpointRecovery: archiveSource.opengeniAutomaticCheckpointRecovery,
+        }
+      : {}),
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
       ? { backendId: archiveSource.backendId }
       : {}),
@@ -45281,7 +46469,9 @@ function resumeStateWithPreservedArchives(
 function archiveOnlyResumeState(
   row: LeaseRow,
   recovery: SandboxRecoveryState,
+  providerLoss?: ProviderLossRecord,
 ): Record<string, unknown> {
+  const carriedLoss = providerLoss ?? providerLossRecord(row.resume_state);
   const current =
     row.resume_state && typeof row.resume_state === "object" ? row.resume_state : undefined;
   const currentSession =
@@ -45309,6 +46499,16 @@ function archiveOnlyResumeState(
           opengeniHistoricalArchiveRecoveryId: current.opengeniHistoricalArchiveRecoveryId,
         }
       : {}),
+    ...(current?.opengeniAutomaticCheckpointRecovery &&
+    typeof current.opengeniAutomaticCheckpointRecovery === "object"
+      ? {
+          opengeniAutomaticCheckpointRecovery: current.opengeniAutomaticCheckpointRecovery,
+        }
+      : {}),
+    ...(pendingFreshWorkspaceRecovery(current)
+      ? { [FRESH_WORKSPACE_RECOVERY_KEY]: pendingFreshWorkspaceRecovery(current) }
+      : {}),
+    ...(carriedLoss ? { [PROVIDER_LOSS_KEY]: carriedLoss } : {}),
     opengeniRecovery: recovery,
   };
 }
@@ -45396,10 +46596,14 @@ function continuityRecoveryEquals(
 function recoveryResumeState(
   row: LeaseRow,
   recovery: SandboxRecoveryState,
+  providerLoss?: ProviderLossRecord,
 ): Record<string, unknown> {
   return recovery.continuity
-    ? resumeStateWithRecovery(row.resume_state, recovery)
-    : archiveOnlyResumeState(row, recovery);
+    ? {
+        ...resumeStateWithRecovery(row.resume_state, recovery),
+        ...(providerLoss ? { [PROVIDER_LOSS_KEY]: providerLoss } : {}),
+      }
+    : archiveOnlyResumeState(row, recovery, providerLoss);
 }
 
 function archiveProjectionFromResumeState(
@@ -45538,6 +46742,14 @@ async function acquireLeaseOnce(
   if (input.kind === "process") {
     throw new Error("Process lease holders are created only by atomic retained-process promotion");
   }
+  if (
+    input.retainedInstanceId !== undefined &&
+    (input.kind !== "direct" || input.retainedInstanceId.length === 0)
+  ) {
+    throw new Error(
+      "Retained instance admission requires a direct holder and exact provider identity",
+    );
+  }
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
@@ -45593,10 +46805,26 @@ async function acquireLeaseOnce(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+        // Existing browser control and suspension must remain possible after a
+        // deployment changes the image for new boxes. Check under the lease lock
+        // before any holder, re-arm, billing admission or cold-spawner election.
+        if (
+          input.retainedInstanceId !== undefined &&
+          (row.instance_id !== input.retainedInstanceId ||
+            row.backend !== backend ||
+            (liveness !== "warm" && liveness !== "draining"))
+        ) {
+          return {
+            role: "fenced" as const,
+            reason: "superseded" as const,
+            lease: mapLeaseRow(row),
+          };
+        }
         const existingSnapshot = warmBillingSnapshot(row);
         if (row.resume_state?.opengeniWarmBilling && !existingSnapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
         }
+        const admittedAttribution = await sandboxWarmAdmissionAttribution(tx, input);
 
         // Every new paid holder, including direct operations and interaction
         // controllers, passes the same account funding boundary before it can
@@ -45622,6 +46850,27 @@ async function acquireLeaseOnce(
               where lease_id = ${row.id} and kind = ${kind} and holder_id = ${holderId}) as held
           `);
           if (!alreadyHeld[0]?.held) {
+            const attribution =
+              liveness === "cold"
+                ? admittedAttribution
+                : (existingSnapshot?.attribution ?? { kind: "unknown" as const });
+            if (attribution.kind === "unknown") {
+              throw new SandboxDebitAttributionUnavailableError(workspaceId, sandboxGroupId);
+            }
+            const refusal = await checkWorkspaceAllowance(tx, {
+              accountId,
+              workspaceId,
+              subjectId:
+                attribution.kind === "turn" || attribution.kind === "human"
+                  ? attribution.initiatingHumanSubjectId
+                  : null,
+            });
+            if (refusal) {
+              throw Object.assign(
+                new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId),
+                refusal,
+              );
+            }
             const balance = await getBillingBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
@@ -45674,16 +46923,16 @@ async function acquireLeaseOnce(
           };
         }
 
-        // A creator died after publishing an instance id but before publishing
-        // its resumable envelope. The attributed provider may still be live,
-        // but an arrival has no safe SDK state with which to attach. Keep this
+        // A creator died before publishing its resumable envelope or verifying
+        // the workspace. The attributed provider may still be live,
+        // but an arrival has no verified state with which to attach. Keep this
         // exceptional row transiently fenced until the reaper captures/settles
         // it; unlike an ordinary expired drain, re-arming it cannot restore
         // service and would strand an unmanageable provider.
         if (
           liveness === "draining" &&
-          leaseBackendRequiresResumableInstance(row) &&
-          !hasResumableLeaseInstance(row)
+          (!hasRearmableWorkspace(row) ||
+            (leaseBackendRequiresResumableInstance(row) && !hasResumableLeaseInstance(row)))
         ) {
           return {
             role: "fenced" as const,
@@ -45709,7 +46958,11 @@ async function acquireLeaseOnce(
         // Each axis is enforced only when BOTH sides are known; a cold row / a legacy null /
         // an unset input never conflicts (the selfhosted path passes neither; a rig-less run
         // passes no rigVersionId, so it never stamps or conflicts on rig).
-        const imageConflict = image !== null && row.image !== null && row.image !== image;
+        const imageConflict =
+          input.retainedInstanceId === undefined &&
+          image !== null &&
+          row.image !== null &&
+          row.image !== image;
         const rigConflict =
           rigVersionId !== null &&
           row.rig_version_id !== null &&
@@ -45786,7 +47039,12 @@ async function acquireLeaseOnce(
         // records the image it runs — for a fresh cold row or a solo-recreate above.
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
+          // An audited system decision to continue on an EMPTY workspace makes
+          // the lost workspace's blocked restore truth non-blocking for exactly
+          // one kind of publication: a new box with no archive hydrated.
+          const freshWorkspaceRecoveryId = await authorizedFreshWorkspaceRecoveryId(tx, row);
           if (
+            freshWorkspaceRecoveryId === null &&
             ((recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
               recovery.restore.status === "unrecoverable") &&
             (await authorizedHistoricalArchiveGeneration(tx, row)) === null
@@ -45811,6 +47069,7 @@ async function acquireLeaseOnce(
                 rateMicrosPerSecond: warmPolicy.rateMicrosPerSecond,
                 accountId,
                 workspaceId,
+                attribution: admittedAttribution,
               })}::jsonb),`
                 : sql``
             }
@@ -45833,7 +47092,9 @@ async function acquireLeaseOnce(
             lease: {
               ...mapLeaseRow(updated),
               historicalRecoveryAuthorized:
+                freshWorkspaceRecoveryId === null &&
                 (await authorizedHistoricalArchiveGeneration(tx, updated)) !== null,
+              ...(freshWorkspaceRecoveryId ? { freshWorkspaceRecoveryId } : {}),
             },
           };
         }
@@ -45968,6 +47229,7 @@ export type BeginSandboxRematerializationResult =
         | "archive_unverified"
         | "archive_generation_mismatch"
         | "checkpoint_artifact_invalid"
+        | "fresh_workspace_pending"
         | "attempt_conflict"
         | "stale_epoch";
       lease: LeaseSnapshot | null;
@@ -46067,6 +47329,20 @@ export async function sessionEffectiveSandboxRecoveryBlocked(
   if (!row) return false;
   if ((row.public_recovery as Record<string, unknown> | null)?.status === "accepted") return true;
   if (row.liveness !== "cold") return false;
+  // A failed turn may be explicitly retried into a system recovery lane: the
+  // latest verified checkpoint, or a new empty workspace when none survived a
+  // definitive loss. Retry itself restores and replays nothing; the next
+  // claimed attempt rechecks the lane and group-wide quiescence first.
+  const lane = await automaticRecoveryLaneTx(tx, row, session);
+  if (lane.kind !== "unavailable") {
+    if (lane.state === "authorized") return false;
+    const blockers = await sandboxGroupRecoveryBlockersTx(tx, {
+      row,
+      sessionId: session.id,
+      attemptId: null,
+    });
+    if (!blockers.lease && !blockers.current && !blockers.others) return false;
+  }
   const recovery = recoveryStateFromLeaseRow(row);
   return (
     recovery.restore.status === "unrecoverable" ||
@@ -46098,23 +47374,634 @@ async function completeRecoveryGroupCount(
     );
     return Number(row?.count ?? 0);
   } finally {
-    await setSubjectRlsContext(tx, input.subjectId);
+    if (input.subjectId.trim()) await setSubjectRlsContext(tx, input.subjectId);
+    else await tx.execute(sql`select set_config('opengeni.subject_id', '', true)`);
   }
+}
+
+/** System attribution for group-member receipts that no member's own attempt
+ * created. Never a human, delegated principal or agent authority. */
+const AUTOMATIC_SANDBOX_RECOVERY_SUBJECT = "opengeni:automatic-sandbox-recovery";
+const FRESH_WORKSPACE_RECOVERY_ACTION = "sandbox.fresh_workspace_recovery.authorized";
+/** Automatic restores of one checkpoint before an operator must decide. Only
+ * a definitive integrity failure of that exact checkpoint abandons it. */
+const MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS = 6;
+/** Wait after the k-th failed automatic restore before the next decision. */
+const AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS = [
+  60_000,
+  5 * 60_000,
+  15 * 60_000,
+  60 * 60_000,
+  4 * 60 * 60_000,
+] as const;
+/** Failure codes that prove the exact selected checkpoint's own content can
+ * never be restored (its bytes, descriptor or registered artifact are wrong),
+ * and only when the failure was recorded as not retryable. Provider, binding,
+ * capacity, commit, worker, storage-configuration (`archive_storage_unavailable`)
+ * and missing-object (`archive_object_missing`) failures are deliberately
+ * absent: a bad deploy or storage outage must never abandon a checkpoint. */
+const DEFINITIVE_CHECKPOINT_FAILURES: ReadonlySet<string> = new Set([
+  "archive_metadata_missing",
+  "archive_metadata_invalid",
+  "archive_base64_invalid",
+  "archive_hash_mismatch",
+  "checkpoint_artifact_invalid",
+]);
+/** OpenGeni validates OPENGENI_MODAL_TIMEOUT_SECONDS to at most 24h, Modal's
+ * own hard cap, and Modal lifetimes are never renewed. */
+const MODAL_SANDBOX_MAX_LIFETIME_MS = 24 * 60 * 60_000;
+/** A recorded deadline is stamped from the create call's start; the provider
+ * object may come up to the warming budget later. */
+const PROVIDER_CREATE_DEADLINE_GRACE_MS = 60 * 60_000;
+/** persistDrainSnapshot refuses a cold late publication after this window. */
+const LATE_CAPTURE_PUBLICATION_WINDOW_MS = SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS;
+/** Decisions wait slightly longer than publication so host clock skew can
+ * never let a late archive land after a decision. */
+const LATE_CAPTURE_DECISION_DELAY_MS = LATE_CAPTURE_PUBLICATION_WINDOW_MS + 5 * 60_000;
+
+type AutomaticCheckpointMarker = {
+  operationId: string;
+  sessionId: string;
+  status: string;
+  attempt: number;
+};
+
+function automaticCheckpointMarker(
+  resumeState: Record<string, unknown> | null | undefined,
+): AutomaticCheckpointMarker | null {
+  const value = resumeState?.opengeniAutomaticCheckpointRecovery;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const marker = value as Record<string, unknown>;
+  return {
+    operationId: typeof marker.operationId === "string" ? marker.operationId : "",
+    sessionId: typeof marker.sessionId === "string" ? marker.sessionId : "",
+    status: typeof marker.status === "string" ? marker.status : "",
+    attempt:
+      typeof marker.attempt === "number" &&
+      Number.isSafeInteger(marker.attempt) &&
+      marker.attempt > 0
+        ? marker.attempt
+        : 1,
+  };
+}
+
+/** Clear the RLS actor so a census and its warning receipts cover the complete
+ * tenant group, including sessions private to another human. Callers never
+ * return member identities to an actor who cannot already see them. */
+async function withCompleteSandboxGroupScope<T>(tx: Database, fn: () => Promise<T>): Promise<T> {
+  const [context] = await rawRows<{ subject_id: string }>(
+    tx,
+    sql`select coalesce(current_setting('opengeni.subject_id', true), '') as subject_id`,
+  );
+  const restore = async () => {
+    const subjectId = context?.subject_id ?? "";
+    if (subjectId.trim()) await setSubjectRlsContext(tx, subjectId);
+    else await tx.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+  };
+  await tx.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+  let result: T;
+  try {
+    result = await fn();
+  } catch (error) {
+    await restore().catch(() => undefined);
+    throw error;
+  }
+  await restore();
+  return result;
+}
+
+type SandboxGroupMember = { id: string; activeEpoch: number; authorityEpoch: number };
+
+async function sandboxGroupMembersTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string },
+): Promise<SandboxGroupMember[]> {
+  return await withCompleteSandboxGroupScope(tx, async () => {
+    const rows = await rawRows<{
+      id: string;
+      active_epoch: number | string;
+      authority_epoch: number | string;
+    }>(
+      tx,
+      sql`select id, active_epoch, authority_epoch from sessions
+        where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+        order by id`,
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      activeEpoch: Number(row.active_epoch),
+      authorityEpoch: Number(row.authority_epoch),
+    }));
+  });
+}
+
+/** Group-wide quiescence for an automatic system recovery decision. Every
+ * member of the sandbox group counts, including private and finished children:
+ * no lease holder, open workspace admission, active retained process, live
+ * pending tool call, or unclosed/unquiesced attempt may exist anywhere in the
+ * group. A pending call is live while its owning attempt is open or awaits
+ * quiescence, or while its turn can still resume it. A row left behind by a
+ * terminal turn whose attempt settled cannot run again and is not a writer.
+ * `attemptId` is the exact deciding attempt, which is itself still running. */
+async function sandboxGroupRecoveryBlockersTx(
+  tx: Database,
+  input: { row: LeaseRow; sessionId: string; attemptId: string | null },
+): Promise<{ lease: boolean; current: boolean; others: boolean }> {
+  const workspaceId = input.row.workspace_id;
+  return await withCompleteSandboxGroupScope(tx, async () => {
+    const [blockers] = await rawRows<{ lease: boolean; current: boolean; others: boolean }>(
+      tx,
+      sql`with members as (
+          select id from sessions
+          where workspace_id = ${workspaceId} and sandbox_group_id = ${input.row.sandbox_group_id}
+        ), unsettled as (
+          select attempt.session_id from session_turn_attempts attempt
+          join members on members.id = attempt.session_id
+          where attempt.workspace_id = ${workspaceId}
+            and attempt.id is distinct from ${input.attemptId}::uuid
+            and (attempt.state <> 'closed' or (attempt.quiesced_at is null and exists(
+              select 1 from session_attempt_interruptions interruption
+              where interruption.attempt_id = attempt.id)))
+          union all
+          select pending.session_id from session_pending_tool_calls pending
+          join members on members.id = pending.session_id
+          where pending.workspace_id = ${workspaceId}
+            and (exists(select 1 from session_turn_attempts owner
+                where owner.workspace_id = pending.workspace_id and owner.id = pending.attempt_id
+                  and (owner.state <> 'closed' or (owner.quiesced_at is null and exists(
+                    select 1 from session_attempt_interruptions interruption
+                    where interruption.attempt_id = owner.id))))
+              or exists(select 1 from session_turns turn
+                where turn.workspace_id = pending.workspace_id and turn.id = pending.turn_id
+                  and turn.status not in
+                    ('completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit')))
+        )
+        select
+          exists(select 1 from sandbox_lease_holders where lease_id = ${input.row.id})
+            or exists(select 1 from sandbox_workspace_mutation_admissions
+              where lease_id = ${input.row.id} and settled_at is null)
+            or exists(select 1 from sandbox_retained_processes
+              where lease_id = ${input.row.id} and state = 'active') as lease,
+          exists(select 1 from unsettled where session_id = ${input.sessionId})
+            or (${input.attemptId}::uuid is not null and exists(
+              select 1 from session_attempt_interruptions
+              where workspace_id = ${workspaceId} and attempt_id = ${input.attemptId}::uuid)) as current,
+          exists(select 1 from unsettled where session_id <> ${input.sessionId}) as others`,
+    );
+    return {
+      lease: Boolean(blockers?.lease),
+      current: Boolean(blockers?.current),
+      others: Boolean(blockers?.others),
+    };
+  });
+}
+
+/** A registered CURRENT native Modal checkpoint older than the lost workspace.
+ * The restore path independently verifies the opaque bytes and provider binding. */
+async function verifiedAutomaticCheckpointSelectionTx(
+  tx: Database,
+  row: LeaseRow,
+  session: typeof schema.sessions.$inferSelect,
+  recovery: SandboxRecoveryState,
+): Promise<import("@opengeni/contracts").SandboxRecoverySelection | null> {
+  const descriptor = recovery.archive.current;
+  if (
+    recovery.archive.status !== "available" ||
+    descriptor?.version !== 2 ||
+    row.current_checkpoint_artifact_id === null ||
+    row.archive_generation === null ||
+    Number(row.archive_generation) >= Number(row.workspace_generation)
+  )
+    return null;
+  const [artifact] = await rawRows<{ valid: boolean }>(
+    tx,
+    sql`select exists(select 1 from sandbox_checkpoint_artifacts
+      where id = ${row.current_checkpoint_artifact_id}
+        and account_id = ${session.accountId} and workspace_id = ${session.workspaceId}
+        and sandbox_group_id = ${row.sandbox_group_id} and source_lease_id = ${row.id}
+        and state = 'current' and provider_backend = 'modal'
+        and provenance = 'native_capture'
+        and source_workspace_generation = ${Number(row.archive_generation)}
+        and descriptor_revision = ${descriptor.revision}
+        and (descriptor->>'capturedAt') = ${descriptor.capturedAt}) as valid`,
+  );
+  if (!artifact?.valid) return null;
+  return checkpointSelectionForSession(row, session, descriptor);
+}
+
+function checkpointSelectionForSession(
+  row: LeaseRow,
+  session: Pick<typeof schema.sessions.$inferSelect, "id" | "activeEpoch" | "authorityEpoch">,
+  descriptor: { revision: string; capturedAt: string },
+): import("@opengeni/contracts").SandboxRecoverySelection | null {
+  const parsed = SandboxRecoverySelection.safeParse({
+    version: 1,
+    sessionId: session.id,
+    sandboxGroupId: row.sandbox_group_id,
+    leaseId: row.id,
+    routeEpoch: session.activeEpoch,
+    authorityEpoch: session.authorityEpoch,
+    leaseEpoch: Number(row.lease_epoch),
+    workspaceGeneration: Number(row.workspace_generation),
+    archiveGeneration: row.archive_generation === null ? null : Number(row.archive_generation),
+    artifactId: row.current_checkpoint_artifact_id,
+    revision: descriptor.revision,
+    capturedAt: descriptor.capturedAt,
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+async function freshWorkspaceAuthorizationTx(
+  tx: Database,
+  row: LeaseRow,
+): Promise<{
+  operationId: string;
+  initiatingSessionId: string;
+  reason: SandboxFreshWorkspaceReason;
+  lostAt: string;
+} | null> {
+  const marker = pendingFreshWorkspaceRecovery(row.resume_state);
+  // Human consent and the empty-workspace decision are mutually exclusive.
+  if (!marker || row.public_recovery !== null) return null;
+  const [audit] = await tx
+    .select({ metadata: schema.auditEvents.metadata })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.id, marker.operationId),
+        eq(schema.auditEvents.accountId, row.account_id),
+        eq(schema.auditEvents.workspaceId, row.workspace_id),
+        eq(schema.auditEvents.targetId, row.sandbox_group_id),
+        eq(schema.auditEvents.action, FRESH_WORKSPACE_RECOVERY_ACTION),
+      ),
+    );
+  const metadata = audit?.metadata as Record<string, unknown> | undefined;
+  const reason = SandboxFreshWorkspaceReason.safeParse(metadata?.reason);
+  return metadata?.version === 1 &&
+    metadata.freshWorkspace === true &&
+    metadata.leaseId === row.id &&
+    metadata.sessionId === marker.sessionId &&
+    typeof metadata.lostAt === "string" &&
+    reason.success
+    ? {
+        operationId: marker.operationId,
+        initiatingSessionId: marker.sessionId,
+        reason: reason.data,
+        lostAt: metadata.lostAt,
+      }
+    : null;
+}
+
+/** The exact pending empty-workspace authorization, for the cold->warming
+ * election. Never inferred from archive absence; always an audited decision. */
+async function authorizedFreshWorkspaceRecoveryId(
+  tx: Database,
+  row: LeaseRow,
+): Promise<string | null> {
+  return (await freshWorkspaceAuthorizationTx(tx, row))?.operationId ?? null;
+}
+
+type AutomaticRecoveryLane =
+  | {
+      kind: "checkpoint";
+      state: "available" | "authorized";
+      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      operationId: string | null;
+      initiatingSessionId: string | null;
+      attempt: number;
+      /** Present for a new decision; the lease records it with the decision. */
+      loss?: ProviderLossRecord;
+    }
+  | {
+      kind: "fresh_workspace";
+      state: "available" | "authorized";
+      operationId: string | null;
+      initiatingSessionId: string | null;
+      reason: SandboxFreshWorkspaceReason;
+      lostAt: string;
+      /** Present for a new decision; the lease records it with the decision. */
+      loss?: ProviderLossRecord;
+    }
+  | {
+      kind: "unavailable";
+      reason:
+        | "not_applicable"
+        | "not_required"
+        | "loss_unconfirmed"
+        | "capture_unresolved"
+        | "restore_retry_backoff"
+        | "restore_retry_exhausted"
+        | "provider_lifetime_unexpired"
+        | "authorization_pending"
+        | "authorization_invalid";
+      /** For a timed wait: the earliest time a new decision (Retry or a new
+       * message) can proceed. Nothing re-decides by itself before then. */
+      availableAt?: string;
+    };
+
+function isoTimestamp(...candidates: Array<string | null | undefined>): string {
+  for (const candidate of candidates) {
+    const parsed = typeof candidate === "string" ? Date.parse(candidate) : Number.NaN;
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return new Date().toISOString();
+}
+
+/** Structural system continuity for a definitively lost managed Modal box.
+ * Prefer the latest verified registered checkpoint; otherwise continue on a
+ * new EMPTY workspace. Never for an ambiguous provider state, an unresolved
+ * create, a live explicit authorization, or an unsettled late capture. Group
+ * quiescence is checked separately, at the exact deciding attempt. Rows
+ * written by older confirmDrainCold/lost-instance code qualify as-is: the
+ * decision reads current lease truth, not a new loss-time receipt. */
+async function automaticRecoveryLaneTx(
+  tx: Database,
+  row: LeaseRow,
+  session: typeof schema.sessions.$inferSelect,
+): Promise<AutomaticRecoveryLane> {
+  if (
+    session.sandboxBackend !== "modal" ||
+    session.sandboxGroupId !== row.sandbox_group_id ||
+    (session.activeSandboxId !== null && session.activeSandboxId !== row.sandbox_group_id) ||
+    row.backend !== "modal" ||
+    row.public_recovery !== null ||
+    (row.liveness !== "cold" && row.liveness !== "warming")
+  )
+    return { kind: "unavailable", reason: "not_applicable" };
+  const recovery = recoveryStateFromLeaseRow(row);
+  if (recovery.continuity) return { kind: "unavailable", reason: "not_applicable" };
+
+  // An already durable decision is reused, never re-evaluated or duplicated,
+  // including while an elected spawner rematerializes it.
+  const fresh = await freshWorkspaceAuthorizationTx(tx, row);
+  if (fresh)
+    return {
+      kind: "fresh_workspace",
+      state: "authorized",
+      operationId: fresh.operationId,
+      initiatingSessionId: fresh.initiatingSessionId,
+      reason: fresh.reason,
+      lostAt: fresh.lostAt,
+    };
+  if (pendingFreshWorkspaceRecovery(row.resume_state))
+    return { kind: "unavailable", reason: "authorization_invalid" };
+  const automatic = automaticCheckpointMarker(row.resume_state);
+  if (automatic?.status === "accepted") {
+    const generation = await authorizedHistoricalArchiveGeneration(tx, row);
+    const selection =
+      recovery.archive.current && generation !== null
+        ? checkpointSelectionForSession(row, session, recovery.archive.current)
+        : null;
+    return selection && generation === selection.archiveGeneration
+      ? {
+          kind: "checkpoint",
+          state: "authorized",
+          selection,
+          operationId: automatic.operationId,
+          initiatingSessionId: automatic.sessionId || null,
+          attempt: automatic.attempt,
+        }
+      : { kind: "unavailable", reason: "authorization_invalid" };
+  }
+
+  // A new decision needs a settled, box-less lease.
+  if (
+    row.liveness !== "cold" ||
+    row.instance_id !== null ||
+    Number(row.refcount) !== 0 ||
+    row.archive_capture_id !== null ||
+    // An unresolved provider create may still own a live box.
+    (row.provider_create_attempt != null && row.provider_create_attempt.instanceId === null)
+  )
+    return { kind: "unavailable", reason: "not_applicable" };
+  // A complete archive (or one at the workspace generation) belongs to the
+  // ordinary restore path, whose failures stop for an operator. Never select
+  // a historical checkpoint over it, and never discard it for an empty box.
+  const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  if (
+    hasCompleteWorkspaceArchive(row) ||
+    (archiveGeneration !== null && archiveGeneration >= Number(row.workspace_generation))
+  )
+    return { kind: "unavailable", reason: "not_required" };
+  const automaticFailed = automatic?.status === "failed";
+  const blocked =
+    (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
+    recovery.restore.status === "unrecoverable";
+  // The spawner restores only a complete archive or an explicitly authorized
+  // one. An incomplete archive is a dead end whatever its restore label says
+  // (a reset `pending`, a retryable failure, or a failed system restore).
+  const deadEnd =
+    blocked ||
+    (recovery.archive.status !== "none" &&
+      (recovery.restore.status === "degraded" || recovery.restore.status === "pending"));
+  if (!deadEnd) return { kind: "unavailable", reason: "not_required" };
+  const loss = await providerLossEvidenceTx(tx, row, recovery);
+  if (!loss) return { kind: "unavailable", reason: "loss_unconfirmed" };
+  if ((await authorizedHistoricalArchiveGeneration(tx, row)) !== null)
+    return { kind: "unavailable", reason: "authorization_pending" };
+  // A drain capture that was in flight when the provider vanished may still
+  // publish the exact lost generation until its durable publication deadline
+  // (enforced by persistDrainSnapshot). Neither lane may pre-empt it.
+  // Every deadline is compared with the database clock, the same clock
+  // persistDrainSnapshot uses for its publication window, never a host clock.
+  const late = recovery.lateArchiveCapture;
+  const now = (await transactionNow(tx)).getTime();
+  const lateDecisionAt = late ? Date.parse(late.recordedAt) + LATE_CAPTURE_DECISION_DELAY_MS : 0;
+  if (late && now < lateDecisionAt)
+    return {
+      kind: "unavailable",
+      reason: "capture_unresolved",
+      availableAt: new Date(lateDecisionAt).toISOString(),
+    };
+
+  // Only a definitive integrity failure of the exact checkpoint abandons it.
+  // Retryable or ambiguous failures (provider capacity, worker death, a
+  // rejected commit, a changed provider binding) keep the checkpoint lane.
+  const definitiveCheckpointFailure =
+    (recovery.restore.status === "degraded" || recovery.restore.status === "unrecoverable") &&
+    recovery.restore.retryable !== true &&
+    DEFINITIVE_CHECKPOINT_FAILURES.has(recovery.restore.failureCode ?? "");
+  const selection = definitiveCheckpointFailure
+    ? null
+    : await verifiedAutomaticCheckpointSelectionTx(tx, row, session, recovery);
+  if (selection) {
+    const attempt = automaticFailed ? automatic.attempt + 1 : 1;
+    if (automaticFailed) {
+      // Bounded retries with backoff, then an operator decides. A verified
+      // checkpoint is never discarded because restoring it kept failing.
+      if (attempt > MAX_AUTOMATIC_CHECKPOINT_ATTEMPTS)
+        return { kind: "unavailable", reason: "restore_retry_exhausted" };
+      // A failure with no recorded time starts no backoff, rather than one
+      // that restarts from the current clock on every evaluation.
+      const failedAt =
+        [recovery.restore.completedAt, recovery.provider.observedAt]
+          .map((value) => (typeof value === "string" ? Date.parse(value) : Number.NaN))
+          .find(Number.isFinite) ?? 0;
+      const backoffMs =
+        AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS[
+          Math.min(automatic.attempt, AUTOMATIC_CHECKPOINT_RETRY_BACKOFF_MS.length) - 1
+        ]!;
+      if (now < failedAt + backoffMs)
+        return {
+          kind: "unavailable",
+          reason: "restore_retry_backoff",
+          availableAt: new Date(failedAt + backoffMs).toISOString(),
+        };
+    }
+    return {
+      kind: "checkpoint",
+      state: "available",
+      selection,
+      operationId: null,
+      initiatingSessionId: null,
+      attempt,
+      loss,
+    };
+  }
+  // No checkpoint OpenGeni can restore automatically. An empty workspace is
+  // irreversible for the running sandbox, so it additionally waits until the
+  // lost object is past its hard provider lifetime: no Modal sandbox outlives
+  // it in any workspace, so a misconfigured credential or namespace cannot
+  // turn a live box into a false loss here.
+  const lifetimeEndsAt = loss.providerDeadlineAt
+    ? Date.parse(loss.providerDeadlineAt) + PROVIDER_CREATE_DEADLINE_GRACE_MS
+    : Date.parse(loss.observedAt) + MODAL_SANDBOX_MAX_LIFETIME_MS;
+  if (now < lifetimeEndsAt)
+    return {
+      kind: "unavailable",
+      reason: "provider_lifetime_unexpired",
+      availableAt: new Date(lifetimeEndsAt).toISOString(),
+    };
+  const reason: SandboxFreshWorkspaceReason = definitiveCheckpointFailure
+    ? "checkpoint_restore_failed"
+    : recovery.archive.status === "none"
+      ? "archive_unavailable"
+      : recovery.archive.status === "available"
+        ? "checkpoint_unrestorable"
+        : "archive_unverified";
+  return {
+    kind: "fresh_workspace",
+    state: "available",
+    operationId: null,
+    initiatingSessionId: null,
+    reason,
+    lostAt: isoTimestamp(loss.observedAt),
+    loss,
+  };
+}
+
+/** The durable proof that this lease lineage's provider object was lost.
+ * Replacement failures and ambiguous provider states are never proof. Rows
+ * committed before this release qualify from their own loss transition's
+ * exact shape or from the committed reaper loss audit. */
+async function providerLossEvidenceTx(
+  tx: Database,
+  row: LeaseRow,
+  recovery: SandboxRecoveryState,
+): Promise<ProviderLossRecord | null> {
+  if (recovery.provider.status !== "missing" && recovery.provider.status !== "not_created")
+    return null;
+  const recorded = providerLossRecord(row.resume_state);
+  if (recorded)
+    return recorded.leaseId === row.id &&
+      recorded.workspaceGeneration === Number(row.workspace_generation)
+      ? recorded
+      : null;
+  const legacy = (
+    source: ProviderLossRecord["source"],
+    observedAt: string,
+  ): ProviderLossRecord => ({
+    version: 1,
+    source,
+    leaseId: row.id,
+    lostEpoch: Math.max(0, Number(row.lease_epoch) - 1),
+    instanceId: recovery.provider.instanceId,
+    workspaceGeneration: Number(row.workspace_generation),
+    observedAt,
+    providerDeadlineAt: null,
+  });
+  if (recovery.provider.status === "missing" && recovery.provider.observedAt) {
+    // confirmDrainCold: the reaper's exact missing-before-capture commit.
+    if (recovery.provider.diagnostic === PROVIDER_NOT_FOUND_BEFORE_CAPTURE)
+      return legacy("drain_probe", recovery.provider.observedAt);
+    // markWarmLeaseInstanceLost is the only writer of `missing` that leaves
+    // the restore unsettled; replacement failures always stamp completion.
+    if (
+      recovery.restore.completedAt === null &&
+      recovery.restore.rematerializationId === null &&
+      recovery.provider.diagnostic !== REPLACEMENT_FAILED_DIAGNOSTIC
+    )
+      return legacy("warm_resume", recovery.provider.observedAt);
+  }
+  // A replacement attempt overwrote the provider record: older code wrote
+  // `missing`, current code `replacement_failed`. Only those shapes may fall
+  // back to the committed reaper audit for this exact lease and unchanged
+  // workspace generation; a plain `not_created` (an ordinary drain, operator
+  // restore or capture failure) never resurrects an older loss, nor does a
+  // lineage a verified automatic restore already ended.
+  if (
+    recovery.provider.status !== "missing" &&
+    recovery.provider.diagnostic !== REPLACEMENT_FAILED_DIAGNOSTIC
+  )
+    return null;
+  if (automaticCheckpointMarker(row.resume_state)?.status === "verified") return null;
+  const [audit] = await tx
+    .select({ occurredAt: schema.auditEvents.occurredAt })
+    .from(schema.auditEvents)
+    .where(
+      and(
+        eq(schema.auditEvents.accountId, row.account_id),
+        eq(schema.auditEvents.workspaceId, row.workspace_id),
+        eq(schema.auditEvents.targetId, row.sandbox_group_id),
+        eq(schema.auditEvents.action, "sandbox.provider_missing_before_capture"),
+        sql`${schema.auditEvents.metadata}->>'leaseId' = ${row.id}`,
+        sql`(${schema.auditEvents.metadata}->>'workspaceGeneration')::bigint = ${Number(row.workspace_generation)}`,
+      ),
+    )
+    .orderBy(desc(schema.auditEvents.occurredAt))
+    .limit(1);
+  return audit ? legacy("drain_probe", audit.occurredAt.toISOString()) : null;
+}
+
+/** Public projection reasons for an automatic lane that is structurally
+ * available but not yet safe to decide. */
+async function automaticLaneQuiescenceReason(
+  tx: Database,
+  row: LeaseRow,
+  session: typeof schema.sessions.$inferSelect,
+): Promise<string | null> {
+  if (session.activeTurnId !== null || session.status === "cancelled")
+    return "session_not_quiescent";
+  const blockers = await sandboxGroupRecoveryBlockersTx(tx, {
+    row,
+    sessionId: session.id,
+    attemptId: null,
+  });
+  if (blockers.current) return "execution_unresolved";
+  if (blockers.others) return "shared_sandbox_member_active";
+  // A holder, open admission or retained process on the lost lease is still
+  // unsettled execution, whichever member owns it.
+  if (blockers.lease) return "execution_unresolved";
+  return null;
 }
 
 async function projectPublicSandboxRecovery(
   tx: Database,
   input: PublicRecoveryScope,
+  purpose: "preview" | "consent" = "preview",
 ): Promise<SandboxRecoveryProjection> {
   const unavailable = (
     reason: string,
     checkpoint: SandboxRecoverySelection | null = null,
+    availableAt?: string,
   ): SandboxRecoveryProjection => ({
     version: 1,
     status: "blocked",
     reason,
     checkpoint,
     operationId: null,
+    ...(availableAt ? { availableAt } : {}),
   });
   const [session] = await tx
     .select()
@@ -46148,8 +48035,6 @@ async function projectPublicSandboxRecovery(
   }
   if (session.sandboxBackend !== "modal")
     return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
-  if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) !== 1)
-    return { ...unavailable("singleton_required"), status: "unsupported" };
   const [row] =
     await tx.execute<LeaseRow>(sql`select * from sandbox_leases where workspace_id = ${input.workspaceId}
     and sandbox_group_id = ${session.sandboxGroupId}`);
@@ -46188,6 +48073,55 @@ async function projectPublicSandboxRecovery(
       operationId: String(publicRecovery.operationId),
     };
   }
+  // System continuity first: a definitively lost box is never a dead end when
+  // the complete group is quiescent. Human consent below is the remaining
+  // explicit lane for singleton checkpoints the system may not select itself.
+  if (purpose === "preview") {
+    const lane = await automaticRecoveryLaneTx(tx, row, session);
+    if (lane.kind === "checkpoint" || lane.kind === "fresh_workspace") {
+      const checkpoint = lane.kind === "checkpoint" ? lane.selection : null;
+      const reason =
+        lane.state === "authorized" ? null : await automaticLaneQuiescenceReason(tx, row, session);
+      if (reason) return unavailable(reason, checkpoint);
+      // Retry reopens the latest failed turn, and never with a tool call whose
+      // outcome it cannot prove. A new message still recovers the sandbox.
+      const [retryTarget] = await rawRows<{ unresolved: boolean }>(
+        tx,
+        sql`select exists(select 1 from session_pending_tool_calls pending
+          where pending.workspace_id = ${input.workspaceId} and pending.session_id = ${session.id}
+            and pending.turn_id = (select turn.id from session_turns turn
+              where turn.workspace_id = ${input.workspaceId} and turn.session_id = ${session.id}
+              order by turn.position desc, turn.created_at desc limit 1)) as unresolved`,
+      );
+      if (retryTarget?.unresolved) return unavailable("retry_tool_outcome_unresolved", checkpoint);
+      return {
+        version: 1,
+        status: "eligible",
+        reason: null,
+        checkpoint,
+        operationId: null,
+        automaticAvailable: true,
+        automaticLane: lane.kind,
+      };
+    }
+    // A timed wait (Retry or a new message can re-decide at `availableAt`;
+    // nothing proceeds by itself) or an operator hand-off; explain which.
+    if (
+      lane.reason === "capture_unresolved" ||
+      lane.reason === "restore_retry_backoff" ||
+      lane.reason === "restore_retry_exhausted" ||
+      lane.reason === "provider_lifetime_unexpired"
+    )
+      return unavailable(lane.reason, null, lane.availableAt);
+  }
+  // A system decision already owns this lease; consent may not compete with it.
+  if (
+    pendingFreshWorkspaceRecovery(row.resume_state) ||
+    automaticCheckpointMarker(row.resume_state)?.status === "accepted"
+  )
+    return unavailable("automatic_recovery_pending");
+  if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) !== 1)
+    return { ...unavailable("singleton_required"), status: "unsupported" };
   const recovery = recoveryStateFromLeaseRow(row);
   // No authoritative recovery failure: a model/transport failure must keep its
   // ordinary remedies even before the first checkpoint or lease exists.
@@ -46205,22 +48139,8 @@ async function projectPublicSandboxRecovery(
     !row.current_checkpoint_artifact_id
   )
     return unavailable("registered_current_checkpoint_required");
-  const parsed = SandboxRecoverySelection.safeParse({
-    version: 1,
-    sessionId: session.id,
-    sandboxGroupId: session.sandboxGroupId,
-    leaseId: row.id,
-    routeEpoch: session.activeEpoch,
-    authorityEpoch: session.authorityEpoch,
-    leaseEpoch: Number(row.lease_epoch),
-    workspaceGeneration: Number(row.workspace_generation),
-    archiveGeneration: row.archive_generation === null ? null : Number(row.archive_generation),
-    artifactId: row.current_checkpoint_artifact_id,
-    revision: descriptor.revision,
-    capturedAt: descriptor.capturedAt,
-  });
-  if (!parsed.success) return unavailable("checkpoint_metadata_invalid");
-  const selection = parsed.data;
+  const selection = checkpointSelectionForSession(row, session, descriptor);
+  if (!selection) return unavailable("checkpoint_metadata_invalid");
   if (selection.archiveGeneration >= selection.workspaceGeneration)
     return unavailable("historical_checkpoint_not_required", selection);
   if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
@@ -46274,7 +48194,6 @@ export async function readPublicSandboxRecovery(
     projectPublicSandboxRecovery(tx, input),
   );
 }
-
 /** Core authenticates the canonical managed human before calling this seam.
  * Exclusive tenancy precedes the complete membership proof and is shared by
  * every attach/child writer. No provider operation or inference is dispatched. */
@@ -46339,7 +48258,9 @@ export async function consentPublicSandboxRecovery(
           sql`select id from sandbox_leases where workspace_id = ${input.workspaceId} and sandbox_group_id = ${session.sandboxGroupId} for update`,
         ),
       );
-      const projection = await projectPublicSandboxRecovery(activity, input);
+      // Consent stays singleton-only and uses its own eligibility: the
+      // automatic system lanes never widen what a human may accept.
+      const projection = await projectPublicSandboxRecovery(activity, input, "consent");
       if (
         projection.status !== "eligible" ||
         canonicalSessionCommandHash(projection.checkpoint) !==
@@ -46389,8 +48310,426 @@ export async function consentPublicSandboxRecovery(
   );
 }
 
+export type AutomaticSandboxRecoveryAuthorization =
+  | { status: "not_eligible" }
+  | {
+      status: "authorized" | "already_authorized";
+      lane: "checkpoint";
+      selection: import("@opengeni/contracts").SandboxRecoverySelection;
+      groupSessionCount: number;
+    }
+  | {
+      status: "authorized" | "already_authorized";
+      lane: "fresh_workspace";
+      operationId: string;
+      reason: SandboxFreshWorkspaceReason;
+      lostAt: string;
+      groupSessionCount: number;
+    };
+
+type SessionCommandActorInput = Parameters<typeof reserveSessionCommandReceipt>[1]["actor"];
+
+/** One immutable warning receipt per group member for the exact decision.
+ * The deciding attempt is the actor for its own session; every other member
+ * is attributed to the system recovery subject. Members created after the
+ * decision receive the same receipt on their next turn start. */
+async function writeAutomaticRecoveryReceiptsTx(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    row: LeaseRow;
+    lane: Exclude<AutomaticRecoveryLane, { kind: "unavailable" }>;
+    operationId: string;
+    initiatingSessionId: string;
+    currentSessionId: string;
+    actor: SessionCommandActorInput;
+    members: SandboxGroupMember[];
+  },
+): Promise<void> {
+  const action =
+    input.lane.kind === "checkpoint"
+      ? "sandbox.recovery.automatic"
+      : "sandbox.recovery.fresh_workspace";
+  await withCompleteSandboxGroupScope(tx, async () => {
+    const existing = await rawRows<{ target_session_id: string }>(
+      tx,
+      sql`select target_session_id from session_command_receipts
+        where workspace_id = ${input.workspaceId} and action = ${action}
+          and result->>'operationId' = ${input.operationId}`,
+    );
+    const covered = new Set(existing.map((receipt) => receipt.target_session_id));
+    const shared = input.members.length > 1;
+    for (const member of input.members) {
+      if (covered.has(member.id)) continue;
+      const actor: SessionCommandActorInput =
+        member.id === input.currentSessionId
+          ? input.actor
+          : { type: "service", subjectId: AUTOMATIC_SANDBOX_RECOVERY_SUBJECT };
+      if (input.lane.kind === "checkpoint") {
+        const checkpoint = SandboxRecoverySelection.parse({
+          ...input.lane.selection,
+          sessionId: member.id,
+          routeEpoch: member.activeEpoch,
+          authorityEpoch: member.authorityEpoch,
+        });
+        await reserveSessionCommandReceipt(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          targetSessionId: member.id,
+          targetTurnId: null,
+          actor,
+          action,
+          operationKey: input.operationId,
+          canonicalRequestHash: canonicalSessionCommandHash(checkpoint),
+          initialResult: {
+            operationId: input.operationId,
+            checkpoint,
+            ...(shared ? { scope: "shared", initiatingSessionId: input.initiatingSessionId } : {}),
+          },
+        });
+        continue;
+      }
+      const freshWorkspace = SandboxFreshWorkspaceRecovery.parse({
+        version: 1,
+        sessionId: member.id,
+        sandboxGroupId: input.row.sandbox_group_id,
+        leaseId: input.row.id,
+        leaseEpoch: Number(input.row.lease_epoch),
+        workspaceGeneration: Number(input.row.workspace_generation),
+        archiveGeneration:
+          input.row.archive_generation === null ? null : Number(input.row.archive_generation),
+        lostAt: input.lane.lostAt,
+        reason: input.lane.reason,
+      });
+      await reserveSessionCommandReceipt(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        targetSessionId: member.id,
+        targetTurnId: null,
+        actor,
+        action,
+        operationKey: input.operationId,
+        canonicalRequestHash: canonicalSessionCommandHash(freshWorkspace),
+        initialResult: {
+          operationId: input.operationId,
+          freshWorkspace,
+          initiatingSessionId: input.initiatingSessionId,
+        },
+      });
+    }
+  });
+}
+
+/** Turn-start-only continuity after definitive managed-provider loss. This is
+ * system policy, never a fabricated human consent or permission to replay an
+ * operation. It selects the latest verified checkpoint when the restore path
+ * can use it, otherwise a new EMPTY workspace, for the complete sandbox group
+ * at once. No box is created here; rematerialization rechecks the exact
+ * decision before publishing a usable sandbox. */
+export async function authorizeAutomaticSandboxCheckpointRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+  },
+): Promise<AutomaticSandboxRecoveryAuthorization> {
+  return withRlsContext(db, input, async (tx) => {
+    // Healthy turns, including the ordinary idle-drained resume of a complete
+    // archive (`not_created`/`pending`), must not acquire a workspace-wide
+    // inference or session write lock just to discover that no system recovery
+    // is needed. Only an incomplete archive with a loss-shaped provider record
+    // can ever be decided (see automaticRecoveryLaneTx/providerLossEvidenceTx).
+    const [candidate] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists(select 1 from sessions session
+        join sandbox_leases lease on lease.workspace_id = session.workspace_id
+          and lease.sandbox_group_id = session.sandbox_group_id
+        where session.account_id = ${input.accountId}
+          and session.workspace_id = ${input.workspaceId}
+          and session.id = ${input.sessionId}
+          and ((lease.liveness = 'cold'
+              and (lease.archive_generation is null
+                or lease.archive_generation < lease.workspace_generation)
+              and (lease.resume_state #>> '{opengeniRecovery,provider,status}' = 'missing'
+                or lease.resume_state ? ${PROVIDER_LOSS_KEY}
+                or lease.resume_state #>> '{opengeniRecovery,provider,diagnostic}'
+                  = ${REPLACEMENT_FAILED_DIAGNOSTIC})
+              and lease.resume_state #>> '{opengeniRecovery,provider,status}' in ('missing', 'not_created')
+              and lease.resume_state #>> '{opengeniRecovery,restore,status}' in
+                ('degraded', 'unrecoverable', 'pending'))
+            -- A pending decision still delivers receipts to members that
+            -- joined after it, including while its box is being created.
+            or (lease.liveness in ('cold', 'warming') and (
+              lease.resume_state #>> '{opengeniAutomaticCheckpointRecovery,status}' = 'accepted'
+              or lease.resume_state #>> '{opengeniFreshWorkspaceRecovery,status}' = 'accepted')))) as present`,
+    );
+    if (!candidate?.present) return { status: "not_eligible" };
+    await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+    const [session] = await tx
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .for("update");
+    if (!session) return { status: "not_eligible" };
+    const [attempt] = await tx
+      .select()
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.accountId, input.accountId),
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+        ),
+      );
+    if (
+      !attempt ||
+      !["claimed", "running"].includes(attempt.state) ||
+      attempt.quiescedAt !== null ||
+      session.activeTurnId !== attempt.turnId ||
+      session.authorityEpoch !== attempt.authorityEpoch ||
+      session.visibility !== attempt.authorityVisibility ||
+      session.ownerOrganizationMembershipId !== attempt.authorityOwnerOrganizationMembershipId
+    )
+      return { status: "not_eligible" };
+    await lockSandboxLeaseAdmission(tx, input.workspaceId, session.sandboxGroupId);
+    const [row] = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${session.sandboxGroupId}
+      for update`);
+    if (!row) return { status: "not_eligible" };
+    const lane = await automaticRecoveryLaneTx(tx, row, session);
+    if (lane.kind === "unavailable") return { status: "not_eligible" };
+    const members = await sandboxGroupMembersTx(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sandboxGroupId: row.sandbox_group_id,
+    });
+    if (!members.some((member) => member.id === session.id)) return { status: "not_eligible" };
+    const actor: SessionCommandActorInput = {
+      type: "agent_attempt",
+      attemptId: input.attemptId,
+      sessionId: input.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+    };
+    const result = (
+      status: "authorized" | "already_authorized",
+      operationId: string,
+    ): AutomaticSandboxRecoveryAuthorization =>
+      lane.kind === "checkpoint"
+        ? {
+            status,
+            lane: "checkpoint",
+            selection: lane.selection,
+            groupSessionCount: members.length,
+          }
+        : {
+            status,
+            lane: "fresh_workspace",
+            operationId,
+            reason: lane.reason,
+            lostAt: lane.lostAt,
+            groupSessionCount: members.length,
+          };
+    if (lane.state === "authorized") {
+      // The durable decision is reused, not re-evaluated against quiescence.
+      await writeAutomaticRecoveryReceiptsTx(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        row,
+        lane,
+        operationId: lane.operationId!,
+        initiatingSessionId: lane.initiatingSessionId ?? input.sessionId,
+        currentSessionId: input.sessionId,
+        actor,
+        members,
+      });
+      return result("already_authorized", lane.operationId!);
+    }
+    const blockers = await sandboxGroupRecoveryBlockersTx(tx, {
+      row,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+    });
+    if (blockers.lease || blockers.current || blockers.others) return { status: "not_eligible" };
+
+    const operationId = crypto.randomUUID();
+    const recovery = recoveryStateFromLeaseRow(row);
+    const priorAutomatic = automaticCheckpointMarker(row.resume_state);
+    if (lane.kind === "checkpoint") {
+      const selection = lane.selection;
+      await tx.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            id: operationId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: "opengeni:automatic-checkpoint-recovery",
+            action: "sandbox.automatic_checkpoint_recovery.authorized",
+            targetType: "sandbox_group",
+            targetId: row.sandbox_group_id,
+            metadata: {
+              version: 1,
+              leaseId: row.id,
+              leaseEpoch: selection.leaseEpoch,
+              workspaceGeneration: selection.workspaceGeneration,
+              archiveGeneration: selection.archiveGeneration,
+              selectedRevision: selection.revision,
+              artifactId: selection.artifactId,
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              automaticHistoricalCheckpoint: true,
+              providerMissingBeforeCapture: true,
+              groupSessionCount: members.length,
+              attempt: lane.attempt,
+              ...(lane.loss ? { providerLoss: lane.loss } : {}),
+              ...(priorAutomatic ? { supersededAutomaticRecovery: priorAutomatic } : {}),
+            },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
+      await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+        ${operationId}::uuid, 'checkpoint_fallback_selected')`);
+      await writeAutomaticRecoveryReceiptsTx(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        row,
+        lane,
+        operationId,
+        initiatingSessionId: input.sessionId,
+        currentSessionId: input.sessionId,
+        actor,
+        members,
+      });
+      // The decision also pins its loss evidence, so a failed restore of the
+      // selected checkpoint cannot erase why this lineage is recoverable.
+      await tx.execute(sql`update sandbox_leases set
+        resume_state = coalesce(resume_state, '{}'::jsonb) || ${JSON.stringify({
+          opengeniHistoricalArchiveRecoveryId: operationId,
+          opengeniAutomaticCheckpointRecovery: {
+            operationId,
+            sessionId: input.sessionId,
+            status: "accepted",
+            attempt: lane.attempt,
+          },
+          ...(lane.loss ? { [PROVIDER_LOSS_KEY]: lane.loss } : {}),
+        })}::jsonb,
+        updated_at = now()
+        where id = ${row.id} and liveness = 'cold' and lease_epoch = ${selection.leaseEpoch}`);
+      return result("authorized", operationId);
+    }
+
+    await tx.insert(schema.auditEvents).values(
+      withLosslessContentWriteVersion(
+        {
+          id: operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: AUTOMATIC_SANDBOX_RECOVERY_SUBJECT,
+          action: FRESH_WORKSPACE_RECOVERY_ACTION,
+          targetType: "sandbox_group",
+          targetId: row.sandbox_group_id,
+          // The lost workspace's full recovery evidence stays on the lease and
+          // its checkpoint artifacts; this receipt names what was abandoned.
+          metadata: {
+            version: 1,
+            freshWorkspace: true,
+            providerMissing: true,
+            leaseId: row.id,
+            leaseEpoch: Number(row.lease_epoch),
+            workspaceGeneration: Number(row.workspace_generation),
+            archiveGeneration:
+              row.archive_generation === null ? null : Number(row.archive_generation),
+            reason: lane.reason,
+            lostAt: lane.lostAt,
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            groupSessionCount: members.length,
+            providerDiagnostic: recovery.provider.diagnostic ?? null,
+            restoreStatus: recovery.restore.status,
+            restoreFailureCode: recovery.restore.failureCode ?? null,
+            archiveStatus: recovery.archive.status,
+            archiveRevision: recovery.archive.current?.revision ?? null,
+            currentCheckpointArtifactId: row.current_checkpoint_artifact_id,
+            previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
+            ...(lane.loss ? { providerLoss: lane.loss } : {}),
+            ...(recovery.lateArchiveCapture
+              ? { retiredLateArchiveCapture: recovery.lateArchiveCapture }
+              : {}),
+            ...(priorAutomatic ? { supersededAutomaticRecovery: priorAutomatic } : {}),
+          },
+        },
+        "metadata",
+        "metadataCodecVersion",
+      ),
+    );
+    await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+      ${operationId}::uuid, 'fresh_workspace_selected')`);
+    await writeAutomaticRecoveryReceiptsTx(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      row,
+      lane,
+      operationId,
+      initiatingSessionId: input.sessionId,
+      currentSessionId: input.sessionId,
+      actor,
+      members,
+    });
+    const marker: FreshWorkspaceRecoveryMarker = {
+      version: 1,
+      operationId,
+      sessionId: input.sessionId,
+      status: "accepted",
+      authorizedAt: new Date().toISOString(),
+    };
+    // The decision retires any late-capture receipt in the same commit, so a
+    // capture of the lost generation can no longer land behind the empty box.
+    await tx.execute(sql`update sandbox_leases set
+      resume_state = (coalesce(resume_state, '{}'::jsonb) #- '{opengeniRecovery,lateArchiveCapture}')
+        || ${JSON.stringify({
+          [FRESH_WORKSPACE_RECOVERY_KEY]: marker,
+          ...(lane.loss ? { [PROVIDER_LOSS_KEY]: lane.loss } : {}),
+        })}::jsonb,
+      resume_backend_id = coalesce(resume_backend_id, backend),
+      updated_at = now()
+      where id = ${row.id} and liveness = 'cold' and lease_epoch = ${Number(row.lease_epoch)}`);
+    return result("authorized", operationId);
+  });
+}
+
+/** True once any empty-workspace decision was delivered to this session. A
+ * spawner must then never restore a per-session legacy archive: that session
+ * was told its pre-loss files are gone, whatever the lease marker says now. */
+export async function sessionHoldsFreshWorkspaceRecovery(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  return withWorkspaceRls(db, workspaceId, async (tx) => {
+    const [row] = await rawRows<{ present: boolean }>(
+      tx,
+      sql`select exists(select 1 from session_command_receipts
+        where workspace_id = ${workspaceId} and target_session_id = ${sessionId}
+          and action = 'sandbox.recovery.fresh_workspace') as present`,
+    );
+    return row?.present === true;
+  });
+}
+
 /** These warnings are outside compactable history and survive ordinary context
- * reconstruction. Receipts describe consent, never unverified restore success. */
+ * reconstruction. Receipts describe decisions, never unverified restore success. */
 export async function getSandboxRecoveryDiscontinuity(
   db: Database,
   workspaceId: string,
@@ -46398,18 +48737,37 @@ export async function getSandboxRecoveryDiscontinuity(
 ): Promise<string | null> {
   return withWorkspaceRls(db, workspaceId, async (tx) => {
     const rows = await tx
-      .select({ result: schema.sessionCommandReceipts.result })
+      .select({
+        action: schema.sessionCommandReceipts.action,
+        result: schema.sessionCommandReceipts.result,
+      })
       .from(schema.sessionCommandReceipts)
       .where(
         and(
           eq(schema.sessionCommandReceipts.workspaceId, workspaceId),
           eq(schema.sessionCommandReceipts.targetSessionId, sessionId),
-          eq(schema.sessionCommandReceipts.action, "sandbox.recovery.consent"),
+          inArray(schema.sessionCommandReceipts.action, [
+            "sandbox.recovery.consent",
+            "sandbox.recovery.automatic",
+            "sandbox.recovery.fresh_workspace",
+          ]),
         ),
       )
       .orderBy(desc(schema.sessionCommandReceipts.createdAt))
       .limit(1);
     if (!rows[0]) return null;
+    if (rows[0].action === "sandbox.recovery.fresh_workspace") {
+      return freshWorkspaceSandboxRecoveryDiscontinuity(
+        SandboxFreshWorkspaceRecovery.parse(rows[0].result.freshWorkspace),
+      );
+    }
+    if (rows[0].action === "sandbox.recovery.automatic") {
+      const selection = SandboxRecoverySelection.parse(rows[0].result.checkpoint);
+      return automaticSandboxRecoveryDiscontinuity(
+        selection,
+        rows[0].result.scope === "shared" ? "shared" : "session",
+      );
+    }
     const receipt = SandboxRecoveryResponse.parse(rows[0].result);
     return receipt.recovery.checkpoint
       ? sandboxRecoveryDiscontinuity(receipt.recovery.checkpoint)
@@ -46476,6 +48834,12 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
       (await authorizedHistoricalArchiveGeneration(tx, row)) === input.expectedArchiveGeneration
     )
       return { authorized: true };
+    const publicRecovery = row.public_recovery as Record<string, unknown> | null;
+    // Only a completed public restore may be superseded by this new, exact
+    // operator authorization. Never steal an accepted selection or silently
+    // retry a failed public operation. Keep its full projection in the new
+    // audit receipt; permanent public command receipts remain untouched.
+    if (publicRecovery && publicRecovery.status !== "verified") return { authorized: false };
     const metadata = {
       version: 1,
       leaseId: row.id,
@@ -46485,6 +48849,7 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
       selectedRevision: input.selectedRevision,
       reason: input.reason,
       acceptedHistoricalCheckpoint: true,
+      ...(publicRecovery ? { supersededPublicRecovery: publicRecovery } : {}),
     };
     await tx.insert(schema.auditEvents).values(
       withLosslessContentWriteVersion(
@@ -46502,7 +48867,8 @@ export async function authorizeHistoricalSandboxCheckpointRecovery(
         "metadataCodecVersion",
       ),
     );
-    await tx.execute(sql`update sandbox_leases set resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+    await tx.execute(sql`update sandbox_leases set public_recovery = null,
+      resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
       '{opengeniHistoricalArchiveRecoveryId}', ${JSON.stringify(input.operationId)}::jsonb), updated_at = now()
       where id = ${row.id}`);
     return { authorized: true };
@@ -46559,7 +48925,11 @@ async function authorizedHistoricalArchiveGeneration(
   )
     return null;
   const [receipt] = await db
-    .select({ metadata: schema.auditEvents.metadata, subjectId: schema.auditEvents.subjectId })
+    .select({
+      action: schema.auditEvents.action,
+      metadata: schema.auditEvents.metadata,
+      subjectId: schema.auditEvents.subjectId,
+    })
     .from(schema.auditEvents)
     .where(
       and(
@@ -46567,11 +48937,61 @@ async function authorizedHistoricalArchiveGeneration(
         eq(schema.auditEvents.accountId, row.account_id),
         eq(schema.auditEvents.workspaceId, row.workspace_id),
         eq(schema.auditEvents.targetId, row.sandbox_group_id),
-        eq(schema.auditEvents.action, "sandbox.historical_checkpoint_recovery.authorized"),
+        inArray(schema.auditEvents.action, [
+          "sandbox.historical_checkpoint_recovery.authorized",
+          "sandbox.automatic_checkpoint_recovery.authorized",
+        ]),
       ),
     );
   const metadata = receipt?.metadata;
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
+  if (receipt?.action === "sandbox.automatic_checkpoint_recovery.authorized") {
+    if (publicRecovery || typeof metadata?.sessionId !== "string") return null;
+    const automatic = row.resume_state?.opengeniAutomaticCheckpointRecovery;
+    if (
+      !automatic ||
+      typeof automatic !== "object" ||
+      (automatic as Record<string, unknown>).status !== "accepted" ||
+      (automatic as Record<string, unknown>).operationId !== operationId ||
+      (automatic as Record<string, unknown>).sessionId !== metadata.sessionId
+    )
+      return null;
+    const [session] = await db
+      .select({
+        id: schema.sessions.id,
+        sandboxGroupId: schema.sessions.sandboxGroupId,
+        sandboxBackend: schema.sessions.sandboxBackend,
+        activeSandboxId: schema.sessions.activeSandboxId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, row.account_id),
+          eq(schema.sessions.workspaceId, row.workspace_id),
+          eq(schema.sessions.id, metadata.sessionId),
+        ),
+      );
+    // Shared groups qualify: every member received its warning receipt when
+    // the decision was made, and the 0526 guard pins membership and routes
+    // until verified warm publication.
+    if (!session) return null;
+    return session.sandboxGroupId === row.sandbox_group_id &&
+      session.sandboxBackend === "modal" &&
+      (session.activeSandboxId === null || session.activeSandboxId === row.sandbox_group_id) &&
+      metadata?.version === 1 &&
+      metadata.automaticHistoricalCheckpoint === true &&
+      metadata.providerMissingBeforeCapture === true &&
+      metadata.leaseId === row.id &&
+      metadata.leaseEpoch === Number(row.lease_epoch) &&
+      metadata.workspaceGeneration === Number(row.workspace_generation) &&
+      metadata.archiveGeneration === archiveGeneration &&
+      metadata.artifactId === row.current_checkpoint_artifact_id &&
+      archiveGeneration !== null &&
+      archiveGeneration < Number(row.workspace_generation) &&
+      metadata.selectedRevision === recoveryStateFromLeaseRow(row).archive.current?.revision
+      ? archiveGeneration
+      : null;
+  }
   return (!publicRecovery || receipt?.subjectId === publicRecovery.subjectId) &&
     metadata?.version === 1 &&
     metadata.acceptedHistoricalCheckpoint === true &&
@@ -46632,6 +49052,15 @@ export async function beginSandboxRematerialization(
             status: "blocked" as const,
             code: "stale_epoch" as const,
             lease: row ? mapLeaseRow(row) : null,
+          };
+        }
+        // Every member was already told the workspace is empty. No archive,
+        // including a per-session legacy fallback, may be restored under it.
+        if (pendingFreshWorkspaceRecovery(row.resume_state)) {
+          return {
+            status: "blocked" as const,
+            code: "fresh_workspace_pending" as const,
+            lease: mapLeaseRow(row),
           };
         }
         let workingResumeState = row.resume_state;
@@ -47019,6 +49448,7 @@ export async function failSandboxRematerialization(
         const row = rows[0];
         if (
           !row ||
+          row.provider_create_attempt?.instanceId === null ||
           row.liveness !== "warming" ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           (
@@ -47040,10 +49470,13 @@ export async function failSandboxRematerialization(
             ? "degraded"
             : "unrecoverable";
         const recovery: SandboxRecoveryState = {
+          // The failed replacement is not evidence about the lost workspace:
+          // loss is recorded only by the loss transitions themselves.
           provider: {
-            status: "missing",
+            status: "not_created",
             instanceId: row.instance_id,
             observedAt: new Date().toISOString(),
+            diagnostic: REPLACEMENT_FAILED_DIAGNOSTIC,
           },
           archive: current.archive,
           restore: {
@@ -47211,6 +49644,10 @@ export async function commitWarmingToWarm(
     /** Exact durable same-workspace receipt returned by the elected provider
      * continuity recovery. Mutually exclusive with archive hydration. */
     continuityRecovery?: SandboxProviderContinuityRecovery;
+    /** The exact audited empty-workspace decision this archive-free box
+     * fulfils. Required while such a decision is pending; exclusive with
+     * archive hydration and provider continuity. */
+    freshWorkspace?: { operationId: string };
     leaseTtlMs: number;
   },
 ): Promise<{
@@ -47223,7 +49660,9 @@ export async function commitWarmingToWarm(
     | "recovery_mode_conflict"
     | "continuity_mismatch"
     | "archive_revision_mismatch"
-    | "archive_generation_mismatch";
+    | "archive_generation_mismatch"
+    | "fresh_workspace_required"
+    | "fresh_workspace_mismatch";
 }> {
   return await withRlsContext(
     db,
@@ -47249,11 +49688,38 @@ export async function commitWarmingToWarm(
         const current = recoveryStateFromLeaseRow(row);
         const rematerialization = input.rematerialization;
         const continuityRecovery = input.continuityRecovery;
-        if (rematerialization && continuityRecovery) {
+        const freshWorkspace = input.freshWorkspace;
+        if (
+          (rematerialization && continuityRecovery) ||
+          (freshWorkspace && (rematerialization || continuityRecovery))
+        ) {
           return {
             committed: false,
             lease: mapLeaseRow(row),
             reason: "recovery_mode_conflict" as const,
+          };
+        }
+        const pendingFresh = pendingFreshWorkspaceRecovery(row.resume_state);
+        if (pendingFresh && !freshWorkspace) {
+          // Every group member was already told this workspace is empty.
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "fresh_workspace_required" as const,
+          };
+        }
+        if (
+          freshWorkspace &&
+          (!pendingFresh ||
+            pendingFresh.operationId !== freshWorkspace.operationId ||
+            (await authorizedFreshWorkspaceRecoveryId(tx, row)) !== freshWorkspace.operationId ||
+            current.restore.status === "restoring" ||
+            current.restore.status === "verifying")
+        ) {
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "fresh_workspace_mismatch" as const,
           };
         }
         if (continuityRecovery) {
@@ -47269,14 +49735,19 @@ export async function commitWarmingToWarm(
             };
           }
         }
-        if (current.continuity && !continuityRecovery && !rematerialization) {
+        if (current.continuity && !continuityRecovery && !rematerialization && !freshWorkspace) {
           return {
             committed: false,
             lease: mapLeaseRow(row),
             reason: "continuity_mismatch" as const,
           };
         }
-        if (current.archive.status === "available" && !rematerialization && !continuityRecovery) {
+        if (
+          current.archive.status === "available" &&
+          !rematerialization &&
+          !continuityRecovery &&
+          !freshWorkspace
+        ) {
           return {
             committed: false,
             lease: mapLeaseRow(row),
@@ -47369,17 +49840,51 @@ export async function commitWarmingToWarm(
           input.resumeState ?? null,
           row.resume_state,
         );
-        const resumeStateJson = JSON.stringify(
-          resumeStateWithRecovery(
-            {
-              ...(withArchives ?? {}),
-              ...(row.resume_state?.opengeniWarmBilling
-                ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
-                : {}),
-            },
-            recovery,
-          ),
+        const automatic = row.resume_state?.opengeniAutomaticCheckpointRecovery;
+        const automaticVerified =
+          rematerialization !== null &&
+          row.public_recovery === null &&
+          automatic !== null &&
+          typeof automatic === "object" &&
+          (automatic as Record<string, unknown>).status === "accepted" &&
+          (automatic as Record<string, unknown>).operationId ===
+            row.resume_state?.opengeniHistoricalArchiveRecoveryId;
+        const completedResumeState = resumeStateWithRecovery(
+          {
+            ...(withArchives ?? {}),
+            ...(row.resume_state?.opengeniWarmBilling
+              ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+              : {}),
+            ...(automaticVerified
+              ? {
+                  opengeniAutomaticCheckpointRecovery: {
+                    ...(automatic as Record<string, unknown>),
+                    status: "verified",
+                  },
+                }
+              : {}),
+          },
+          recovery,
         );
+        if (automaticVerified) delete completedResumeState.opengeniHistoricalArchiveRecoveryId;
+        // A verified warm box ends the lost lineage; its loss evidence cannot
+        // describe any later loss of this new provider object.
+        delete completedResumeState[PROVIDER_LOSS_KEY];
+        if (freshWorkspace && pendingFresh) {
+          // The lost workspace's archive fields and checkpoint references stay
+          // for forensics until ordinary capture rotation supersedes them. Any
+          // failed or stale earlier restore decision is retired so a later loss
+          // of this new workspace can be recovered again.
+          completedResumeState[FRESH_WORKSPACE_RECOVERY_KEY] = {
+            ...pendingFresh,
+            status: "verified",
+            verifiedAt: completedAt,
+          } satisfies FreshWorkspaceRecoveryMarker;
+          delete completedResumeState.opengeniHistoricalArchiveRecoveryId;
+          if (automaticCheckpointMarker(completedResumeState)?.status !== "accepted")
+            delete completedResumeState.opengeniAutomaticCheckpointRecovery;
+        }
+        const resumeStateJson = JSON.stringify(completedResumeState);
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness          = 'warm',
@@ -47415,6 +49920,194 @@ export async function commitWarmingToWarm(
   );
 }
 
+/** Persist before provider dispatch. This is deliberately not replayable: a
+ * timeout, absent running-name lookup, or expired lease cannot settle an
+ * unknown create. A later exact provider receipt may attribute the operation. */
+export async function beginModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    operationId: string;
+    providerBindingKey: string;
+    rematerializationId: string | null;
+    selectedRevision: string | null;
+    imageId: string | null;
+    imageRef: string | null;
+    appId: string;
+    providerName: string;
+    requestSha256: string;
+  },
+): Promise<void> {
+  if (
+    !input.operationId ||
+    !input.providerBindingKey ||
+    !input.appId ||
+    input.providerName !== `opengeni-create-${input.operationId}` ||
+    !/^[a-f0-9]{64}$/u.test(input.requestSha256)
+  ) {
+    throw new Error("Modal create requires operation and provider namespace identities");
+  }
+  await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`
+        select * from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+      const row = rows[0];
+      if (
+        !row ||
+        row.backend !== "modal" ||
+        row.liveness !== "warming" ||
+        Number(row.lease_epoch) !== input.expectedEpoch ||
+        row.instance_id !== null
+      ) {
+        throw new Error("Modal create lease no longer owns an unbound warming epoch");
+      }
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.rematerializationId ||
+        current.restore.selectedRevision !== input.selectedRevision
+      ) {
+        throw new Error("Modal create selected recovery revision changed before dispatch");
+      }
+      if (
+        row.provider_create_attempt?.instanceId === null ||
+        row.provider_create_attempt?.leaseEpoch === input.expectedEpoch
+      ) {
+        throw new Error("provider_create_outcome_unknown: provider attempt cannot be replayed");
+      }
+      const attempt: SandboxProviderCreateAttempt = {
+        version: 1,
+        operationId: input.operationId,
+        leaseEpoch: input.expectedEpoch,
+        providerBindingKey: input.providerBindingKey,
+        rematerializationId: input.rematerializationId,
+        selectedRevision: input.selectedRevision,
+        imageId: input.imageId,
+        imageRef: input.imageRef,
+        appId: input.appId,
+        providerName: input.providerName,
+        requestSha256: input.requestSha256,
+        startedAt: new Date().toISOString(),
+        instanceId: null,
+      };
+      await tx.execute(sql`
+        update sandbox_leases set provider_create_attempt = ${JSON.stringify(attempt)}::jsonb,
+          provider_create_recovery_after = null,
+          updated_at = now() where id = ${row.id}
+      `);
+    }),
+  );
+}
+
+export async function listPendingModalProviderCreates(
+  db: Database,
+): Promise<Array<{ workspaceId: string; sandboxGroupId: string }>> {
+  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string }>(
+    db,
+    sql`select * from opengeni_private.list_pending_modal_provider_creates()`,
+  );
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    sandboxGroupId: row.sandbox_group_id,
+  }));
+}
+
+/** Throttle positive discovery without extending the warming lease or changing
+ * its create authority. Old unresolved rows rotate behind the next batch. */
+export async function claimModalProviderCreateRecovery(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+  },
+): Promise<SandboxProviderCreateAttempt | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      provider_create_attempt: SandboxProviderCreateAttempt;
+    }>(sql`
+      update sandbox_leases set provider_create_recovery_after = now() + interval '30 seconds'
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and provider_create_attempt->'instanceId' = 'null'::jsonb
+        and expires_at < now()
+        and coalesce(provider_create_recovery_after, '-infinity'::timestamptz) <= now()
+      returning provider_create_attempt
+    `);
+    return rows[0]?.provider_create_attempt ?? null;
+  });
+}
+
+/** Attribute a positively identified late receipt, preserving expiry and every
+ * checkpoint. Ordinary holder/epoch-fenced draining owns all physical cleanup. */
+export async function recordRecoveredModalProviderCreate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    attempt: SandboxProviderCreateAttempt;
+    instanceId: string;
+  },
+): Promise<boolean> {
+  if (!input.instanceId.startsWith("sb-") || input.attempt.instanceId !== null)
+    throw new Error("Modal create recovery requires an unresolved operation and exact provider id");
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`select * from sandbox_leases
+      where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        and backend = 'modal' and liveness = 'warming' and instance_id is null
+        and lease_epoch = ${input.attempt.leaseEpoch}
+        and provider_create_attempt = ${JSON.stringify(input.attempt)}::jsonb
+      for update`);
+      const row = rows[0];
+      if (!row) return false;
+      const current = recoveryStateFromLeaseRow(row);
+      if (
+        current.restore.rematerializationId !== input.attempt.rematerializationId ||
+        current.restore.selectedRevision !== input.attempt.selectedRevision
+      )
+        return false;
+      const recovery: SandboxRecoveryState = {
+        ...current,
+        provider: {
+          status: "creating",
+          instanceId: input.instanceId,
+          observedAt: new Date().toISOString(),
+        },
+        workspace: {
+          ...current.workspace,
+          status: "not_ready",
+          verifiedRevision: null,
+          verifiedAt: null,
+        },
+      };
+      await tx.execute(sql`update sandbox_leases set instance_id = ${input.instanceId},
+      provider_create_attempt = ${JSON.stringify({ ...input.attempt, instanceId: input.instanceId })}::jsonb,
+      resume_state = ${JSON.stringify(
+        resumeStateWithRecovery(
+          {
+            ...(resumeStateWithPreservedArchives(null, row.resume_state) ?? {}),
+            ...(row.resume_state?.opengeniWarmBilling
+              ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+              : {}),
+          },
+          recovery,
+        ),
+      )}::jsonb,
+      updated_at = now() where id = ${row.id}`);
+      return true;
+    }),
+  );
+}
+
 // §4.2a — leak-proof create attribution. The spawner calls this immediately
 // after the provider create returns, before display/readiness/setup work. It
 // intentionally does NOT bump lease_epoch or mark the lease warm; it only makes
@@ -47427,6 +50120,7 @@ export async function recordWarmingSandboxCreated(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    providerCreateOperationId?: string;
     /** Exact restore attempt elected before provider create. Null for a fresh
      *  archive-less create. Provider attribution is accepted only while the
      *  warming row still carries this same attempt as well as this epoch. */
@@ -47466,6 +50160,18 @@ export async function recordWarmingSandboxCreated(
         }
         const now = new Date().toISOString();
         const current = recoveryStateFromLeaseRow(row);
+        const createAttempt =
+          row.provider_create_attempt?.leaseEpoch === input.expectedEpoch
+            ? row.provider_create_attempt
+            : null;
+        if (
+          createAttempt &&
+          (createAttempt.leaseEpoch !== input.expectedEpoch ||
+            createAttempt.operationId !== input.providerCreateOperationId ||
+            (createAttempt.instanceId !== null && createAttempt.instanceId !== input.instanceId))
+        ) {
+          return { recorded: false, lease: mapLeaseRow(row) };
+        }
         if (current.restore.rematerializationId !== (input.rematerializationId ?? null)) {
           return { recorded: false, lease: mapLeaseRow(row) };
         }
@@ -47533,6 +50239,11 @@ export async function recordWarmingSandboxCreated(
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             instance_id       = ${input.instanceId},
+            provider_create_attempt = ${
+              createAttempt
+                ? JSON.stringify({ ...createAttempt, instanceId: input.instanceId })
+                : null
+            }::jsonb,
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
             provider_created_at = ${providerCreatedAt?.toISOString() ?? null}::timestamptz,
@@ -49376,7 +52087,11 @@ export async function markWarmLeaseInstanceLost(
           },
           ...(continuity ? { continuity } : {}),
         };
-        const coldResumeState = recoveryResumeState(current, recovery);
+        const coldResumeState = recoveryResumeState(
+          current,
+          recovery,
+          providerLossRecordForLostRow(current, "warm_resume", observedAt),
+        );
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
@@ -49651,23 +52366,38 @@ export async function failWarmingToCold(
         if (!row || row.liveness !== "warming" || Number(row.lease_epoch) !== input.expectedEpoch) {
           return;
         }
+        if (row.provider_create_attempt?.instanceId === null) return;
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
         const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
-        const hasRecovery = hasArchive || continuity !== null;
+        // A pending empty-workspace decision must survive a failed empty create;
+        // otherwise a null envelope would look like an ordinary new lease.
+        const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
+        const hasRecovery = hasArchive || continuity !== null || freshPending;
         const archiveComplete = hasCompleteWorkspaceArchive(row);
+        // beginSandboxRematerialization already proved this exact registered
+        // checkpoint unusable in this warming epoch. Keep that terminal truth
+        // instead of re-deriving a pending restore that would fail every turn.
+        const artifactInvalid =
+          hasArchive &&
+          current.restore.status === "degraded" &&
+          current.restore.failureCode === "checkpoint_artifact_invalid";
         const now = new Date().toISOString();
-        const restoreStatus: SandboxRestoreStatus =
-          continuity || (current.archive.status === "available" && archiveComplete)
+        const restoreStatus: SandboxRestoreStatus = artifactInvalid
+          ? "degraded"
+          : continuity || (current.archive.status === "available" && archiveComplete)
             ? "pending"
             : hasArchive
               ? "degraded"
               : "unrecoverable";
         const recovery: SandboxRecoveryState = {
+          // A failed replacement box proves nothing about the lost workspace;
+          // durable loss evidence is carried separately, never minted here.
           provider: {
-            status: "missing",
+            status: "not_created",
             instanceId: row.instance_id,
             observedAt: now,
+            diagnostic: REPLACEMENT_FAILED_DIAGNOSTIC,
           },
           archive: current.archive,
           restore: {
@@ -49678,8 +52408,9 @@ export async function failWarmingToCold(
             completedAt: now,
             ...(restoreStatus === "degraded"
               ? {
-                  failureCode:
-                    current.archive.status === "available"
+                  failureCode: artifactInvalid
+                    ? "checkpoint_artifact_invalid"
+                    : current.archive.status === "available"
                       ? "archive_generation_mismatch"
                       : "archive_unverified",
                   retryable: false,
@@ -50569,42 +53300,59 @@ export async function reapStaleLeaseHolders(
       `);
         let warmingReset = 0;
         for (const row of expiredWarming) {
+          // A lost reply can still name a live provider. Keep the same epoch
+          // available for late attribution; time is not termination proof.
+          if (row.provider_create_attempt?.instanceId === null) continue;
           const current = recoveryStateFromLeaseRow(row);
           const hasArchive = current.archive.status !== "none";
+          // An authorized empty-workspace continuation keeps its decision (and
+          // its blocked lost-workspace truth) when no archive exists.
+          const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
           const resetAt = new Date().toISOString();
-          const restoreStatus: SandboxRestoreStatus =
-            current.archive.status === "available" ? "pending" : "degraded";
-          const resetResumeState = hasArchive
-            ? archiveOnlyResumeState(row, {
-                provider: {
-                  status: "not_created",
-                  instanceId: null,
-                  observedAt: resetAt,
-                },
-                archive: current.archive,
-                restore: {
-                  status: restoreStatus,
-                  rematerializationId: null,
-                  selectedRevision: current.archive.current?.revision ?? null,
-                  startedAt: null,
-                  completedAt: resetAt,
-                  ...(restoreStatus === "degraded"
-                    ? { failureCode: "archive_unverified", retryable: false }
-                    : {}),
-                },
-                workspace: {
-                  status: restoreStatus === "pending" ? "not_ready" : "degraded",
-                  verifiedRevision: null,
-                  verifiedAt: null,
-                },
-              })
-            : null;
+          const restoreStatus: SandboxRestoreStatus = !hasArchive
+            ? "unrecoverable"
+            : current.archive.status === "available"
+              ? "pending"
+              : "degraded";
+          const resetResumeState =
+            hasArchive || freshPending
+              ? archiveOnlyResumeState(row, {
+                  provider: {
+                    status: "not_created",
+                    instanceId: null,
+                    observedAt: resetAt,
+                  },
+                  archive: current.archive,
+                  restore: {
+                    status: restoreStatus,
+                    rematerializationId: null,
+                    selectedRevision: current.archive.current?.revision ?? null,
+                    startedAt: null,
+                    completedAt: resetAt,
+                    ...(restoreStatus === "degraded"
+                      ? { failureCode: "archive_unverified", retryable: false }
+                      : restoreStatus === "unrecoverable"
+                        ? { failureCode: "archive_unavailable", retryable: false }
+                        : {}),
+                  },
+                  workspace: {
+                    status:
+                      restoreStatus === "pending"
+                        ? "not_ready"
+                        : restoreStatus === "unrecoverable"
+                          ? "unrecoverable"
+                          : "degraded",
+                    verifiedRevision: null,
+                    verifiedAt: null,
+                  },
+                })
+              : null;
           const reset = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'cold', instance_id = null,
             lease_epoch = lease_epoch + 1,
             reaper_hold_id = null, reaper_hold_until = null, reaper_hold_reason = null,
-            resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+            resume_backend_id = case when ${hasArchive || freshPending} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             controller_data_plane_url = null,
@@ -51214,7 +53962,9 @@ export async function reArmDrainingLease(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-        if (!lease || lease.liveness !== "draining") return { rearmed: false };
+        if (!lease || lease.liveness !== "draining" || !hasRearmableWorkspace(lease)) {
+          return { rearmed: false };
+        }
         const snapshot = warmBillingSnapshot(lease);
         if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
           throw new Error("sandbox warm billing snapshot is invalid");
@@ -51229,6 +53979,32 @@ export async function reArmDrainingLease(
           (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
+        }
+        if (
+          activeMode === "credits" &&
+          snapshot?.mode === "credits" &&
+          snapshot.rateMicrosPerSecond > 0
+        ) {
+          const attribution = snapshot.attribution ?? { kind: "unknown" as const };
+          if (attribution.kind === "unknown") {
+            throw new SandboxDebitAttributionUnavailableError(
+              input.workspaceId,
+              input.sandboxGroupId,
+            );
+          }
+          const refusal = await checkWorkspaceAllowance(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId:
+              attribution.kind === "turn" || attribution.kind === "human"
+                ? attribution.initiatingHumanSubjectId
+                : null,
+          });
+          if (refusal)
+            throw Object.assign(
+              new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId),
+              refusal,
+            );
         }
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
@@ -51392,12 +54168,15 @@ export async function confirmDrainCold(
                 recordedAt: now,
               }
             : null;
+        // A pending empty-workspace decision whose box drained before warm
+        // publication stays a blocked lost workspace, never a clean new lease.
+        const freshPending = pendingFreshWorkspaceRecovery(row.resume_state) !== null;
         const restoreStatus: SandboxRestoreStatus =
           current.archive.status === "available" && archiveComplete
             ? "pending"
             : hasArchive
               ? "degraded"
-              : input.providerMissingBeforeCapture
+              : input.providerMissingBeforeCapture || freshPending
                 ? "unrecoverable"
                 : "not_required";
         const recovery: SandboxRecoveryState = {
@@ -51444,7 +54223,15 @@ export async function confirmDrainCold(
         };
         const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
         const resumeStateJson = preserveRecovery
-          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+          ? JSON.stringify(
+              archiveOnlyResumeState(
+                row,
+                recovery,
+                input.providerMissingBeforeCapture
+                  ? providerLossRecordForLostRow(row, "drain_probe", now)
+                  : undefined,
+              ),
+            )
           : null;
         // Migration 0184 also enforces exact teardown ownership at the table
         // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
@@ -51491,6 +54278,33 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
+        if (rows.length > 0 && input.providerMissingBeforeCapture) {
+          const eventId = crypto.randomUUID();
+          await tx.insert(schema.auditEvents).values(
+            withLosslessContentWriteVersion(
+              {
+                id: eventId,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: "opengeni:sandbox-reaper",
+                action: "sandbox.provider_missing_before_capture",
+                targetType: "sandbox_group",
+                targetId: input.sandboxGroupId,
+                metadata: {
+                  leaseId: row.id,
+                  leaseEpoch: input.expectedEpoch,
+                  workspaceGeneration: Number(row.workspace_generation),
+                  archiveGeneration:
+                    row.archive_generation === null ? null : Number(row.archive_generation),
+                },
+              },
+              "metadata",
+              "metadataCodecVersion",
+            ),
+          );
+          await tx.execute(sql`select opengeni_private.record_sandbox_recovery_operator_event(
+            ${eventId}::uuid, 'provider_missing_before_capture')`);
+        }
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
         }
@@ -55905,6 +58719,26 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
   };
 }
 
+/** Content-free, cross-workspace operator signal reconstructed from committed
+ * audit receipts. Unlike process-local counters, a worker crash after commit
+ * cannot erase this short-lived warning window. */
+export async function readRecentSandboxRecoveryObservations(db: Database): Promise<{
+  providerLosses: number;
+  fallbackSelections: number;
+  freshWorkspaceSelections: number;
+}> {
+  const [row] = await rawRows<{
+    provider_losses: number | string;
+    fallback_selections: number | string;
+    fresh_workspace_selections?: number | string;
+  }>(db, sql`select * from opengeni_private.sandbox_recovery_observations()`);
+  return {
+    providerLosses: Number(row?.provider_losses ?? 0),
+    fallbackSelections: Number(row?.fallback_selections ?? 0),
+    freshWorkspaceSelections: Number(row?.fresh_workspace_selections ?? 0),
+  };
+}
+
 export type LegacyModalCheckpointSlot = {
   accountId: string;
   workspaceId: string;
@@ -56401,6 +59235,12 @@ export async function persistDrainSnapshot(
         lateReceipt.sourceInstanceId === input.expectedInstanceId &&
         lateReceipt.sourceWorkspaceGeneration === input.expectedWorkspaceGeneration &&
         lateReceipt.providerRequestId === input.providerRequestId &&
+        // Durable publication deadline: automatic recovery decisions wait out
+        // this window, so an archive can never land behind one.
+        (await transactionNow(scopedDb)).getTime() <
+          Date.parse(lateReceipt.recordedAt) + LATE_CAPTURE_PUBLICATION_WINDOW_MS &&
+        !pendingFreshWorkspaceRecovery(row.resume_state) &&
+        automaticCheckpointMarker(row.resume_state)?.status !== "accepted" &&
         !row.unsettled_mutation;
       if (!activePublication && !coldLatePublication) {
         return { wrote: false, archiveRevision: null, ...candidateFields };
@@ -59421,6 +62261,8 @@ export async function setEnrollmentDisplayState(
     enrollmentId: string;
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
+    /** Live snapshots update the desktop bit without rewriting release/update metadata. */
+    runtimeDesktop?: boolean;
     /** When present, fence the update to the exact still-live runner. */
     connectionInstanceId?: string;
   },
@@ -59434,6 +62276,12 @@ export async function setEnrollmentDisplayState(
         .set({
           hasDisplay: input.hasDisplay,
           desktopUnavailableReason: input.desktopUnavailableReason,
+          ...(input.runtimeDesktop !== undefined
+            ? {
+                agentCapabilities: sql`coalesce(${schema.enrollments.agentCapabilities}, '{}'::jsonb)
+                  || jsonb_build_object('desktop', ${input.runtimeDesktop}::boolean)`,
+              }
+            : {}),
           updatedAt: new Date(),
         })
         .where(
@@ -59453,6 +62301,11 @@ export async function setEnrollmentDisplayState(
             or(
               ne(schema.enrollments.hasDisplay, input.hasDisplay),
               sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
+              ...(input.runtimeDesktop !== undefined
+                ? [
+                    sql`${schema.enrollments.agentCapabilities}->'desktop' IS DISTINCT FROM to_jsonb(${input.runtimeDesktop}::boolean)`,
+                  ]
+                : []),
             ),
           ),
         )
@@ -61404,6 +64257,7 @@ export async function accrueWarmSeconds(
             sourceType: "sandbox_lease",
             sourceId: `${input.sandboxGroupId}:${input.expectedEpoch}`,
             idempotencyKey: `debit:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`,
+            metadata: creditDebitAttributionMetadata(snapshot?.attribution ?? { kind: "unknown" }),
           });
         }
 
@@ -64342,7 +67196,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits";
+      reason: "max_auto_continuations" | "limits" | "allowance";
       goal: SessionGoal;
     }
   | {
@@ -64421,6 +67275,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
+    budgetPausedReason?: "limits" | "allowance" | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -64504,6 +67359,7 @@ export async function evaluateGoalContinuation(
             desc(schema.sessionTurns.finishedAt),
             desc(schema.sessionTurns.position),
             desc(schema.sessionTurns.createdAt),
+            desc(schema.sessionTurns.id),
           )
           .limit(1);
         const contextCompactionFailure = latestFinished
@@ -64595,7 +67451,7 @@ export async function evaluateGoalContinuation(
             .update(schema.sessionGoals)
             .set({
               status: "paused",
-              pausedReason: "limits",
+              pausedReason: input.budgetPausedReason ?? "limits",
               rationale: input.budgetBlocked,
               autoContinuations,
               noProgressStreak: 0,
@@ -64606,7 +67462,7 @@ export async function evaluateGoalContinuation(
             .returning();
           return {
             decision: "paused",
-            reason: "limits",
+            reason: input.budgetPausedReason ?? "limits",
             goal: mapSessionGoal(paused!),
           } as const;
         }
@@ -64681,6 +67537,16 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
+    budgetPausedReason?: "limits" | "allowance" | undefined;
+    /** Trusted worker admission, evaluated under the same session/goal locks
+     * as lineage materialization. Never substitutes a mutable latest human. */
+    admission?: (
+      tx: Database,
+      causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+    ) => Promise<{
+      budgetBlocked: string | null;
+      budgetPausedReason?: "limits" | "allowance";
+    }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
       model: string;
@@ -65023,6 +67889,36 @@ export async function materializeGoalContinuation(
           }
         }
 
+        // Freeze one exact latest-finished causal row while holding the
+        // canonical session lock. Admission and queued lineage reuse it.
+        const [causalTurn] = await tx
+          .select({
+            id: schema.sessionTurns.id,
+            personalConnectionDelegations: schema.sessionTurns.personalConnectionDelegations,
+            mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
+            initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+            initiatorKind: schema.sessionTurns.initiatorKind,
+            initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+            xaiProviderAccountAuthoritySnapshot:
+              schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              sql`${schema.sessionTurns.finishedAt} is not null`,
+            ),
+          )
+          .orderBy(
+            desc(schema.sessionTurns.finishedAt),
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+            desc(schema.sessionTurns.id),
+          )
+          .limit(1);
+        const admission = await input.admission?.(tx, causalTurn ?? null);
+
         let goalWakeRevision = goalRead.continuationWakeRevision;
         if (goalWakeRevision <= goalRead.continuationObservedRevision) {
           // This is an invariant-repair path, not a polling loop: a workflow
@@ -65046,7 +67942,8 @@ export async function materializeGoalContinuation(
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           defaultMaxAutoContinuations: input.defaultMaxAutoContinuations ?? null,
-          budgetBlocked: input.budgetBlocked ?? null,
+          budgetBlocked: admission ? admission.budgetBlocked : (input.budgetBlocked ?? null),
+          budgetPausedReason: admission ? admission.budgetPausedReason : input.budgetPausedReason,
         });
         if (decision.decision === "none" || decision.decision === "queue") {
           return { action: decision.decision, events: [] } as const;
@@ -65094,31 +67991,6 @@ export async function materializeGoalContinuation(
           return { action: "paused", events: [mapEvent(event)] } as const;
         }
 
-        const [causalTurn] = await tx
-          .select({
-            id: schema.sessionTurns.id,
-            personalConnectionDelegations: schema.sessionTurns.personalConnectionDelegations,
-            mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
-            initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-            initiatorKind: schema.sessionTurns.initiatorKind,
-            initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            xaiProviderAccountAuthoritySnapshot:
-              schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              sql`${schema.sessionTurns.finishedAt} is not null`,
-            ),
-          )
-          .orderBy(
-            desc(schema.sessionTurns.position),
-            desc(schema.sessionTurns.createdAt),
-            desc(schema.sessionTurns.id),
-          )
-          .limit(1);
         const personalConnectionDelegations = causalTurn
           ? parsedPersonalConnectionDelegations(
               causalTurn.personalConnectionDelegations,
@@ -65329,6 +68201,8 @@ export type InitializeSessionStartInput = {
   reasoningEffortFallback: ReasoningEffort;
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
+  /** Content-free product surface the create request entered through. */
+  surface?: SessionTurnSurface | null;
   createdEventPayload: Record<string, unknown>;
   /** Trusted backend-only capture for a newly inserted initial turn. Runs under
    * the canonical activity transaction; failure rolls back events and turn.
@@ -65883,6 +68757,7 @@ export async function initializeSessionStartAtomically(
                   temporalWorkflowId,
                   status: "queued",
                   source: "user",
+                  surface: input.surface ?? null,
                   promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
@@ -66206,6 +69081,7 @@ export async function enqueueSessionTurn(
                 temporalWorkflowId: input.temporalWorkflowId,
                 status: "queued",
                 source: input.source,
+                surface: input.surface ?? null,
                 promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
@@ -66521,7 +69397,7 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
 export type ClaimSessionWorkForAttemptInput = {
   /** Internal worker-build declaration, never request-derived or universally
    * stamped by createDb. Only builds that always reconstruct the warning opt in. */
-  filesystemDiscontinuityProtocol?: 1;
+  filesystemDiscontinuityProtocol?: 1 | 2 | 3;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -66753,6 +69629,23 @@ function consumedChildLifecycleSessionIds(
     // The row's kind and its payload discriminator are written together; narrow
     // on the discriminator so the shared field access is typed rather than cast.
     if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
+    // An untruncated final answer, and each goal continuation after it, is
+    // exact content of one child answer event; claim still verifies every part
+    // against its retained event before acknowledging.
+    if (payload.type === "child_terminal_result") {
+      const answer = payload.finalAnswer;
+      if (answer && answer.truncated === false) {
+        for (const part of [answer, ...(answer.goalContinuations ?? [])]) {
+          if (part.sequence <= 0 || part.sequence > POSTGRES_INT_MAX) continue;
+          children.push({
+            sessionId: payload.childSessionId,
+            sequence: part.sequence,
+            type: "turn.completed",
+            payload: { output: part.text },
+          });
+        }
+      }
+    }
     const evidence = payload.childEventEvidence;
     if (!Array.isArray(evidence) || evidence.length > 32) continue;
     for (const event of evidence) {
@@ -66917,6 +69810,479 @@ export async function acknowledgeConsumedChildEvents(
   await withWorkspaceRls(db, input.workspaceId, async (tx) => {
     await acknowledgeConsumedChildSequencesInTransaction(tx, input);
   });
+}
+
+/**
+ * Turn metadata key recording each direct child answer (`turn.completed`
+ * sequence) that one exact attempt of the turn returned whole to its model
+ * from a read tool. It is bounded, append-only per turn, and only ever
+ * suppresses a duplicate: a lost or unproven record delivers the child's
+ * result normally.
+ */
+export const CONSUMED_CHILD_ANSWERS_METADATA_KEY = "consumedChildAnswers";
+const CONSUMED_CHILD_ANSWERS_MAX = 64;
+const CONSUMED_CHILD_ANSWERS_TURN_WINDOW = 16;
+/** Any hex UUID shape, so a stored attempt id is cast only when castable. */
+const UUID_TEXT_PATTERN_SQL =
+  "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+type ConsumedChildAnswerEntry = { childSessionId: string; sequence: number; attemptId: string };
+
+function consumedChildAnswerEntries(metadata: unknown): ConsumedChildAnswerEntry[] {
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const entries = (metadata as Record<string, unknown>)[CONSUMED_CHILD_ANSWERS_METADATA_KEY];
+  if (!Array.isArray(entries)) return [];
+  return entries.filter(
+    (entry): entry is ConsumedChildAnswerEntry =>
+      entry !== null &&
+      typeof entry === "object" &&
+      typeof entry.childSessionId === "string" &&
+      typeof entry.attemptId === "string" &&
+      Number.isSafeInteger(entry.sequence),
+  );
+}
+
+/** Every child answer an idle success `child_terminal_result` reports on, or
+ * null when it carries no final answer. */
+function childTerminalResultAnswerParts(
+  payload: unknown,
+): { childSessionId: string; sequences: number[] } | null {
+  const parsed = SessionSystemUpdatePayload.safeParse(payload);
+  if (
+    !parsed.success ||
+    parsed.data.type !== "child_terminal_result" ||
+    parsed.data.status !== "idle" ||
+    !parsed.data.finalAnswer
+  ) {
+    return null;
+  }
+  return {
+    childSessionId: parsed.data.childSessionId,
+    sequences: childTerminalResultFinalAnswerSequences(parsed.data.finalAnswer),
+  };
+}
+
+/**
+ * The child answers the parent's model received whole, per child. A record
+ * counts when its recording attempt completed its turn: the tool output that
+ * carried the answer is then durable parent history. The parent's newest
+ * completed turns hold such records (a child commits its result seconds after
+ * the answer); a record outside that window, like a lost one, only means the
+ * result is delivered normally. `attempt` also counts the records one exact
+ * attempt made on its own turn: its caller proves that attempt is live, or has
+ * just completed its turn in the same transaction. A record of an attempt that
+ * failed, was interrupted, or was replaced proves nothing.
+ */
+async function consumedChildAnswerSequencesTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    parentSessionId: string;
+    childSessionIds: readonly string[];
+    attempt?: { turnId: string; attemptId: string };
+  },
+): Promise<Map<string, Set<number>>> {
+  const consumed = new Map<string, Set<number>>();
+  const childSessionIds = [...new Set(input.childSessionIds)].filter((id) => UUID_PATTERN.test(id));
+  if (childSessionIds.length === 0) return consumed;
+  const attempt =
+    input.attempt &&
+    UUID_PATTERN.test(input.attempt.turnId) &&
+    UUID_PATTERN.test(input.attempt.attemptId)
+      ? input.attempt
+      : null;
+  const key = CONSUMED_CHILD_ANSWERS_METADATA_KEY;
+  const rows = await rawRows<{ childSessionId: string; sequence: string | number }>(
+    tx,
+    sql`select entry ->> 'childSessionId' as "childSessionId",
+        (entry ->> 'sequence')::numeric as sequence
+      from (
+        (select recent.id, recent.metadata from session_turns recent
+          where recent.workspace_id = ${input.workspaceId}::uuid
+            and recent.session_id = ${input.parentSessionId}::uuid
+            and recent.status = 'completed'
+          order by recent.position desc limit ${CONSUMED_CHILD_ANSWERS_TURN_WINDOW})
+        ${
+          attempt
+            ? sql`union
+        (select own.id, own.metadata from session_turns own
+          where own.workspace_id = ${input.workspaceId}::uuid
+            and own.session_id = ${input.parentSessionId}::uuid
+            and own.id = ${attempt.turnId}::uuid)`
+            : sql``
+        }
+      ) turn
+      cross join lateral jsonb_array_elements(
+        case when jsonb_typeof(turn.metadata -> ${key}) = 'array'
+          then turn.metadata -> ${key} else '[]'::jsonb end
+      ) as entry
+      join session_turn_attempts attempt
+        on attempt.workspace_id = ${input.workspaceId}::uuid
+          and attempt.session_id = ${input.parentSessionId}::uuid
+          and attempt.turn_id = turn.id
+          and attempt.id = case when entry ->> 'attemptId' ~ ${UUID_TEXT_PATTERN_SQL}
+            then (entry ->> 'attemptId')::uuid end
+      where entry ->> 'childSessionId' in (${sql.join(
+        childSessionIds.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+        and jsonb_typeof(entry -> 'sequence') = 'number'
+        and (attempt.outcome = 'completed'${
+          attempt
+            ? sql` or (turn.id = ${attempt.turnId}::uuid and attempt.id = ${attempt.attemptId}::uuid)`
+            : sql``
+        })`,
+  );
+  for (const row of rows) {
+    const sequences = consumed.get(row.childSessionId) ?? new Set<number>();
+    sequences.add(Number(row.sequence));
+    consumed.set(row.childSessionId, sequences);
+  }
+  return consumed;
+}
+
+function childResultConsumed(
+  parts: { childSessionId: string; sequences: readonly number[] },
+  consumed: ReadonlyMap<string, ReadonlySet<number>>,
+): boolean {
+  const sequences = consumed.get(parts.childSessionId);
+  return sequences !== undefined && parts.sequences.every((sequence) => sequences.has(sequence));
+}
+
+/**
+ * Whether the parent's model already received every part of this successful
+ * idle child result (the answer and each goal continuation it reports on)
+ * whole, through a read by an attempt that completed its turn. Such a result is
+ * inserted already consumed. A result that arrives while the reading attempt
+ * still runs is inserted pending; that attempt's completion supersedes it.
+ */
+async function childTerminalResultConsumedByParentReadTx(
+  tx: Database,
+  input: { workspaceId: string; parentSessionId: string; payload: unknown },
+): Promise<boolean> {
+  const parts = childTerminalResultAnswerParts(input.payload);
+  if (!parts) return false;
+  return childResultConsumed(
+    parts,
+    await consumedChildAnswerSequencesTx(tx, {
+      workspaceId: input.workspaceId,
+      parentSessionId: input.parentSessionId,
+      childSessionIds: [parts.childSessionId],
+    }),
+  );
+}
+
+/** Ids of this parent's pending idle child results its model already received
+ * whole (see `consumedChildAnswerSequencesTx`). */
+async function pendingChildResultsConsumedTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    parentSessionId: string;
+    attempt?: { turnId: string; attemptId: string };
+  },
+): Promise<string[]> {
+  const pending = await tx
+    .select({
+      id: schema.sessionSystemUpdates.id,
+      payload: schema.sessionSystemUpdates.payload,
+      payloadCodecVersion: schema.sessionSystemUpdates.payloadCodecVersion,
+    })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, input.parentSessionId),
+        eq(schema.sessionSystemUpdates.kind, "child_terminal_result"),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+        eq(schema.sessionSystemUpdates.classification, "success"),
+      ),
+    );
+  const candidates = pending.flatMap((row) => {
+    const parts = childTerminalResultAnswerParts(
+      fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+    );
+    return parts ? [{ id: row.id, parts }] : [];
+  });
+  if (candidates.length === 0) return [];
+  const consumed = await consumedChildAnswerSequencesTx(tx, {
+    workspaceId: input.workspaceId,
+    parentSessionId: input.parentSessionId,
+    childSessionIds: candidates.map((candidate) => candidate.parts.childSessionId),
+    ...(input.attempt ? { attempt: input.attempt } : {}),
+  });
+  return candidates
+    .filter((candidate) => childResultConsumed(candidate.parts, consumed))
+    .map((candidate) => candidate.id)
+    .sort();
+}
+
+/**
+ * Inside the successful completion settlement of a turn attempt that recorded
+ * a consumed child answer: supersede each still-pending idle child result the
+ * parent's model has now received whole, before the next claim could start an
+ * inference that only repeats it. The tool output that carried each answer is
+ * durable history once the attempt completes. The canonical row stays as
+ * audit truth; the caller appends the `system.update.cancelled` event.
+ */
+async function supersedeChildResultsConsumedByCompletedAttemptTx(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    turnMetadata: unknown;
+  },
+): Promise<string[]> {
+  if (
+    !consumedChildAnswerEntries(input.turnMetadata).some(
+      (entry) => entry.attemptId === input.attemptId,
+    )
+  ) {
+    return [];
+  }
+  const consumed = await pendingChildResultsConsumedTx(tx, {
+    workspaceId: input.workspaceId,
+    parentSessionId: input.sessionId,
+    attempt: { turnId: input.turnId, attemptId: input.attemptId },
+  });
+  if (consumed.length === 0) return [];
+  await tx
+    .update(schema.sessionSystemUpdates)
+    .set({ state: "superseded" })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+        inArray(schema.sessionSystemUpdates.id, consumed),
+      ),
+    );
+  return consumed;
+}
+
+/**
+ * The parent's exact live attempt has just returned a direct child's complete
+ * final answer to its model from a read tool. Record each such result-bearing
+ * answer on the reading turn (`CONSUMED_CHILD_ANSWERS_METADATA_KEY`). Nothing
+ * is superseded here: the tool output is not durable parent history until the
+ * attempt completes its turn. That completion supersedes each still-pending
+ * idle result whose every part was received, and a result that arrives after
+ * it is inserted already consumed. A read by an attempt that then fails, is
+ * interrupted, or is replaced suppresses nothing.
+ *
+ * The caller proves the read returned whole content to the model; this proves
+ * the attempt is still the session's current one and that each sequence is a
+ * direct child's result-bearing answer. Only the reading turn's row is locked,
+ * never the session write prefix, and a read whose answers this attempt
+ * already recorded writes nothing. It is best effort: a busy turn row skips it
+ * and the result is then delivered normally.
+ */
+export async function recordConsumedChildAnswers(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    children: readonly { sessionId: string; sequences: readonly number[] }[];
+  },
+): Promise<{ recorded: number }> {
+  const children = input.children
+    .map((child) => ({
+      sessionId: child.sessionId,
+      sequences: [
+        ...new Set(
+          child.sequences.filter(
+            (value) => Number.isSafeInteger(value) && value > 0 && value <= POSTGRES_INT_MAX,
+          ),
+        ),
+      ],
+    }))
+    .filter((child) => UUID_PATTERN.test(child.sessionId) && child.sequences.length > 0);
+  if (
+    children.length === 0 ||
+    !UUID_PATTERN.test(input.sessionId) ||
+    !UUID_PATTERN.test(input.turnId) ||
+    !UUID_PATTERN.test(input.attemptId)
+  ) {
+    return { recorded: 0 };
+  }
+  // Most complete reads return no child answer, and a repeated read returns
+  // one this attempt already recorded. Decide both without any lock.
+  const probe = await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const answers = await tx
+      .select({
+        sessionId: schema.sessionEvents.sessionId,
+        sequence: schema.sessionEvents.sequence,
+      })
+      .from(schema.sessionEvents)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+          eq(schema.sessions.id, schema.sessionEvents.sessionId),
+          eq(schema.sessions.parentSessionId, input.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          inArray(
+            schema.sessionEvents.sessionId,
+            children.map((child) => child.sessionId),
+          ),
+          eq(schema.sessionEvents.type, "turn.completed"),
+          inArray(schema.sessionEvents.sequence, [
+            ...new Set(children.flatMap((child) => child.sequences)),
+          ]),
+          // Only a returned result-bearing answer proves consumption; a
+          // commentary message or goal fact read alongside it does not.
+          completeMeaningfulSessionEventSql("session_events"),
+        ),
+      );
+    const [turn] = await tx
+      .select({ metadata: schema.sessionTurns.metadata })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+        ),
+      )
+      .limit(1);
+    return { answers, metadata: turn?.metadata };
+  });
+  const readByChild = new Map(children.map((child) => [child.sessionId, child.sequences]));
+  const unrecorded = (metadata: unknown) => {
+    const recorded = consumedChildAnswerEntries(metadata);
+    return probe.answers
+      .map((answer) => ({ childSessionId: answer.sessionId, sequence: Number(answer.sequence) }))
+      .filter(
+        (answer) =>
+          readByChild.get(answer.childSessionId)?.includes(answer.sequence) === true &&
+          !recorded.some(
+            (entry) =>
+              entry.attemptId === input.attemptId &&
+              entry.childSessionId === answer.childSessionId &&
+              entry.sequence === answer.sequence,
+          ),
+      );
+  };
+  if (unrecorded(probe.metadata).length === 0) return { recorded: 0 };
+  try {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          // A request-scoped writer never waits long on the turn row.
+          await tx.execute(
+            sql`select set_config('lock_timeout', ${`${Math.max(1, workspaceControlRequestLockTimeoutMs())}ms`}, true)`,
+          );
+          // The turn row alone: settlement locks the session and then this
+          // row, so while it is held the attempt below cannot close.
+          const [turn] = await tx
+            .select({
+              accountId: schema.sessionTurns.accountId,
+              metadata: schema.sessionTurns.metadata,
+            })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!turn || turn.accountId !== input.accountId) return { recorded: 0 };
+          const [current] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .innerJoin(
+              schema.sessions,
+              and(
+                eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+                eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+                eq(schema.sessions.activeTurnId, input.turnId),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, input.turnId),
+                eq(schema.sessionTurnAttempts.id, input.attemptId),
+                eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+                inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+              ),
+            )
+            .limit(1);
+          if (!current) return { recorded: 0 };
+          const newlyRecorded = unrecorded(turn.metadata).map((answer) => ({
+            ...answer,
+            attemptId: input.attemptId,
+          }));
+          if (newlyRecorded.length === 0) return { recorded: 0 };
+          // Under the turn row lock: only this key changes, the rest of the
+          // turn metadata stays exactly as committed.
+          const entries = [...consumedChildAnswerEntries(turn.metadata), ...newlyRecorded].slice(
+            -CONSUMED_CHILD_ANSWERS_MAX,
+          );
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: sql`jsonb_set(coalesce(${schema.sessionTurns.metadata}, '{}'::jsonb), ${`{${CONSUMED_CHILD_ANSWERS_METADATA_KEY}}`}::text[], ${JSON.stringify(entries)}::jsonb)`,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            );
+          return { recorded: newlyRecorded.length };
+        }),
+    );
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "55P03") return { recorded: 0 };
+    throw error;
+  }
+}
+
+/**
+ * This session's pending machine input, less each idle child result its model
+ * already received whole: through a completed turn, or through a read by the
+ * given exact live attempt, whose completion will supersede it. Such a result
+ * would only repeat an answer the caller holds, so it is not input to wait for.
+ */
+export async function listOutstandingSessionSystemUpdatesForAttempt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  attempt: { turnId: string; attemptId: string },
+): Promise<SessionSystemUpdate[]> {
+  const pending = await listOutstandingSessionSystemUpdates(db, workspaceId, sessionId);
+  if (!pending.some((update) => update.kind === "child_terminal_result")) return pending;
+  const consumed = new Set(
+    await withWorkspaceRls(
+      db,
+      workspaceId,
+      async (tx) =>
+        await pendingChildResultsConsumedTx(tx, {
+          workspaceId,
+          parentSessionId: sessionId,
+          attempt,
+        }),
+    ),
+  );
+  return pending.filter((update) => !consumed.has(update.id));
 }
 
 /** Bounded operator reconciliation, dry-run by default. No timestamps, session
@@ -67188,15 +70554,26 @@ async function acknowledgeConsumedChildSequencesInTransaction(
 /** Scope the worker-build declaration to registration, including nested claims. */
 async function withSandboxRecoveryWarningClaimProtocol<T>(
   tx: Database,
-  version: 1 | undefined,
+  version: 1 | 2 | 3 | undefined,
   register: () => Promise<T>,
 ): Promise<T> {
-  const [prior] = await rawRows<{ protocol: string }>(
+  const [prior] = await rawRows<{
+    consent_protocol: string;
+    automatic_protocol: string;
+    fresh_protocol: string;
+  }>(
     tx,
-    sql`select coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as protocol`,
+    sql`select
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as consent_protocol,
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v2', true), '') as automatic_protocol,
+      coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v3', true), '') as fresh_protocol`,
   );
+  // Each protocol version reconstructs every earlier warning kind as well.
   await tx.execute(
-    sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 ? "1" : ""}, true)`,
+    sql`select
+      set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 || version === 2 || version === 3 ? "1" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v2', ${version === 2 || version === 3 ? "2" : ""}, true),
+      set_config('opengeni.filesystem_discontinuity_protocol_v3', ${version === 3 ? "3" : ""}, true)`,
   );
   let completed = false;
   try {
@@ -67205,7 +70582,10 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
     return result;
   } finally {
     const restore = tx.execute(
-      sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.protocol ?? ""}, true)`,
+      sql`select
+        set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.consent_protocol ?? ""}, true),
+        set_config('opengeni.filesystem_discontinuity_protocol_v2', ${prior?.automatic_protocol ?? ""}, true),
+        set_config('opengeni.filesystem_discontinuity_protocol_v3', ${prior?.fresh_protocol ?? ""}, true)`,
     );
     if (completed) await restore;
     else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.
@@ -67255,6 +70635,8 @@ export async function claimSessionWorkForAttempt(
           triggerEventId: string | null;
           historyItemId: string | null;
           historyItem: Record<string, unknown> | null;
+          /** Durable delivery time written to every delivered member. */
+          deliveredAt: Date;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
           /** Deduped children the delivered batch reports on, in delivery order. */
           childSessionIds: ConsumedChildEvidence[];
@@ -67371,6 +70753,7 @@ export async function claimSessionWorkForAttempt(
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
+              deliveredAt: occurredAt,
               updates: [],
               childSessionIds: [],
               events: [],
@@ -67711,6 +71094,7 @@ export async function claimSessionWorkForAttempt(
               triggerEventId: null,
               historyItemId: null,
               historyItem: null,
+              deliveredAt: occurredAt,
               updates: [],
               childSessionIds: [],
               events: cancellationEvents,
@@ -67729,6 +71113,8 @@ export async function claimSessionWorkForAttempt(
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
+            undefined,
+            { deliveredAt: occurredAt },
           ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
@@ -67889,6 +71275,7 @@ export async function claimSessionWorkForAttempt(
             triggerEventId: eventId,
             historyItemId,
             historyItem,
+            deliveredAt: occurredAt,
             updates: deliverable,
             childSessionIds: consumedChildLifecycleSessionIds(deliverable, parsedPayloadsById),
             events,
@@ -67935,6 +71322,7 @@ export async function claimSessionWorkForAttempt(
                       ? sessionSystemUpdateBatchHistoryItem(
                           delivered.updates.map((update) => mapSessionSystemUpdate(update)),
                           goalSnapshot,
+                          { deliveredAt: delivered.deliveredAt },
                         )
                       : delivered.historyItem),
                 ),
@@ -68710,6 +72098,11 @@ export async function claimSessionWorkForAttempt(
               workspaceId,
               sessionId,
             );
+            const [effectivePolicy] = await withEffectiveSessionPolicy(
+              tx as unknown as Database,
+              workspaceId,
+              [session],
+            );
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
@@ -68726,17 +72119,20 @@ export async function claimSessionWorkForAttempt(
                     executionGeneration: 1,
                     activeAttemptId: input.attemptId,
                     source: "compaction",
+                    // Maintenance continues the session's work; keep the
+                    // surface of the turn it compacts after.
+                    surface: sessionTurnSurfaceOrNull(latestStarted?.surface),
                     position: Number(position),
                     prompt: "",
                     resources: [],
                     tools: [],
-                    model: latestStarted?.model ?? session.model,
+                    model: effectivePolicy!.model,
                     reasoningEffort: reasoningEffortForMetadata(
-                      { reasoningEffort: latestStarted?.reasoningEffort },
+                      { reasoningEffort: effectivePolicy!.reasoningEffort },
                       session.reasoningEffort as ReasoningEffort,
                     ),
                     latencyMode: latencyModeForMetadata(
-                      { latencyMode: latestStarted?.latencyMode },
+                      { latencyMode: effectivePolicy!.latencyMode },
                       session.latencyMode as LatencyMode,
                     ),
                     sandboxBackend: latestStarted?.sandboxBackend ?? session.sandboxBackend,
@@ -69018,6 +72414,12 @@ export async function claimSessionWorkForAttempt(
           } else {
             internalInitiator = internalUpdateInitiator();
           }
+          // Batch identity belongs to this accepted inference, not its sender's
+          // earlier batch. Preserve every other frozen service/agent context key.
+          internalInitiator.context = {
+            ...internalInitiator.context,
+            updateIds: delivered.updates.map((update) => update.id),
+          };
           if (delivered.event) {
             delivered.event.payload = {
               ...(delivered.event.payload as Record<string, unknown>),
@@ -69037,19 +72439,22 @@ export async function claimSessionWorkForAttempt(
             workspaceId,
             sessionId,
           );
+          const [effectivePolicy] = await withEffectiveSessionPolicy(
+            tx as unknown as Database,
+            workspaceId,
+            [session],
+          );
           let model =
-            typeof goalPolicy?.model === "string"
-              ? goalPolicy.model
-              : (latestStarted?.model ?? session.model);
+            typeof goalPolicy?.model === "string" ? goalPolicy.model : effectivePolicy!.model;
           let reasoningEffort = reasoningEffortForMetadata(
             {
-              reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
+              reasoningEffort: goalPolicy?.reasoningEffort ?? effectivePolicy!.reasoningEffort,
             },
             session.reasoningEffort as ReasoningEffort,
           );
           let latencyMode = latencyModeForMetadata(
             {
-              latencyMode: goalPolicy?.latencyMode ?? latestStarted?.latencyMode,
+              latencyMode: goalPolicy?.latencyMode ?? effectivePolicy!.latencyMode,
             },
             session.latencyMode as LatencyMode,
           );
@@ -69061,6 +72466,13 @@ export async function claimSessionWorkForAttempt(
               ? goalPolicy.sandboxBackend
               : (latestStarted?.sandboxBackend ?? session.sandboxBackend);
           const scheduledTaskRunId = delivered.updates[0]?.scheduledTaskRunId ?? null;
+          // A scheduled occurrence or another agent's message is a new request;
+          // any other machine input continues the session's latest surface.
+          const internalSurface: SessionTurnSurface | null = scheduledTaskRunId
+            ? "scheduled"
+            : agentCommandUpdate
+              ? "agent"
+              : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
@@ -69084,6 +72496,21 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            // A task's accepted service provenance is immutable, just like
+            // its execution policy. Never consult a mutable task or borrow
+            // the session creator's human for this occurrence.
+            if (delivered.updates.every((update) => update.kind === "scheduled_occurrence")) {
+              internalInitiator = frozenScheduledOccurrenceInitiator(
+                accepted.task,
+                internalInitiator,
+              );
+              if (delivered.event) {
+                delivered.event.payload = {
+                  ...(delivered.event.payload as Record<string, unknown>),
+                  initiator: internalInitiator.initiator,
+                };
+              }
+            }
             frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
               ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
               : null;
@@ -69218,6 +72645,7 @@ export async function claimSessionWorkForAttempt(
                 initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
                 initiatorKind: schema.sessionTurns.initiatorKind,
                 initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                initiatorContext: schema.sessionTurns.initiatorContext,
               })
               .from(schema.sessionTurns)
               .where(
@@ -69228,6 +72656,20 @@ export async function claimSessionWorkForAttempt(
                 ),
               )
               .limit(1);
+            if (causalTurn) {
+              internalInitiator.context = contextForCausalTurn(
+                internalInitiator.context,
+                {
+                  initiator: initiatorFromStorage(
+                    causalTurn.initiatorKind,
+                    causalTurn.initiatorSubjectId,
+                    causalTurn.initiatorContext,
+                  ),
+                  context: causalTurn.initiatorContext,
+                },
+                { sessionId, turnId: causalHumanTurnId },
+              );
+            }
             const causalHumanSubjectId =
               causalTurn?.initiatingHumanSubjectId ??
               (causalTurn?.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null);
@@ -69303,6 +72745,7 @@ export async function claimSessionWorkForAttempt(
                   executionGeneration: 1,
                   activeAttemptId: input.attemptId,
                   source: routingGoalUpdate ? "goal" : "system",
+                  surface: internalSurface,
                   position: Number(position),
                   prompt: "Process the delivered internal session updates.",
                   resources: [],
@@ -69370,9 +72813,12 @@ export async function claimSessionWorkForAttempt(
               [],
               [],
               contextualUpdates.length > 0
-                ? renderSessionSystemUpdateBatch(contextualUpdates)
+                ? renderSessionSystemUpdateBatch(contextualUpdates, {
+                    deliveredAt: delivered.deliveredAt,
+                  })
                 : undefined,
               frozenGoalSnapshot,
+              internalTurn.createdAt,
             );
           }
           const scheduledOccurrenceHistoryItem =
@@ -69382,7 +72828,7 @@ export async function claimSessionWorkForAttempt(
               ? sessionSystemUpdateBatchHistoryItem(
                   delivered.updates.map((update) => mapSessionSystemUpdate(update)),
                   frozenGoalSnapshot,
-                  { promoteScheduledOccurrenceToUser: true },
+                  { promoteScheduledOccurrenceToUser: true, deliveredAt: delivered.deliveredAt },
                 )
               : undefined;
           await persistDeliveredUpdateBatch(
@@ -69531,6 +72977,9 @@ export async function claimSessionWorkForAttempt(
                   TimelineAnnotations.parse(row.annotations),
                   row.modelContext,
                   SessionGoalSnapshot.parse(row.goalSnapshot),
+                  // Acceptance time, not claim time: a queued message keeps the
+                  // moment the user sent it.
+                  row.createdAt,
                 ),
               ),
             },
@@ -70677,6 +74126,8 @@ export type SessionWorkPeek =
       kind: "approval-wait";
       humanInputRequestId?: string;
       interactionInterventionId?: string;
+      /** The scheduled run's approval timeout is the earliest deadline. */
+      scheduledRunTimeout?: { runId: string; turnId: string };
       expiresAt?: string;
     }
   | {
@@ -70953,9 +74404,12 @@ async function pendingSystemUpdateWakeClassesTx(
 }
 
 /**
- * Evaluate the durable session-level wait against the newest finished turn and
- * the PostgreSQL clock. A newer completed turn is input that supersedes the
- * declaration; only the unchanged declaring turn can time out.
+ * Evaluate the durable session-level wait against the newest finished turn
+ * that can decide it (`sessionInputWaitDecidingTurnSql`) and the PostgreSQL
+ * clock. A newer finished turn that a person did not start is input that
+ * supersedes the declaration. A person's turn that does not wait again leaves
+ * the wait held, so a later child result or background command still wakes the
+ * agent; the unchanged deadline bounds it.
  */
 async function sessionInputWaitStateTx(
   db: Database,
@@ -70969,7 +74423,7 @@ async function sessionInputWaitStateTx(
   if (!wait.inputWaitTurnId || !wait.inputWaitUntil) {
     return { disposition: "none" };
   }
-  const [latestFinishedTurn] = await db
+  const [decidingTurn] = await db
     .select({ id: schema.sessionTurns.id })
     .from(schema.sessionTurns)
     .where(
@@ -70977,6 +74431,7 @@ async function sessionInputWaitStateTx(
         eq(schema.sessionTurns.workspaceId, workspaceId),
         eq(schema.sessionTurns.sessionId, sessionId),
         sql`${schema.sessionTurns.finishedAt} is not null`,
+        sessionInputWaitDecidingTurnSql(schema.sessionTurns, wait.inputWaitTurnId),
       ),
     )
     .orderBy(
@@ -70985,7 +74440,7 @@ async function sessionInputWaitStateTx(
       desc(schema.sessionTurns.createdAt),
     )
     .limit(1);
-  if (latestFinishedTurn?.id !== wait.inputWaitTurnId) {
+  if (decidingTurn?.id !== wait.inputWaitTurnId) {
     return { disposition: "superseded" };
   }
   const dbNow = await transactionNow(db);
@@ -71289,25 +74744,50 @@ export async function peekSessionWork(
             asc(schema.interactionInterventions.id),
           )
           .limit(1);
-        if (
-          expiringHumanInput?.expiresAt &&
-          (!expiringInteractionIntervention ||
-            expiringHumanInput.expiresAt.getTime() <=
-              expiringInteractionIntervention.expiresAt.getTime())
-        ) {
-          return {
-            kind: "approval-wait",
-            humanInputRequestId: expiringHumanInput.id,
-            expiresAt: expiringHumanInput.expiresAt.toISOString(),
-          };
+        // A scheduled run's frozen approval timeout joins the same earliest-
+        // deadline choice; the workflow sleeps on it with a durable timer.
+        const scheduledDeadline = await scheduledHumanWaitDeadlineInRlsContext(
+          scopedDb,
+          workspaceId,
+          turn,
+        );
+        const candidates: Array<{
+          at: number;
+          wait: Extract<SessionWorkPeek, { kind: "approval-wait" }>;
+        }> = [];
+        if (expiringHumanInput?.expiresAt) {
+          candidates.push({
+            at: expiringHumanInput.expiresAt.getTime(),
+            wait: {
+              kind: "approval-wait",
+              humanInputRequestId: expiringHumanInput.id,
+              expiresAt: expiringHumanInput.expiresAt.toISOString(),
+            },
+          });
         }
-        return expiringInteractionIntervention
-          ? {
+        if (expiringInteractionIntervention) {
+          candidates.push({
+            at: expiringInteractionIntervention.expiresAt.getTime(),
+            wait: {
               kind: "approval-wait",
               interactionInterventionId: expiringInteractionIntervention.id,
               expiresAt: expiringInteractionIntervention.expiresAt.toISOString(),
-            }
-          : { kind: "approval-wait" };
+            },
+          });
+        }
+        if (scheduledDeadline) {
+          candidates.push({
+            at: Date.parse(scheduledDeadline.expiresAt),
+            wait: {
+              kind: "approval-wait",
+              scheduledRunTimeout: { runId: scheduledDeadline.runId, turnId: turn.id },
+              expiresAt: scheduledDeadline.expiresAt,
+            },
+          });
+        }
+        // Stable: on a tie, the per-request deadlines keep their precedence.
+        candidates.sort((left, right) => left.at - right.at);
+        return candidates[0]?.wait ?? { kind: "approval-wait" };
       }
       if (turn.status === "running") {
         if (observerAccountId && turn.activeAttemptId) {
@@ -72967,6 +76447,43 @@ export async function settleSessionIdleWithParentOutbox(
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
+      // Immediate machine input has no queued turn until claim. Its producer
+      // takes this same session fence, so a post-peek arrival must win before
+      // we publish the preceding episode's terminal result. Use the wake-class
+      // contract, not every pending row: deferred notices and unwaited command
+      // results do not reopen finished work. A late child notice likewise only
+      // reserves new work when its producer queued the session; active goals
+      // and held/due waits are independently protected below.
+      const pendingInputs = await tx
+        .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, sessionId),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        );
+      const pendingSteer = pendingInputs.some(({ kind }) => kind === "agent_steer_instruction");
+      const pendingImmediate = pendingInputs.some(
+        ({ kind }) =>
+          SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] === "immediate" &&
+          kind !== "background_command_result" &&
+          (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+            session.status === "queued"),
+      );
+      if (
+        pendingSteer ||
+        (pendingImmediate &&
+          !(await latestFinishedTurnHasFailureCodeTx(
+            tx as unknown as Database,
+            workspaceId,
+            sessionId,
+            "context_compaction_failed",
+          )))
+      ) {
+        return { action: "stale", episodeKey: null, events: [] } as const;
+      }
       const [{ episodeSequence } = { episodeSequence: 0 }] = await tx
         .select({
           episodeSequence: sql<number>`coalesce(max(${schema.sessionEvents.sequence}), 0)::int`,
@@ -73046,6 +76563,14 @@ export async function settleSessionIdleWithParentOutbox(
         } as const;
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
+      // Freeze the child's answer with the boundary that reports it, so the
+      // parent's wake is the result itself and a reaper-delivered row carries
+      // the same content as an immediately delivered one.
+      const finalAnswer = await childFinalAnswerTx(
+        tx as unknown as Database,
+        workspaceId,
+        session.id,
+      );
       await enqueueChildLifecycleNoticeOutboxTx(tx as unknown as Database, workspaceId, session, {
         dedupeKey,
         kind: "child_terminal_result",
@@ -73055,6 +76580,7 @@ export async function settleSessionIdleWithParentOutbox(
           type: "child_terminal_result",
           childSessionId: session.id,
           status: "idle",
+          ...(finalAnswer ? { finalAnswer } : {}),
         },
       });
       return {
@@ -73068,13 +76594,111 @@ export async function settleSessionIdleWithParentOutbox(
   });
 }
 
-export function buildChildCompletionDigest(summaries: string[], trailing: string): string {
-  if (summaries.length <= 1) {
-    return [summaries[0] ?? "", "", trailing].join("\n");
+/** How many of the child's newest turn outcomes the final answer may walk
+ * back through past goal-continuation turns before giving up. */
+const CHILD_FINAL_ANSWER_OUTCOME_WINDOW = 16;
+
+/**
+ * The child's current final answer for its idle terminal result. Null when its
+ * newest turn ended without an answer (including one that stopped at a segment
+ * limit), when it has no answer text, or when a stored answer row is itself
+ * only a retained preview: the parent then reads the child's events instead of
+ * receiving an older answer or a partial copy presented as the result.
+ *
+ * A turn claimed only to continue the child's goal (typically to confirm and
+ * complete it after the answer) does not replace the answer. The walk goes
+ * back past such turns to the newest outcome that had any other input and
+ * reports that answer, followed by the continuation output. It also stops, as
+ * at such a turn, at an earlier outcome that is not a readable answer (a
+ * failure, a cancellation, a segment limit) and at the child's newest goal
+ * activation, so it never reaches output an earlier result reported. When the
+ * window holds only continuations, the result is the newest answer alone, as
+ * if no walk were made. A copy that cannot fit whole is the newest part,
+ * marked truncated, pointing at every part (see
+ * `childTerminalResultFinalAnswerWithGoalContinuations`).
+ */
+async function childFinalAnswerTx(
+  tx: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<ChildTerminalResultFinalAnswer | null> {
+  const outcomes = await rawRows<{
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payloadCodecVersion: number | null;
+    goalContinuationOnly: boolean;
+    goalActivatedAt: number | string;
+  }>(
+    tx,
+    childRecentTurnOutcomesSql(
+      sql`${workspaceId}::uuid`,
+      sql`${childSessionId}::uuid`,
+      CHILD_FINAL_ANSWER_OUTCOME_WINDOW,
+    ),
+  );
+  const readable = (outcome: (typeof outcomes)[number]) =>
+    outcome.type === "turn.completed" ? completedTurnAnswerOutput(outcome) : null;
+  const [newest] = outcomes;
+  const newestOutput = newest ? readable(newest) : null;
+  if (!newest || newestOutput === null) return null;
+  const goalActivatedAt = Number(newest.goalActivatedAt);
+  // Newest first; reversed into oldest-first parts below.
+  const parts: { sequence: number; output: string }[] = [];
+  let started = false;
+  for (const [index, outcome] of outcomes.entries()) {
+    const output = readable(outcome);
+    // The run's first turn is behind this one: a non-answer outcome, or the
+    // goal (re)activation that began the goal-continuation run.
+    if (output === null || (index > 0 && Number(outcome.sequence) < goalActivatedAt)) {
+      started = true;
+      break;
+    }
+    if (output.length > 0) parts.push({ sequence: Number(outcome.sequence), output });
+    if (!outcome.goalContinuationOnly) {
+      started = true;
+      break;
+    }
   }
-  const header = `${summaries.length} worker sessions you spawned reached a terminal state:`;
-  const numbered = summaries.map((summary, index) => `${index + 1}. ${summary}`).join("\n\n");
-  return [header, "", numbered, "", trailing].join("\n");
+  // Fewer outcomes than the window: the walk reached the child's first turn.
+  if (outcomes.length < CHILD_FINAL_ANSWER_OUTCOME_WINDOW) started = true;
+  if (!started) {
+    // Only goal continuations in the window: the run's first answer is not
+    // proven here, so report the newest answer alone.
+    return newestOutput.length > 0
+      ? childTerminalResultFinalAnswer({
+          childSessionId,
+          sequence: Number(newest.sequence),
+          output: newestOutput,
+        })
+      : null;
+  }
+  const [answer, ...goalContinuations] = parts.reverse();
+  if (!answer) return null;
+  return childTerminalResultFinalAnswerWithGoalContinuations({
+    childSessionId,
+    sequence: answer.sequence,
+    output: answer.output,
+    goalContinuations,
+  });
+}
+
+/** The whole answer a `turn.completed` carries ("" when it has none), or null
+ * when the stored row cannot stand in for that turn's result: a retained
+ * preview, or a turn that stopped at a segment limit. */
+function completedTurnAnswerOutput(outcome: {
+  payload: unknown;
+  payloadCodecVersion: number | null;
+}): string | null {
+  const payload = logicalChildReadEvent(outcome).payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const truncation = record.truncation as { truncated?: unknown } | null | undefined;
+  if (truncation?.truncated === true || record.sourceOmitted === true) return null;
+  if (Object.hasOwn(record, "segmentLimit")) return null;
+  if (typeof record.output === "string") return record.output;
+  // No output at all is "no answer"; any other shape is not a readable copy.
+  return (record.output ?? null) === null && (record.result ?? null) === null ? "" : null;
 }
 
 export async function setTemporalWorkflowId(
@@ -73449,6 +77073,8 @@ export type ApplySessionTurnSettlementInput = {
    * input after a bounded terminal condition.
    */
   suppressGoalContinuation?: boolean;
+  /** Pause an active goal atomically with a recoverable allowance stop. */
+  allowanceGoalPause?: { rationale: string };
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -74382,12 +78008,76 @@ export async function applySessionTurnSettlement(
               },
             }
           : null;
+      // The model now durably holds each child answer this attempt returned
+      // to it whole. A pending result repeating only those answers would start
+      // an inference that repeats them, so it is superseded before any claim.
+      const consumedChildResultIds =
+        input.turnStatus === "completed"
+          ? await supersedeChildResultsConsumedByCompletedAttemptTx(tx as unknown as Database, {
+              workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              attemptId: input.attemptId,
+              turnMetadata: turn.metadata,
+            })
+          : [];
+      const consumedChildResultEvent: AppendEventInput | null =
+        consumedChildResultIds.length > 0
+          ? {
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: consumedChildResultIds,
+                count: consumedChildResultIds.length,
+                reason: "consumed_by_parent_read",
+              },
+            }
+          : null;
+      let allowanceGoalEvent: AppendEventInput | null = null;
+      if (input.allowanceGoalPause && input.turnStatus === "completed") {
+        const [pausedGoal] = await tx
+          .update(schema.sessionGoals)
+          .set({
+            status: "paused",
+            pausedReason: "allowance",
+            rationale: input.allowanceGoalPause.rationale,
+            continuationObservedRevision: sql`${schema.sessionGoals.continuationWakeRevision}`,
+            version: sql`${schema.sessionGoals.version} + 1`,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+              eq(schema.sessionGoals.status, "active"),
+            ),
+          )
+          .returning({
+            id: schema.sessionGoals.id,
+            autoContinuations: schema.sessionGoals.autoContinuations,
+            noProgressStreak: schema.sessionGoals.noProgressStreak,
+          });
+        if (pausedGoal) {
+          allowanceGoalEvent = {
+            type: "goal.paused",
+            payload: {
+              goalId: pausedGoal.id,
+              actor: "system",
+              reason: "allowance",
+              rationale: input.allowanceGoalPause.rationale,
+              autoContinuations: pausedGoal.autoContinuations,
+              noProgressStreak: pausedGoal.noProgressStreak,
+            },
+          };
+        }
+      }
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
+        ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
         ...input.events,
+        ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
         const payload =
@@ -76073,6 +79763,27 @@ export async function getSessionTurn(
 }
 
 /**
+ * Read only the immutable causal human for one exact accepted turn. Public
+ * SessionTurn projections intentionally omit this execution-authority field.
+ */
+export async function getSessionTurnInitiatingHumanSubjectId(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ subjectId: schema.sessionTurns.initiatingHumanSubjectId })
+      .from(schema.sessionTurns)
+      .where(
+        and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
+      )
+      .limit(1);
+    return row?.subjectId ?? null;
+  });
+}
+
+/**
  * Resolve the exact currently executable turn/attempt from authoritative
  * pointers in one query. This avoids treating a stale session preview as proof
  * that no attempt exists during an atomic claim transition.
@@ -76153,12 +79864,9 @@ export async function getSessionTurnForAttempt(
  * turn's `started_at` is set before worker admission, so it is not sufficient
  * evidence that the turn's model/reasoning policy was actually used. The
  * durable `turn.started` event is emitted only after admission succeeds and is
- * therefore the continuation boundary used by goal and parent-wake synthesis.
- *
- * Preflight-rejected turns (credit/limit/config failures) deliberately do not
- * override the last effective policy. This matters when an explicit per-turn
- * model differs from the persisted session default: follow-up work must keep
- * the model that actually ran rather than reverting to a stale default.
+ * therefore actual causal execution evidence. It is not the effective defaults:
+ * those also respect explicit model-setting boundaries through the shared
+ * session read projection. Preflight-rejected turns are not execution evidence.
  */
 export async function getLatestStartedSessionTurn(
   db: Database,
@@ -76225,6 +79933,7 @@ export async function getScheduledTargetSessionExecution(
       )
       .orderBy(asc(schema.sessionMcpServers.serverId));
     const latestStarted = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
+    const [effectivePolicy] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
     const variableSets = await Promise.all(
       ((session.variableSetIds as string[]) ?? []).map(async (variableSetId) => {
         const variableSet = await getVariableSet(
@@ -76283,13 +79992,13 @@ export async function getScheduledTargetSessionExecution(
       sessionId: session.id,
       visibility: session.visibility as "user_private" | "workspace_shared",
       authorityEpoch: session.authorityEpoch,
-      model: latestStarted?.model ?? session.model,
+      model: effectivePolicy!.model,
       reasoningEffort: reasoningEffortForMetadata(
-        { reasoningEffort: latestStarted?.reasoningEffort },
+        { reasoningEffort: effectivePolicy!.reasoningEffort },
         session.reasoningEffort as ReasoningEffort,
       ),
       latencyMode: latencyModeForMetadata(
-        { latencyMode: latestStarted?.latencyMode },
+        { latencyMode: effectivePolicy!.latencyMode },
         session.latencyMode as LatencyMode,
       ),
       // A turn stores omitted `tools` as the non-null database default `[]`.
@@ -76627,16 +80336,24 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   // Oversized evidence is omitted, not truncated and then called consumed.
   // Bound index candidates before payload filters, and prefer the newest complete
   // result within the total budget. Explicit reads handle omitted evidence.
-  const candidates = await rawRows<{
-    sequence: number;
-    type: string;
-    payload: unknown;
-    payloadCodecVersion: number | null;
-  }>(tx, childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`));
-  const noticePayload = {
-    ...input.payload,
-    childEventEvidence: boundedChildLifecycleEvidence(candidates),
-  };
+  // A terminal result that carries the child's final answer needs no second
+  // copy: an untruncated answer is itself the consumption evidence.
+  const carriesFinalAnswer =
+    input.kind === "child_terminal_result" && input.payload.finalAnswer !== undefined;
+  const candidates = carriesFinalAnswer
+    ? []
+    : await rawRows<{
+        sequence: number;
+        type: string;
+        payload: unknown;
+        payloadCodecVersion: number | null;
+      }>(
+        tx,
+        childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`),
+      );
+  const noticePayload = carriesFinalAnswer
+    ? input.payload
+    : { ...input.payload, childEventEvidence: boundedChildLifecycleEvidence(candidates) };
   const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -77644,6 +81361,28 @@ export async function getOrCreateSessionSystemUpdateOutbox(
         "System-update outbox source and target sessions must exist in the same workspace",
       );
     }
+    // The producing lifecycle transaction may already have committed this row
+    // with content only it could freeze (the child's final answer, or its
+    // consumption evidence). Enrichment adds facts on top of that content and
+    // never replaces it, under the same row lock the upsert takes.
+    const [committed] = await scopedDb
+      .select({
+        kind: schema.sessionSystemUpdateOutbox.kind,
+        payload: schema.sessionSystemUpdateOutbox.payload,
+        payloadCodecVersion: schema.sessionSystemUpdateOutbox.payloadCodecVersion,
+      })
+      .from(schema.sessionSystemUpdateOutbox)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdateOutbox.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdateOutbox.dedupeKey, input.dedupeKey),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const payload = committed
+      ? withCommittedChildResultContent(committed, input.payload)
+      : input.payload;
     const [row] = await scopedDb
       .insert(schema.sessionSystemUpdateOutbox)
       .values(
@@ -77659,7 +81398,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               classification: input.classification,
               sourceId: input.sourceId,
               summary: input.summary,
-              payload: input.payload,
+              payload,
               lineage: input.lineage,
               personalConnectionDelegations: input.personalConnectionDelegations,
               mcpAccountBindings: input.mcpAccountBindings,
@@ -77684,7 +81423,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               classification: input.classification,
               sourceId: input.sourceId,
               summary: input.summary,
-              payload: input.payload,
+              payload,
               updatedAt: new Date(),
             },
             "summary",
@@ -77745,6 +81484,32 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       ),
     };
   });
+}
+
+/** Content the child's own lifecycle transaction froze into its terminal
+ * result. A committed payload that no longer parses is rewritten from the
+ * enrichment alone, as before this content existed. */
+const COMMITTED_CHILD_RESULT_CONTENT_KEYS = ["finalAnswer", "childEventEvidence"] as const;
+
+function withCommittedChildResultContent(
+  committed: { kind: string; payload: unknown; payloadCodecVersion: number | null },
+  enrichment: ChildLifecycleOutboxPayload,
+): ChildLifecycleOutboxPayload {
+  let stored: Record<string, unknown>;
+  try {
+    stored = parseChildLifecycleOutboxPayload(
+      fromPostgresLosslessJson(committed.payload, committed.payloadCodecVersion),
+      committed.kind,
+    ).payload as Record<string, unknown>;
+  } catch {
+    return enrichment;
+  }
+  if (stored.type !== enrichment.type) return enrichment;
+  const merged: Record<string, unknown> = { ...enrichment };
+  for (const key of COMMITTED_CHILD_RESULT_CONTENT_KEYS) {
+    if (Object.hasOwn(stored, key) && !Object.hasOwn(merged, key)) merged[key] = stored[key];
+  }
+  return merged as ChildLifecycleOutboxPayload;
 }
 
 export async function markSessionSystemUpdateOutboxFailed(
@@ -77987,6 +81752,17 @@ export async function addSessionSystemUpdateWithSourceMutation<
           ...(input.lineage ?? {}),
           ...(prepared?.lineage ?? {}),
         };
+        // The parent's own attempt may already have read this exact answer
+        // before the child's idle boundary committed it. Such a result stays
+        // canonical but arrives consumed: no pending input, no wake.
+        const consumedByParentRead =
+          input.kind === "child_terminal_result" &&
+          input.classification === "success" &&
+          (await childTerminalResultConsumedByParentReadTx(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            parentSessionId: input.sessionId,
+            payload: input.payload,
+          }));
 
         const [inserted] = await tx
           .insert(schema.sessionSystemUpdates)
@@ -78010,7 +81786,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
                   scheduledTaskRunId: input.scheduledTaskRunId ?? null,
-                  state: "pending",
+                  state: consumedByParentRead ? "superseded" : "pending",
                 },
                 "summary",
                 "summaryCodecVersion",
@@ -78105,7 +81881,34 @@ export async function addSessionSystemUpdateWithSourceMutation<
         if (supersededUpdateIds.length > 0 && !supersededEvent) {
           throw new Error("Failed to append system-update supersession event");
         }
-        const supersessionSequences = supersededEvent ? 1 : 0;
+        const [consumedEvent] = consumedByParentRead
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 2 + (supersededEvent ? 1 : 0),
+                    type: "system.update.cancelled",
+                    payload: {
+                      updateIds: [inserted.id],
+                      count: 1,
+                      reason: "consumed_by_parent_read",
+                    },
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning()
+          : [];
+        if (consumedByParentRead && !consumedEvent) {
+          throw new Error("Failed to append consumed child result event");
+        }
+        const supersessionSequences = (supersededEvent ? 1 : 0) + (consumedEvent ? 1 : 0);
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
           tx as unknown as Database,
           input.workspaceId,
@@ -78126,6 +81929,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // wakes one. A deferred notice never resumes a goal by itself: a goal
         // resumed without a workflow wake would strand its obligation.
         const externalGoalInput =
+          !consumedByParentRead &&
           wakeClass === "immediate" &&
           commandMayWake &&
           input.kind !== "goal_continuation" &&
@@ -78201,6 +82005,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           !childLifecycleKind ||
           (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
+          !consumedByParentRead &&
           wakeClass === "immediate" &&
           !session.admissionBlock &&
           commandMayWake &&
@@ -78234,7 +82039,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           added: true,
           reason: "added",
           update: mapSessionSystemUpdate(inserted),
-          shouldWake: wake?.shouldSignal ?? false,
+          shouldWake: wake !== null,
           workflowWakeRevision: wake?.wakeRevision ?? null,
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
@@ -78242,6 +82047,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
             ...(prepared?.events ?? []),
             mapEvent(event),
             ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
+            ...(consumedEvent ? [mapEvent(consumedEvent)] : []),
             ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
           ],
         };
@@ -79419,6 +83225,190 @@ export type ExpireSessionInteractionInterventionResult = {
   events: SessionEvent[];
 };
 
+/**
+ * What the scheduler's approval timeout would answer for this exact
+ * requires_action turn: the first pending tool approval, else the first pending
+ * structured human-input request that a system response may settle (a Skill
+ * review needs a person, so it is never timed out). Null means the timeout has
+ * nothing it may settle, so no timer is offered for it.
+ */
+async function scheduledHumanWaitTargetInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  turn: { id: string; sessionId: string; executionGeneration: number },
+): Promise<{ kind: "approval"; approvalId: string } | { kind: "input"; requestId: string } | null> {
+  const [runState] = await scopedDb
+    .select({
+      pendingApprovals: schema.agentRunStates.pendingApprovals,
+      pendingApprovalsCodecVersion: schema.agentRunStates.pendingApprovalsCodecVersion,
+    })
+    .from(schema.agentRunStates)
+    .where(
+      and(
+        eq(schema.agentRunStates.workspaceId, workspaceId),
+        eq(schema.agentRunStates.sessionId, turn.sessionId),
+        eq(schema.agentRunStates.turnId, turn.id),
+      ),
+    )
+    .orderBy(desc(schema.agentRunStates.stateVersion))
+    .limit(1);
+  const pendingApprovals = runState
+    ? fromPostgresLosslessJson(runState.pendingApprovals, runState.pendingApprovalsCodecVersion)
+    : [];
+  const approvalId = (Array.isArray(pendingApprovals) ? pendingApprovals : [])
+    .map((pending) => approvalIdentifier(pending))
+    .find((id): id is string => typeof id === "string" && id.length > 0);
+  if (approvalId) return { kind: "approval", approvalId };
+  const requests = await scopedDb
+    .select({
+      id: schema.sessionHumanInputRequests.id,
+      questions: schema.sessionHumanInputRequests.questions,
+    })
+    .from(schema.sessionHumanInputRequests)
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, turn.sessionId),
+        eq(schema.sessionHumanInputRequests.turnId, turn.id),
+        eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+      ),
+    )
+    .orderBy(
+      asc(schema.sessionHumanInputRequests.createdAt),
+      asc(schema.sessionHumanInputRequests.id),
+    )
+    .limit(16);
+  const request = requests.find(
+    (candidate) => !candidate.questions.some((question) => question.skillReview != null),
+  );
+  return request ? { kind: "input", requestId: request.id } : null;
+}
+
+/**
+ * The scheduled-run approval timeout deadline of this requires_action turn, when
+ * the task set one and there is something it may settle.
+ */
+async function scheduledHumanWaitDeadlineInRlsContext(
+  scopedDb: Database,
+  workspaceId: string,
+  turn: {
+    id: string;
+    sessionId: string;
+    executionGeneration: number;
+    scheduledTaskRunId: string | null;
+  },
+): Promise<{ runId: string; expiresAt: string } | null> {
+  if (!turn.scheduledTaskRunId) return null;
+  const [wait] = await scheduledRunHumanWaitsInRlsContext(scopedDb, workspaceId, {
+    turnId: turn.id,
+  });
+  if (!wait?.expiresAt || wait.runId !== turn.scheduledTaskRunId) return null;
+  const target = await scheduledHumanWaitTargetInRlsContext(scopedDb, workspaceId, turn);
+  return target ? { runId: wait.runId, expiresAt: wait.expiresAt } : null;
+}
+
+export type ExpireScheduledRunHumanWaitResult = {
+  action: "expired" | "stale" | "not_found";
+  events: SessionEvent[];
+};
+
+/**
+ * The scheduler's approval timeout for one scheduled run's turn: when the
+ * task's frozen `approvalTimeoutSeconds` elapsed with no person answering,
+ * reject the first pending approval (or skip the first pending structured
+ * question) through the exact same acceptance boundary a person uses, as a
+ * clearly labelled system decision with a deterministic client event id. It
+ * re-derives the deadline from durable facts and never acts early; a race with
+ * a person's answer settles as `stale`. Remaining approvals surface as a new
+ * wait whose deadline has already passed, so they are rejected in turn.
+ */
+export async function expireScheduledRunHumanWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    runId: string;
+  },
+): Promise<ExpireScheduledRunHumanWaitResult> {
+  const snapshot = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [turn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          sessionId: schema.sessionTurns.sessionId,
+          executionGeneration: schema.sessionTurns.executionGeneration,
+          scheduledTaskRunId: schema.sessionTurns.scheduledTaskRunId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .limit(1);
+      if (!turn || turn.sessionId !== input.sessionId || turn.scheduledTaskRunId !== input.runId) {
+        return null;
+      }
+      const [wait] = await scheduledRunHumanWaitsInRlsContext(scopedDb, input.workspaceId, {
+        turnId: turn.id,
+      });
+      if (!wait?.expiresAt) return null;
+      const target = await scheduledHumanWaitTargetInRlsContext(scopedDb, input.workspaceId, turn);
+      return target ? { turn, wait, target } : null;
+    },
+  );
+  if (!snapshot) return { action: "not_found", events: [] };
+  if (Date.parse(snapshot.wait.expiresAt!) > Date.now()) return { action: "stale", events: [] };
+  const { turn, wait, target } = snapshot;
+  const minutes = Math.max(1, Math.round((wait.timeoutSeconds ?? 0) / 60));
+  const clientEventId = `${SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX}${createHash("sha256")
+    .update(
+      `${turn.id}\0${turn.executionGeneration}\0${target.kind}\0${
+        target.kind === "approval" ? target.approvalId : target.requestId
+      }`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32)}`;
+  if (target.kind === "approval") {
+    const result = await acceptSessionApprovalDecision(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      subjectId: "system:scheduled-approval-timeout",
+      respondedByKind: "system",
+      payload: {
+        approvalId: target.approvalId,
+        decision: "reject",
+        message: `Rejected automatically by the scheduler: no person decided within this scheduled task's approval timeout (${minutes} min).`,
+      },
+      clientEventId,
+    });
+    return result.action === "accepted"
+      ? { action: "expired", events: result.events }
+      : { action: "stale", events: [] };
+  }
+  const result = await acceptSessionHumanInputResponse(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    requestId: target.requestId,
+    response: { outcome: "skipped" },
+    respondedBy: "system:scheduled-approval-timeout",
+    respondedByKind: "system",
+    clientEventId,
+  });
+  return result.action === "accepted"
+    ? { action: "expired", events: result.events }
+    : { action: "stale", events: [] };
+}
+
 function deterministicSystemUuid(seed: string): string {
   const bytes = createHash("sha256").update(seed, "utf8").digest().subarray(0, 16);
   bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
@@ -80503,7 +84493,7 @@ async function mapSessionWithControl(
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  const [effective] = await withLatestStartedSessionPolicy(
+  const [effective] = await withEffectiveSessionPolicy(
     db,
     row.workspaceId,
     await withCurrentSessionInputWait(db, row.workspaceId, [row]),
@@ -80637,6 +84627,7 @@ function mapSession(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string; activated: boolean },
 ): Session {
+  const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
     id: row.id,
     accountId: row.accountId,
@@ -80653,9 +84644,7 @@ function mapSession(
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
     skills: StoredSessionSkills.parse(row.skills ?? []),
-    ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
-      ? { bundledSkillIds: bundledSkillSelectionFromMetadata(row.metadata) }
-      : {}),
+    ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
@@ -80956,6 +84945,14 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     knowledgeSummary: row.knowledgeSummary as ScheduledTaskRun["knowledgeSummary"],
     completedAt: row.completedAt?.toISOString() ?? null,
     error: row.error,
+    admissionDiagnostic:
+      row.admissionDiagnostic == null
+        ? null
+        : ConnectionAccountSelectionDiagnostic.parse(row.admissionDiagnostic),
+    admissionRefusal:
+      row.admissionRefusal == null
+        ? null
+        : ScheduledTaskAdmissionRefusal.parse(row.admissionRefusal),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -81260,6 +85257,10 @@ function mapConnectionMetadata(row: {
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    anthropicCredentialOperationId: _anthropicOperationId,
+    anthropicCredentialOperationDigest: _anthropicOperationDigest,
+    claude_subscriptionCredentialOperationId: _claudeOperationId,
+    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
     ...publicMetadata
   } = row.metadata;
   return {
@@ -81687,6 +85688,29 @@ function shortHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
 
+/**
+ * A token refresh observed a different plan and retired a plan exclusion.
+ * Bump the durable capacity-waiter wake revision (delivered by the normal
+ * wake dispatcher) so a wait blocked partly by that exclusion re-evaluates,
+ * exactly as a usage observation that retires one does.
+ */
+async function wakeCodexCapacityAfterPlanChange(
+  db: Database,
+  workspaceId: string,
+  acceptedTurnId: string | undefined,
+): Promise<void> {
+  await withSessionCodexCapacityMutation(
+    db,
+    {
+      workspaceId,
+      reason: "codex_plan_changed",
+      acceptedTurnId,
+      mutationSource: "effective",
+    },
+    async () => ({ result: undefined, changed: true }),
+  );
+}
+
 // The resolver modules are cycle-free orchestration leaves. The root barrel is
 // the composition point that supplies their existing persistence accessors while
 // retaining the historical public builder/fetcher signatures.
@@ -81711,6 +85735,9 @@ function codexAuthDeps(authority?: CodexAcceptedCredentialAuthority): CodexAuthD
           authority,
         )
       ).result,
+    onPlanExclusionRetired: async (db, workspaceId) => {
+      await wakeCodexCapacityAfterPlanChange(db, workspaceId, authority?.turnId);
+    },
   };
 }
 
@@ -81751,6 +85778,8 @@ export function buildCodexTokenResolver(
         recordCodexTokenRefresh(targetDb, { ...input, authority }),
       setStatus: (targetDb, targetWorkspaceId, status, lastError, target) =>
         setCodexCredentialStatus(targetDb, targetWorkspaceId, status, lastError, target, authority),
+      onPlanExclusionRetired: (targetDb, targetWorkspaceId) =>
+        wakeCodexCapacityAfterPlanChange(targetDb, targetWorkspaceId, authority.turnId),
     };
   }
   return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);
@@ -81772,6 +85801,30 @@ export async function fetchCodexUsageForAccount(
     codexAuthDeps(
       acceptedTurnId ? { turnId: acceptedTurnId, purpose: "capacity_refresh" } : undefined,
     ),
+    fetchImpl,
+  );
+}
+
+/**
+ * Re-check the CURRENT ChatGPT plan of one credential under exact accepted
+ * authority: the live lease holder of a failing attempt, or capacity-refresh
+ * authority for a turn being admitted. Persists the observation; see
+ * codex-token-resolver `recheckCodexCredentialPlan`.
+ */
+export async function recheckCodexCredentialPlan(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  authority: CodexAcceptedLeaseAuthority | { turnId: string; purpose: "capacity_refresh" },
+  fetchImpl: CodexFetch = fetch,
+): ReturnType<typeof recheckCodexCredentialPlanCore> {
+  return await recheckCodexCredentialPlanCore(
+    db,
+    settings,
+    workspaceId,
+    credentialId,
+    codexAuthDeps(authority),
     fetchImpl,
   );
 }
@@ -81808,6 +85861,7 @@ export {
   type CodexAuthDeps,
   type CodexCredentialCooldownKind,
   type CodexCredentialForRun,
+  type CodexCredentialPlanRecheck,
   type CodexCredentialTokens,
   type CodexRateLimitResetCreditsAccountResult,
   type CodexTokenDeadlineClock,
@@ -81882,6 +85936,8 @@ export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
+export * from "./claude-subscription-usage";
+export * from "./claude-subscription-tokens";
 
 export {
   setWorkspacePauseTimerInTransaction,

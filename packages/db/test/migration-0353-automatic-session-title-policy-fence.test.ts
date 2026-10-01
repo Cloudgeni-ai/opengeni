@@ -996,13 +996,29 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // It also predates the 0507 pending MCP OAuth state table.
     // It also retains the three Pack tables removed from the runtime contract
     // by 0482 and predates the 0492 accepted Codex source table/capture capability.
+    // The allowance helpers introduced by 0552-0554 are likewise absent;
+    // private storage preserves the old table inventory, not these new helpers.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
-      "runtime privilege tables are missing: codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
-      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "runtime privilege tables are missing: codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
+      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
       "RLS tables are absent from the declared contract: pack_installation_components, pack_installations, workspace_packs",
+      "owner-internal target-schema helper usage_allowance_members(uuid, uuid) is missing or ambiguous",
+      "owner-internal target-schema helper usage_allowance_effective_period(uuid, jsonb, timestamp with time zone) is missing or ambiguous",
+      "owner-internal target-schema helper count_workspace_allowance_debit() is missing or ambiguous",
+      "owner-internal target-schema helper capture_usage_allowance_attribution() is missing or ambiguous",
+      "owner-internal target-schema helper reverse_video_allowance_refund() is missing or ambiguous",
+      "owner-internal target-schema helper capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone) is missing or ambiguous",
+      "owner-internal target-schema helper emit_usage_allowance_notifications(uuid, uuid, jsonb, text, timestamp with time zone, text) is missing or ambiguous",
+      "owner-internal target-schema helper usage_allowance_period(jsonb, timestamp with time zone) is missing or ambiguous",
+      "owner-internal target-schema helper validate_usage_allowance_config(jsonb) is missing or ambiguous",
+      "owner-internal target-schema helper validate_usage_allowance_rule(jsonb) is missing or ambiguous",
+      "owner-internal target-schema helper guard_slack_file_upload_operation() is missing or ambiguous",
+      "target-schema runtime capability maintain_usage_allowances(integer, integer) is missing or ambiguous",
+      "target-schema runtime capability usage_allowance_command(jsonb) is missing or ambiguous",
+      "target-schema runtime capability usage_allowance_capability_active(uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability knowledge_index_claim(text, integer, integer) is missing or ambiguous",
       "target-schema runtime capability knowledge_index_work(uuid, uuid, uuid, jsonb) is missing or ambiguous",
       "target-schema runtime capability knowledge_index_billing_policy(uuid, uuid, uuid, text, timestamp with time zone, bigint) is missing or ambiguous",
@@ -1083,6 +1099,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ]);
     const post0353ForbiddenRoutines = new Set([
       "activate_session_tenancy_from_additional_organization(uuid)",
+      "set_verified_signup_trial_credits_enabled(boolean, text, text)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(

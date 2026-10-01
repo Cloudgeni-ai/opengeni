@@ -190,7 +190,9 @@ try {
       const path = new URL(url).pathname;
       if (isLifecycleProxy(path)) throw new Error(`lifecycle proxy path ${path}`);
       if (!isSignedUri(path)) throw new Error(`not OSEP URI: ${path}`);
-      if (new URL(url).host !== "127.0.0.1:28888") throw new Error(`host rewrite failed: ${url}`);
+      if (new URL(url).origin !== new URL(PUBLIC_BASE).origin) {
+        throw new Error("signed endpoint does not use the configured public origin");
+      }
       const denied = await retry(30_000, async () => {
         const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
         if (response.status !== 401)

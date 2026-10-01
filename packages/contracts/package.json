@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.2.0",
+  "version": "5.4.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,18 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./allowance-refusal": {
+      "types": "./src/allowance-refusal.ts",
+      "default": "./src/allowance-refusal.ts"
+    },
+    "./usage-allowances": {
+      "types": "./src/usage-allowances.ts",
+      "default": "./src/usage-allowances.ts"
+    },
+    "./browser-storage": {
+      "types": "./src/browser-storage.ts",
+      "default": "./src/browser-storage.ts"
+    },
     "./managed-sign-in-methods": {
       "types": "./src/managed-sign-in-methods.ts",
       "default": "./src/managed-sign-in-methods.ts"
@@ -25,6 +37,10 @@
     "./client-error-report": {
       "types": "./src/client-error-report.ts",
       "default": "./src/client-error-report.ts"
+    },
+    "./analytics-consent-report": {
+      "types": "./src/analytics-consent-report.ts",
+      "default": "./src/analytics-consent-report.ts"
     },
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",
@@ -121,6 +137,10 @@
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
+    },
+    "./workspace-integration-wire": {
+      "types": "./src/workspace-integration-wire.ts",
+      "default": "./src/workspace-integration-wire.ts"
     },
     "./code-search": {
       "types": "./src/code-search.ts",

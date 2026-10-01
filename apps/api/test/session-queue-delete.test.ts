@@ -212,7 +212,18 @@ describe("session queue delete lookup", () => {
   test("session control rejects oversized reason and actor before mutation", async () => {
     if (!available) return;
     const owner = await freshWorkspace();
-    const sessionId = "00000000-0000-4000-8000-000000000009";
+    // A real target: a missing session is refused as 404 before body checks.
+    const { id: sessionId } = await createSession(db, {
+      accountId: owner.accountId,
+      workspaceId: owner.workspaceId,
+      initialMessage: "oversized control",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
     const publishedBefore = published;
     const wakesBefore = wakes;
 

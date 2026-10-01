@@ -1,8 +1,8 @@
-import { CalendarClockIcon, CloudIcon, PaletteIcon, SlidersHorizontalIcon } from "lucide-react";
+import { ActivityIcon, BoxesIcon, CloudIcon, PaletteIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
-import { BrandMark } from "@/components/brand-mark";
+import { BrandMark, Wordmark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -10,21 +10,23 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+// Copy follows the public landing page (opengeni.ai): its headline, its lead
+// sentence and the platform features it names.
 const highlights = [
-  { icon: SlidersHorizontalIcon, text: "Choose your models and tools" },
-  { icon: CalendarClockIcon, text: "Schedule one-off or recurring tasks" },
-  { icon: CloudIcon, text: "Your agents keep working, even when you close your laptop" },
+  { icon: CloudIcon, text: "Durable sessions that keep working, even when you close your laptop" },
+  { icon: BoxesIcon, text: "Tools and sandboxes, with approvals and permissions" },
+  { icon: ActivityIcon, text: "Observability out of the box" },
 ];
 
 /** Presentation only: the existing managed or broker panel owns authentication. */
 export function SignedOutPage({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="flex min-h-full flex-col bg-bg text-fg">
-        <header className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-6 py-6 sm:px-10">
-          <div className="flex items-center gap-3">
-            <BrandMark className="size-9 text-brand" />
-            <span className="text-lg font-semibold tracking-tight">OpenGeni</span>
+      <div className="og-page-glow flex min-h-full flex-col text-fg">
+        <header className="mx-auto flex w-full max-w-[1040px] items-center justify-between gap-4 px-4 py-6 min-[721px]:px-10">
+          <div className="flex items-center gap-2.5 text-fg">
+            <BrandMark className="w-[31px]" />
+            <Wordmark className="text-[23px]" />
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -38,39 +40,42 @@ export function SignedOutPage({ children }: { children: ReactNode }) {
             </DropdownMenuContent>
           </DropdownMenu>
         </header>
-        <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col justify-center px-6 py-8 sm:px-10 sm:py-14">
-          <div className="grid items-center gap-10 lg:grid-cols-[1.15fr_1fr] lg:gap-20">
+        <div className="mx-auto flex w-full max-w-[1040px] flex-1 flex-col justify-center px-4 py-8 min-[721px]:px-10 min-[721px]:py-14">
+          <div className="grid items-center gap-10 min-[721px]:grid-cols-[minmax(0,1fr)_minmax(0,390px)] min-[721px]:gap-16">
             <section aria-labelledby="signed-out-heading" className="min-w-0">
-              <p className="mb-4 text-xs font-medium tracking-widest text-brand uppercase">
-                Your AI workspace
-              </p>
               <h1
                 id="signed-out-heading"
-                className="text-4xl font-semibold tracking-tight text-balance sm:text-5xl"
+                className="font-display text-[40px] leading-[1.08] font-medium tracking-[-1.5px] text-balance min-[721px]:text-[48px] min-[721px]:tracking-[-2px]"
               >
-                Open-source cloud agents
+                Infrastructure <span className="whitespace-nowrap">for agents</span>{" "}
+                <em className="font-serif text-[1.18em] leading-none font-normal">
+                  that actually finish the job.
+                </em>
               </h1>
-              <p className="mt-5 max-w-lg text-base leading-relaxed text-fg-muted">
-                Work on research, documents, and code. Keep the conversation, context, and results
-                together.
+              <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">
+                Build AI products without building the infrastructure from scratch.
               </p>
-              <ul className="mt-9 space-y-6">
+              <ul className="mt-8 space-y-4">
                 {highlights.map(({ icon: Icon, text }) => (
-                  <li key={text} className="flex items-start gap-3 text-sm font-medium">
-                    <Icon className="mt-0.5 size-5 shrink-0 text-brand" aria-hidden="true" />
-                    <span>{text}</span>
+                  <li key={text} className="flex items-start gap-3 text-sm text-fg">
+                    <span className="mt-px flex size-6 shrink-0 items-center justify-center rounded-md border border-border bg-surface text-fg-muted">
+                      <Icon className="size-3.5" aria-hidden="true" />
+                    </span>
+                    <span className="pt-0.5">{text}</span>
                   </li>
                 ))}
               </ul>
             </section>
-            <div className="min-w-0 rounded-lg border border-border bg-surface p-5 shadow-sm sm:p-7 forced-colors:border-[CanvasText]">
+            <div className="w-full min-w-0 justify-self-center rounded-xl border border-border bg-surface p-[30px] min-[721px]:max-w-[390px] min-[721px]:justify-self-end forced-colors:border-[CanvasText] [&_button[type=submit]]:min-h-[42px]">
               {children}
             </div>
           </div>
         </div>
-        <footer className="mx-auto flex w-full max-w-6xl flex-wrap justify-between gap-3 px-6 py-6 text-xs text-fg-subtle sm:px-10">
-          <span>OpenGeni</span>
-          <span>Your conversations. Your projects. One workspace.</span>
+        <footer className="border-t border-border">
+          <div className="mx-auto flex w-full max-w-[1040px] flex-wrap justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
+            <Wordmark className="text-[15px] text-fg-muted" />
+            <span>Your conversations. Your projects. One workspace.</span>
+          </div>
         </footer>
       </div>
     </div>

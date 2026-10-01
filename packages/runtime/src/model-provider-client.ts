@@ -29,6 +29,10 @@ import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
+import {
+  observeClaudeUsageResponse,
+  prepareClaudeSubscriptionRequest,
+} from "./claude-subscription-usage";
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
@@ -287,6 +291,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     return cached;
   }
   if (scopedCredentialProvider && !provider.apiKey) {
+    if (provider.api === "anthropic-messages")
+      throw new Error(
+        "Claude is not connected. Ask someone who manages this connection to connect it in Models.",
+      );
     if (provider.kind === "openrouter-organization") {
       throw new OrganizationOpenRouterUnavailableError();
     }
@@ -395,6 +403,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
+    init = await prepareClaudeSubscriptionRequest(provider, input, init);
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
@@ -402,6 +411,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     const started = performance.now();
     try {
       const response = await inner(input, capture.init);
+      observeClaudeUsageResponse(provider, response);
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {

@@ -4,16 +4,30 @@ import {
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { freezeAgentLearningPolicy, withSessionRlsActorContext } from "@opengeni/db";
+import {
+  freezeAgentLearningPolicy,
+  withSessionRlsActorContext,
+  withCreditDebitAttribution,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export async function withAccessGrantSessionRlsContext<T>(
-  deps: ApiRouteDeps,
+  deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
   fn: () => Promise<T>,
 ): Promise<T> {
   if (grant.principalKind !== "agent_attempt") {
-    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
+    return await withCreditDebitAttribution(
+      grant.principalKind === "human_session"
+        ? { kind: "human", initiatingHumanSubjectId: grant.subjectId }
+        : grant.principalKind === "service" ||
+            grant.principalKind === "api_key" ||
+            grant.principalKind === "configured_key" ||
+            grant.principalKind === "mcp_gateway"
+          ? { kind: "service" }
+          : { kind: "unknown" },
+      () => withSessionRlsActorContext({ subjectId: grant.subjectId }, fn),
+    );
   }
   const callerSessionId = grant.metadata?.sessionId;
   if (typeof callerSessionId !== "string") {
@@ -32,13 +46,22 @@ export async function withAccessGrantSessionRlsContext<T>(
         executionGeneration: actor.executionGeneration,
       },
     });
-    return await withSessionRlsActorContext(
+    return await withCreditDebitAttribution(
       {
-        subjectId: actor.subjectId,
-        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-        privateFileOwnerSubjectId: learning.defaultScope === "personal" ? learning.subjectId : null,
+        kind: "turn",
+        turnId: actor.turnId,
+        initiatingHumanSubjectId: actor.initiatingHumanSubjectId ?? null,
       },
-      fn,
+      () =>
+        withSessionRlsActorContext(
+          {
+            subjectId: actor.subjectId,
+            initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+            privateFileOwnerSubjectId:
+              learning.defaultScope === "personal" ? learning.subjectId : null,
+          },
+          fn,
+        ),
     );
   } catch (error) {
     if (error instanceof SessionAuthorizationDeniedError) {

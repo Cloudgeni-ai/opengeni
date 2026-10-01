@@ -4,6 +4,10 @@ import type { SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "@opengeni/react";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 const control: SessionQueueSnapshot["effectiveControl"] = {
   state: "active",

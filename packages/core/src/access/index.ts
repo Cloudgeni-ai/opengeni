@@ -10,6 +10,7 @@ import {
   type AccountGrant,
   type AccessContext,
   type AccessGrant,
+  type OrganizationApiKeyAccess,
   Permission,
   type Workspace,
 } from "@opengeni/contracts";
@@ -34,6 +35,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
+import { serviceInitiatorFromHeaders } from "./service-initiator";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -141,6 +143,10 @@ const accountScopedApiKeyContexts = new WeakMap<
   AccessContext,
   Readonly<{ accountId: string; permissions: readonly Permission[] }>
 >();
+const apiKeyServiceContexts = new WeakMap<
+  AccessContext,
+  Pick<AccessGrant, "serviceInitiator" | "serviceInitiatorContext">
+>();
 const verifiedOrganizationServiceAuthorizations = new WeakMap<
   AccessGrantAuthorization,
   AccessGrant
@@ -202,6 +208,11 @@ export function accountScopedApiKeyWorkspaceAuthority(
     accountId: authority.accountId,
     permissions: [...authority.permissions],
   };
+}
+
+/** The organization access tier is derived from the stored workspace-admin wildcard. */
+export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
+  return permissions.includes("workspace:admin") ? "full" : "read";
 }
 
 /**
@@ -567,6 +578,7 @@ async function accessGrantAuthorization(
         ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
         permissions: authority.permissions,
         principalKind: "api_key",
+        ...apiKeyServiceContexts.get(context),
       };
     } else {
       throw new HTTPException(403, { message: "workspace access denied" });
@@ -690,6 +702,21 @@ export function hasPermission(permissions: Permission[], permission: Permission)
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {
+  const service = serviceInitiatorFromHeaders(c.req.raw.headers);
+  if (service) {
+    if (deps.settings.productAccessMode === "local") {
+      throw new HTTPException(422, {
+        message: "service initiator headers require an organization or workspace API key",
+      });
+    }
+    const context = await apiKeyAccessContext(c, deps, deps.settings.productAccessMode);
+    if (!context) {
+      throw new HTTPException(422, {
+        message: "service initiator headers require an organization or workspace API key",
+      });
+    }
+    return context;
+  }
   if (c.req.header("x-opengeni-external-actor") !== undefined) {
     if (deps.settings.productAccessMode === "local") {
       throw new HTTPException(401, {
@@ -794,6 +821,16 @@ async function apiKeyAccessContext(
     return null;
   }
   const externalHeader = c.req.header("x-opengeni-external-actor");
+  const service = serviceInitiatorFromHeaders(c.req.raw.headers);
+  if (
+    service &&
+    apiKey.credentialKind !== "organization" &&
+    apiKey.credentialKind !== "workspace"
+  ) {
+    throw new HTTPException(422, {
+      message: "service initiator headers require an organization or workspace API key",
+    });
+  }
   if (externalHeader !== undefined) {
     if (apiKey.workspaceId !== null || apiKey.credentialKind !== "organization") {
       throw new HTTPException(403, { message: "external actors require an organization key" });
@@ -854,7 +891,7 @@ async function apiKeyAccessContext(
     : apiKey.permissions.filter((permission) =>
         accountScopedApiKeyAccountPermissions.has(permission),
       );
-  const context = {
+  const context: AccessContext = {
     mode,
     subjectId,
     subjectLabel: apiKey.name,
@@ -875,12 +912,14 @@ async function apiKeyAccessContext(
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
             principalKind: "api_key",
+            ...service,
           },
         ]
       : [],
     defaultAccountId: apiKey.accountId,
     defaultWorkspaceId: apiKey.workspaceId,
-  } satisfies AccessContext;
+  };
+  if (service) apiKeyServiceContexts.set(context, service);
   if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
     accountScopedApiKeyContexts.set(
       context,
@@ -893,6 +932,30 @@ async function apiKeyAccessContext(
         ),
       }),
     );
+  }
+  // Report the exact stamped authority consumed by accessGrantAuthorization,
+  // rather than re-deriving organization-key permissions from a separate rule.
+  // This projection is never an authorization input, and the asUser branch
+  // above deliberately omits it instead of advertising the service's authority.
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  const workspaceGrant =
+    apiKey.credentialKind === "workspace" ? context.workspaceGrants[0] : undefined;
+  const workspacePermissions = authority?.permissions ?? workspaceGrant?.permissions;
+  if (workspacePermissions) {
+    context.credential = {
+      kind: authority ? "organization_api_key" : "workspace_api_key",
+      ...(authority ? { access: organizationApiKeyAccess(apiKey.permissions) } : {}),
+      accountId: apiKey.accountId,
+      workspaceId: apiKey.workspaceId,
+      effectiveWorkspacePermissions: Permission.options.filter(
+        (permission) =>
+          !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
+          hasPermission(workspacePermissions, permission),
+      ),
+      note: authority
+        ? "These permissions apply to every shared workspace in this organization, not Personal workspaces. workspaceGrants need not enumerate them; accountGrants report organization-level permissions. asUser requests also require user authority."
+        : "These permissions apply only to the workspace identified by workspaceId; they grant no organization-wide workspace authority.",
+    };
   }
   return context;
 }

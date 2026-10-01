@@ -12,18 +12,20 @@ A goal is `active`, `paused`, or `completed`.
 
 - **Set** it when creating a session, from a scheduled task, or from inside the run with the agent's `goal_set` tool. A goal carries an objective and success criteria.
 - **Complete** is explicit: the agent calls `goal_complete` with evidence.
-- **Pause** holds the goal with a rationale: the agent's `goal_pause`, a user pause, an API call, or a budget or admission limit. Any pause is resumable with `goal_resume`.
+- **Pause** holds the goal with a rationale: the agent's `goal_pause`, a user pause, an API call, or a budget or admission limit. Any pause is resumable with `goal_resume`. The agent resumes a paused goal when you ask it to continue, or when the blocker it paused for clears; a question gets an answer, not a resume.
 - **Clear** removes the goal. The session stays usable as an ordinary session.
 
 Pausing the session (the workstream) is separate from pausing the goal: it holds inference without changing goal state.
 
-## Reports are artifact deliverables
+## Reports
 
-User-facing reports are native document Artifacts, including reports produced
-while doing another task—for example, a Knowledge organization audit. The agent
-declares the report before authoring, creates the document through the Documents
-Skill, inspects the relevant content after its final edit, and provides the
-artifact reference in its handoff.
+The agent answers in chat by default, including summaries and reports. It
+creates a native document Artifact when you ask for a document or file, or when
+the result is large or clearly meant to be kept or shared, such as a Knowledge
+organization audit you want to keep. It then replies with a short summary and
+the link. Inside a goal, the agent declares the document before authoring,
+creates it through the Documents Skill, inspects the relevant content after its
+final edit, and provides the artifact reference in its handoff.
 
 Declared report requirements must have verified artifact delivery evidence before
 the goal can complete. A sandbox link or a claim that the document was inspected

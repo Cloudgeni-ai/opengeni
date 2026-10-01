@@ -77,7 +77,9 @@ mock.module("@/components/artifacts/site-conversations", () => ({
   SiteConversations: () => createElement("button", { type: "button" }, "Conversations"),
 }));
 
-mock.module("@/components/artifacts/artifact-sandbox", () => ({
+const actualArtifacts = await import("@opengeni/react/artifacts");
+mock.module("@opengeni/react/artifacts", () => ({
+  ...actualArtifacts,
   ArtifactSandbox: ({ children }: { children?: ReactNode }) =>
     createElement("div", { "data-testid": "site-sandbox" }, children),
 }));
@@ -119,6 +121,11 @@ async function renderDetail() {
   return { container, root };
 }
 
+/** Archive lives in the page's ⋯ menu. */
+function hasArchive(container: HTMLElement) {
+  return container.querySelector('button[aria-label^="More actions for"]') !== null;
+}
+
 function hasAction(container: HTMLElement, label: string) {
   const needle = label.replace(/\s+/g, " ").trim();
   return [...container.querySelectorAll("button, a")].some((node) => {
@@ -127,12 +134,12 @@ function hasAction(container: HTMLElement, label: string) {
   });
 }
 
-test("loaded Site keeps Archive and Edit with Geni behind permission checks", async () => {
+test("loaded Site keeps Archive and Edit with Opengeni behind permission checks", async () => {
   loadError = null;
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(true);
-    expect(hasAction(container, "Edit with Geni")).toBe(true);
+    expect(hasArchive(container)).toBe(true);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
   } finally {
     await act(async () => root.unmount());
@@ -140,12 +147,12 @@ test("loaded Site keeps Archive and Edit with Geni behind permission checks", as
   }
 });
 
-test("missing Site hides Archive and Edit with Geni", async () => {
+test("missing Site hides Archive and Edit with Opengeni", async () => {
   loadError = new OpenGeniApiError(404, "", { correlationId: "corr-missing-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site isn't available");
     expect(container.textContent).toContain("Reference: corr-missing-site");
     expect(container.textContent).not.toContain("OpenGeni API 404");
@@ -161,8 +168,8 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
   accessContext.workspaceGrants[0]!.permissions = [];
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
@@ -175,8 +182,8 @@ test("malformed Site id hides mutation actions", async () => {
   loadError = new OpenGeniApiError(422, "", { correlationId: "corr-malformed-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site link isn't valid");
   } finally {
     await act(async () => root.unmount());
@@ -188,8 +195,8 @@ test("transient Site load failure offers retry without mutation actions", async 
   loadError = new OpenGeniApiError(503, "", { correlationId: "corr-transient-site" });
   const { container, root } = await renderDetail();
   try {
-    expect(hasAction(container, "Archive")).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasArchive(container)).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Retry")).toBe(true);
     expect(container.textContent).toContain("Couldn't load this Site");
   } finally {

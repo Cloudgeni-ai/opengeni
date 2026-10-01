@@ -1,5 +1,81 @@
 # @opengeni/config
 
+## 3.1.1
+
+### Patch Changes
+
+- aad6598: Claude subscription setup and replacement require only the setup token. Observe
+  provider usage and reset windows from ordinary model responses, including quota
+  errors, and expose scoped cached reads and authorized refreshes. Preserve the last
+  reading when inference-only tokens cannot use the separate usage endpoint; fence
+  cached readings against credential replacement and revocation.
+- b591ea1: Support native Claude Messages with separate encrypted Anthropic API-key and Claude subscription setup-token connections, workspace access policies, streaming tools and thinking, prompt caching and usage accounting. Add connection UI and payment-source labels. Migration 0544 expands organization connection kinds and lifecycle validation.
+
+  Pin the Claude subscription client identity headers, persist account/device metadata with encrypted credentials, and add request-scoped attribution. Existing token-only connections require replacement with identity metadata. The captured billing checksum remains unverified and is not replayed.
+
+  Preserve Claude session identity across worker turns and recovery while keeping prompt lineage scoped to each run.
+
+  Admit organization Claude models through session creation and lock their correct connection kind. Preserve Claude provider labels in the client catalog. Project initial system/developer instructions into Anthropic’s top-level system field so full agent sessions with skill instructions execute successfully.
+
+  Polish Claude setup with local settings import, full-page token renewal, named model choices, provider marks, accurate subscription payment labels, and workspace discovery of organization-owned connections.
+
+  Support workspace-owned Claude credentials, model generations, access controls and setup/account screens alongside organization connections. Migration 0545 expands workspace custom-model provider kinds. Gate Claude subscriptions behind OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED (default off), leaving Anthropic API keys and other providers unchanged.
+
+- 126a395: Make agent effort proportional to the request. The operational contract now asks for a direct answer with minimal tool use on simple asks, reuse of the earlier approach on repeat asks, one-sentence progress updates without a forced opening update, answer-first final responses, answers from web or published sources that are short but not partial (the best-supported finding, figures in the user's terms, and a source link beside each study or figure), and reading each Skill once without announcing it. A question asked mid-run gets an answer instead of restarting work; while work is still in flight the agent answers in one or two sentences in the user's terms, naming a blocker only when the user must act on it, and registers the wait again with the earlier reason and remaining time, even with an active goal, so its result still resumes the agent without pushing back a timed recheck, and a question alone no longer resumes a paused goal. Answers stay in chat by default; a document Artifact is created only when the user asks for one or the deliverable is large or meant to be kept or shared, and a session no longer creates a goal only to declare a document. The default persona is a general assistant; it works on a branch with a pull request only when the repository has a remote and git provider credentials, and otherwise leaves changes in the working tree without branch or pull request talk unless the user asks, saying only that the changes are not pushed when the repository has a remote, and the Sites and visualize Skill descriptors apply when the user asks or clearly benefits.
+- 2088678: Support an optional exact email allowlist for native human account admission.
+- Updated dependencies [01f50bf]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [872391f]
+- Updated dependencies [aad6598]
+- Updated dependencies [6146167]
+- Updated dependencies [8019cac]
+- Updated dependencies [e14db2a]
+- Updated dependencies [e917ce3]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [a6854a7]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a82657f]
+- Updated dependencies [cabfc5e]
+- Updated dependencies [8669490]
+- Updated dependencies [7a08660]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [30414a0]
+- Updated dependencies [514f8ea]
+- Updated dependencies [b28d5fa]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [bcd9988]
+- Updated dependencies [d1f4724]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/codex@0.2.29
+
+## 3.1.0
+
+### Minor Changes
+
+- 585f2c1: Add an operator-disabled ephemeral Chromium BrowserSession mode for disposable sandbox verification. Explicit requests use isolated browser contexts within a trusted actor and placement partition, preserve existing private-profile defaults, and become terminal after shared process loss instead of silently recreating or replaying work.
+
+### Patch Changes
+
+- 74e0dfb: Refresh the default Modal desktop image to the verified publication supporting
+  viewport actions and focused DOM reads. Report exact legacy controller schema
+  and route mismatches as unsupported controller features without replaying browser
+  actions or restarting live sessions.
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+- Updated dependencies [3aab8f9]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/codex@0.2.28
+
 ## 3.0.0
 
 ### Major Changes

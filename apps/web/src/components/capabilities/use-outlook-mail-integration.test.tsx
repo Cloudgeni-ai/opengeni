@@ -264,7 +264,7 @@ describe("useOutlookMailIntegration", () => {
     try {
       expect(model?.chip).toEqual({ label: "Connected", tone: "ok" });
       expect(model?.access?.title).toBe("Connected accounts");
-      expect(model?.access?.editLabel).toBe("+ Add account");
+      expect(model?.access?.editLabel).toBe("Add account");
       expect(model?.access?.items).toHaveLength(1);
       expect(model?.access?.items[0]).toMatchObject({ name: "ana@acme.com", status: "ok" });
       // A healthy account offers no Reconnect, but always a per-instance Remove:

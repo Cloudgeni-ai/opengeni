@@ -356,6 +356,7 @@ export {
   toolDisplayName,
 } from "./timeline";
 export type {
+  GroupTimelineOptions,
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
@@ -425,6 +426,7 @@ export type {
   TurnSummaryFacetResult,
   TurnSummaryOptions,
   TurnSummaryProps,
+  TurnSummaryStatus,
   LightboxControlLabels,
 } from "./timeline";
 
@@ -481,6 +483,10 @@ export type { CommandPaletteProps } from "./components/command-palette";
 export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
 export { SessionConversation } from "./components/session-conversation";
+export { SessionList } from "./components/session-list";
+export type { SessionListLabels, SessionListProps } from "./components/session-list";
+export { OpenGeniChat } from "./components/open-geni-chat";
+export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
 export type { SessionConversationProps } from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
@@ -546,6 +552,25 @@ export type {
   MarkdownInteractiveBlock,
   SandboxFileLocation,
 } from "./components/markdown";
+export {
+  OpenGeniLinkProvider,
+  chainLinkResolvers,
+  sessionLinkResolver,
+  useOpenGeniLinkResolver,
+  viewerLinkResolver,
+} from "./components/open-geni-links";
+export type {
+  OpenGeniLinkResolution,
+  OpenGeniLinkResolver,
+  OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
+} from "./components/open-geni-links";
+export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
@@ -567,6 +592,9 @@ export type { WorkbenchChangesProps } from "./components/workbench-changes";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
 export { PierreDiff } from "./components/pierre-diff";
+// Opt in to the optional `@pierre/diffs` peer with `enablePierreDiffs()` from
+// `@opengeni/react/diffs`; the root entry never names the peer.
+export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-loader";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";
@@ -644,3 +672,8 @@ export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 
 export { StartupTimings } from "./timeline/startup-timings";
 export { setStartupDetails, useStartupDetails } from "./timeline/startup-preference";
+
+export { ClaudeMark } from "./components/claude-mark";
+export { AnthropicMark } from "./components/anthropic-mark";
+export { OpenRouterMark } from "./components/openrouter-mark";
+export { GrokMark } from "./components/grok-mark";

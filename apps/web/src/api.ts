@@ -454,7 +454,15 @@ export async function managedActorFetch(
 /** HTTP/1 browsers cap all same-origin SSE connections across every tab at six. */
 export function shouldBoundBrowserSseForProtocol(protocol: string | null | undefined): boolean {
   const normalized = protocol?.trim().toLowerCase();
-  return normalized === "http/1.0" || normalized === "http/1.1";
+  // Cross-origin ResourceTiming hides the protocol without Timing-Allow-Origin;
+  // startup can also precede the first completed timing entry. Reserve HTTP/1
+  // capacity until a multiplexed transport is positively observed.
+  return !(
+    normalized === "h2" ||
+    normalized === "h2c" ||
+    normalized === "h3" ||
+    normalized?.startsWith("h3-")
+  );
 }
 
 function browserSseTransportInput(
@@ -463,6 +471,7 @@ function browserSseTransportInput(
   headers: Headers,
 ): readonly [input: string | URL | Request, cleanCloseDelayMs: number, nativeLifetimeMs: number] {
   if (
+    typeof window === "undefined" ||
     requestMethod(input, init) !== "GET" ||
     !headers.get("accept")?.toLowerCase().includes("text/event-stream") ||
     (typeof Request !== "undefined" && input instanceof Request) ||
@@ -497,9 +506,10 @@ function isForegroundApiRequest(
   try {
     const raw = typeof Request !== "undefined" && input instanceof Request ? input.url : input;
     const base = typeof window === "undefined" ? "http://opengeni.local" : window.location.href;
+    // Prioritize finite reads without pausing live events behind mutations.
+    // A held attention acknowledgement must still receive a newer frontier.
     return (
-      new URL(String(raw), base).pathname.startsWith("/v1/") &&
-      !new Set(["HEAD", "OPTIONS"]).has(requestMethod(input, init))
+      new URL(String(raw), base).pathname.startsWith("/v1/") && requestMethod(input, init) === "GET"
     );
   } catch {
     return false;
@@ -1159,17 +1169,17 @@ function showApiUpdateNotice(willReload: boolean): void {
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
   notice.textContent = willReload
-    ? "OpenGeni updated — reloading…"
-    : "OpenGeni updated. Reload this tab to continue.";
+    ? "Opengeni updated — reloading…"
+    : "Opengeni updated. Reload this tab to continue.";
   Object.assign(notice.style, {
     position: "fixed",
     inset: "16px 16px auto auto",
     zIndex: "2147483647",
-    border: "1px solid rgba(255,255,255,.14)",
+    border: "1px solid var(--og-color-border)",
     borderRadius: "10px",
-    background: "#17191d",
-    color: "#f5f7fa",
-    boxShadow: "0 12px 32px rgba(0,0,0,.35)",
+    background: "var(--og-color-surface-1)",
+    color: "var(--og-color-fg)",
+    boxShadow: "var(--og-shadow-lg)",
     font: "500 14px/1.4 Inter, system-ui, sans-serif",
     padding: "10px 14px",
   });

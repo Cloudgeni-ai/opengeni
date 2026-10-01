@@ -33,8 +33,15 @@ export const MEANINGFUL_SESSION_EVENT_TYPES = [
   "session.event.envelope_omitted",
 ] as const;
 
-export function meaningfulSessionEventSql(alias: string): SQL {
+/**
+ * `0503` is that migration's index predicate. `0527` adds two changes: completed
+ * commentary is activity, and a `turn.completed` recording the `reply` a human
+ * or API message received before its turn waited for input is an answer even
+ * though its `output` is empty.
+ */
+function attentionSessionEventSql(alias: string, revision: "0503" | "0527"): SQL {
   const e = sql.identifier(alias);
+  const turnResult = sql`coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result')`;
   // These are code-owned literals, not request values. Literal predicates let
   // PostgreSQL use the matching partial index even with a generic cached plan.
   return sql`${e}.type in (${sql.join(
@@ -43,12 +50,43 @@ export function meaningfulSessionEventSql(alias: string): SQL {
   )})
     and ${e}.duplicate_of_event_id is null
     and (${e}.turn_association is null or ${e}.turn_association = 'current')
-    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')
+    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'text', '') <> '')${
+      revision === "0527"
+        ? sql`
+    and (${e}.type <> 'agent.message.completed' or coalesce(${e}.payload ->> 'phase', '') <> 'commentary')
     and (${e}.type <> 'turn.completed' or (
       not (${e}.payload ?| array['maintenance', 'segmentLimit'])
-      and coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result') is not null
-      and coalesce(nullif(${e}.payload -> 'output', 'null'::jsonb), ${e}.payload -> 'result') not in ('null'::jsonb, '""'::jsonb)
-    ))`;
+      and ((
+        ${turnResult} is not null
+        and ${turnResult} not in ('null'::jsonb, '""'::jsonb)
+      ) or coalesce(${e}.payload ->> 'reply', '') <> '')
+    ))`
+        : sql`
+    and (${e}.type <> 'turn.completed' or (
+      not (${e}.payload ?| array['maintenance', 'segmentLimit'])
+      and ${turnResult} is not null
+      and ${turnResult} not in ('null'::jsonb, '""'::jsonb)
+    ))`
+    }`;
+}
+
+/**
+ * Completed commentary is progress narrating the work, not an answer, so it
+ * never creates attention on its own; the answer or turn outcome that follows
+ * does. A turn that ends waiting for input has no output, but when a human or
+ * API message started it, the `reply` it records is that answer. Exactly the
+ * migration 0527 partial-index predicate.
+ */
+export function meaningfulSessionEventSql(alias: string): SQL {
+  return attentionSessionEventSql(alias, "0527");
+}
+
+/**
+ * The migration 0503 index predicate. Older API processes still probe with it
+ * during a rolling deploy; nothing current queries it.
+ */
+export function commentaryInclusiveMeaningfulSessionEventSql(alias: string): SQL {
+  return attentionSessionEventSql(alias, "0503");
 }
 
 /** A stored audit preview can still need attention, but cannot stand in for
@@ -73,6 +111,75 @@ export function meaningfulSessionSequenceSql(
         and ${meaningfulSessionEventSql("meaningful")}
       order by meaningful.sequence desc limit 1
     ), 0)`;
+}
+
+/** The child's newest ordinary turn outcomes, newest first. Only a
+ * result-bearing `turn.completed` here is the child's current answer: an older
+ * answer behind a newer failed, cancelled, superseded, or segment-limited turn
+ * is never reported as the result. A segment-limit completion (`max_turns`,
+ * `budget_exhausted`) is the outcome of the turn that stopped there, and its
+ * empty output means "no answer". Only standalone maintenance is not an
+ * outcome.
+ *
+ * `goalContinuationOnly` marks a turn claimed only to continue the child's
+ * goal: a goal-routed turn to which no other input (a message, a Steer, a
+ * child or command result) was ever delivered. Such a turn follows an answer
+ * rather than producing the task's result, so the caller walks back past it.
+ * Each outcome probe walks the (workspace, session, type, sequence) index
+ * backwards within `limit`, and only the selected rows' payloads are read.
+ * The child's delivered input is scanned once for all selected turns.
+ *
+ * `goalActivatedAt` is the newest `goal.set` or `goal.resumed` event: goal
+ * continuation turns never run across an idle boundary that reported the goal
+ * inactive, so a continuation walk stops there instead of reaching output a
+ * result for an earlier run already reported. */
+export function childRecentTurnOutcomesSql(
+  workspaceId: SQLWrapper,
+  sessionId: SQLWrapper,
+  limit: number,
+): SQL {
+  return sql`with latest as materialized (
+    select outcome.sequence, outcome.turn_id from session_events outcome
+    where outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
+      and outcome.type in ('turn.completed', 'turn.failed', 'turn.cancelled', 'turn.superseded')
+      and outcome.duplicate_of_event_id is null
+      and (outcome.turn_association is null or outcome.turn_association = 'current')
+      and (outcome.type <> 'turn.completed' or not (outcome.payload ? 'maintenance'))
+    order by outcome.sequence desc limit ${limit}
+  ), goal_turns as materialized (
+    select turn.id from session_turns turn
+    where turn.workspace_id = ${workspaceId} and turn.session_id = ${sessionId}
+      and turn.id in (select latest.turn_id from latest where latest.turn_id is not null)
+      and turn.source = 'goal'
+  ), goal_turns_with_input as materialized (
+    select distinct input.delivered_turn_id as id from session_system_updates input
+    where input.workspace_id = ${workspaceId} and input.session_id = ${sessionId}
+      and input.delivered_turn_id in (select goal_turns.id from goal_turns)
+      and input.kind <> 'goal_continuation'
+  ), goal_activation as (
+    select max(activation.sequence) as sequence from (
+      (select event.sequence from session_events event
+        where event.workspace_id = ${workspaceId} and event.session_id = ${sessionId}
+          and event.type = 'goal.set'
+        order by event.sequence desc limit 1)
+      union all
+      (select event.sequence from session_events event
+        where event.workspace_id = ${workspaceId} and event.session_id = ${sessionId}
+          and event.type = 'goal.resumed'
+        order by event.sequence desc limit 1)
+    ) activation
+  )
+  select outcome.sequence, outcome.type, outcome.payload,
+    outcome.payload_codec_version as "payloadCodecVersion",
+    (latest.turn_id in (select goal_turns.id from goal_turns)
+      and latest.turn_id not in (select goal_turns_with_input.id from goal_turns_with_input))
+      is true as "goalContinuationOnly",
+    coalesce((select goal_activation.sequence from goal_activation), 0) as "goalActivatedAt"
+  from latest
+  join session_events outcome
+    on outcome.workspace_id = ${workspaceId} and outcome.session_id = ${sessionId}
+      and outcome.sequence = latest.sequence
+  order by outcome.sequence desc`;
 }
 
 /** Bound indexed candidate rows BEFORE testing payload size/completeness. Without

@@ -19,15 +19,10 @@ import {
 import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
-  getBillingBalance,
-  getLatestStartedSessionTurn,
   getWorkspaceModelPolicy,
   getSessionGoal,
-  isCodexBilledTurn,
   materializeGoalContinuation,
   requireSession,
-  sumUsageQuantity,
-  type Database,
 } from "@opengeni/db";
 import type {
   ControlActivityServices,
@@ -39,6 +34,7 @@ import {
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -70,21 +66,15 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
-    // must preserve the newest policy that actually emitted `turn.started`.
-    // Admission-rejected turns have no such event and cannot poison it.
+    // follows effective defaults: a started turn or a newer explicit settings
+    // boundary. Admission-rejected turns cannot poison that projection.
     // Kept below the goal-less fast path so a non-goal session still skips the
     // reads entirely.
     const session = await requireSession(db, input.workspaceId, input.sessionId);
-    const latestStartedTurn = await getLatestStartedSessionTurn(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
-    const inheritedContinuationModel = latestStartedTurn?.model ?? session.model;
+    const inheritedContinuationModel = session.model;
     let continuationModel = inheritedContinuationModel;
-    const continuationReasoningEffort =
-      latestStartedTurn?.reasoningEffort ?? session.reasoningEffort;
-    const continuationLatencyMode = latestStartedTurn?.latencyMode ?? session.latencyMode;
+    const continuationReasoningEffort = session.reasoningEffort;
+    const continuationLatencyMode = session.latencyMode;
     const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
     if (
       inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
@@ -116,30 +106,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
-    // so it must not be budget-paused for zero OpenGeni credits. This file uses
-    // BASE settings (no codex overlay); the predicate does its own credential read.
-    const isCodexRun = await isCodexBilledTurn({
-      db,
-      settings,
-      workspaceId: input.workspaceId,
-      model: continuationModel,
-    });
-    const fundedWithoutCredits = goalContinuationFundedWithoutCredits(
-      settings,
-      continuationModel,
-      isCodexRun,
-    );
-    // Budget exhaustion pauses the goal visibly instead of failing the
-    // session. Computed up front and applied inside the locked decision so a
-    // limits pause never consumes continuation budget.
-    const budgetBlocked = await goalRunBudgetBlocked(
-      settings,
-      db,
-      input.accountId,
-      input.workspaceId,
-      fundedWithoutCredits,
-    );
     const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
       modelId: continuationModel,
       requestedModelId: null,
@@ -164,7 +130,25 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
-      budgetBlocked: modelPolicyBlocked ?? budgetBlocked,
+      admission: async (tx, causalTurn) => {
+        const budgetBlocked = modelPolicyBlocked
+          ? null
+          : await goalRunBudgetBlocked(
+              { ...service, settings, db: tx },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                model: continuationModel,
+                initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+              },
+            );
+        return {
+          budgetBlocked: modelPolicyBlocked ?? budgetBlocked?.message ?? null,
+          budgetPausedReason: modelPolicyBlocked
+            ? "limits"
+            : (budgetBlocked?.pausedReason ?? "limits"),
+        };
+      },
       policy: {
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
@@ -258,8 +242,9 @@ export function goalContinuationPrompt(
     ? [
         "Waiting on child sessions, background commands, or external events:",
         "- When further progress depends on work already in flight, do not sleep, loop, or poll session or command state repeatedly.",
-        "- Re-check once; if the work is still in flight and the wait is long or uncertain, call opengeni__wait_for_input with a concrete reason and timeoutSeconds, then end your turn immediately. Relevant session input or the safety deadline will start a new turn, and this goal stays active.",
-        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__wait_for_input and end the turn. Report only material new state or a newly discovered blocker.",
+        "- If progress depends on work already in flight and the wait is long or uncertain, call opengeni__wait_for_input with a concrete reason and timeoutSeconds, then end your turn immediately. A preliminary status check is not required. Relevant session input or the safety deadline will start a new turn, and this goal stays active.",
+        "- No short execution wait is required first. Choose the safety deadline for the dependency or a meaningful monitoring cadence; an out-of-turn wait may span hours or days within the tool's limits. Do not schedule model wakeups merely to repeat reassurance. Honor explicit user/task/Skill check or update cadences within existing authority.",
+        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__wait_for_input and end the turn. Report only material new state or a newly discovered blocker, unless an explicit user/task/Skill update cadence calls for an update.",
         "- If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
         "",
       ]
@@ -270,18 +255,20 @@ export function goalContinuationPrompt(
       (options.humanInputRespondAvailable
         ? "If you know the answer to its question, answer it with opengeni__session_human_input_respond (pass the worker's sessionId, the requestId from the notice, and a response). "
         : "") +
-      "Tool approvals can only be decided by a human. If you cannot resolve the blocker yourself, report the exact blocker (worker session id, the question) to the user and wait or pause instead of retrying the worker.",
+      "Tool approvals can only be decided by a human. If you cannot resolve the blocker yourself, report the exact blocker (worker session id, the question); if it prevents further goal progress, pause under the blocked audit instead of retrying the worker or treating a human decision as an in-flight wait.",
     "- `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, and `child_progress` updates are informational: a resolved notice means the worker is moving again; a paused worker needs a human or you to resume it; a capacity wait resumes by itself; a progress note needs no action.",
     "",
   ];
   return [
-    "Reconcile the active session goal against authoritative current state, then carry the work through to the full requested end state and verify it.",
+    "Automatic goal continuation (generated input, not a new user request or grant of authority). Resume established work toward the full applied objective and verify its requested end state.",
     "",
     "Goal recovery:",
+    "- Use the current applied goal frozen for this turn, including its success criteria, root constraints, and report requirements, as the authoritative objective. Pending proposals and older goal revisions do not replace it; change it only through the authorized goal-mutation controls, without widening authority.",
     "- Treat this continuation as re-entry into the full objective, not as a request to perform one step and stop.",
+    "- Resume from established work and relevant evidence rather than restarting discovery or a full reconciliation on every turn. Perform full reconciliation or a comprehensive audit when the goal, user, or applicable Skill calls for it, when uncertainty or recovery warrants it, or when required by risk or a gate.",
     "- Do not rely on previous assistant claims of progress or completion; use them only to locate authoritative evidence.",
     "- If authoritative evidence already proves the full objective, call opengeni__goal_complete instead of manufacturing more work.",
-    "- Before repeating a state-setting action, verify whether its desired state already holds. If it does, do not repeat it; continue reconciling the overall goal.",
+    "- Before repeating a state-setting action, verify whether its desired state already holds, using relevant evidence that remains valid or a fresh check when needed. If it does, do not repeat it; continue the overall goal.",
     "",
     "Continuation behavior:",
     "- This goal persists across turns. A runtime boundary can end one turn without shrinking the objective; the next continuation resumes the same full objective.",
@@ -291,7 +278,7 @@ export function goalContinuationPrompt(
     "- Temporary rough edges are acceptable while the work is moving in the right direction. Completion still requires the requested end state to be true and verified.",
     "",
     "Work from evidence:",
-    "Use the current workspace and external state as authoritative. Conversation context can help locate relevant work, but it is not proof of the current state. Inspect the current state before relying on it. Improve, replace, or remove existing work as needed to satisfy the actual objective.",
+    "Use authoritative workspace and external evidence, including prior tool results that remain relevant and valid. Reuse evidence only for the requirement, scope, version, and state it actually establishes; recheck changed, stale, uncertain, or insufficient evidence. Conversation summaries and assistant claims are pointers, not proof. Do not infer progress or evidence validity merely from this continuation. Improve, replace, or remove existing work as needed within authority to satisfy the actual objective.",
     "",
     "Progress visibility:",
     "If a planning tool is available and the next work is meaningfully multi-step, use it to show a concise plan tied to the real objective. Keep the plan current as steps complete or the next best action changes. Skip planning overhead for trivial one-step progress, and do not treat a plan update as a substitute for doing the work.",
@@ -302,23 +289,24 @@ export function goalContinuationPrompt(
     "- Treat alignment as movement toward the requested end state. An edit is aligned only if it makes the requested final state more true; useful-looking behavior that preserves a different end state is misaligned.",
     "",
     "Completion audit:",
-    "Before deciding that the goal is achieved, treat completion as unproven and verify it against the actual current state:",
+    "Before deciding that the goal is achieved, treat completion as unproven and verify it against the actual current state. This full completion audit is required even when ordinary continuation did not need full reconciliation; reuse still-valid authoritative evidence, but refresh it when the requirement or gate requires a fresh check:",
     "- Derive concrete requirements from the objective and any referenced files, plans, specifications, issues, or user instructions.",
-    "- Preserve the original scope; do not redefine success around the work that already exists.",
+    "- Preserve the applied objective's scope; do not redefine success around the work that already exists.",
     "- For every explicit requirement, named artifact, command, test, gate, invariant, and deliverable, identify and inspect the authoritative evidence that would prove it.",
     "- Match verification scope to requirement scope. Treat uncertain, indirect, incomplete, or missing evidence as not achieved and continue working.",
     "- The audit must prove completion, not merely fail to find obvious remaining work.",
-    "- For user-facing report deliverables, including reports produced during another task, follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, and explicitly requested local-file work remain outside this report contract.",
+    "- For document report deliverables (a document the user asked for, or a large report meant to be kept or shared), follow the Documents Skill: create the durable native document first, inspect its relevant final head after the last edit, and provide the returned artifact reference. Declare report requirements through the available goal tools before authoring and satisfy every persisted report requirement with verified artifact delivery evidence before completion. Sandbox paths and raw file IDs do not prove report delivery. If artifact tooling or access is unavailable, keep that deliverable incomplete and state the blocker; never invent proof or silently substitute a local report. Ordinary chat answers, short progress updates, source-code links, and explicitly requested local-file work remain outside this report contract.",
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
     "",
     ...waitingGuidance,
     ...childNoticeGuidance,
     "Blocked audit:",
-    "- Do not call opengeni__goal_pause the first time a blocker appears.",
-    "- Pause only when the same blocking condition has repeated for at least three consecutive goal turns and meaningful progress is impossible without user input or an external-state change.",
+    "- Base persistence on evidence, not a fixed number of turns or retries. Investigate recoverable failures and try plausible safe alternatives within current authority when they could materially advance the goal; do not exhaust every imaginable alternative or repeat an unchanged failure without a reason to expect progress.",
+    "- A definitive missing permission, required human decision, or external prerequisite with no actionable authorized path can justify pausing immediately. State the concrete blocker, relevant evidence or attempted alternatives, and what must change to resume. Tool approvals remain human-only.",
+    "- If progress depends on work already in flight or a meaningful timed recheck, use the available waiting mechanism rather than pausing the goal; continue any independent authorized work first.",
     "- Do not pause merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
-    "- Once that threshold is satisfied, call opengeni__goal_pause with the concrete blocker instead of repeatedly reporting it while leaving the goal active.",
+    "- When no meaningful authorized progress remains and the blocker requires human input or an external change that cannot be handled by an available wait or monitoring mechanism, call opengeni__goal_pause with the concrete blocker instead of repeatedly reporting it while leaving the goal active.",
     "",
     "Do not call opengeni__goal_complete or opengeni__goal_pause unless the corresponding audit above is satisfied.",
   ].join("\n");
@@ -339,55 +327,22 @@ export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolR
 }
 
 /**
- * Non-throwing variant of the scheduled-run admission check: returns a human
- * readable reason when balance or monthly caps block another agent run.
+ * Goals share scheduled admission and pause visibly without synthesizing work.
  */
-async function goalRunBudgetBlocked(
-  settings: Settings,
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  fundedWithoutCredits: boolean,
-): Promise<string | null> {
-  // Free, subscription, and workspace-funded continuations skip OpenGeni's
-  // credit-balance gate and monthly model-cost cap. The agent-run COUNT cap
-  // below is a volume quota (not a credit/cost gate) and remains enforced.
-  if (
-    !fundedWithoutCredits &&
-    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
-  ) {
-    const balance = await getBillingBalance(db, accountId);
-    if (balance.balanceMicros <= 0) {
-      return "insufficient OpenGeni credits";
-    }
+export async function goalRunBudgetBlocked(
+  services: Parameters<typeof agentRunAdmissionDenial>[0],
+  input: Omit<Parameters<typeof agentRunAdmissionDenial>[1], "requestedAgentRuns">,
+): Promise<{ pausedReason: "limits" | "allowance"; message: string } | null> {
+  const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
+  if (denial === null) return null;
+  if (denial === "allowance_exhausted") {
+    return { pausedReason: "allowance", message: "OpenGeni usage allowance exhausted" };
   }
-  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
-    const limits = configuredStaticUsageLimits(settings);
-    if (!fundedWithoutCredits && limits.maxMonthlyCostMicrosPerAccount) {
-      const used = await sumUsageQuantity(db, {
-        accountId,
-        eventType: "model.cost",
-        since: startOfUtcMonth(),
-      });
-      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-        return `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`;
-      }
-    }
-    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
-        eventType: "agent_run.created",
-        since: startOfUtcMonth(),
-      });
-      if (used + 1 > limits.maxMonthlyAgentRunsPerWorkspace) {
-        return `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`;
-      }
-    }
-  }
-  return null;
-}
-
-function startOfUtcMonth(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const limits = configuredStaticUsageLimits(services.settings);
+  const messages = {
+    insufficient_credits: "insufficient OpenGeni credits",
+    monthly_model_cost_limit: `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
+    monthly_agent_run_limit: `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
+  };
+  return { pausedReason: "limits", message: messages[denial] };
 }

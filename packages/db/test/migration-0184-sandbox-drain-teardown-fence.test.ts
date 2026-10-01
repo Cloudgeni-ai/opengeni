@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
+import { allowanceMigrationTail } from "./allowance-migration-tail";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -87,6 +88,13 @@ const withheldMigrationNames = [
   "0511_knowledge_visible_index_status.sql",
   // Patches learning resolvers introduced by withheld 0461; replay after it.
   "0515_autonomous_learning_defaults.sql",
+  // Patches the withheld 0509 trial grant trigger; replay after it.
+  "0521_verified_signup_trial_runtime_switch.sql",
+  // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
+  "0534_scheduled_admission_diagnostics.sql",
+  // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
+  "0539_scheduled_admission_refusals.sql",
+  ...allowanceMigrationTail,
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -7,6 +7,7 @@ const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.
 const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD === "1";
 const demoInputs = {
   genieLoading: resolve(__dirname, "genie-loading.html"),
+  exchangeFold: resolve(__dirname, "exchange-fold.html"),
   main: resolve(__dirname, "index.html"),
   timeline: resolve(__dirname, "timeline.html"),
   fleetPolicy: resolve(__dirname, "fleet-policy.html"),
@@ -19,6 +20,7 @@ const demoInputs = {
   transcription: resolve(__dirname, "transcription.html"),
   realtime: resolve(__dirname, "realtime.html"),
   editableArtifacts: resolve(__dirname, "editable-artifacts.html"),
+  artifactViewer: resolve(__dirname, "artifact-viewer.html"),
   browser: resolve(__dirname, "browser.html"),
   computer: resolve(__dirname, "computer.html"),
   composerResponsive: resolve(__dirname, "composer-responsive.html"),

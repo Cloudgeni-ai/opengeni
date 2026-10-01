@@ -41,16 +41,52 @@ switched on per deployment or workspace to measure it.
 1. **Recall.** One wide ripgrep pass over the workspace finds candidate files
    by keyword, weighted by how rare each keyword is.
 2. **File triage.** Jev decides which candidate files are about the question.
-3. **Passage check.** Jev scores the passages around each hit for relevance and
-   for each sub-question.
-4. **Leads.** The tool follows up to six definitions named in the best passages,
-   one level deep.
-5. **Pack.** Passages that pass are packed within a token budget. A final Jev
-   check gives the packed passages an evidence rating. The rating cannot see
-   evidence the search missed, so the header, the tool description and the
-   directive all steer follow-up searches outside the pack: other entry points,
-   defaults, flags and exceptions. An earlier `sufficient`/`partial` label read
-   as permission to stop and cost answer completeness in testing.
+3. **Symbols.** Jev judges a shortlist of the identifiers that the relevant files declare, import, call
+   or render: at most 160, ranked cheaply first. For the ones that matter, one ripgrep pass finds their
+   definitions and usages across the workspace, so the file behind an import, or a sibling call site, is
+   found even when no keyword matched it. This runs alongside step 4, and the windows it adds are verified
+   in the same Jev round as the leads, so it adds no round of its own.
+4. **Passage check.** Jev scores passages for relevance and for each sub-question. The most relevant
+   small files are cut into declaration-sized tiles, so every function and handler in them is judged.
+   Other files get windows around their keyword and symbol hits. In the same round, Jev answers a
+   "must change together" question for up to 60 functions of the three most relevant files, each shown by
+   its signature and the calls it makes. A chosen function catches sibling code that a literal relevance
+   check scores low, such as another handler that mutates the same state. It is packed after the passages
+   that passed the relevance bar, so it never pushes a verified passage out of the budget.
+5. **Leads.** The tool follows up to six definitions named in the best passages,
+   one level deep, and checks up to three call sites of each.
+6. **Pack.** Passages that pass are packed within a token budget:
+   - small relevant files are shown whole;
+   - an import-only span ranks lower;
+   - each sub-question's best passage comes first, even when that
+     sub-question is weak.
+
+   A final Jev check gives the packed passages an evidence rating:
+   - below 0.4, the tool follows the next leads once and checks again;
+   - below 0.7, it refills the budget with the next-best passages; the rating then covers the passages
+     above the bar.
+
+   The rating cannot see evidence the search missed, so the header, the tool
+   description and the directive all steer follow-up searches outside the pack:
+   other entry points, defaults, flags and exceptions. An earlier
+   `sufficient`/`partial` label read as permission to stop and cost answer
+   completeness in testing.
+7. **What it did not show.** The pack ends with the relevant files, the line
+   ranges of each that it did not show, and the functions declared in those
+   ranges. Before changing code, the agent is told to read those regions in
+   full. It also lists every limit that cut something (files, regions, passages,
+   leads, symbols, call sites and the token budget), with the cut files and line
+   ranges. Keywords that matched nothing, or only files judged irrelevant, are
+   listed with similar identifiers that exist in the workspace.
+
+On 138 real staging searches replayed at their own commits, compared with scout-0.3.1:
+- the share of the regions agents later edited or cited that the pack contains rose from 13% to 18%;
+- the share it contains or points to by line range rose from 29% to 57%;
+- packs grew from 8.8k to 10.6k tokens;
+- Jev cost rose from $0.005 to $0.009 per call.
+
+Most of the added lines are relevant: lines outside any region the agent later used rose 4%, while lines
+inside them rose 49%.
 
 The engine lives in `@opengeni/jev` and runs in the worker. The workspace sees
 only read-only commands through `SandboxChannelAService`:
@@ -77,13 +113,45 @@ The tool works on every sandbox backend and Connected Machine that has `rg` and
 `bash`; both stock sandbox images include them. Windows Connected Machines do
 not get the tool, because its search commands are POSIX shell scripts.
 
+### Credential directories are never searched
+
+The workspace holds platform credential material next to code, and a search
+result goes into model history and session events. So `code_search` never
+searches or reads these directories, at any depth:
+
+| Directory | Holds |
+| --- | --- |
+| `.opengeni/` | Per-session sandbox state: Codemode bearer tokens, Git credential files and bindings, delivered clients |
+| `.azure/` | The Azure CLI login cache from the sandbox's service-principal login (`HOME=/workspace`) |
+| `.config/opengeni/` | A Connected Machine agent's enrollment credentials, when its working directory is its home |
+
+The rule is path exclusion at the source, never content redaction:
+
+- Every ripgrep call excludes them: the engine adds the globs, and
+  `codeSearchRipgrep` appends them again after the engine's own globs so they
+  always win.
+- ripgrep searches an explicitly named path even when a glob excludes it, so an
+  explicit `paths` entry into one of them is ignored like a missing path. The
+  engine checks the normalized path case-insensitively (`./.opengeni`,
+  `.OpenGeni`, `a/../x` and backslashes included), and `codeSearchRipgrep`
+  refuses such a path again.
+- ripgrep follows a symlink named as a search root, so `codeSearchPathKinds`
+  resolves each path physically and reports one that lands in a credential
+  directory as missing. The directory walk itself never follows symlinks.
+
+The list lives in `CODE_SEARCH_CREDENTIAL_DIRS`, once in `@opengeni/jev` (which
+is published on its own) and once in `@opengeni/contracts/code-search` for the
+sandbox channel; a worker test pins that they agree. The agent can still read
+these files with `exec_command`; the rule keeps a code question from pulling
+credentials into its answer.
+
 ## Turning it on and off
 
 | Level | Setting | Effect |
 | --- | --- | --- |
 | Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
-| Workspace | `settings.codeSearchEnabled` | Settings → Session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
+| Workspace | `settings.codeSearchEnabled` | Settings → General → New session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
 | Worker process | Circuit breaker | Three consecutive Jev outages make `code_search` calls on that worker fail at once for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. The breaker never hides the tool. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and

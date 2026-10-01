@@ -308,6 +308,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       // the runtime hooks put in the command text can admit the provisioning scripts.
       const sandboxSession = (home: string) =>
         hostShellSession(home, {
+          shell: "bash",
           cwd: workspace,
           env: {
             GIT_TERMINAL_PROMPT: "0",
@@ -365,6 +366,195 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("an optional repository that cannot be cloned is skipped with a warning while a required one stays fatal", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-optional-clone-"));
+    try {
+      const origin = makeOrigin(root);
+      // A repository with no commits: the fetch of its default branch fails,
+      // exactly like an empty GitHub repository.
+      const empty = join(root, "empty");
+      execFileSync("git", ["init", "--bare", "-b", "main", empty]);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
+      const session = hostShellSession(join(root, "home"), {
+        shell: "bash",
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "3",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: remote("required"),
+          GIT_CONFIG_KEY_1: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_1: remote("recent"),
+          GIT_CONFIG_KEY_2: `url.file://${empty}.insteadOf`,
+          GIT_CONFIG_VALUE_2: remote("empty"),
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const repository = (name: string, optional: boolean) => ({
+        kind: "repository" as const,
+        uri: remote(name),
+        ref: "main",
+        mountPath: `repos/test/${name}`,
+        ...(optional ? { optional: true } : {}),
+      });
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const warnings: unknown[][] = [];
+      const warn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args);
+      };
+      try {
+        await runRepositoryCloneHook(
+          session as never,
+          [repository("required", false), repository("empty", true), repository("recent", true)],
+          {
+            environment: {},
+            onRuntimeEvent: async (event) => {
+              events.push(event as never);
+            },
+          },
+        );
+      } finally {
+        console.warn = warn;
+      }
+      expect(readFileSync(join(workspace, "repos", "test", "required", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      expect(readFileSync(join(workspace, "repos", "test", "recent", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      // The failed optional clone leaves no partial tree or temporary clone.
+      expect(
+        existsSync(join(workspace, "repos", "test", "empty")) &&
+          readdirSync(join(workspace, "repos", "test", "empty")).length > 0,
+      ).toBe(false);
+      expect(
+        readdirSync(join(workspace, "repos", "test")).filter((name) => name.includes(".tmp.")),
+      ).toEqual([]);
+      expect(events.map((event) => event.type)).toEqual([
+        "sandbox.operation.started",
+        "sandbox.operation.completed",
+      ]);
+      expect(events[1]!.payload).toMatchObject({
+        name: "repository-clone",
+        repositoryCount: 3,
+        skippedOptionalRepositories: ["repos/test/empty"],
+      });
+      expect(warnings).toEqual([
+        [
+          "[sandbox] optional repository resources were not cloned",
+          { skippedCount: 1, repositoryCount: 3 },
+        ],
+      ]);
+
+      // The same empty repository attached explicitly keeps today's strict
+      // behavior: the hook fails and reports the failure.
+      const strictEvents: string[] = [];
+      await expect(
+        runRepositoryCloneHook(session as never, [repository("empty", false)], {
+          environment: {},
+          onRuntimeEvent: async (event) => {
+            strictEvents.push(event.type);
+          },
+        }),
+      ).rejects.toThrow("Repository resource fetch failed");
+      expect(strictEvents).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an optional repository whose fetch hangs is skipped after its bound while a required one still clones", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-optional-clone-timeout-"));
+    // A server that accepts the connection and never answers: a hung fetch.
+    const sockets: Array<{ end: () => void }> = [];
+    const hanging = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open: (socket) => {
+          sockets.push(socket);
+        },
+        data: () => undefined,
+      },
+    });
+    try {
+      const origin = makeOrigin(root);
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      const remote = (name: string) => `https://github.com/opengeni/${name}.git`;
+      const session = hostShellSession(join(root, "home"), {
+        shell: "bash",
+        cwd: workspace,
+        env: {
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_KEY_0: `url.file://${origin}.insteadOf`,
+          GIT_CONFIG_VALUE_0: remote("required"),
+          GIT_CONFIG_KEY_1: `url.http://127.0.0.1:${hanging.port}/hung.git.insteadOf`,
+          GIT_CONFIG_VALUE_1: remote("hung"),
+        },
+        rewriteCommand: (cmd) => cmd.replaceAll("'/workspace/", `'${workspace}/`),
+      });
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const warn = console.warn;
+      console.warn = () => undefined;
+      const started = Date.now();
+      try {
+        await runRepositoryCloneHook(
+          session as never,
+          [
+            {
+              kind: "repository",
+              uri: remote("required"),
+              ref: "main",
+              mountPath: "repos/test/required",
+            },
+            {
+              kind: "repository",
+              uri: remote("hung"),
+              ref: "main",
+              mountPath: "repos/test/hung",
+              optional: true,
+            },
+          ],
+          {
+            environment: {},
+            onRuntimeEvent: async (event) => {
+              events.push(event as never);
+            },
+          },
+          { optionalCloneTimeoutSeconds: 2 },
+        );
+      } finally {
+        console.warn = warn;
+      }
+      expect(Date.now() - started).toBeLessThan(30_000);
+      expect(readFileSync(join(workspace, "repos", "test", "required", "README.md"), "utf8")).toBe(
+        "hello\n",
+      );
+      expect(events[1]!.payload).toMatchObject({
+        name: "repository-clone",
+        repositoryCount: 2,
+        skippedOptionalRepositories: ["repos/test/hung"],
+      });
+      // The timed-out fetch leaves no partial tree or temporary clone behind.
+      expect(
+        existsSync(join(workspace, "repos", "test", "hung")) &&
+          readdirSync(join(workspace, "repos", "test", "hung")).length > 0,
+      ).toBe(false);
+      expect(
+        readdirSync(join(workspace, "repos", "test")).filter((name) => name.includes(".tmp.")),
+      ).toEqual([]);
+    } finally {
+      for (const socket of sockets) socket.end();
+      hanging.stop(true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("keeps exact-path provider remotes distinct when one name ends in .git", () => {
     const command = repositoryCloneCommand([
       {
@@ -405,13 +595,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     const lines = command.split("\n");
 
     expect(
-      lines.filter((line) =>
-        line.includes("'https|git.example|acme/repo') username='x-access-token'"),
+      lines.filter(
+        (line) =>
+          line.includes("'https|git.example|acme/repo') ") &&
+          line.includes("username='x-access-token'"),
       ),
     ).toHaveLength(1);
     expect(
-      lines.filter((line) =>
-        line.includes("'https|git.example|acme/repo.git') username='x-access-token'"),
+      lines.filter(
+        (line) =>
+          line.includes("'https|git.example|acme/repo.git') ") &&
+          line.includes("username='x-access-token'"),
       ),
     ).toHaveLength(1);
   });
@@ -1365,13 +1559,15 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       line.includes('git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"'),
     );
     const guardIndex = lines.findIndex((line) =>
-      line.includes('if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"'),
+      line.includes(
+        'if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"',
+      ),
     );
     const setHeadIndex = lines.findIndex((line) =>
       line.includes('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true'),
     );
     const checkoutIndex = lines.findIndex((line) =>
-      line.includes('if ! git -C "$tmp" checkout --detach FETCH_HEAD'),
+      line.includes('if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD'),
     );
 
     expect(fetchIndex).toBeGreaterThan(-1);

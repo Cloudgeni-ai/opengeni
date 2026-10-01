@@ -184,7 +184,7 @@ function HumanInputRequestForm({
       questions.map(async (question) => {
         if (!loadSkillReview)
           throw new Error(
-            "This client cannot preview Skill files. Open this request in OpenGeni to review it.",
+            "This client cannot preview Skill files. Open this request in Opengeni to review it.",
           );
         const reference = question.reference;
         const record = await loadSkillReview(reference);
@@ -585,7 +585,7 @@ function HumanInputRequestForm({
         <button
           type="submit"
           disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
+          className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
         >
           {busy ? messages.submitting : resolvedSubmitLabel}
         </button>

@@ -14,6 +14,7 @@ let failure = 503;
 let selectedFailure: number | null = null;
 let messageGate: Promise<void> | null = null;
 const queries: string[] = [];
+const navigations: Array<{ search: Record<string, unknown> }> = [];
 const client = {
   listSessionPage: async (_workspace: string, options: { search: string; signal: AbortSignal }) => {
     titleReads++;
@@ -50,9 +51,14 @@ beforeAll(async () => {
   mock.module("@/context", () => ({
     useAppContext: () => ({ client, accessContext: { subjectId: "reader" } }),
   }));
-  mock.module("@tanstack/react-router", () => ({ useNavigate: () => () => {} }));
+  mock.module("@tanstack/react-router", () => ({
+    useNavigate: () => (options: { search: Record<string, unknown> }) => {
+      navigations.push(options);
+    },
+  }));
   Dialog = (await import("./session-search-dialog")).default;
 });
+
 afterAll(() => mock.restore());
 
 test("StrictMode draft undo preserves results; isolated retries recover safely after denial", async () => {
@@ -140,6 +146,39 @@ test("StrictMode draft undo preserves results; isolated retries recover safely a
     expect(document.querySelectorAll("[data-search-result]").length).toBe(1);
     await type("");
     expect(document.querySelectorAll("[data-search-result]").length).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("opening a title hit marks the conversation as reached from session search", async () => {
+  failure = 200;
+  selectedFailure = 200;
+  const view = await renderComponent(<Dialog workspaceId="w" open onOpenChange={() => {}} />);
+  try {
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Search session titles and messages"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+        input,
+        "needle",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keyup", { key: "e", bubbles: true }));
+    });
+    await flush(280);
+    await flush(220);
+    await flush(220);
+    const open = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Open session",
+    );
+    expect(open).toBeDefined();
+    await act(async () => open!.click());
+    expect(navigations.at(-1)?.search).toEqual({
+      find: "needle",
+      searchOrigin: "session-search",
+    });
   } finally {
     await view.unmount();
   }

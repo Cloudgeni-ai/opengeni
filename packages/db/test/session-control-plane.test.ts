@@ -4,6 +4,7 @@ import {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   boundSessionEventPayload,
+  renderMessageSentAtForModel,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
 } from "@opengeni/contracts";
@@ -223,6 +224,14 @@ async function controlWorkspace(
       }),
     ),
   );
+}
+
+/** A claimed human message renders its frozen acceptance time before the text. */
+function acceptedUserContent(text: string, turn: { createdAt: string }) {
+  return [
+    { type: "input_text", text: renderMessageSentAtForModel(turn.createdAt) },
+    { type: "input_text", text },
+  ];
 }
 
 async function claimTestSessionWork(
@@ -2977,7 +2986,11 @@ describe("clean session control plane", () => {
     });
     const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
     expect(history.map((row) => row.item)).toEqual([
-      { type: "message", role: "user", content: "change the external state" },
+      {
+        type: "message",
+        role: "user",
+        content: acceptedUserContent("change the external state", turn!),
+      },
       {
         type: "function_call",
         name: "mutate_state",
@@ -4314,7 +4327,7 @@ describe("clean session control plane", () => {
     expect(nextHistory.at(-1)?.item).toMatchObject({
       type: "message",
       role: "user",
-      content: "Use the child result now",
+      content: acceptedUserContent("Use the child result now", prompt.turn),
     });
   });
 
@@ -5847,6 +5860,279 @@ describe("clean session control plane", () => {
     ).toEqual({ action: "stale", episodeKey: null, events: [] });
   });
 
+  test("a follow-up committed between turn settlement and idle close fences the parent result", async () => {
+    const { grant, session: parent } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "idle close race",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: parent.id,
+    });
+    await send(grant, child.id, "first episode");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      child.id,
+      `session-${child.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("child turn was not claimed");
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: child.id,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [],
+      }),
+    ).toMatchObject({ action: "settled" });
+
+    // This producer wins the DB fence after the workflow's last idle peek.
+    // No Temporal grace period or signal is needed to reject stale settlement.
+    await send(grant, child.id, "follow-up before close");
+    expect(
+      await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+    ).toEqual({ action: "stale", episodeKey: null, events: [] });
+    const notices = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ id: schema.sessionSystemUpdateOutbox.id })
+        .from(schema.sessionSystemUpdateOutbox)
+        .where(eq(schema.sessionSystemUpdateOutbox.sourceSessionId, child.id)),
+    );
+    expect(notices).toEqual([]);
+    const next = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      child.id,
+      `session-${child.id}`,
+      { attemptId: crypto.randomUUID() },
+    );
+    expect(next?.id).toBeTruthy();
+    expect(next?.id).not.toBe(turn.id);
+  });
+
+  describe("pending machine input at the final idle settlement fence", () => {
+    async function idleChild(compactionFailed = false) {
+      const { grant, session: parent } = await fixture();
+      const child = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "machine input close race",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none",
+        parentSessionId: parent.id,
+      });
+      await send(grant, child.id, "first episode");
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        child.id,
+        `session-${child.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error("child turn was not claimed");
+      expect(
+        await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+          sessionId: child.id,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId,
+          turnStatus: compactionFailed ? "failed" : "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: compactionFailed
+            ? [{ type: "turn.failed", payload: { code: "context_compaction_failed" } }]
+            : [],
+        }),
+      ).toMatchObject({ action: "settled" });
+      // Freeze the workflow's last idle observation before the competing
+      // producer commits. No timing sleeps or Temporal signal are involved.
+      expect(await peekSessionWork(client.db, grant.workspaceId!, child.id)).toEqual({
+        kind: "idle",
+      });
+      const idleNotices = () =>
+        withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .select({ id: schema.sessionSystemUpdateOutbox.id })
+            .from(schema.sessionSystemUpdateOutbox)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdateOutbox.sourceSessionId, child.id),
+                eq(schema.sessionSystemUpdateOutbox.kind, "child_terminal_result"),
+                sql`${schema.sessionSystemUpdateOutbox.payload} ->> 'status' = 'idle'`,
+              ),
+            ),
+        );
+      return { grant, child, idleNotices };
+    }
+
+    for (const kind of ["agent_message", "agent_steer_instruction"] as const) {
+      for (const compactionFailed of [false, true]) {
+        test(`${kind} after final peek ${compactionFailed ? "with" : "without"} compaction failure respects claimability`, async () => {
+          const { grant, child, idleNotices } = await idleChild(compactionFailed);
+          const operationId = crypto.randomUUID();
+          const added = await addSessionSystemUpdate(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: child.id,
+            classification: "info",
+            sourceId: crypto.randomUUID(),
+            dedupeKey: `idle-fence-${operationId}`,
+            summary: "accepted direction after final peek",
+            ...(kind === "agent_message"
+              ? { kind, payload: { type: kind, text: "continue", operationId } }
+              : { kind, payload: { type: kind, instruction: "continue", operationId } }),
+          });
+          if (!added.added) throw new Error("machine input was not inserted");
+          const claim = (attemptId = crypto.randomUUID()) =>
+            claimTestSessionWork(client.db, grant.workspaceId!, child.id, `session-${child.id}`, {
+              attemptId,
+            });
+
+          if (compactionFailed && kind === "agent_message") {
+            // Ordinary input held behind compaction failure is not an
+            // autonomous retry; idle settlement must not acquire a new hold.
+            expect(await claim()).toBeNull();
+            expect(
+              await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+            ).toMatchObject({ action: "settled", notifyParent: true });
+            expect(await idleNotices()).toHaveLength(1);
+            expect(
+              (
+                await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)
+              ).map((update) => update.id),
+            ).toContain(added.update.id);
+            return;
+          }
+
+          expect(
+            await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+          ).toEqual({ action: "stale", episodeKey: null, events: [] });
+          expect(await idleNotices()).toEqual([]);
+          expect(await getSession(client.db, grant.workspaceId!, child.id)).toMatchObject({
+            status: "queued",
+          });
+          const attemptId = crypto.randomUUID();
+          const next = await claim(attemptId);
+          if (!next) throw new Error("accepted machine input was not claimed");
+          expect(
+            (
+              await listSessionSystemUpdatesForTurn(
+                client.db,
+                grant.workspaceId!,
+                child.id,
+                next.id,
+              )
+            ).map((update) => update.id),
+          ).toEqual([added.update.id]);
+          expect(await claim()).toBeNull();
+          expect(
+            await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+              sessionId: child.id,
+              turnId: next.id,
+              triggerEventId: next.triggerEventId,
+              attemptId,
+              turnStatus: "completed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              events: [],
+            }),
+          ).toMatchObject({ action: "settled" });
+          expect(await claim()).toBeNull();
+          for (let replay = 0; replay < 2; replay += 1) {
+            expect(
+              await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+            ).toMatchObject({ action: "settled", notifyParent: true });
+          }
+          expect(await idleNotices()).toHaveLength(1);
+        });
+      }
+    }
+
+    for (const kind of [
+      "child_progress",
+      "background_command_result",
+      "child_terminal_result",
+    ] as const) {
+      test(`${kind} without a wake obligation does not block completed idle`, async () => {
+        const { grant, child, idleNotices } = await idleChild();
+        const operationId = crypto.randomUUID();
+        const added = await addSessionSystemUpdate(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: child.id,
+          classification: "info",
+          sourceId: crypto.randomUUID(),
+          dedupeKey: `idle-fence-${operationId}`,
+          summary: "retained notice after final peek",
+          ...(kind === "child_progress"
+            ? {
+                kind,
+                payload: {
+                  type: kind,
+                  childSessionId: crypto.randomUUID(),
+                  goalId: crypto.randomUUID(),
+                  objectiveRevision: 1,
+                  operationId,
+                  progressNote: "still working",
+                },
+              }
+            : kind === "child_terminal_result"
+              ? {
+                  kind,
+                  payload: {
+                    type: kind,
+                    childSessionId: crypto.randomUUID(),
+                    status: "idle" as const,
+                  },
+                }
+              : {
+                  kind,
+                  payload: {
+                    type: kind,
+                    commandId: operationId,
+                    state: "exited" as const,
+                    exitCode: 0,
+                    reason: "completed",
+                    outputLocator: {
+                      eventType: "sandbox.command.output.delta" as const,
+                      commandId: operationId,
+                    },
+                  },
+                }),
+        });
+        if (!added.added) throw new Error("retained notice was not inserted");
+        expect(added.shouldWake).toBe(false);
+        for (let replay = 0; replay < 2; replay += 1) {
+          expect(
+            await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, child.id),
+          ).toMatchObject({ action: "settled", notifyParent: true });
+        }
+        expect(await idleNotices()).toHaveLength(1);
+        expect(
+          (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, child.id)).map(
+            (update) => update.id,
+          ),
+        ).toContain(added.update.id);
+      });
+    }
+  });
+
   test("every child terminal path durably produces one parent update", async () => {
     const { grant, session: parent } = await fixture();
     const createChild = async (label: string) => {
@@ -6670,7 +6956,9 @@ describe("clean session control plane", () => {
       (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
         (row) => row.item,
       ),
-    ).toEqual([{ type: "message", role: "user", content: "build it" }]);
+    ).toEqual([
+      { type: "message", role: "user", content: acceptedUserContent("build it", first!) },
+    ]);
 
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
     expect(

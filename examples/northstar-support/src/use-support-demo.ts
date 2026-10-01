@@ -236,14 +236,10 @@ export function useSupportDemo(): SupportDemoResult {
   };
 }
 
-export async function createDemoSession(
-  ticketId: string,
-  initialMessage: string,
-  options: { model: string; reasoningEffort?: string; latencyMode?: string },
-) {
+export async function createDemoSession(ticketId: string, initialMessage: string, runId: string) {
   return await fetchJson<{ id: string }>("/api/demo/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ticketId, initialMessage, ...options }),
+    body: JSON.stringify({ ticketId, initialMessage, runId }),
   });
 }

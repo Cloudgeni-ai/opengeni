@@ -507,11 +507,11 @@ export function ComputerViewer({
       return (
         <div className={cn("grid h-full place-items-center bg-og-bg p-6", className)}>
           <div className="max-w-sm text-center">
-            <CircleAlertIcon className="mx-auto size-5 text-og-status-error" />
+            <CircleAlertIcon className="mx-auto size-5 text-og-danger" />
             <p className="mt-3 text-og-menu font-medium text-og-fg">
               Chrome reconnected—open a fresh browser/desktop.
             </p>
-            <p className="mt-1 text-og-control leading-5 text-og-muted">
+            <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
               This Chrome profile is live again, but the previous desktop cannot move to the new
               connection. Use Browser → New browser → Connected Chrome.
             </p>
@@ -524,9 +524,9 @@ export function ComputerViewer({
     return (
       <div className={cn("grid h-full place-items-center bg-og-bg p-6", className)}>
         <div className="max-w-sm text-center">
-          <span className="mx-auto grid size-10 place-items-center rounded-og-lg border border-og-border bg-og-surface-1 text-og-muted">
+          <span className="mx-auto grid size-10 place-items-center rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg-muted">
             {error ? (
-              <CircleAlertIcon className="size-5 text-og-status-error" />
+              <CircleAlertIcon className="size-5 text-og-danger" />
             ) : (
               <LoaderCircleIcon className="size-5 animate-spin" />
             )}
@@ -534,7 +534,7 @@ export function ComputerViewer({
           <p className="mt-3 text-og-menu font-medium text-og-fg">
             {error ? "Desktop didn’t open" : "Opening desktop…"}
           </p>
-          <p className="mt-1 text-og-control leading-5 text-og-muted">
+          <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
             {error?.message ?? "Preparing this agent’s desktop. It will appear here when ready."}
           </p>
           {error ? (
@@ -542,7 +542,7 @@ export function ComputerViewer({
               type="button"
               onClick={createError ? createComputer : () => void refreshRegistry()}
               disabled={creating || registry.refreshing}
-              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm bg-og-accent-deep px-3 text-og-control font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
+              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
             >
               {creating || registry.refreshing ? (
                 <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -695,9 +695,9 @@ function ComputerUnselectedPanel(props: {
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
       <div className="max-w-sm">
-        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
           {props.error || props.generationLoss ? (
-            <CircleAlertIcon className="size-4.5 text-og-status-error" />
+            <CircleAlertIcon className="size-4.5 text-og-danger" />
           ) : (
             <LoaderCircleIcon className="size-4.5 animate-spin" />
           )}
@@ -709,7 +709,7 @@ function ComputerUnselectedPanel(props: {
               ? "Desktop didn’t open"
               : "Opening desktop…"}
         </p>
-        <p className="mt-1 text-og-control leading-5 text-og-muted">
+        <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {props.generationLoss
             ? "This Chrome profile is live again, but the previous desktop cannot move to the new connection. Use Browser → New browser → Connected Chrome."
             : (props.error?.message ??
@@ -758,17 +758,17 @@ function ComputerToolbar(props: {
     detailsRef.current?.removeAttribute("open");
   };
   return (
-    <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-0 px-2">
+    <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-og-border bg-og-surface-1 px-2">
       <details ref={detailsRef} className="relative min-w-0">
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
-          <MonitorIcon className="size-3.5 shrink-0 text-og-muted" />
+          <MonitorIcon className="size-3.5 shrink-0 text-og-fg-muted" />
           <span className="truncate font-medium">
             {selected?.name === "Computer" ? "Desktop" : (selected?.name ?? "Desktop")}
           </span>
           {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
             <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
           ) : null}
-          <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
+          <ChevronDownIcon className="size-3 shrink-0 text-og-fg-subtle" />
         </summary>
         <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
           <ComputerSessionGroup
@@ -797,13 +797,13 @@ function ComputerToolbar(props: {
           </div>
         </div>
       </details>
-      <span className="min-w-0 flex-1 truncate text-og-xs text-og-subtle">
+      <span className="min-w-0 flex-1 truncate text-og-xs text-og-fg-subtle">
         {selected ? `${platformLabel(selected)} · ${placementLabel(selected)}` : ""}
       </span>
       <button
         type="button"
         onClick={props.onRefresh}
-        className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg"
+        className="grid size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg"
         aria-label="Refresh desktops"
       >
         <RefreshCwIcon className={cn("size-3.5", props.refreshing && "animate-spin")} />
@@ -813,7 +813,7 @@ function ComputerToolbar(props: {
           type="button"
           onClick={props.onCreate}
           disabled={props.creating}
-          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          className="grid size-7 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
           aria-label="Open a new desktop"
         >
           {props.creating ? (
@@ -837,7 +837,7 @@ function ComputerSessionGroup(props: {
   if (props.sessions.length === 0) return null;
   return (
     <div className="py-1">
-      <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
+      <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-fg-subtle">
         {props.label}
       </p>
       {props.sessions.map((session) => {
@@ -860,7 +860,7 @@ function ComputerSessionGroup(props: {
             />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-og-control text-og-fg">{session.name}</span>
-              <span className="block truncate text-og-xs text-og-subtle">
+              <span className="block truncate text-og-xs text-og-fg-subtle">
                 {platformLabel(session)} · {placementLabel(session)}
               </span>
             </span>
@@ -882,7 +882,7 @@ function MenuButton(props: { children: ReactNode; onClick: () => void; disabled?
       type="button"
       onClick={props.onClick}
       disabled={props.disabled}
-      className="flex h-7 flex-1 items-center justify-center gap-1 rounded-og-sm px-2 text-og-control text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+      className="flex h-7 flex-1 items-center justify-center gap-1 rounded-og-sm px-2 text-og-control text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
     >
       {props.children}
     </button>
@@ -898,7 +898,7 @@ function ComputerTargetRail(props: {
   const visualTargets = props.targets.filter(isRenderableComputerView);
   return (
     <div
-      className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-og-border bg-og-surface-0 px-2"
+      className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-og-border bg-og-surface-1 px-2"
       aria-label="Desktop views"
     >
       {visualTargets.map((target) => (
@@ -910,7 +910,7 @@ function ComputerTargetRail(props: {
             "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-og-sm border px-2 text-og-control transition",
             target.id === props.selectedTargetId
               ? "border-og-border-strong bg-og-surface-2 text-og-fg"
-              : "border-transparent text-og-muted hover:bg-og-surface-1 hover:text-og-fg",
+              : "border-transparent text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg",
           )}
           aria-pressed={target.id === props.selectedTargetId}
         >
@@ -929,10 +929,10 @@ function ComputerTargetRail(props: {
         </button>
       ))}
       {props.loading ? (
-        <LoaderCircleIcon className="ml-1 size-3.5 animate-spin text-og-muted" />
+        <LoaderCircleIcon className="ml-1 size-3.5 animate-spin text-og-fg-muted" />
       ) : null}
       {!props.loading && visualTargets.length === 0 ? (
-        <span className="text-og-xs text-og-subtle">Waiting for apps and screens…</span>
+        <span className="text-og-xs text-og-fg-subtle">Waiting for apps and screens…</span>
       ) : null}
     </div>
   );
@@ -964,9 +964,9 @@ function ComputerLifecyclePanel(props: {
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6">
       <div className="max-w-sm text-center">
         {failed ? (
-          <CircleAlertIcon className="mx-auto size-5 text-og-status-error" />
+          <CircleAlertIcon className="mx-auto size-5 text-og-danger" />
         ) : (
-          <LoaderCircleIcon className="mx-auto size-5 animate-spin text-og-muted" />
+          <LoaderCircleIcon className="mx-auto size-5 animate-spin text-og-fg-muted" />
         )}
         <p className="mt-3 text-og-menu font-medium text-og-fg">
           {generationLoss
@@ -975,7 +975,7 @@ function ComputerLifecyclePanel(props: {
               ? "Desktop needs attention"
               : lifecycleLabel(props.session.lifecycle)}
         </p>
-        <p className="mt-1 text-og-control leading-5 text-og-muted">
+        <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {generationLoss
             ? "This Chrome profile is live again, but the previous desktop cannot move to the new connection. Use Browser → New browser → Connected Chrome."
             : (computerFailureMessage(props.session) ??
@@ -1539,9 +1539,9 @@ function ComputerViewportFallback(props: {
     return (
       <div className="absolute inset-0 grid place-items-center bg-og-bg p-6">
         <div className="max-w-sm text-center">
-          <LockKeyholeIcon className="mx-auto size-6 text-og-muted" />
+          <LockKeyholeIcon className="mx-auto size-6 text-og-fg-muted" />
           <p className="mt-3 text-og-menu font-medium text-og-fg">Machine locked</p>
-          <p className="mt-1 text-og-control leading-5 text-og-muted">
+          <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
             Live frames and input stay private until someone unlocks the machine.
           </p>
         </div>
@@ -1554,12 +1554,12 @@ function ComputerViewportFallback(props: {
     .slice(0, 10);
   return (
     <div className="absolute inset-0 grid place-items-center bg-og-bg p-6">
-      <div className="w-full max-w-md rounded-og-lg border border-og-border bg-og-surface-0 p-4 shadow-lg">
+      <div className="w-full max-w-md rounded-og-lg border border-og-border bg-og-surface-1 p-4 shadow-lg">
         <div className="flex items-center gap-2">
           {props.error ? (
-            <CircleAlertIcon className="size-4 text-og-status-error" />
+            <CircleAlertIcon className="size-4 text-og-danger" />
           ) : (
-            <LoaderCircleIcon className="size-4 animate-spin text-og-muted" />
+            <LoaderCircleIcon className="size-4 animate-spin text-og-fg-muted" />
           )}
           <p className="text-og-menu font-medium text-og-fg">
             {isAttachedChromeGenerationLossError(props.error)
@@ -1570,7 +1570,7 @@ function ComputerViewportFallback(props: {
           </p>
         </div>
         {props.error ? (
-          <p className="mt-2 text-og-control leading-5 text-og-muted">
+          <p className="mt-2 text-og-control leading-5 text-og-fg-muted">
             {isAttachedChromeGenerationLossError(props.error)
               ? "Chrome reconnected—open a fresh browser/desktop. Use Browser → New browser → Connected Chrome."
               : (controlFailure?.message ?? props.error.message)}
@@ -1578,7 +1578,7 @@ function ComputerViewportFallback(props: {
         ) : null}
         {interactive.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-subtle">Native controls remain available</p>
+            <p className="mb-2 text-og-xs text-og-fg-subtle">Native controls remain available</p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
                 <button
@@ -1617,12 +1617,12 @@ function ComputerSemanticPanel(props: {
 }) {
   const nodes = semanticNodes(props.observation).slice(0, 100);
   return (
-    <aside className="w-64 shrink-0 overflow-y-auto border-l border-og-border bg-og-surface-0 p-2">
-      <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-subtle">
+    <aside className="w-64 shrink-0 overflow-y-auto border-l border-og-border bg-og-surface-1 p-2">
+      <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
         <KeyboardIcon className="size-3" /> Native controls
       </div>
       {nodes.length === 0 ? (
-        <p className="px-1 py-2 text-og-control leading-5 text-og-muted">
+        <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
           This view has no accessibility controls. Use the live image instead.
         </p>
       ) : (
@@ -1670,7 +1670,7 @@ function ComputerSemanticControl(props: {
           });
         }}
       >
-        <label className="block truncate text-[10px] uppercase text-og-subtle">
+        <label className="block truncate text-[10px] uppercase text-og-fg-subtle">
           {node.name || node.identifier || node.role}
         </label>
         <div className="mt-1 flex gap-1">
@@ -1702,7 +1702,7 @@ function ComputerSemanticControl(props: {
       }}
       className="flex w-full items-start gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2 disabled:cursor-default disabled:hover:bg-transparent"
     >
-      <span className="mt-0.5 text-[10px] uppercase text-og-subtle">{node.role}</span>
+      <span className="mt-0.5 text-[10px] uppercase text-og-fg-subtle">{node.role}</span>
       <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
         {node.name || semanticValue(node) || node.identifier || "Unnamed control"}
       </span>
@@ -1721,7 +1721,7 @@ function ComputerStatusBar(props: {
 }) {
   const screen = props.target?.kind === "screen";
   return (
-    <div className="flex h-8 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-0 px-2 text-og-xs text-og-subtle">
+    <div className="flex h-8 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-1 px-2 text-og-xs text-og-fg-subtle">
       <span
         className={cn(
           "size-1.5 rounded-full",
@@ -1759,7 +1759,7 @@ function ComputerNotice(props: { icon: ReactNode; text: string; className?: stri
   return (
     <div
       className={cn(
-        "grid h-full place-items-center bg-og-bg text-og-control text-og-muted",
+        "grid h-full place-items-center bg-og-bg text-og-control text-og-fg-muted",
         props.className,
       )}
     >

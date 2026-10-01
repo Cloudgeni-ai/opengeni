@@ -98,6 +98,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   rig_promote: { allOf: ["rigs:manage"] },
   sessions_list: { allOf: ["sessions:read"] },
   session_get: { allOf: ["sessions:read"] },
+  session_set_model: { allOf: ["sessions:control"] },
   session_events: { allOf: ["sessions:read"] },
   // Blocking wait inside a running turn: the live attempt's own session is the
   // self target, so the tool exists only for session-scoped grants.
@@ -207,7 +208,11 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_list_files: { allOf: ["connections:read"] },
   slack_bot_file_info: { allOf: ["connections:read"] },
   slack_bot_file_content: { allOf: ["connections:read"] },
+  slack_bot_upload_file: { sessionRequired: true, allOf: ["connections:read", "files:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
+  // Scheduled runs only; the destination is the task's human-chosen channel.
+  slack_bot_prepare_message: { sessionRequired: true, allOf: ["connections:read"] },
+  slack_bot_send_prepared_message: { sessionRequired: true, allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
   fiken_companies_list: { allOf: ["connections:read"] },
   fiken_contacts_list: { allOf: ["connections:read"] },

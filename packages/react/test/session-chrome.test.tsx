@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { TimelineAnnotation } from "@opengeni/sdk";
 import { act } from "react";
 
 import {
@@ -14,11 +15,40 @@ import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
-import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
+import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
 
 let mounted: RenderedComponent | null = null;
+
+test("queue navigation opens and focuses once, without stealing focus on refresh or reopening dismissal", async () => {
+  const value = queue();
+  const target = { turnId: value.queue[1]!.id, requestId: 1 };
+  mounted = await renderComponent(<SessionChrome queue={value} queueFocusTarget={target} />);
+  await flush(80);
+  expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(target.turnId);
+  const other = document.createElement("button");
+  document.body.append(other);
+  other.focus();
+  await mounted.rerender(
+    <SessionChrome
+      queue={{ ...value, queue: [...value.queue] }}
+      queueFocusTarget={{ ...target }}
+    />,
+  );
+  expect(document.activeElement).toBe(other);
+  const chip = mounted.container.querySelector<HTMLButtonElement>(
+    '[data-og-session-chrome-signal="queue"]',
+  )!;
+  await act(async () => chip.click());
+  await flush(50);
+  expectChromeCollapsed(mounted.container);
+  await mounted.rerender(
+    <SessionChrome queue={value} queueFocusTarget={{ ...target, requestId: 2 }} />,
+  );
+  await flush(80);
+  expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(target.turnId);
+});
 
 /** Collapsed chrome. Do not require the queue panel node to unmount — AnimatePresence may keep an exiting frame. */
 function expectChromeCollapsed(container: HTMLElement) {
@@ -1392,6 +1422,7 @@ describe("SessionChrome compact actions", () => {
       '[aria-label="Steer first queued message"]',
     )!;
     expect(action.closest("button")).toBe(action);
+    expect(action.getAttribute("data-analytics-action")).toBe("steer");
     await act(async () => action.click());
     expect(ids).toEqual(["11111111-1111-4111-8111-111111111111"]);
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
@@ -1609,4 +1640,240 @@ test("failed-session goal chip and panel explain the block without changing the 
   ).toContain("use Continue or send a message");
   expect(mounted.container.textContent).not.toContain("Waiting to continue automatically");
   expect(activeGoal.goal?.status).toBe("active");
+});
+
+describe("SessionChrome compact queue annotations", () => {
+  function sentAnnotation(id: string, quote: string, note: string): TimelineAnnotation {
+    return {
+      id,
+      ordinal: 1,
+      source: {
+        kind: "assistant_message",
+        eventId: "00000000-0000-4000-8000-000000000901",
+        eventType: "agent.message.completed",
+        sequence: 4,
+        turnId: null,
+        startOffset: 0,
+        endOffset: quote.length,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote,
+      note,
+    };
+  }
+
+  async function waitFor(condition: () => boolean, message: string): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (!condition()) {
+      if (Date.now() >= deadline) throw new Error(message);
+      await flush(10);
+    }
+  }
+
+  function queueRow(container: HTMLElement, turnId: string): HTMLElement {
+    return container.querySelector<HTMLElement>(`[data-queue-turn-id="${turnId}"]`)!;
+  }
+
+  test("shows annotation-only confirmed rows and reviews them read-only", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const firstId = "11111111-1111-4111-8111-111111111111";
+    const secondId = "22222222-2222-4222-8222-222222222222";
+    const annotation = sentAnnotation(
+      "00000000-0000-4000-8000-000000000911",
+      "retry the flaky test",
+      "Only on the Linux runner.",
+    );
+    const checkedOut: NonNullable<ComposerState["draft"]> = {
+      revision: 1,
+      text: "",
+      annotations: [annotation],
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: firstId,
+      sourceTurnVersion: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    const calls: string[] = [];
+    const appliedDrafts: Array<NonNullable<ComposerState["draft"]>> = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [
+            fakeTurn({ id: firstId, prompt: "", annotations: [annotation] }),
+            fakeTurn({
+              id: secondId,
+              prompt: "",
+              annotations: [
+                sentAnnotation("00000000-0000-4000-8000-000000000912", "a", "first"),
+                {
+                  ...sentAnnotation("00000000-0000-4000-8000-000000000913", "b", "second"),
+                  ordinal: 2,
+                },
+              ],
+            }),
+          ],
+          editTurn: async (turnId) => {
+            calls.push(`edit:${turnId}`);
+            return checkedOut;
+          },
+          removeTurn: async (turnId) => {
+            calls.push(`remove:${turnId}`);
+            return true;
+          },
+        })}
+        composer={composer({
+          send: async () => {
+            calls.push("send");
+            return true;
+          },
+          applyDraft: (draft) => appliedDrafts.push(draft),
+        })}
+      />,
+    );
+
+    const first = queueRow(mounted.container, firstId);
+    const second = queueRow(mounted.container, secondId);
+    expect(first.textContent).toContain("1");
+    expect(first.textContent).toContain("1 annotation");
+    expect(second.textContent).toContain("2 annotations");
+    const review = first.querySelector<HTMLButtonElement>(
+      'button[aria-label="Review 1 annotation"]',
+    )!;
+    expect(review).not.toBeNull();
+    expect(second.querySelector('button[aria-label="Review 2 annotations"]')).not.toBeNull();
+
+    await act(async () => {
+      review.focus();
+      review.click();
+    });
+    await waitFor(
+      () => document.body.querySelector('[role="dialog"]') !== null,
+      "annotation review did not open",
+    );
+    const dialog = document.body.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("retry the flaky test");
+    expect(dialog.textContent).toContain("Only on the Linux runner.");
+    expect(dialog.querySelector("textarea")).toBeNull();
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await waitFor(
+      () => document.body.querySelector('[role="dialog"]') === null,
+      "Escape did not close the annotation review",
+    );
+    expect(document.activeElement).toBe(review);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 260));
+    });
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[aria-label="Remove queued prompt 2"]')!
+        .click();
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit queued prompt 1"]')!
+        .click();
+    });
+    expect(calls).toEqual([`remove:${secondId}`, `edit:${firstId}`]);
+    expect(appliedDrafts).toEqual([checkedOut]);
+    expect(appliedDrafts[0]?.annotations).toEqual([annotation]);
+  });
+
+  test("shows the prompt preview alongside the annotation chip", async () => {
+    const turnId = "11111111-1111-4111-8111-111111111111";
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [
+            fakeTurn({
+              id: turnId,
+              prompt: "Fix the flaky test",
+              annotations: [
+                sentAnnotation("00000000-0000-4000-8000-000000000921", "flaky", "See CI."),
+              ],
+            }),
+          ],
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const row = queueRow(mounted.container, turnId);
+    expect(row.textContent).toContain("Fix the flaky test");
+    expect(row.querySelector('button[aria-label="Review 1 annotation"]')).not.toBeNull();
+    for (const action of ["Steer", "Edit", "Remove"]) {
+      expect(row.querySelector(`[aria-label="${action} queued prompt 1"]`)).not.toBeNull();
+    }
+    expect(row.textContent).not.toContain("Content unavailable");
+  });
+
+  test.each([
+    { state: "sending" as const, status: "Placing in queue" },
+    { state: "queued" as const, status: "Queued" },
+    { state: "failed" as const, status: "Not confirmed" },
+  ])("labels an annotation-only optimistic row while $state", async ({ state, status }) => {
+    const retried: string[] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-annotation-only",
+              delivery: "send",
+              destination: "queue",
+              text: "",
+              annotations: [
+                {
+                  id: "00000000-0000-4000-8000-000000000931",
+                  source: sentAnnotation("00000000-0000-4000-8000-000000000931", "x", "y").source,
+                  quote: "keep this",
+                  note: "as-is",
+                },
+              ],
+              resources: [],
+              occurredAt: new Date().toISOString(),
+              state,
+            },
+          ],
+          retryOptimisticMessage: (clientEventId) => retried.push(clientEventId),
+        })}
+      />,
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+
+    const row = mounted.container.querySelector("[data-optimistic-queue-message]")!;
+    expect(row.textContent).toContain("1 annotation");
+    expect(row.textContent).toContain(status);
+    expect(row.querySelector('button[aria-label="Review 1 annotation"]')).not.toBeNull();
+    if (state === "failed") {
+      const retry = Array.from(row.querySelectorAll("button")).find(
+        (button) => button.textContent === "Retry",
+      );
+      await act(async () => retry!.click());
+      expect(retried).toEqual(["client-send-annotation-only"]);
+    }
+  });
+
+  test("shows an explicit fallback for a row with neither prompt nor annotations", async () => {
+    const turnId = "11111111-1111-4111-8111-111111111111";
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [fakeTurn({ id: turnId, prompt: "" })] })}
+        composer={composer()}
+      />,
+    );
+
+    const row = queueRow(mounted.container, turnId);
+    expect(row.textContent).toContain("Content unavailable");
+    expect(row.querySelector('button[aria-label^="Review"]')).toBeNull();
+    expect(row.querySelector('[aria-label="Edit queued prompt 1"]')).not.toBeNull();
+  });
 });

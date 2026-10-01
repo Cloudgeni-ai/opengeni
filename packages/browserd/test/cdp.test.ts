@@ -8,6 +8,35 @@ afterEach(() => {
 });
 
 describe("CdpConnection", () => {
+  test("disconnect observers run once, unsubscribe, and observe an already closed connection", async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: { message() {} },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    let retained = 0;
+    let removed = 0;
+    connection.onDisconnect(() => {
+      retained += 1;
+    });
+    const unsubscribe = connection.onDisconnect(() => {
+      removed += 1;
+    });
+    unsubscribe();
+    connection.close();
+    connection.close();
+    connection.onDisconnect(() => {
+      retained += 1;
+    });
+    expect(retained).toBe(2);
+    expect(removed).toBe(0);
+  });
+
   test("cleans up a timed out command and ignores its late reply without closing the connection", async () => {
     let replyToExpired: (() => void) | undefined;
     const server = Bun.serve({

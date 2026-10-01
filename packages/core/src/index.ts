@@ -47,6 +47,8 @@ export {
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  configureManagedUserAdmission,
+  assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,
   markManagedAuthRequestActorTransitionApplied,
   releaseManagedAuthRequestActorLease,
@@ -98,6 +100,7 @@ export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
+export * from "./domain/scheduled-task-access";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/memory-slack-publication";
@@ -127,6 +130,7 @@ export * from "./editable-artifact-live";
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
 export { withSiteSessionOrigin } from "./site-session-origin";
+export { resolveTurnSurface } from "./turn-surface";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
 

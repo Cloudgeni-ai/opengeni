@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
 import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
+import type { AccessContext, AccessCredential } from "../src/index";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -20,6 +21,22 @@ const BASE_ID = "77777777-7777-4777-8777-777777777777";
 const DOCUMENT_ID = "88888888-8888-4888-8888-888888888888";
 const TURN_A = "99999999-9999-4999-8999-999999999991";
 const TURN_B = "99999999-9999-4999-8999-999999999992";
+
+test("workspace-only file reads use a distinct route that older APIs reject", async () => {
+  const requests: string[] = [];
+  const client = new OpenGeniEmbeddingClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "dummy",
+    fetch: async (input) => {
+      requests.push(String(input));
+      return Response.json({ content: "", encoding: "base64", sizeBytes: 0 });
+    },
+  });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a", workspaceOnly: true });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a" });
+  expect(requests[0]).toEndWith("/fs/read-workspace");
+  expect(requests[1]).toEndWith("/fs/read");
+});
 
 type RecordedRequest = {
   url: string;
@@ -507,6 +524,79 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(JSON.parse(requests[7]!.body!)).toEqual(command);
   });
 
+  test.each([
+    {
+      kind: "organization_api_key",
+      access: "full",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: null,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:create", "members:manage"],
+      note: "All shared workspaces in this organization; Personal workspaces are excluded.",
+    },
+    {
+      kind: "workspace_api_key",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: WORKSPACE_ID,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:read", "secrets:read"],
+      note: "Only this workspace; secrets:read is explicitly granted.",
+    },
+  ] satisfies AccessCredential[])(
+    "getAccessContext preserves $kind credential metadata and existing grants",
+    async (credential) => {
+      const access: AccessContext = {
+        mode: "managed",
+        subjectId: "api_key:test",
+        accountGrants: [
+          {
+            accountId: ENVIRONMENT_ID,
+            subjectId: "api_key:test",
+            permissions: ["account:read"],
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: ENVIRONMENT_ID,
+        defaultWorkspaceId: credential.workspaceId,
+        credential,
+      };
+      const { client, requests } = makeClient(() => jsonResponse(access));
+
+      const result = await client.getAccessContext();
+
+      expect(result).toEqual(access);
+      expect(result.credential).toEqual(credential);
+      expect(result.accountGrants).toEqual(access.accountGrants);
+      expect(result.workspaceGrants).toEqual(access.workspaceGrants);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.method).toBe("GET");
+      expect(new URL(requests[0]!.url).pathname).toBe("/v1/access/me");
+    },
+  );
+
+  test("getAccessContext accepts older servers without credential metadata", async () => {
+    const access: AccessContext = {
+      mode: "managed",
+      subjectId: "api_key:legacy",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          accountId: ENVIRONMENT_ID,
+          subjectId: "api_key:legacy",
+          permissions: ["workspace:read", "sessions:read"],
+        },
+      ],
+      defaultAccountId: ENVIRONMENT_ID,
+      defaultWorkspaceId: WORKSPACE_ID,
+    };
+    const { client } = makeClient(() => jsonResponse(access));
+
+    const result = await client.getAccessContext();
+
+    expect(result).toEqual(access);
+    expect(result.credential).toBeUndefined();
+    expect(result).not.toHaveProperty("credential");
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {
@@ -845,6 +935,18 @@ describe("OpenGeniClient access + workspaces", () => {
 });
 
 describe("OpenGeniClient scheduled tasks", () => {
+  test("sends a model-only patch without inventing a replacement config", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
+    await client.updateScheduledTask(WORKSPACE_ID, TASK_ID, {
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("PATCH");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+  });
+
   test("normalizes Connected Machine working directories before sending", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
     await client.createScheduledTask(WORKSPACE_ID, {
@@ -904,6 +1006,55 @@ describe("OpenGeniClient scheduled tasks", () => {
       `DELETE /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}`,
       `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/runs?limit=5`,
     ]);
+  });
+
+  test("refreshes access against the reviewed head and lists access attention", async () => {
+    const digest = "a".repeat(64);
+    const { client, requests } = makeClient((request) =>
+      new URL(request.url).pathname.endsWith("/attention")
+        ? jsonResponse({
+            tasks: [
+              {
+                taskId: TASK_ID,
+                taskName: "Post the daily summary",
+                executionDigest: digest,
+                runId: TASK_ID,
+                firedAt: "2026-09-17T08:00:00.000Z",
+                unavailableAccounts: [{ id: "gmail", name: "Gmail" }],
+                failures: [
+                  {
+                    serverId: "slack",
+                    name: "Slack",
+                    providerDomain: "slack.com",
+                    reason: "personal_authority_unavailable",
+                    count: 2,
+                    firstOccurredAt: "2026-09-17T08:00:05.000Z",
+                  },
+                ],
+              },
+            ],
+          })
+        : jsonResponse({ id: TASK_ID }),
+    );
+    await client.refreshScheduledTaskAccess(WORKSPACE_ID, TASK_ID, {
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
+    const attention = await client.listScheduledTaskAccessAttention(WORKSPACE_ID);
+    expect(attention.map((item) => item.failures[0]?.reason)).toEqual([
+      "personal_authority_unavailable",
+    ]);
+    expect(attention[0]?.unavailableAccounts).toEqual([{ id: "gmail", name: "Gmail" }]);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/refresh-access`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/attention`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
   });
 });
 
@@ -2278,6 +2429,8 @@ describe("OpenGeniClient billing", () => {
       buckets: [],
       workspaces: [],
       nextWorkspaceCursor: null,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(

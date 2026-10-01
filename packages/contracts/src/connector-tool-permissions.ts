@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MCP_MAX_CATALOG_TOOL_ENTRIES } from "./mcp-catalog-limits";
 
 export const ConnectorToolPermission = z.enum(["allow", "ask", "block"]);
 export type ConnectorToolPermission = z.infer<typeof ConnectorToolPermission>;
@@ -49,7 +50,7 @@ export const UpdateConnectorToolPermissionsRequest = z.discriminatedUnion("targe
             }),
         )
         .min(1)
-        .max(2048),
+        .max(MCP_MAX_CATALOG_TOOL_ENTRIES),
       permission: ConnectorToolPermission,
     })
     .strict(),

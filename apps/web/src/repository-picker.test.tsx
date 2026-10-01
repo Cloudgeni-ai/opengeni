@@ -41,7 +41,7 @@ describe("repository picker GitHub binding status", () => {
       healthy: false,
       canRefresh: false,
     });
-    expect(presentation.setupDescription).toContain("Install OpenGeni");
+    expect(presentation.setupDescription).toContain("Install Opengeni");
     expect(presentation.emptyDescription).not.toContain("server credentials");
     expect(presentation.emptyDescription).not.toContain(".env");
   });
@@ -154,7 +154,7 @@ describe("repository picker GitHub App links", () => {
     await actRun(() => Promise.resolve());
     expect(configured).toEqual([42]);
     expect(rendered.container.querySelector('[role="alert"]')?.textContent).toBe(
-      "You can't change this installation's repositories.",
+      "Couldn't open GitHub. You can't change this installation's repositories.",
     );
     await rendered.unmount();
   });
@@ -437,7 +437,9 @@ describe("additive repository picker", () => {
     );
     await actRun(() => refresh?.click());
     expect(explicitRefreshes).toBe(1);
-    expect(body.container.querySelector('[role="alert"]')?.textContent).toBe("Catalog unavailable");
+    expect(body.container.querySelector('[role="alert"]')?.textContent).toBe(
+      "Couldn't refresh the list. Catalog unavailable",
+    );
     await body.rerender(
       createElement(RepositoryContextMenuBody, {
         ...bodyProps,

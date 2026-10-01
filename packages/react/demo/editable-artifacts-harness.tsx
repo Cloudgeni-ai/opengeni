@@ -25,6 +25,10 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { createRoot } from "react-dom/client";
 
 import "./styles.css";
+import { enablePierreDiffs } from "@opengeni/react/diffs";
+
+// The demo ships the optional @pierre/diffs peer.
+enablePierreDiffs();
 
 const apiBaseUrl = import.meta.env.VITE_OPENGENI_DEMO_API_BASE_URL ?? "/demo-api";
 const absoluteApiBaseUrl = new URL(apiBaseUrl, location.origin);

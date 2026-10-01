@@ -461,8 +461,34 @@ describe("workspace tool gateway adapters", () => {
           return true;
         },
       ),
-    ).rejects.toMatchObject({ status: 422 });
+    ).rejects.toMatchObject({
+      status: 422,
+      code: "validation_failed",
+      retryable: false,
+      message:
+        'Tool arguments do not match the tool\'s input schema: missing required property "sku"',
+      details: {
+        code: "invalid_tool_arguments",
+        issues: [{ path: "sku", keyword: "required", message: 'missing required property "sku"' }],
+        omittedIssueCount: 0,
+      },
+    });
     expect(consumedInvalidApproval).toBe(false);
+    const mistyped = await callWorkspaceToolGateway(prepared, access, {
+      ...base,
+      operationId: "44444444-4444-4444-8444-444444444444",
+      arguments: { sku: 12345, note: "synthetic-note-value" },
+    }).then(
+      () => null,
+      (error: unknown) => error as { status?: number; message?: string; details?: unknown },
+    );
+    expect(mistyped).toMatchObject({
+      status: 422,
+      message:
+        'Tool arguments do not match the tool\'s input schema: property "note" is not allowed; "sku" must be string',
+    });
+    expect(JSON.stringify(mistyped?.details)).not.toContain("synthetic-note-value");
+    expect(JSON.stringify(mistyped?.details)).not.toContain("12345");
   });
 
   test("issues an opaque approval capability bound to the exact operation", async () => {

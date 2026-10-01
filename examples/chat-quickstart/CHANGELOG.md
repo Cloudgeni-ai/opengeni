@@ -1,5 +1,51 @@
 # @opengeni/example-chat-quickstart
 
+## 0.0.17
+
+### Patch Changes
+
+- Updated dependencies [3f9c757]
+- Updated dependencies [304ddc5]
+- Updated dependencies [3f9c757]
+- Updated dependencies [378327b]
+- Updated dependencies [a6644b6]
+- Updated dependencies [aad6598]
+- Updated dependencies [e14db2a]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a6644b6]
+- Updated dependencies [d480872]
+- Updated dependencies [3f9c757]
+- Updated dependencies [9732749]
+- Updated dependencies [6f28afd]
+- Updated dependencies [b591ea1]
+- Updated dependencies [a6644b6]
+- Updated dependencies [a82657f]
+- Updated dependencies [3f9c757]
+- Updated dependencies [57f030c]
+- Updated dependencies [3f9c757]
+- Updated dependencies [3f9c757]
+- Updated dependencies [f986809]
+- Updated dependencies [1ea4c69]
+- Updated dependencies [11151c6]
+- Updated dependencies [12bc3de]
+- Updated dependencies [30414a0]
+- Updated dependencies [a6644b6]
+- Updated dependencies [8a9d19e]
+- Updated dependencies [e193b13]
+- Updated dependencies [14990d0]
+- Updated dependencies [d1f4724]
+- Updated dependencies [c823664]
+  - @opengeni/sdk@7.4.0
+
+## 0.0.16
+
+### Patch Changes
+
+- Updated dependencies [1842911]
+- Updated dependencies [585f2c1]
+- Updated dependencies [ec707de]
+  - @opengeni/sdk@7.3.0
+
 ## 0.0.15
 
 ### Patch Changes

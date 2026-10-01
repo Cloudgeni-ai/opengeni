@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
@@ -16,6 +16,14 @@ import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagno
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 export {
+  withMcpTelemetry,
+  withMcpCallIdentity,
+  bindMcpTelemetry,
+  beginMcpPhase,
+  measureMcpPhase,
+  MCP_EXECUTION_PHASES,
+} from "./mcp-timing";
+export {
   currentTraceContext,
   withTraceContext,
   parseTraceparent,
@@ -27,6 +35,9 @@ export {
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
+
+// Opaque runtime identity shared by observers in this process, never a metric label.
+const serviceInstanceId = randomUUID();
 
 export type ObservabilitySettings = {
   serviceName: string;
@@ -53,6 +64,7 @@ export type ObservabilityOptions = {
 export type Span = {
   traceId: string;
   spanId: string;
+  traceFlags?: string;
   addLink?: (context: TraceContext) => void;
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
@@ -332,6 +344,7 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
  * caller accidentally publish a raw identifier under that name. */
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
+  ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
   // Web error beacon: a route PATTERN of lowercase literal and `$param`
@@ -590,8 +603,10 @@ export class Observability {
     this.exporter = options.exporter ?? defaultExporter;
     this.resourceAttributes = {
       "service.name": settings.serviceName,
+      "service.instance.id": serviceInstanceId,
       "deployment.environment": settings.environment,
       "opengeni.component": options.component,
+      "opengeni.deployment_revision": settings.deploymentRevision || undefined,
     };
     this.registry.setDefaultLabels({
       service: settings.serviceName,
@@ -754,6 +769,7 @@ export class Observability {
     return {
       traceId,
       spanId,
+      ...(parent?.traceFlags === undefined ? {} : { traceFlags: parent.traceFlags }),
       addLink: (context) => {
         const valid = validTraceContext(context);
         if (
@@ -1077,7 +1093,7 @@ export class Observability {
                   traceId: span.traceId,
                   spanId: span.spanId,
                   ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
-                  links: span.links,
+                  links: span.links.map(({ traceId, spanId }) => ({ traceId, spanId })),
                   name: span.name,
                   kind: 1,
                   startTimeUnixNano: millisToNanos(span.startMs),

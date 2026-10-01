@@ -67,12 +67,14 @@ describe("web bundle budget policy", () => {
       "initialRaw: 1485 * kib",
       "initialGzip: 405 * kib",
       "initialFileGzip: wholeKibEnvelope(82_325)",
-      "initialFiles: 17",
+      // Usage allowances split one shared members chunk (807 gzip bytes).
+      "initialFiles: 18",
       "directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400))",
       "directSessionFiles: 31",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
-      "cssGzip: wholeKibEnvelope(35_411)",
+      // The neutral retheme's documented stylesheet growth.
+      "cssGzip: wholeKibEnvelope(44_100)",
     ])
       expect(source).toContain(limit);
   });
@@ -318,5 +320,12 @@ describe("web bundle budget policy", () => {
     expect(
       SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET - SESSION_WAIT_COMMAND_WAKE_RAW_MEASUREMENT,
     ).toBeGreaterThanOrEqual(MINIMUM_RAW_HEADROOM_BYTES);
+  });
+
+  test("bounds the usage-allowance session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_531_746, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(713_634, 1.5 * kib)");
+    expect(wholeKibEnvelope(713_634, 1.5 * KIB) - 713_634).toBeGreaterThanOrEqual(1.5 * KIB);
   });
 });

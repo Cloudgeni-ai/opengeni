@@ -14,6 +14,7 @@ import {
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
+  skillCatalogEntryIds,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -57,6 +58,7 @@ import {
   structuredToolTransportForTurn,
   hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
+  textVerbosityForTurn,
 } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -570,6 +572,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
   );
+  const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
@@ -580,6 +583,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     catalog: formatSkillCatalog(deps.skillCatalog),
   });
+  eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
@@ -651,6 +655,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         reasoningEffort: requestReasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
+        ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
         missingSessionTitleHint,

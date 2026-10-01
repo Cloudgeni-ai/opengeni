@@ -2,9 +2,10 @@
 
 > Most customer products do **not** need this integration shape. When OpenGeni
 > remains a standalone service and the product presents an OpenGeni-backed agent
-> in its own UI, use `@opengeni/sdk` through a tenant-scoped server proxy and add
-> only the `@opengeni/react` surfaces the product wants. See the package READMEs
-> and the `opengeni-client` skill. This guide is for the rarer case where the
+> in its own UI, mount `OpenGeniChat` or `SessionConversation` from
+> `@opengeni/react` behind the packaged `createSessionProxyHandler` from
+> `@opengeni/sdk` (adapters: `@opengeni/sdk/next`, `/express`, `/hono`). See
+> [product integration](product-integration.md) and the `opengeni-client` skill. This guide is for the rarer case where the
 > host mounts OpenGeni's router or calls its core domain packages in-process.
 
 This guide is for a host application that embeds OpenGeni instead of running it only as the stock API + worker service. Embedding means binding host-owned concerns (identity, tenancy, billing admission, credentials, persistence, worker process, and event bus) into the same OpenGeni domain/runtime code the standalone stack uses.
@@ -62,8 +63,9 @@ Resume is optional.
 **OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
 should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
-under `OpenGeniProvider`. It wires queue actions, composer drafts, model policy,
-pause/resume, human-input forms, optimistic delivery, and paged timeline history.
+under `OpenGeniProvider`. A standalone product backs both with
+`createSessionProxyHandler`. It wires queue actions, composer drafts, model policy,
+pause/resume, tool approvals, attachments, human-input forms, optimistic delivery, and paged timeline history.
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
@@ -71,6 +73,26 @@ The host owns available space; `SessionConversation` fills its container by
 default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
 children. The SDK scrolls the timeline internally and keeps the composer at
 the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
+
+Agent replies link files, sandbox paths, editable artifacts, and Sites with
+`artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
+host origin. `SessionConversation` downloads retained files by default;
+sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+session working directory without following symlinks.
+`opengeni-site` fences render the console's inline Site preview, and
+`onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
+open editable artifacts and Sites in a host container through the proxy's
+opt-in `artifacts: true`. The proxy checks exact session associations on every
+request and refreshes effective workspace grants for the browser cache
+partition. Live source authority is rechecked in the mutation commit transaction;
+lease expiry runs independently of pending authorization. Older APIs omit only
+artifact capability, leaving conversation bootstrap available.
+Its Site HTML delivery streams with cancellation and a 25 MiB
+actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+Other routing uses `resolveLink` (also on
+`MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
+`@opengeni/sdk` outside React. See
+[links, files, artifacts, and Sites](product-integration.md#links-files-artifacts-and-sites-in-replies).
 
 A host that mounts the styled React surfaces
 can import `@opengeni/react/compiled.css` once. That package-owned artifact is
@@ -220,7 +242,10 @@ tenant-scoped tool over a large context snapshot.
 
 Because `modelContext` is appended in the newest user history item rather than
 composed into `Agent.instructions`, changing it does not rewrite the persistent
-provider prefix or invalidate otherwise reusable prompt-cache bytes. Initial
+provider prefix or invalidate otherwise reusable prompt-cache bytes. OpenGeni
+adds the message's acceptance time (minute-precision UTC with the weekday) to
+that same history item as its own part, so hosts do not need to put the current
+date or time in `modelContext`. Initial
 `modelContext` requires `initialMessage`; a realtime shell attaches context to a
 later delegation or finalized transcript entry instead. Values are trimmed,
 non-empty, and capped at 32768 characters.
@@ -531,6 +556,26 @@ provider therefore requires choosing its path semantics rather than silently
 inheriting GitHub behavior. Mount-path and display-name derivation are separate
 from the clone transport URI.
 
+A repository resource may carry `optional: true` to make its materialization
+best effort: when its clone fails (for example the repository is empty, the
+ref no longer exists, or an anonymous remote is unreachable), the clone hook logs a warning, reports the
+mount path in `skippedOptionalRepositories` on the `repository-clone`
+`sandbox.operation.completed` event, and the session continues without it.
+Without the flag a failed clone fails sandbox setup, as before. OpenGeni sets
+it only on repositories it attaches on a person's behalf (a Slack task's
+recently used repositories); it grants no access and changes no credential
+routing. An optional clone is bounded to 60 seconds (90 seconds for all
+optional clones of one setup command) when the sandbox has a `timeout` binary,
+so a hung fetch is skipped the same way. Before each turn's strict GitHub App
+allowlist recheck and installation-token mint, the worker also drops, for that
+turn only, an optional GitHub App repository that the workspace allowlist no
+longer admits or, when OpenGeni's own App mints the token (no host
+`gitCredentials` port), that the installation can no longer reach; it reports
+them as `skippedOptionalRepositories` on a `sandbox.operation.completed` event
+named `optional-repository-access`. This only removes repositories from the
+turn. A repository without the flag keeps the strict checks and still fails
+the turn when its access is gone.
+
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
 an existing warm workspace path should persist the session's former effective
@@ -607,6 +652,11 @@ a pure service initiator; user-scoped sets must reject a null causal human and
 revalidate the exact admitted personal-resource grant. The provider returns
 plaintext values plus exact scope/resource/attempt echoes, which the worker
 checks before applying any value.
+
+A standalone product can supply the same material without embedding: a
+workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
+is a signed HTTP endpoint that OpenGeni uses as that workspace's `runCredentials`
+resolver, in place of the injected port.
 
 `runCredentials` is the session-aware seam for credentials that programs inside
 the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,
@@ -972,7 +1022,7 @@ registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 Accepted `user.message` events intentionally have no direct turn ID. Migration
-`0461_host_export_message_attribution.sql` derives export initiator and origin
+`0460_host_export_message_attribution.sql` derives export initiator and origin
 from the exact same-account/workspace/session turn whose `trigger_event_id`
 references the message, after the accepting transaction commits its turn. It
 never derives sender authority from payload fields or the session creator.
@@ -980,6 +1030,23 @@ An unbound event stays unattributed. The event's own turn ID and the existing
 immutable export rows/checkpoints are unchanged; downstream historical
 attribution repair is a separate operator action. Analytics consumers must expose
 unattributed coverage instead of equating missing identity with zero messages.
+
+Migration `0533_turn_surface_analytics.sql` adds three content-free analytics
+fields next to `origin`, each from a fixed list defined in
+`packages/contracts/src/product-analytics.ts`: `surface` (the attributed turn's
+entry surface, see [`run-lifecycle.md`](run-lifecycle.md)), `modelProvider` (the
+provider family from the turn's accepted execution policy; operator-configured
+registry providers export as `registry`), and, on `agent.toolCall.created` only,
+`toolFamily` (an OpenGeni first-party tool name, `integration:<reviewed domain>`,
+or `custom`, so a tenant's own MCP host never leaves the database). The worker
+stamps `toolFamily` on the event payload and the export trigger checks the wire
+format again, exporting NULL for anything malformed. Usage facts carry `surface`
+and `modelProvider` from their turn. The published claim function and its
+root/codec sidecar keep their signatures: SQL consumers read the new columns
+through `opengeni_host_export.host_export_claim_analytics_sidecars(kind,
+consumer, lease)` in the same transaction as the claim, and `createHostExportPump`
+sinks receive them on each `HostEventExport` / `HostUsageExport`. The fields are
+optional on the wire; rows enqueued before the migration export them as null.
 
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
@@ -1050,6 +1117,8 @@ maintenance disposition, while installations with no suspect population can appl
 the bounded rolling path. Child lifecycle remains child lifecycle—the root id is attribution
 context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
+The usage trigger locks the workspace before the session, turn, and attempt, matching lifecycle
+writers. Rolling migration 0541 repairs this ordering without changing validation or retained facts.
 Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
 new fact fails its source transaction instead of committing a poison export row, while standalone
 mode retains its prior input behavior.
@@ -1073,6 +1142,49 @@ enabled across deploy restarts. `pump.disable(kind)` retains that consumer and i
 continues to hold the pruning floor); when it disables the last consumer of a kind, capture stops and
 events in that interval are deliberately not recoverable. Normal deploys must use `stop()`, not
 `disable()`.
+
+#### Product lifecycle facts
+
+Canonical sources: `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES` in
+`packages/contracts/src/product-lifecycle-facts.ts`, the `HostLifecycleFactExport` contract in
+`packages/contracts/src/index.ts`, and migration `0532_product_lifecycle_fact_export.sql`.
+
+A third export kind, `lifecycle_fact`, carries one content-free fact per person-level product
+milestone, so a host can answer who signed up, verified, signed in, set up an organization, and
+adopted which features without reading tenant data. Register it like the other kinds, either with
+`registerHostExportConsumer(db, { kind: "lifecycle_fact", consumerId })` or with a
+`lifecycleSink: { consumerId, deliverLifecycleFacts }` on `createHostExportPump`. Capture is off
+until the first lifecycle consumer registers.
+
+| Fact | Attribute (fixed list) | Captured when |
+|---|---|---|
+| `auth.sign_up` | method: `email`, `google`, `github`, `other` | a managed account gets its first sign-in method |
+| `auth.email_verified` | none | the email is verified by link, or a social provider verified it at creation |
+| `auth.sign_in` | method of that session | a live sign-in session is created (discarded session-set provider sessions are not) |
+| `organization.setup` | `created`, `additional` | self-service setup or an additional organization commits |
+| `model.connected` | `codex`, `supergrok`, `vercel_gateway`, `openrouter` | a subscription account or organization model provider is connected |
+| `credits.purchased` | none | a credit top-up payment is granted |
+| `connection.created` | provider class, for example `slack`, `github`, `google`, `other` | an integration connection is created |
+| `scheduled_task.created` | none | a scheduled task is created |
+| `skill.installed` | none | a catalog Skill is installed into a workspace |
+| `slack.user_linked` | none | a Slack user is linked to an OpenGeni user |
+| `machine.enrolled` | none | a new Connected Machine is enrolled |
+| `member.joined` | none | a person becomes an active member of an organization that already had one |
+
+Row triggers on the source tables write each fact in the same transaction as the product change,
+so every writer path is covered and a rolled-back change leaves no fact. A capture error rolls back
+only the fact and raises a database warning; it never fails the product change. A self-service
+setup that fails writes nothing durable, so failed setups stay a count in
+`opengeni_organization_setup_total{outcome="failed"}` rather than a per-person fact.
+
+Facts are deliberately minimal. `fact.subjectId` is present only for opaque `user:` and `api_key:`
+subjects; every other subject (services, embedded-host identities) is reduced to `subjectKind`. Sign-up,
+verification and sign-in facts carry no organization (`accountId: null`), because a person can
+belong to several. No name, email, IP address, user agent, provider domain, credential, amount, or
+free text is exported: a connection to a domain outside the fixed provider list is exported as
+`other`. Fact ids are deterministic, so a re-captured fact has the same `idempotencyKey`. Retention
+of delivered facts belongs to the sink; the outbox keeps only undelivered and recently acknowledged
+rows, like the other kinds.
 
 ### EventBus
 

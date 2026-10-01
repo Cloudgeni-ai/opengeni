@@ -1,17 +1,20 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   access,
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   readlink,
   realpath,
   rm,
+  writeFile,
 } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -23,6 +26,7 @@ const MAX_ARGUMENT_BYTES = 4 * 1024 * 1024;
 const DAEMON_STOP_TIMEOUT_MS = 3_000;
 const PROCESS_QUERY_TIMEOUT_MS = 2_000;
 const MAX_PROCESS_QUERY_BYTES = 8 * 1024;
+const CHROME_STDERR_DIAGNOSTIC_BYTES = 64 * 1024;
 
 export type AgentBrowserEnvelope<T = unknown> = {
   success: boolean;
@@ -105,8 +109,13 @@ export class AgentBrowserJsonRunner {
   private readonly browserPidFile: string;
   private readonly profileDirectory: string;
   private readonly managedBrowserExecutable: string | null;
+  private readonly chromeStderrDrainPaths: readonly string[];
 
-  private constructor(binary: ResolvedAgentBrowserBinary, options: AgentBrowserRunnerOptions) {
+  private constructor(
+    binary: ResolvedAgentBrowserBinary,
+    options: AgentBrowserRunnerOptions,
+    browserLaunch?: ManagedBrowserLaunch,
+  ) {
     this.binary = binary;
     this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
     this.profileDirectory = resolve(options.profileDirectory);
@@ -126,8 +135,10 @@ export class AgentBrowserJsonRunner {
     this.browserPidFile = join(this.profileDirectory, "..", "browser.pid");
     this.managedBrowserExecutable =
       options.environment?.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ??
-      options.browserExecutablePath ??
-      null;
+      (browserLaunch && "actualExecutablePath" in browserLaunch
+        ? (browserLaunch.actualExecutablePath ?? null)
+        : (options.browserExecutablePath ?? null));
+    this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
   }
 
   static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
@@ -143,6 +154,7 @@ export class AgentBrowserJsonRunner {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
+    const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
     const browserLaunch = await managedBrowserLaunch(options);
     const browserPidFile = join(resolve(options.profileDirectory), "..", "browser.pid");
     if (browserLaunch?.backgroundBrowserExecutable) {
@@ -152,25 +164,28 @@ export class AgentBrowserJsonRunner {
         executablePath: browserLaunch.backgroundBrowserExecutable,
       });
     }
-    const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
-    return new AgentBrowserJsonRunner(binary, {
-      ...options,
-      ...(browserLaunch
-        ? {
-            browserExecutablePath: browserLaunch.executablePath,
-            environment: {
-              ...options.environment,
-              ...(browserLaunch.backgroundBrowserExecutable
-                ? {
-                    OPENGENI_BACKGROUND_BROWSER_EXECUTABLE:
-                      browserLaunch.backgroundBrowserExecutable,
-                    OPENGENI_BACKGROUND_BROWSER_PID_FILE: browserPidFile,
-                  }
-                : {}),
-            },
-          }
-        : {}),
-    });
+    return new AgentBrowserJsonRunner(
+      binary,
+      {
+        ...options,
+        ...(browserLaunch
+          ? {
+              browserExecutablePath: browserLaunch.executablePath,
+              environment: {
+                ...options.environment,
+                ...(browserLaunch.backgroundBrowserExecutable
+                  ? {
+                      OPENGENI_BACKGROUND_BROWSER_EXECUTABLE:
+                        browserLaunch.backgroundBrowserExecutable,
+                      OPENGENI_BACKGROUND_BROWSER_PID_FILE: browserPidFile,
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      },
+      browserLaunch,
+    );
   }
 
   async run<T = unknown>(
@@ -319,6 +334,7 @@ export class AgentBrowserJsonRunner {
     if (pid === null || !(await processRunning(pid))) {
       await rm(this.daemonPidFile, { force: true });
       await this.terminateManagedBrowser();
+      await this.cleanupChromeStderrDrain();
       return;
     }
     if (!(await sameExecutable(pid, this.binary.path))) {
@@ -345,6 +361,7 @@ export class AgentBrowserJsonRunner {
     }
     await rm(this.daemonPidFile, { force: true });
     await this.terminateManagedBrowser();
+    await this.cleanupChromeStderrDrain();
   }
 
   private async terminateManagedBrowser(): Promise<void> {
@@ -352,7 +369,14 @@ export class AgentBrowserJsonRunner {
       pidFile: this.browserPidFile,
       profileDirectory: this.profileDirectory,
       executablePath: this.managedBrowserExecutable,
+      discoverByProfile: this.chromeStderrDrainPaths.length > 0,
     });
+  }
+
+  private async cleanupChromeStderrDrain(): Promise<void> {
+    await Promise.all(
+      this.chromeStderrDrainPaths.map(async (path) => await rm(path, { force: true })),
+    );
   }
 }
 
@@ -378,6 +402,22 @@ export async function reapManagedBrowserProcesses(rootDirectory: string): Promis
       executablePath: null,
       discoverByProfile: true,
     });
+    await cleanupStaleChromeLaunchers(join(sessionDirectory, "chrome-launch"));
+  }
+}
+
+async function cleanupStaleChromeLaunchers(directory: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const name of names) {
+    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo)$/iu.test(name)) {
+      await rm(join(directory, name), { force: true });
+    }
   }
 }
 
@@ -387,12 +427,25 @@ const MACOS_BROWSER_EXECUTABLES = [
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ] as const;
 
+type ManagedBrowserLaunch = {
+  executablePath: string;
+  actualExecutablePath?: string | null;
+  backgroundBrowserExecutable?: string;
+  cleanupPaths?: readonly string[];
+};
+
 async function managedBrowserLaunch(
   options: AgentBrowserRunnerOptions,
-): Promise<{ executablePath: string; backgroundBrowserExecutable?: string } | undefined> {
+): Promise<ManagedBrowserLaunch | undefined> {
   const configured = options.browserExecutablePath
     ? resolve(options.browserExecutablePath)
     : undefined;
+  if (process.platform === "linux" && !options.provider) {
+    const executable = configured ?? (await linuxChromeExecutable());
+    if (executable) {
+      return await linuxChromeStderrDrainWrapper(options.profileDirectory, executable);
+    }
+  }
   if (process.platform !== "darwin" || !options.headed || options.provider) {
     return configured ? { executablePath: configured } : undefined;
   }
@@ -413,6 +466,99 @@ async function managedBrowserLaunch(
     executablePath: helper,
     backgroundBrowserExecutable: executable,
   };
+}
+
+/** The pinned agent-browser daemon keeps Chrome's stderr pipe open after
+ * DevToolsActivePort appears but does not consume it. A noisy managed Chrome
+ * fills that pipe and then stops answering even browser-level CDP requests.
+ * Keep Chrome's PID/process group unchanged with shell exec, while a private
+ * reader consumes stderr and retains only the last bounded diagnostic bytes. */
+async function linuxChromeStderrDrainWrapper(
+  profileDirectory: string,
+  executable: string,
+): Promise<ManagedBrowserLaunch> {
+  await access(executable, constants.X_OK);
+  const actualExecutablePath = (await isScriptExecutable(executable)) ? null : executable;
+  const mkfifo =
+    (await firstExecutableInPath(["mkfifo"])) ??
+    (await firstExecutable(["/usr/bin/mkfifo", "/bin/mkfifo"]));
+  const tail =
+    (await firstExecutableInPath(["tail"])) ??
+    (await firstExecutable(["/usr/bin/tail", "/bin/tail"]));
+  if (!mkfifo || !tail) throw new Error("managed Linux Chrome requires mkfifo and tail");
+  const directory = join(dirname(resolve(profileDirectory)), "chrome-launch");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const id = randomUUID();
+  const fifo = join(directory, `${id}.stderr.fifo`);
+  const log = join(directory, "chrome-stderr.log");
+  const wrapper = join(directory, `${id}.sh`);
+  try {
+    await runProcess(mkfifo, ["-m", "600", fifo]);
+    await writeFile(
+      wrapper,
+      `#!/bin/sh\numask 077\n${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)} "$@" 2>${shellQuote(fifo)}\n`,
+      { mode: 0o700, flag: "wx" },
+    );
+    await chmod(wrapper, 0o700);
+    return {
+      executablePath: wrapper,
+      actualExecutablePath,
+      cleanupPaths: [wrapper, fifo],
+    };
+  } catch (error) {
+    await Promise.allSettled([rm(wrapper, { force: true }), rm(fifo, { force: true })]);
+    throw error;
+  }
+}
+
+async function isScriptExecutable(path: string): Promise<boolean> {
+  const file = await open(path, "r");
+  try {
+    const prefix = Buffer.alloc(2);
+    const { bytesRead } = await file.read(prefix, 0, 2, 0);
+    return bytesRead === 2 && prefix[0] === 35 && prefix[1] === 33;
+  } finally {
+    await file.close();
+  }
+}
+
+async function linuxChromeExecutable(): Promise<string | undefined> {
+  return await firstExecutableInPath([
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium-browser",
+    "chromium",
+  ]);
+}
+
+async function firstExecutableInPath(names: readonly string[]): Promise<string | undefined> {
+  for (const name of names) {
+    for (const directory of (process.env.PATH ?? "").split(":")) {
+      if (!directory) continue;
+      const candidate = join(directory, name);
+      try {
+        await access(candidate, constants.X_OK);
+        return resolve(candidate);
+      } catch {
+        // Continue to the next installed candidate.
+      }
+    }
+  }
+  return undefined;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function runProcess(command: string, args: readonly string[]): Promise<void> {
+  const child = spawn(command, args, { stdio: "ignore", windowsHide: true });
+  const code = await new Promise<number | null>((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("close", resolveExit);
+  });
+  if (code !== 0) throw new Error("managed Linux Chrome stderr drain could not start");
 }
 
 async function firstExecutable(candidates: readonly string[]): Promise<string | undefined> {
@@ -495,7 +641,8 @@ async function processRunning(pid: number): Promise<boolean> {
       const commandEnd = stat.lastIndexOf(")");
       return commandEnd >= 0 && stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ESRCH") return false;
       throw error;
     }
   }
@@ -609,7 +756,10 @@ async function findLinuxManagedBrowserProcess(
       argv = await linuxProcessArguments(pid);
       resolvedExecutable = await realpath(await readlink(`/proc/${pid}/exe`));
     } catch (error) {
-      if (["EACCES", "ENOENT", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+      // A process can exit after readdir or while procfs is reading its cmdline.
+      if (
+        ["EACCES", "ENOENT", "EPERM", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")
+      ) {
         continue;
       }
       throw error;
@@ -645,9 +795,13 @@ async function linuxProcessArguments(pid: number): Promise<string[]> {
 }
 
 function isRecognizedLinuxBrowserExecutable(executablePath: string): boolean {
-  return ["chrome", "chromium", "chromium-browser", "google-chrome"].includes(
-    basename(executablePath),
-  );
+  return [
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "chrome-headless-shell",
+  ].includes(basename(executablePath));
 }
 
 async function readManagedBrowserPid(path: string): Promise<number | null> {
@@ -753,7 +907,11 @@ function isolatedEnvironment(
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
     AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
-    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform, options.launchArguments),
+    AGENT_BROWSER_ARGS: browserLaunchArguments(
+      process.platform,
+      options.launchArguments,
+      options.headed,
+    ),
     NO_COLOR: "1",
   });
   if (proxy) {
@@ -883,6 +1041,7 @@ function supportedTimezone(value: string): string {
 export function browserLaunchArguments(
   platform: NodeJS.Platform,
   additional: readonly string[] = [],
+  headed = false,
 ): string {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
@@ -904,6 +1063,17 @@ export function browserLaunchArguments(
     "--restore-last-session",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
+    // Component-update suppression does not stop Chromium's on-demand local
+    // model downloads. Managed profiles must not each fetch gigabytes of AI
+    // weights; OpenGeni's model provider is independent of Chrome's local AI.
+    "--disable-features=OptimizationGuideOnDeviceModel",
+    // Chromium's free-disk-derived default can retain gigabytes per actor.
+    // Bound disposable HTTP caching without limiting cookies or site storage.
+    "--disk-cache-size=67108864",
+    // Chromium's presentation-fenced screenshot path can wait indefinitely for
+    // hidden headed tabs. Copy a freshly repainted surface without raising the
+    // browser or changing the shared desktop's active tab.
+    platform === "linux" && headed ? "--enable-features=CDPScreenshotNewSurface" : null,
     platform === "linux" ? "--test-type" : null,
     profileCryptoArgument,
     ...validatedAdditional,

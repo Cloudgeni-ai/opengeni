@@ -1,9 +1,12 @@
 # Workspace pause timers
 
-Workspace settings → General retains the immediate Pause/Resume button. The
-adjacent chevron opens Pause in (Now or duration) and Pause for (Until I resume
-or duration). Already paused: Resume in. Presets: 15/30 minutes, 1/2 hours.
-Custom: whole minutes/hours, one minute–30 days. Click the countdown to edit.
+Workspace settings → General → Agent activity shows Running with Pause, or
+Paused with Change and Resume. Pause opens a "Pause agent work" dialog: for 30
+minutes, for 1 hour, until tomorrow morning (08:00 local), until I resume, or
+pick a time (one minute to 30 days). Timed choices pause now with a resume
+timer. Change offers the same choices to move the resume time; Until I resume
+cancels the timer. Resume resumes immediately. The API still accepts a delayed
+Pause in.
 
 One timer per workspace. Cancel timer preserves runtime state. Manual
 Pause/Resume cancels automation, even a desired-state no-op. Exact retries do

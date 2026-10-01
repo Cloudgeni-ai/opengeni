@@ -1,4 +1,4 @@
-import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
 import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
@@ -1148,7 +1148,7 @@ async function admitRealtimeDelegationInTransaction(
   if (!session || session.accountId !== accountId || session.status === "cancelled") {
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
-  const [policy] = await withLatestStartedSessionPolicy(db, input.workspaceId, [session]);
+  const [policy] = await withEffectiveSessionPolicy(db, input.workspaceId, [session]);
   if (!policy) throw new Error("Realtime delegation session disappeared");
   const provenance = {
     source: "realtime_provider_delegation",
@@ -1190,6 +1190,7 @@ async function admitRealtimeDelegationInTransaction(
       realtimeDelegation: { ...provenance, inputTranscript },
     },
     source: "api",
+    surface: "voice",
   });
   return {
     turnId: admitted.turnId,

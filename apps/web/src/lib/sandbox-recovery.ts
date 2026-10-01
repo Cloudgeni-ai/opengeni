@@ -61,14 +61,50 @@ export function isRecoveryNotApplicableError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && error.status === 403;
 }
 
-/** Public blocker codes are stable; UI copy must not expose persistence jargon. */
-export function sandboxRecoveryBlocker(reason: string): string {
+/** Times are shown to the minute; round up so a Retry at the shown minute is
+ * never refused for the remaining seconds. */
+function nextMinute(iso: string): string {
+  const time = Date.parse(iso);
+  return Number.isFinite(time) ? new Date(Math.ceil(time / 60_000) * 60_000).toISOString() : iso;
+}
+
+/** Public blocker codes are stable; UI copy must not expose persistence jargon.
+ * A timed wait never implies OpenGeni proceeds by itself: only Retry or a new
+ * message decides again, so the copy names when that becomes possible. */
+export function sandboxRecoveryBlocker(reason: string, availableAt?: string | null): string {
+  const message = sandboxRecoveryBlockerMessage(reason);
+  if (!TIMED_RECOVERY_WAITS.has(reason)) return message;
+  return availableAt
+    ? `${message} You can retry after ${formatCheckpointTime(nextMinute(availableAt))}.`
+    : `${message} You can retry later.`;
+}
+
+const TIMED_RECOVERY_WAITS: ReadonlySet<string> = new Set([
+  "restore_retry_backoff",
+  "provider_lifetime_unexpired",
+  "capture_unresolved",
+]);
+
+function sandboxRecoveryBlockerMessage(reason: string): string {
   const messages: Record<string, string> = {
     recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
     managed_modal_home_required: "Recovery supports only this session's managed cloud sandbox.",
     connected_machine_selected:
       "This session now uses a Connected Machine. Check prior execution outcomes before retrying.",
-    singleton_required: "This sandbox is shared with another session and cannot be recovered here.",
+    singleton_required:
+      "Checkpoint consent is available only when this session does not share its sandbox. Ask your operator to review this session.",
+    shared_sandbox_member_active:
+      "Another session sharing this sandbox is still running or waiting for input. Retry becomes available once it settles.",
+    restore_retry_backoff:
+      "The last checkpoint restore failed. The checkpoint is kept for the next attempt.",
+    restore_retry_exhausted:
+      "Restoring the checkpoint failed repeatedly. The checkpoint is kept; ask your operator to review this session.",
+    provider_lifetime_unexpired:
+      "No checkpoint can be restored automatically. Retry can continue with an empty workspace once the lost sandbox's provider lifetime has ended.",
+    automatic_recovery_pending:
+      "OpenGeni is already recovering this sandbox automatically. Retry to continue.",
+    retry_tool_outcome_unresolved:
+      "A tool call in the failed turn has no recorded outcome, so Retry cannot safely reopen it. Send a new message to continue; the lost sandbox then recovers automatically.",
     checkpoint_unavailable: "No recoverable checkpoint is available.",
     registered_current_checkpoint_required:
       "No verified current checkpoint is available for this recovery.",
@@ -80,7 +116,8 @@ export function sandboxRecoveryBlocker(reason: string): string {
     session_not_quiescent: "This session is active or cancelled and cannot accept recovery.",
     execution_unresolved:
       "Execution may still be active. Recovery must wait until its outcome is settled.",
-    capture_unresolved: "A checkpoint capture is still unresolved.",
+    capture_unresolved:
+      "A checkpoint capture is still unresolved. Recovery can continue once it settles.",
     restore_failed: "Restoration failed. Operator review is required; no commands were replayed.",
     consent_stale:
       "The accepted checkpoint consent is no longer current. Operator review is required.",
@@ -89,6 +126,26 @@ export function sandboxRecoveryBlocker(reason: string): string {
     session_unavailable: "This session is unavailable.",
   };
   return messages[reason] ?? "Recovery is blocked. Ask your operator to review this session.";
+}
+
+/** What an automatic Retry will do after the managed sandbox was lost. */
+export function automaticRecoveryRetryNotice(projection: SandboxRecoveryProjection): string {
+  if (projection.automaticLane === "fresh_workspace") {
+    return "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.";
+  }
+  const capturedAt = projection.checkpoint?.capturedAt;
+  return capturedAt
+    ? `Retry will use the latest verified checkpoint from ${formatCheckpointTime(capturedAt)}. Newer files are unavailable.`
+    : "Retry will use the latest verified checkpoint. Newer files are unavailable.";
+}
+
+function formatCheckpointTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 }
 
 /** GETs may repeat; a consented mutation never repeats automatically. */

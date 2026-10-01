@@ -16,8 +16,13 @@ export {
   listSkillPaths,
   readSkillFiles,
   SkillFileError,
+  skillScriptIndex,
   SKILL_READ_MAX_OUTPUT_BYTES,
   SKILL_READ_MAX_PATHS,
+  SKILL_SCRIPT_INDEX_MAX_BYTES,
+  SKILL_SCRIPT_INDEX_MAX_ENTRIES,
+  SKILL_SCRIPT_USAGE_MAX_CHARS,
+  type SkillScriptIndexEntry,
   type SkillTextFile,
 } from "./skill-files";
 

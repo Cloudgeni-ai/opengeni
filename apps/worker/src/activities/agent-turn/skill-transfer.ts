@@ -6,10 +6,12 @@ import {
   PORTABLE_SKILL_MAX_FILES,
   PORTABLE_SKILL_MAX_FILE_BYTES,
   PORTABLE_SKILL_MAX_TOTAL_BYTES,
+  SKILL_READ_MAX_PATHS,
+  SkillFileError,
   type SkillTextFile,
 } from "@opengeni/runtime/skill-library";
 
-type SkillFileSystem = Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">;
+export type SkillFileSystem = Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWriteFiles">;
 const maxTraversalEntries = 1024;
 
 /** Reuse the host's cancellation and workspace-mutation authority for each filesystem operation. */
@@ -31,36 +33,76 @@ export function guardSkillFilesystem(
   return {
     fsList: (request) => read(() => fs.fsList(request)),
     fsRead: (request) => read(() => fs.fsRead(request)),
-    fsWrite: (request) => write(() => fs.fsWrite(request)),
-    fsMkdir: (request) => write(() => fs.fsMkdir(request)),
+    fsWriteFiles: (request) => write(() => fs.fsWriteFiles(request)),
   };
 }
 
-/** Caller supplies an authorized live filesystem and a fresh workspace-relative target. */
+export type SkillCheckoutResult = {
+  directory: string;
+  fileCount: number;
+  written: number;
+  unchanged: number;
+  /** This call created the directory, so it holds nothing but these files. */
+  createdDirectory: boolean;
+};
+
+/**
+ * Caller supplies an authorized live filesystem and a workspace-relative
+ * target. All missing files are created in one filesystem batch (normally a
+ * single sandbox command). Nothing is overwritten: files already holding the
+ * same bytes are kept, and any other existing entry fails before writing.
+ * `paths` selects exactly those Skill files, for example one script to run.
+ */
 export async function checkoutSkillDirectory(
-  fs: SkillFileSystem,
+  fs: Pick<SkillFileSystem, "fsWriteFiles">,
   directory: string,
   files: readonly SkillTextFile[],
-): Promise<{ directory: string; fileCount: number }> {
+  options: { paths?: readonly string[] } = {},
+): Promise<SkillCheckoutResult> {
   assertSkillRelativePath(directory);
   const artifact = buildPortableSkillArtifact(files);
-  const parent = posix.dirname(directory);
-  if (parent !== ".") await fs.fsMkdir({ path: parent, recursive: true });
-  // Never overwrite an earlier checkout (which may now contain the user's edits).
-  await fs.fsMkdir({ path: directory, recursive: false });
-  for (const file of artifact.files) {
-    const result = await fs.fsWrite({
-      path: `${directory}/${file.path}`,
-      content: file.content,
-      encoding: "utf8",
-      overwrite: false,
-      createParents: true,
-    });
-    if (result.sizeBytes !== new TextEncoder().encode(file.content).byteLength) {
-      throw new Error(`Skill checkout wrote an unexpected byte count: ${file.path}`);
-    }
+  const selected =
+    options.paths === undefined
+      ? artifact.files
+      : selectSkillCheckoutFiles(artifact.files, options.paths);
+  const result = await fs.fsWriteFiles({
+    directory,
+    files: selected.map((file) => ({ path: file.path, content: file.content, encoding: "utf8" })),
+  });
+  if (result.written.length + result.unchanged.length !== selected.length) {
+    throw new Error("Skill checkout returned an incomplete result.");
   }
-  return { directory, fileCount: artifact.files.length };
+  return {
+    directory,
+    fileCount: selected.length,
+    written: result.written.length,
+    unchanged: result.unchanged.length,
+    createdDirectory: result.createdDirectory,
+  };
+}
+
+function selectSkillCheckoutFiles(
+  files: readonly SkillTextFile[],
+  paths: readonly string[],
+): SkillTextFile[] {
+  if (paths.length === 0 || paths.length > SKILL_READ_MAX_PATHS) {
+    throw new SkillFileError(
+      "invalid_request",
+      `Request between 1 and ${SKILL_READ_MAX_PATHS} paths, or omit paths for the whole Skill.`,
+    );
+  }
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const seen = new Set<string>();
+  return paths.map((path) => {
+    assertSkillRelativePath(path);
+    if (seen.has(path)) {
+      throw new SkillFileError("invalid_request", `Duplicate requested Skill path: ${path}`);
+    }
+    seen.add(path);
+    const file = byPath.get(path);
+    if (!file) throw new SkillFileError("missing_file", `Skill file not found: ${path}`);
+    return file;
+  });
 }
 
 /**
@@ -68,7 +110,10 @@ export async function checkoutSkillDirectory(
  * arguments. The caller owns workspace confinement and the final governed save.
  * This operation does not execute scripts or activate the resulting artifact.
  */
-export async function readSkillDirectory(fs: SkillFileSystem, directory: string) {
+export async function readSkillDirectory(
+  fs: Pick<SkillFileSystem, "fsList" | "fsRead">,
+  directory: string,
+) {
   assertSkillRelativePath(directory);
   const pending = [directory];
   const seen = new Set<string>(pending);

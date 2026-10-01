@@ -8,6 +8,7 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
+import { allowanceMigrationTail } from "./allowance-migration-tail";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -40,6 +41,8 @@ describe("pre-knowledge Memory storage compatibility", () => {
       // These later migrations require the post-0461 Knowledge/file policies.
       await owner`INSERT INTO schema_migrations(name) VALUES
         ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql')`;
+      for (const name of allowanceMigrationTail)
+        await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();

@@ -42,6 +42,8 @@ import {
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  authorizeAutomaticSandboxCheckpointRecovery,
+  getSandboxRecoveryDiscontinuity,
   retainedProviderCommandPersistence,
   appendSessionEvents,
   authorizeHistoricalSandboxCheckpointRecovery,
@@ -53,6 +55,7 @@ import {
   advanceWorkspaceGenerationForRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   beginSandboxRematerialization,
+  beginModalProviderCreate,
   claimWorkspaceArchiveCapture,
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
@@ -75,6 +78,7 @@ import {
   releaseWorkspaceArchiveCapture,
   replaceWorkspaceArchiveCaptureAfterProof,
   readLease,
+  readRecentSandboxRecoveryObservations,
   reconcileColdLostLeaseInstanceBlockers,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
@@ -549,6 +553,66 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, spied provider stop)", () => {
+  test("ownership-off owner-death recovery attributes first, then ordinary draining stops the exact instance", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+    };
+    const acquired = await acquireLease(db, {
+      ...identity,
+      kind: "turn",
+      holderId: "dead-create",
+      backend: "modal",
+      leaseTtlMs: 45000,
+    });
+    const operationId = crypto.randomUUID();
+    await beginModalProviderCreate(db, {
+      ...identity,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      operationId,
+      providerBindingKey: MODAL_PROVIDER_BINDING.key,
+      rematerializationId: null,
+      selectedRevision: null,
+      imageId: "im-fixture",
+      imageRef: null,
+      appId: "ap-fixture",
+      providerName: `opengeni-create-${operationId}`,
+      requestSha256: "a".repeat(64),
+    });
+    await admin`update sandbox_leases set expires_at=now()-interval '1 hour',updated_at=now()-interval '1 hour'
+      where workspace_id=${ids.workspaceId} and sandbox_group_id=${ids.groupId}`;
+    await admin`update sandbox_lease_holders set last_heartbeat_at=now()-interval '1 hour' where workspace_id=${ids.workspaceId}`;
+    let discovered = 0;
+    const stopped: string[] = [];
+    const activities = createSandboxLeaseActivities(
+      reaperServices(testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: false })),
+      {
+        findModalProviderCreateReceipt: async (_settings, attempt) => {
+          expect(attempt.operationId).toBe(operationId);
+          discovered++;
+          return "sb-recovered-worker";
+        },
+        terminateBox: async (_settings, lease, _observability, persistArchive) => {
+          const receipt = await persistArchive(null);
+          if (receipt.wrote) stopped.push(lease.instanceId!);
+          return receipt.wrote;
+        },
+      },
+    );
+    await activities.reapSandboxLeases();
+    expect(discovered).toBe(1);
+    expect(stopped).toHaveLength(0);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.instanceId).toBe(
+      "sb-recovered-worker",
+    );
+    await activities.reapSandboxLeases();
+    expect(stopped).toEqual(["sb-recovered-worker"]);
+    expect((await readLease(db, ids.workspaceId, ids.groupId))!.liveness).toBe("cold");
+  }, 60_000);
+
   test("ownership-off keeps read-only inventory fresh without provider mutation", async () => {
     if (!available) return;
     const settings = testSettings({
@@ -1173,6 +1237,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(1b-recovery) published capture resumes teardown immediately without recapture or claim replacement", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
     const epoch = 12;
     const instanceId = "box-published-recovery";
     const operationId = crypto.randomUUID();
@@ -1234,9 +1299,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       persistCalls += 0;
       return { terminated: true, providerMissingBeforeCapture: false };
     };
-    const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
-      terminateBox,
-    });
+    const { drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      { terminateBox },
+    );
     const result = await drainSandboxLease({
       target: {
         workspaceId: ids.workspaceId,
@@ -1254,6 +1320,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(observedDisposition).toBe("archive_published");
     expect(persistCalls).toBe(0);
     expect((await readLease(db, ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
   }, 60_000);
 
   test("(1b-recovery-replay) a replay-safe Modal capture replaces a dead unexpired activity immediately", async () => {
@@ -6384,6 +6453,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     if (!available) return;
 
     const ws = await freshWorkspace();
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
     const attempt = await freshWarmSnapshotAttempt(ws);
     ws.groupId = attempt.sandboxGroupId;
     const leaseId = await insertLease(ws, {
@@ -6430,23 +6500,53 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     let probes = 0;
     let terminations = 0;
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
-      probeDrainableProvider: async (_settings, lease) => {
-        probes += 1;
-        expect(lease.id).toBe(leaseId);
-        expect(lease.instanceId).toBe("sb-missing-with-stale-admission");
-        return "missing";
+    const { reapSandboxLeases, drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      {
+        probeDrainableProvider: async (_settings, lease) => {
+          probes += 1;
+          expect(lease.id).toBe(leaseId);
+          expect(lease.instanceId).toBe("sb-missing-with-stale-admission");
+          return "missing";
+        },
+        terminateBox: async () => {
+          terminations += 1;
+          throw new Error("A definitively missing provider must not be terminated again");
+        },
       },
-      terminateBox: async () => {
-        terminations += 1;
-        throw new Error("A definitively missing provider must not be terminated again");
-      },
-    });
+    );
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
     const result = await reapSandboxLeases();
 
     expect(probes).toBe(1);
     expect(terminations).toBe(0);
     expect(result.terminated).toBeGreaterThanOrEqual(1);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
+    expect((await readRecentSandboxRecoveryObservations(db)).providerLosses).toBeGreaterThanOrEqual(
+      1,
+    );
+    // A duplicate child delivery has no cold transition to commit.
+    expect(
+      await drainSandboxLease({
+        target: {
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: ws.groupId,
+          instanceId: "sb-missing-with-stale-admission",
+          leaseEpoch: 15,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      }),
+    ).toEqual({ status: "skipped" });
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_provider_missing_before_capture_total\{[^}]*backend="modal"[^}]*\} 1\b/,
+    );
     const lease = await readLease(db, ws.workspaceId, ws.groupId);
     expect(lease).toMatchObject({
       liveness: "cold",
@@ -6464,6 +6564,198 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${admission.id}`;
     expect(settled?.provider_outcome).toBe("rejected");
     expect(settled?.settled_at).not.toBeNull();
+  }, 60_000);
+
+  test("(5c) a reaper-committed deadline loss with no checkpoint continues the whole group on an empty workspace", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const createModalSession = (sandboxGroupId?: string) =>
+      createSession(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        initialMessage: "continue after the sandbox deadline",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        ...(sandboxGroupId ? { sandboxGroupId } : {}),
+      });
+    const parent = await createModalSession();
+    const children = [
+      await createModalSession(parent.sandboxGroupId),
+      await createModalSession(parent.sandboxGroupId),
+    ];
+    ws.groupId = parent.sandboxGroupId;
+    const instanceId = "sb-killed-at-provider-deadline";
+    await insertLease(ws, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 21,
+      expiresInMs: -1_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    // Created a day ago; its stamped provider deadline is what just passed.
+    await admin`update sandbox_leases set provider_created_at = now() - interval '26 hours',
+      provider_deadline_at = now() - interval '2 hours'
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      {
+        // The provider killed the box at its deadline while the drain capture
+        // was being taken: capture and stop both see NotFound.
+        terminateBox: async () => ({ terminated: true, providerMissingBeforeCapture: true }),
+      },
+    );
+    await reapSandboxLeases();
+    // This is the exact row older workers then dead-ended on every turn.
+    const lost = await readLease(db, ws.workspaceId, ws.groupId);
+    expect(lost).toMatchObject({
+      liveness: "cold",
+      recovery: {
+        provider: { status: "missing", diagnostic: "provider_not_found_before_workspace_capture" },
+        restore: { status: "unrecoverable", failureCode: "archive_unavailable", retryable: false },
+      },
+    });
+    expect(lost?.recovery.lateArchiveCapture).toBeTruthy();
+    expect(lost?.resumeState?.opengeniProviderLoss).toMatchObject({
+      source: "drain_probe",
+      instanceId,
+      lostEpoch: 21,
+    });
+
+    await initializeSessionStartAtomically(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    expect(
+      await claimSessionWorkForAttempt(db, ws.workspaceId, {
+        sessionId: parent.id,
+        workflowId: `session-${parent.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `deadline-loss-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+        filesystemDiscontinuityProtocol: 3,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    const decide = () =>
+      authorizeAutomaticSandboxCheckpointRecovery(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sessionId: parent.id,
+        attemptId,
+      });
+    // The in-flight drain capture could still publish the exact lost files.
+    expect(await decide()).toEqual({ status: "not_eligible" });
+    // A session stuck since before this release: the capture window elapsed.
+    await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+      '{opengeniRecovery,lateArchiveCapture,recordedAt}',
+      to_jsonb(to_char(now() - interval '2 hours', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    const decision = await decide();
+    expect(decision).toMatchObject({
+      status: "authorized",
+      lane: "fresh_workspace",
+      reason: "archive_unavailable",
+      groupSessionCount: 3,
+    });
+    for (const child of children) {
+      expect(await getSandboxRecoveryDiscontinuity(db, ws.workspaceId, child.id)).toContain(
+        "new empty workspace",
+      );
+    }
+    expect(
+      (await readRecentSandboxRecoveryObservations(db)).freshWorkspaceSelections,
+    ).toBeGreaterThanOrEqual(1);
+    // The cold row now elects an archive-free spawner for this decision.
+    const elected = await acquireLease(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      kind: "turn",
+      holderId: sandboxLeaseHolderIdForAttempt(attemptId),
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected).toMatchObject({ role: "spawner" });
+    expect(elected.lease.freshWorkspaceRecoveryId).toBeTruthy();
+  }, 60_000);
+
+  test("(5b) a failed exact cold commit does not count a provider loss", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const epoch = 16;
+    const instanceId = "sb-missing-but-replaced";
+    const leaseId = await insertLease(ws, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: epoch,
+      expiresInMs: -1_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
+    const { drainSandboxLease } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      {
+        terminateBox: async (_settings, lease) => {
+          // Simulate loss of exact capture ownership after the provider
+          // outcome. The cold commit's capture-id fence must then miss.
+          const captureId = (await readLease(db, ws.workspaceId, ws.groupId))?.archiveCapture?.id;
+          expect(captureId).toBeTruthy();
+          expect(
+            await releaseWorkspaceArchiveCapture(db, {
+              accountId: ws.accountId,
+              workspaceId: ws.workspaceId,
+              sandboxGroupId: ws.groupId,
+              captureId: captureId!,
+              expectedEpoch: epoch,
+              expectedInstanceId: lease.instanceId!,
+            }),
+          ).toBe(true);
+          return { terminated: true, providerMissingBeforeCapture: true };
+        },
+      },
+    );
+    expect(
+      await drainSandboxLease({
+        target: {
+          workspaceId: ws.workspaceId,
+          sandboxGroupId: ws.groupId,
+          instanceId,
+          leaseEpoch: epoch,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      }),
+    ).toEqual({ status: "skipped" });
+    expect((await readLease(db, ws.workspaceId, ws.groupId))?.liveness).toBe("draining");
+    expect(await observability.prometheusMetrics()).not.toContain(
+      "opengeni_sandbox_provider_missing_before_capture_total",
+    );
+    // This deliberately failed cold commit leaves a drainable row. Do not let
+    // the next global reaper test terminate this fixture as a second sandbox.
+    await admin`delete from sandbox_leases where id = ${leaseId}`;
   }, 60_000);
 
   // ── FINDING 1: even a test/legacy no-archive termination seam must remain

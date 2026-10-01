@@ -20,6 +20,29 @@ export type FrozenTurnInitiator = {
   initiatingHumanSubjectId?: string | null;
 };
 
+/** A legacy task has no asserted service identity. Its occurrence is still
+ * initiated by the scheduler, not by the missing-attribution sentinel. */
+export function frozenScheduledOccurrenceInitiator(
+  task: { createdBy: TurnInitiator; createdByContext: TurnInitiatorContext },
+  scheduler: FrozenTurnInitiator,
+): FrozenTurnInitiator {
+  if (
+    task.createdBy.kind !== "service" ||
+    task.createdBy.subjectId === UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID
+  ) {
+    return scheduler;
+  }
+  const { label: _label, ...serviceContext } = task.createdByContext;
+  return {
+    initiator:
+      task.createdBy.subjectId === "scheduler" && !task.createdBy.label
+        ? { ...task.createdBy, label: "OpenGeni scheduler" }
+        : task.createdBy,
+    context: { ...serviceContext, ...scheduler.context },
+    initiatingHumanSubjectId: null,
+  };
+}
+
 const MAX_AGENT_PROVENANCE_HOPS = 32;
 
 /**
@@ -86,6 +109,30 @@ function validAgentHops(value: unknown): Array<Record<string, unknown>> {
     (hop): hop is Record<string, unknown> =>
       typeof hop === "object" && hop !== null && !Array.isArray(hop),
   );
+}
+
+/** Freeze the exact target turn's provenance without changing the new service principal. */
+export function contextForCausalTurn(
+  current: TurnInitiatorContext,
+  causal: FrozenTurnInitiator,
+  reference: { sessionId: string; turnId: string },
+): TurnInitiatorContext {
+  const { via, viaTruncated, ...context } = causal.context;
+  const hops = [
+    ...validAgentHops(via),
+    {
+      kind: causal.initiator.kind === "subject" ? "human" : "service",
+      ...reference,
+      initiator: causal.initiator,
+      context,
+    },
+  ];
+  const clipped = clipAgentProvenanceHops(hops);
+  return {
+    ...current,
+    via: clipped,
+    ...(viaTruncated === true || hops.length > clipped.length ? { viaTruncated: true } : {}),
+  };
 }
 
 export async function frozenInitiatorForCommandActor(

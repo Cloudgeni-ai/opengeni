@@ -37,6 +37,7 @@ import {
 } from "react";
 
 import { DropdownMenu } from "radix-ui";
+import { MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS, MENU_SURFACE_CLASS } from "../lib/menu-styles";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
 import {
@@ -45,8 +46,12 @@ import {
   usePortalTokenStyle,
 } from "../lib/use-portal-token-style";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
+import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
+
+// Queued prompts can be long; menu rows wrap instead of truncating.
+const QUEUE_MENU_ITEM_CLASS = `${MENU_ITEM_CLASS} whitespace-normal break-words`;
 
 /** The sole pending-input surface: compact above Goal, Agents, and composer. */
 type QueueSurfaceCommonProps = {
@@ -529,8 +534,7 @@ type QueuePromptPreview = {
   isFallback: boolean;
 };
 
-function annotationOnlyQueuePreview(count: number): QueuePromptPreview {
-  const summary = `${count} timeline ${count === 1 ? "annotation" : "annotations"}`;
+function labelQueuePreview(summary: string): QueuePromptPreview {
   return {
     summary,
     collapsedVisual: summary,
@@ -546,10 +550,24 @@ function queueTurnPreview(
   maxCharacters: number,
 ): QueuePromptPreview {
   if (!turn) return queuePromptPreview("", maxCharacters);
-  const annotations = turn.annotations ?? [];
-  return turn.prompt.length === 0 && annotations.length > 0
-    ? annotationOnlyQueuePreview(annotations.length)
-    : queuePromptPreview(turn.prompt, maxCharacters);
+  return queueContentPreview(turn.prompt, turn.annotations?.length ?? 0, maxCharacters);
+}
+
+function queueContentPreview(
+  prompt: string,
+  annotationCount: number,
+  maxCharacters: number,
+): QueuePromptPreview {
+  switch (queueItemContent(prompt, annotationCount)) {
+    case "text":
+      return queuePromptPreview(prompt, maxCharacters);
+    case "annotations":
+      return labelQueuePreview(
+        `${annotationCount} timeline ${annotationCount === 1 ? "annotation" : "annotations"}`,
+      );
+    case "unavailable":
+      return labelQueuePreview(QUEUE_ITEM_CONTENT_UNAVAILABLE);
+  }
 }
 
 /**
@@ -825,11 +843,9 @@ function QueuePrompt({
 }) {
   const [expanded, setExpanded] = useState(false);
   const fullContentId = useId();
+  const content = queueItemContent(prompt, annotations.length);
   const preview = useMemo(
-    () =>
-      prompt.length === 0 && annotations.length > 0
-        ? annotationOnlyQueuePreview(annotations.length)
-        : queuePromptPreview(prompt, QUEUE_ROW_PREVIEW_CHARACTERS),
+    () => queueContentPreview(prompt, annotations.length, QUEUE_ROW_PREVIEW_CHARACTERS),
     [annotations.length, prompt],
   );
 
@@ -879,6 +895,14 @@ function QueuePrompt({
           annotations={annotations}
           className={prompt ? "mt-1" : undefined}
         />
+      ) : null}
+      {content === "unavailable" ? (
+        <p
+          className="text-og-control leading-5 text-fg-muted italic"
+          data-testid={`queue-prompt-unavailable-${index + 1}`}
+        >
+          {QUEUE_ITEM_CONTENT_UNAVAILABLE}
+        </p>
       ) : null}
       {prompt ? (
         <button
@@ -1075,6 +1099,7 @@ function SortableQueueRow({
             disabled={pending !== null}
             onClick={onSteer}
             aria-label={`Steer queued prompt ${index + 1}`}
+            data-analytics-action="steer"
             title="Steer — interrupt the current turn and send this message now"
             className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-og-control font-medium text-fg outline-hidden transition-[background-color] hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-[44px] pointer-coarse:min-w-[44px]"
           >
@@ -1118,48 +1143,46 @@ function SortableQueueRow({
               <DropdownMenu.Content
                 align="end"
                 sideOffset={4}
-                className="og-root z-50 w-48 max-w-[calc(100vw-16px)] rounded-md border border-border bg-surface p-1 text-og-control text-fg shadow-lg"
+                collisionPadding={8}
+                className={`${MENU_SURFACE_CLASS} og-root z-50 max-h-(--radix-dropdown-menu-content-available-height) w-52 max-w-[calc(100vw-16px)] overflow-x-hidden overflow-y-auto`}
                 style={portalTokenStyle}
                 data-testid={`queue-actions-menu-${index + 1}`}
               >
                 {onEdit ? (
                   <>
-                    <DropdownMenu.Item
-                      className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 pointer-coarse:min-h-[44px]"
-                      onSelect={onEdit}
-                    >
-                      <PencilIcon className="size-3.5" /> Edit in composer
+                    <DropdownMenu.Item className={QUEUE_MENU_ITEM_CLASS} onSelect={onEdit}>
+                      <PencilIcon /> Edit in composer
                     </DropdownMenu.Item>
-                    <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                    <DropdownMenu.Separator className={MENU_SEPARATOR_CLASS} />
                   </>
                 ) : null}
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === 0}
                   onSelect={() => onMove(0)}
                 >
-                  <ArrowUpToLineIcon className="size-3.5" /> Move to top
+                  <ArrowUpToLineIcon /> Move to top
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === 0}
                   onSelect={() => onMove(index - 1)}
                 >
                   Move up
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(index + 1)}
                 >
                   Move down
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
-                  className="flex min-w-0 cursor-default items-center gap-2 whitespace-normal break-words rounded-sm px-2 py-1.5 outline-hidden focus:bg-surface-2 data-[disabled]:opacity-50 pointer-coarse:min-h-[44px]"
+                  className={QUEUE_MENU_ITEM_CLASS}
                   disabled={index === count - 1}
                   onSelect={() => onMove(count - 1)}
                 >
-                  <ArrowDownToLineIcon className="size-3.5" /> Move to bottom
+                  <ArrowDownToLineIcon /> Move to bottom
                 </DropdownMenu.Item>
               </DropdownMenu.Content>
             </DropdownMenu.Portal>
@@ -1183,7 +1206,7 @@ function SortableQueueRow({
             </button>
             <button
               type="button"
-              className="rounded-md bg-brand px-2 py-1 font-medium text-white hover:bg-brand/90 focus-visible:ring-2 focus-visible:ring-ring/40"
+              className="rounded-md border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-ring/40"
               onClick={onConfirmReplace}
             >
               Replace and edit

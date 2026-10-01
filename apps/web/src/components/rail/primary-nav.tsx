@@ -3,14 +3,13 @@ import { ChevronDownIcon, SquarePenIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
-import { ForYouLink } from "@/components/rail/for-you-link";
+import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
 import { Button } from "@/components/ui/button";
 import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
-import { workspacePriorityPath } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
@@ -28,23 +27,32 @@ function initialWorkspaceShortcutsExpanded(): boolean {
 export function WorkspaceShortcutLinks({
   className,
   pending,
+  scheduleAttention,
 }: {
   className?: string;
   pending?: boolean;
+  scheduleAttention?: boolean;
 }) {
   const rail = useRail();
   const fetchedPending = useKnowledgeReviewIndicator(rail.workspaceId, pending === undefined);
   const pendingKnowledge = pending ?? fetchedPending;
+  const fetchedAttention = useScheduledTaskAttentionIndicator(
+    rail.workspaceId,
+    scheduleAttention === undefined,
+  );
+  const schedulesNeedAttention = scheduleAttention ?? fetchedAttention;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      <ForYouLink embedded />
       {PRIMARY_WORKSPACE_ITEMS.map((item) => (
         <WorkspaceConfigLink
           key={item.to}
           item={item}
           needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
+          needsAttention={
+            item.to === "/workspaces/$workspaceId/schedules" && schedulesNeedAttention
+          }
           workspaceId={rail.workspaceId}
           variant="rail"
           collapsed={rail.collapsed}
@@ -60,14 +68,13 @@ export function WorkspaceShortcutLinks({
 export function PrimaryNav() {
   const rail = useRail();
   const pendingKnowledge = useKnowledgeReviewIndicator(rail.workspaceId);
+  const schedulesNeedAttention = useScheduledTaskAttentionIndicator(rail.workspaceId);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
   const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
     isConfigItemActive(pathname, rail.workspaceId, item.to),
   );
-  const activeWorkspaceSection =
-    activeWorkspaceItem?.label ??
-    (pathname === workspacePriorityPath(rail.workspaceId) ? "For you" : undefined);
+  const activeWorkspaceSection = activeWorkspaceItem?.label;
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );
@@ -96,9 +103,9 @@ export function PrimaryNav() {
       <NewSessionLink
         aria-label={`New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}`}
         className={cn(
-          "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted outline-none transition-colors pointer-coarse:h-10",
-          "hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
-          newSessionActive && "bg-surface-2 text-fg",
+          "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
+          "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",
+          newSessionActive && "bg-selection text-fg hover:bg-selection",
           rail.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
         )}
       >
@@ -114,12 +121,18 @@ export function PrimaryNav() {
       </NewSessionLink>
 
       {rail.isMobile ? null : rail.collapsed ? (
-        <WorkspaceShortcutLinks pending={pendingKnowledge} />
+        <WorkspaceShortcutLinks
+          pending={pendingKnowledge}
+          scheduleAttention={schedulesNeedAttention}
+        />
       ) : (
         <div className="grid gap-0.5">
           {showShortcuts ? (
             <>
-              <WorkspaceShortcutLinks pending={pendingKnowledge} />
+              <WorkspaceShortcutLinks
+                pending={pendingKnowledge}
+                scheduleAttention={schedulesNeedAttention}
+              />
               {shortViewport ? (
                 <Button
                   type="button"
@@ -127,7 +140,7 @@ export function PrimaryNav() {
                   size="sm"
                   aria-expanded="true"
                   onClick={() => setShortcutsExpanded(false)}
-                  className="h-6 w-full justify-start gap-1.5 px-2.5 text-2xs font-normal text-fg-subtle hover:text-fg-muted"
+                  className="h-6 w-full justify-start gap-1.5 px-2.5 text-2xs font-normal text-fg-muted hover:text-fg"
                 >
                   <ChevronDownIcon aria-hidden="true" className="size-3 rotate-180" />
                   Less
@@ -154,6 +167,24 @@ export function PrimaryNav() {
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
               ) : null}
+              {schedulesNeedAttention ? (
+                <WorkspaceConfigLink
+                  item={
+                    PRIMARY_WORKSPACE_ITEMS.find(
+                      (item) => item.to === "/workspaces/$workspaceId/schedules",
+                    )!
+                  }
+                  workspaceId={rail.workspaceId}
+                  variant="rail"
+                  needsAttention
+                  active={isConfigItemActive(
+                    pathname,
+                    rail.workspaceId,
+                    "/workspaces/$workspaceId/schedules",
+                  )}
+                  onNavigate={() => rail.setDrawerOpen(false)}
+                />
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
@@ -167,8 +198,8 @@ export function PrimaryNav() {
                 data-active={activeWorkspaceSection ? "true" : undefined}
                 onClick={() => setShortcutsExpanded(true)}
                 className={cn(
-                  "group relative w-full justify-start gap-2.5 px-2.5 text-fg-muted pointer-coarse:h-10",
-                  activeWorkspaceSection && "bg-surface-2 text-fg",
+                  "group relative w-full justify-start gap-2.5 px-2.5 font-normal text-fg-label pointer-coarse:h-10",
+                  activeWorkspaceSection && "bg-selection text-fg hover:bg-selection",
                 )}
               >
                 <span

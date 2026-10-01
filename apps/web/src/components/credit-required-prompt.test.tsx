@@ -91,7 +91,7 @@ describe("credit required prompt", () => {
         />,
       ),
     );
-    expect(container.textContent).toContain("Add OpenGeni credits to continue");
+    expect(container.textContent).toContain("Add Opengeni credits to continue");
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
     expect(
@@ -114,7 +114,7 @@ describe("credit required prompt", () => {
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).toContain("This model uses OpenGeni credits");
+    expect(container.textContent).toContain("This model uses Opengeni credits");
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
     expect(
@@ -142,7 +142,7 @@ describe("credit required prompt", () => {
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).not.toContain("This model uses OpenGeni credits");
+    expect(container.textContent).not.toContain("This model uses Opengeni credits");
   });
 
   test("negative balance uses honest funding copy without claiming this is the first chat", async () => {
@@ -203,7 +203,7 @@ describe("credit required prompt", () => {
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
     expect(getBilling).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain("This model uses OpenGeni credits");
+    expect(container.textContent).not.toContain("This model uses Opengeni credits");
   });
 
   test("hides purchase actions when billing is disabled", async () => {
@@ -294,9 +294,9 @@ describe("credit required prompt", () => {
       );
     await act(async () => render("account-a"));
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
-    expect(container.textContent).toContain("This model uses OpenGeni credits");
+    expect(container.textContent).toContain("This model uses Opengeni credits");
     await act(async () => render("account-b"));
-    expect(container.textContent).not.toContain("This model uses OpenGeni credits");
+    expect(container.textContent).not.toContain("This model uses Opengeni credits");
     await act(async () => resolveSecond({ mode: "stripe", balance: { balanceMicros: 1 } }));
   });
 });

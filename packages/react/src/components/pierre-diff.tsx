@@ -7,9 +7,15 @@ import {
   Suspense,
   useEffect,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { cn } from "../lib/cn";
 import { gitFileDiffToPatch } from "../lib/git-patch";
+import {
+  loadPierreDiffs,
+  pierreDiffsRevision,
+  subscribePierreDiffs,
+} from "../lib/pierre-diffs-loader";
 
 /** Pierre `PatchDiff` props subset we drive. */
 type PatchDiffComponent = ComponentType<{
@@ -50,10 +56,10 @@ export type PierreDiffProps = {
 
 // Lazy-load `@pierre/diffs/react` so Shiki + the worker pool stay off the
 // critical path (and out of an SSR bundle) until a diff is actually shown. The
-// dynamic specifier is static so the bundler can resolve + chunk it. If the
-// optional peer is absent the import rejects and we render `fallback`.
+// peer is loaded only through the host-registered loader (see
+// `enablePierreDiffs`); without one the load rejects and we render `fallback`.
 const LazyPatchDiff = lazy(async () => {
-  const mod = (await import("@pierre/diffs/react")) as unknown as {
+  const mod = (await loadPierreDiffs()) as {
     PatchDiff: PatchDiffComponent;
   };
   return { default: mod.PatchDiff };
@@ -78,6 +84,7 @@ export function PierreDiff({
   className,
 }: PierreDiffProps) {
   const [failed, setFailed] = useState(false);
+  const [ready, setReady] = useState(false);
   const [forcedColors, setForcedColors] = useState(false);
 
   // Pierre's rich renderer distinguishes additions/deletions primarily through
@@ -95,16 +102,29 @@ export function PierreDiff({
 
   // Probe the import once so a hard failure (peer missing) shows `fallback`
   // rather than a Suspense boundary that never resolves. Skipped when `plain`.
+  const loaderRevision = useSyncExternalStore(
+    subscribePierreDiffs,
+    pierreDiffsRevision,
+    pierreDiffsRevision,
+  );
   useEffect(() => {
     if (plain) return;
     let cancelled = false;
-    void import("@pierre/diffs/react").catch(() => {
-      if (!cancelled) setFailed(true);
-    });
+    setFailed(false);
+    // Mount the lazy renderer only after the peer loaded, so a missing peer
+    // never poisons React.lazy's cached result for the rest of the page.
+    loadPierreDiffs().then(
+      () => {
+        if (!cancelled) setReady(true);
+      },
+      () => {
+        if (!cancelled) setFailed(true);
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, [plain]);
+  }, [plain, loaderRevision]);
 
   if (plain || failed || forcedColors) {
     // `plain` opts out of highlighting; `failed` = `@pierre/diffs` not installed.
@@ -147,6 +167,9 @@ export function PierreDiff({
     "--diffs-light-bg": "var(--og-color-bg)",
     "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
     "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    // Pierre's default (fg mixed 65% into bg) falls under 4.5:1 on the lifted
+    // graphite separator; quiet meta text keeps AA on every diff surface.
+    "--diffs-fg-number-override": "var(--og-color-fg-subtle)",
     "--diffs-addition-color-override": "var(--og-color-status-idle)",
     "--diffs-deletion-color-override": "var(--og-color-status-failed)",
     "--diffs-fg-number-addition-override": "var(--og-color-status-idle)",
@@ -168,15 +191,17 @@ export function PierreDiff({
   return (
     <div className={cn("min-w-0", className)} data-opengeni-pierre-diff style={pierreVars}>
       <Suspense fallback={loading ?? <DiffSkeleton />}>
-        {diff.map((file) => (
-          <div key={file.path} className="mb-2">
-            <LazyPatchDiff
-              patch={gitFileDiffToPatch(file)}
-              options={options}
-              {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
-            />
-          </div>
-        ))}
+        {ready
+          ? diff.map((file) => (
+              <div key={file.path} className="mb-2">
+                <LazyPatchDiff
+                  patch={gitFileDiffToPatch(file)}
+                  options={options}
+                  {...(disableWorkerPool !== undefined ? { disableWorkerPool } : {})}
+                />
+              </div>
+            ))
+          : (loading ?? <DiffSkeleton />)}
       </Suspense>
     </div>
   );

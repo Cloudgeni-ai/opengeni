@@ -37,6 +37,8 @@ import {
   SESSION_EVENT_SEMANTIC_CLASS_TYPES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
   compactSessionEventResult,
+  isStreamedAssistantMessageCompletion,
+  turnCompletedReply,
   type SessionSystemUpdateKind,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_MCP_MAX_BYTES, capPayloadValue } from "./session-view";
@@ -52,6 +54,8 @@ export const SESSION_WAIT_EVENTS_PER_TARGET = 20;
  * agent messages, blocking failures, goal facts, and session status/control
  * changes. Raw deltas, tool receipts, sandbox/machine diagnostics, and PTY
  * noise never wake a waiter; `session_events` remains the drill-down for them.
+ * The change mode further drops per-message completions: see
+ * {@link sessionWaitChangeEventMatches}.
  */
 export const SESSION_WAIT_EVENT_TYPES = [
   "turn.started",
@@ -130,6 +134,18 @@ export function sessionWaitCompletionEventMatches(event: SessionEvent): boolean 
   );
 }
 
+/**
+ * `waitFor=change` wakes on settled changes. A per-message assistant completion
+ * (commentary, or a final message the turn is about to settle) is not one: the
+ * `turn.completed` that follows carries the answer. Waking on every progress
+ * note would only buy the waiter another poll. The phase-less, id-less
+ * completion older workers publish with `turn.completed` still matches.
+ * Readers pair this with `excludeStreamedAssistantMessages` in SQL.
+ */
+export function sessionWaitChangeEventMatches(event: SessionEvent): boolean {
+  return !isStreamedAssistantMessageCompletion(event);
+}
+
 /** The self-session event that announces a newly pending machine input. */
 export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
   "system.update.pending" satisfies SessionEventType;
@@ -142,6 +158,36 @@ export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
 export function ownPendingKindWakes(kind: string): boolean {
   const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind];
   return wakeClass === undefined || wakeClass === "immediate";
+}
+
+function ownPendingUpdateFacts(
+  kinds: readonly string[],
+): Pick<
+  SessionWaitResult,
+  | "ownPendingUpdates"
+  | "ownPendingUpdateKinds"
+  | "ownPendingImmediateUpdates"
+  | "ownPendingDeferredUpdateKinds"
+> {
+  const ownKinds = [...new Set(kinds)].sort();
+  return {
+    ownPendingUpdates: kinds.length,
+    ownPendingUpdateKinds: ownKinds,
+    ownPendingImmediateUpdates: kinds.filter((kind) => ownPendingKindWakes(kind)).length,
+    ownPendingDeferredUpdateKinds: ownKinds.filter((kind) => !ownPendingKindWakes(kind)),
+  };
+}
+
+/**
+ * Re-derive the caller's own pending-input facts after the returned content
+ * consumed some of that input, keeping the same byte bound.
+ */
+export function withOwnPendingUpdateKinds(
+  result: SessionWaitResult,
+  kinds: readonly string[],
+): SessionWaitResult {
+  const { truncated: _truncated, bytes: _bytes, maxBytes, ...rest } = result;
+  return boundSessionWaitResult({ ...rest, ...ownPendingUpdateFacts(kinds) }, maxBytes);
 }
 
 const SEMANTIC_CLASS_PRIORITY: readonly SessionEventSemanticClass[] = [
@@ -351,16 +397,10 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     if (waited && read.changed.length > 0 && input.source.reauthorizeTargets) {
       await input.source.reauthorizeTargets(read.changed.map((target) => target.sessionId));
     }
-    const ownKinds = [...new Set(read.ownPendingUpdateKinds)].sort();
     return boundSessionWaitResult(
       {
         changed: read.changed,
-        ownPendingUpdates: read.ownPendingUpdateKinds.length,
-        ownPendingUpdateKinds: ownKinds,
-        ownPendingImmediateUpdates: read.ownPendingUpdateKinds.filter((kind) =>
-          ownPendingKindWakes(kind),
-        ).length,
-        ownPendingDeferredUpdateKinds: ownKinds.filter((kind) => !ownPendingKindWakes(kind)),
+        ...ownPendingUpdateFacts(read.ownPendingUpdateKinds),
         waitedMs: Math.max(0, now() - startedAt),
         timedOut: outcome.timedOut,
         aborted: outcome.aborted,
@@ -525,8 +565,11 @@ export function summarizeSessionWaitEvent(
   }
   // Other wait summaries may omit actionable fields (e.g. human-input
   // questions); absence of a truncation marker is not proof of full content.
+  // Neither is the empty output of a turn that ended waiting for input while
+  // it records the reply a human's message received.
   summary.contentComplete =
     ["turn.completed", "agent.message.completed"].includes(event.type) &&
+    turnCompletedReply(event.payload) === null &&
     !compact.truncation.truncated &&
     text === compact.text &&
     JSON.stringify(failure) === JSON.stringify(compact.failure) &&

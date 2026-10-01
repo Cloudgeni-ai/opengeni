@@ -59,18 +59,43 @@ Verify organization-key access against your deployment and installed SDK. See th
 
 Choose an access tier when creating an organization key:
 
-| `access`           | Use                                                                                           |
-| ------------------ | --------------------------------------------------------------------------------------------- |
-| `"full"` (default) | Provision workspaces, create and control sessions, and administer keys                        |
-| `"read"`           | Inventory shared workspaces and read their sessions, events, and files for reporting or audit |
+| `access`           | Use                                                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `"full"` (default) | Provision shared workspaces and external members, create and control sessions (including `asUser`), and administer keys |
+| `"read"`           | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                           |
 
-Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for the chat handler, which creates tenant workspaces and sends messages.
+Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for product integrations, which create tenant workspaces and send messages.
 
 Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` to discover readable sessions across the organization's shared workspaces. Personal workspaces and Only me sessions are excluded. Agent access scopes and end-user filters do not restrict the organization key's authority.
 
+### Inspect direct API-key authority
+
+`getAccessContext()` / `GET /v1/access/me` reports optional `credential` metadata
+for direct organization and workspace API-key requests. Existing `accountGrants`
+and `workspaceGrants` are unchanged; an organization key's `workspaceGrants` may
+be empty even when it can access shared workspaces. Use `listWorkspaces()` for
+the inventory.
+
+The credential contains `kind` (`organization_api_key` or `workspace_api_key`),
+organization-only `access` (`full` or `read`), `accountId`, `workspaceId`,
+`effectiveWorkspacePermissions`, and a plain-language `note`. An organization
+key's null `workspaceId` means all shared workspaces in the same organization,
+never Personal workspaces; a workspace key names its one workspace.
+`credential.effectiveWorkspacePermissions` expands `workspace:admin` into
+ordinary workspace permissions, excludes account-only permissions, and includes
+`secrets:read` only when explicitly granted. Full organization keys include
+`sessions:create` and `members:manage`: they can provision workspaces, external
+members, and `asUser` sessions. User requests additionally require live membership
+and intersect it with the key's permissions. This metadata bypasses
+neither session visibility nor literal secrets authority.
+
+`credential` is omitted for `asUser`/external-actor requests, humans, delegated
+tokens, and other caller contexts. Older servers may also omit it; an absent
+field does not prove the key lacks authority.
+
 ## Authenticate users of your chat
 
-`createChatHandler` uses your product's `resolve(request)` hook on sends, history reads, and approval/question responses. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
+`createSessionProxyHandler` and the fallback `createChatHandler` call your product's `resolve(request)` hook on every request. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
 
 Conversation identity is independent of the acting user; different user IDs do not isolate a shared conversation ID. The host must authorize which conversations a user may open. An opaque end-user label does not grant workspace membership. If you omit the user label, the host must resolve an authorized conversation itself.
 

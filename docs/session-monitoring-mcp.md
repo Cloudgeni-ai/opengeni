@@ -4,7 +4,16 @@
 
 Unread is based on completed assistant messages, substantive final answers,
 and actionable failures/input/goal facts, not the raw event cursor. The same
-predicate drives child rows and ancestor counts. Raw deltas, status snapshots,
+predicate drives child rows and ancestor counts. Completed commentary
+(`phase: "commentary"`) is progress, so it never creates a dot on its own; the
+answer or outcome that follows does. A turn that a human or API message started
+and that ended waiting for input (`wait_for_input`) has no output, but the
+`reply` its `turn.completed` records answers that message, so it does create a
+dot. Migration 0527 indexes exactly that predicate; the 0503 index only serves
+older API processes during the rollout. A `session_wait` summary or a compact
+`session_events` `latest: "terminal"` result of such a `turn.completed` shows
+only the empty output, so neither counts as consuming the reply.
+Raw deltas, status snapshots,
 `sandbox.box.terminated`, `workspace.revision.captured`, rejected late events,
 duplicates and maintenance/continuation completion markers do not create dots.
 The public `lastSequence` and replay/pagination cursors still include all events.
@@ -19,7 +28,12 @@ logical 8 KiB evidence budget, parent rendering, or equality checks. The query's
 64 KiB raw inspection cap is only a bounded-read safeguard. Outbox/update payloads
 have their own independent versions; null-version legacy marker text stays literal.
 It never advances to the child's current cursor. A legacy terminal status notice
-without answer content is not proof that the parent consumed an answer.
+without answer content is not proof that the parent consumed an answer. An idle
+terminal result that carries the child's untruncated `finalAnswer` needs no
+separate evidence: claim verifies that answer, and each
+`finalAnswer.goalContinuations` entry, against the child's retained
+`turn.completed` events instead. A truncated answer acknowledges nothing until a
+complete read (see [`durable-agent-inputs.md`](durable-agent-inputs.md)).
 
 For a live exact parent attempt, `session_events` and `session_wait` also
 acknowledge complete returned content for that same frozen human and a real
@@ -34,7 +48,15 @@ are not accumulated as consumption receipts; use an explicit human mark-read
 when a full item cannot fit in one tool response. Wait/compact acknowledgments
 are restricted to complete answers; use complete result/debug reads for detailed
 failures or human-input content. No read changes append-only history or observes
-background-command completion.
+background-command completion. A complete final-answer read that the parent's
+exact live attempt issued as a direct model call (not from a Codemode script) is
+recorded on the reading turn. When that attempt completes its turn, the child's
+still-pending idle terminal result reporting only answers it received is
+superseded (`consumed_by_parent_read`), so it does not start another inference
+that repeats them; a result that arrives after that completion is inserted
+already consumed, and a pending result for a different answer stays. A read by
+an attempt that then fails or is interrupted suppresses nothing; see
+[`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 An explicit mark-unread records the current raw event position as an intent
 fence. Old answer replay and later housekeeping do not clear it; proven consumption
@@ -76,7 +98,8 @@ content are unsupported and remain unread. No child is blanket-marked read.
 ## Conversation and execution history
 
 `session_events` defaults to a conversation projection: actual user text and
-completed assistant messages, including completed progress messages. It excludes
+completed assistant messages, including completed progress messages, which carry
+`phase: "commentary"`. It excludes
 raw deltas, tool bodies, and lifecycle diagnostics. Pagination never implicitly
 changes view or payload detail. Normal pages default to ten messages within a
 16 KiB response budget, preferring fewer complete messages; oversized messages
@@ -215,7 +238,12 @@ already-settled child, retrieve its result-bearing completion with
 `session_events` with `view: "results"` or join from the last consumed cursor.
 The results projection omits maintenance/segment settlements. Use the default
 conversation view for completed progress messages and explicit diagnostic views
-for exact retained execution evidence.
+for exact retained execution evidence. `waitFor: "change"` wakes on settled
+facts, not on each streamed assistant message: a completion that carries a
+provider `messageId` or a `phase` is excluded in SQL, so a long run of progress
+notes can neither wake the waiter nor fill its page ahead of the outcome, and
+the turn's `turn.completed` carries the answer. A `latest: "terminal"` lookup
+likewise skips commentary.
 Do not use `session_get` on your own current session to reconstruct conversation
 context.
 

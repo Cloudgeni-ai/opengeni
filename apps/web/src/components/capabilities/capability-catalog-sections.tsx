@@ -398,7 +398,7 @@ function RegistryFallback({
       }
       description="Search the public MCP registry for a server to connect."
       action={
-        <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={onSearch}>
+        <Button type="button" size="sm" disabled={busy} onClick={onSearch}>
           {busy ? (
             <Loader2Icon className="animate-spin motion-reduce:animate-none" />
           ) : (

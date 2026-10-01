@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { ChevronDownIcon, ChevronRightIcon, PanelsTopLeftIcon } from "lucide-react";
 import { RailTrailingMetadata } from "./session-row-content";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
@@ -17,7 +18,7 @@ export function SiteSessionGroupHeading({
   summary: RailAggregateStatus;
 }) {
   return (
-    <div className="flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-surface-2">
+    <div className="flex min-h-8 items-center gap-1 rounded-md px-1 hover:bg-hover">
       <button
         type="button"
         aria-label={`${expanded ? "Collapse" : "Expand"} conversations from ${origin.title}`}
@@ -31,13 +32,14 @@ export function SiteSessionGroupHeading({
           <ChevronRightIcon className="size-3" />
         )}
       </button>
-      <a
+      <Link
         className="flex min-w-0 flex-1 items-center gap-1.5 text-sm focus-visible:ring-2 focus-visible:ring-accent"
-        href={`/workspaces/${workspaceId}/artifacts/${origin.siteId}`}
+        to="/workspaces/$workspaceId/artifacts/$artifactId"
+        params={{ workspaceId, artifactId: origin.siteId }}
       >
         <PanelsTopLeftIcon className="size-3.5 shrink-0" aria-hidden="true" />
         <span className="truncate">{origin.title}</span>
-      </a>
+      </Link>
       <RailTrailingMetadata summary={summary} />
     </div>
   );

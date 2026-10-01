@@ -1,10 +1,19 @@
+import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
+import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
+import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
 import {
   CLIENT_ERRORS_PATH,
   isClientErrorReportRequest,
   registerClientErrorRoutes,
 } from "./routes/client-errors";
+import {
+  ANALYTICS_CONSENT_PATH,
+  isAnalyticsConsentReportRequest,
+  registerAnalyticsConsentRoutes,
+} from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
@@ -62,7 +71,7 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
-import { createObservability, withTraceContext } from "@opengeni/observability";
+import { createObservability, withTraceContext, withMcpTelemetry } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
@@ -72,9 +81,22 @@ import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import {
+  ApiHttpError,
+  allowanceExhaustedHttpError,
+  workspaceControlBusyHttpError,
+} from "./http/api-error";
+import {
+  isRequestBodyValidationError,
+  requestBodyValidationHttpError,
+  tagRequestJsonParseErrors,
+} from "./http/request-body";
+import { invalidPathIdentifierHttpError } from "./http/path-identifier";
 import { replaceTrustedClientAddressHeader } from "./http/request-source";
+import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { bearerApiContractHeaderCompatibility } from "./http/api-contract-compat";
+import { deprecationHeadersMiddleware } from "./http/deprecation";
 import {
   boundedRegisteredRouteLabel,
   registeredHandlerRoutePath,
@@ -209,6 +231,7 @@ import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
+import { registerUsageAllowanceRoutes } from "./routes/usage-allowances";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerWorkspaceLearningRoutes } from "./routes/workspace-learning";
 import { registerCompanyProfileRoutes } from "./routes/company-profile";
@@ -221,6 +244,7 @@ import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
+import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
@@ -523,6 +547,9 @@ export function createAppComposition(deps: AppDependencies): {
     exposeHeaders: [
       "Accept-Ranges",
       "Content-Range",
+      "Deprecation",
+      "Link",
+      "Sunset",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
@@ -596,9 +623,12 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    // The anonymous web error beacon enforces its own 512-byte limit on the
+    // The anonymous web beacons enforce their own small limits on the
     // streamed body; the generic ceiling would buffer far more first.
-    if (isClientErrorReportRequest(c.req.method, pathname)) {
+    if (
+      isClientErrorReportRequest(c.req.method, pathname) ||
+      isAnalyticsConsentReportRequest(c.req.method, pathname)
+    ) {
       await next();
       return;
     }
@@ -619,6 +649,14 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
+  // Public-route deprecations (docs/design/api-compatibility-policy.md) are
+  // advertised on every response of the affected route, errors included.
+  app.use("/v1/*", deprecationHeadersMiddleware());
+  // A pinned SDK must not be told about a revision it is built to reject; see
+  // the policy's contract-header rule. Registered before the contract fence so
+  // it observes the header that fence sets.
+  app.use("/v1/*", bearerApiContractHeaderCompatibility());
+
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
     const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
@@ -632,68 +670,70 @@ export function createAppComposition(deps: AppDependencies): {
       },
       { parent: null },
     );
-    return await withTraceContext(span, async () => {
-      try {
-        await next();
-        const status = c.res.status || 200;
-        const durationSeconds = (performance.now() - start) / 1000;
-        observability.recordHttpRequest({
-          method: c.req.method,
-          route,
-          status,
-          durationSeconds,
-        });
-        span.end({
-          attributes: {
-            "http.response.status_code": status,
-            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-          },
-        });
-        observability.info("HTTP request completed", {
-          method: c.req.method,
-          route,
-          status,
-          durationMs: Math.round(durationSeconds * 1000),
-          traceId: span.traceId,
-          spanId: span.spanId,
-          correlationId,
-        });
-      } catch (error) {
-        const status = httpStatusForError(error);
-        const errorCode = errorCodeForStatus(status);
-        const durationSeconds = (performance.now() - start) / 1000;
-        observability.recordHttpRequest({
-          method: c.req.method,
-          route,
-          status,
-          durationSeconds,
-        });
-        observability.incrementCounter({
-          name: "opengeni_http_errors_total",
-          help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
-          labels: { route, status: String(status), code: errorCode },
-        });
-        span.end({
-          attributes: {
-            "http.response.status_code": status,
-            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-          },
-          error,
-        });
-        observability.error("HTTP request failed", {
-          method: c.req.method,
-          route,
-          status,
-          durationMs: Math.round(durationSeconds * 1000),
-          traceId: span.traceId,
-          spanId: span.spanId,
-          correlationId,
-          errorCode,
-          errorClass: "HttpOperationError",
-        });
-        throw error;
-      }
-    });
+    return await withMcpTelemetry(observability, span.traceId, () =>
+      withTraceContext(span, async () => {
+        try {
+          await next();
+          const status = c.res.status || 200;
+          const durationSeconds = (performance.now() - start) / 1000;
+          observability.recordHttpRequest({
+            method: c.req.method,
+            route,
+            status,
+            durationSeconds,
+          });
+          span.end({
+            attributes: {
+              "http.response.status_code": status,
+              "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            },
+          });
+          observability.info("HTTP request completed", {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: Math.round(durationSeconds * 1000),
+            traceId: span.traceId,
+            spanId: span.spanId,
+            correlationId,
+          });
+        } catch (error) {
+          const status = httpStatusForError(error);
+          const errorCode = errorCodeForStatus(status);
+          const durationSeconds = (performance.now() - start) / 1000;
+          observability.recordHttpRequest({
+            method: c.req.method,
+            route,
+            status,
+            durationSeconds,
+          });
+          observability.incrementCounter({
+            name: "opengeni_http_errors_total",
+            help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+            labels: { route, status: String(status), code: errorCode },
+          });
+          span.end({
+            attributes: {
+              "http.response.status_code": status,
+              "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            },
+            error,
+          });
+          observability.error("HTTP request failed", {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: Math.round(durationSeconds * 1000),
+            traceId: span.traceId,
+            spanId: span.spanId,
+            correlationId,
+            errorCode,
+            errorClass: "HttpOperationError",
+          });
+          throw error;
+        }
+      }),
+    );
   });
 
   const accessKeyBoundary = requireAccessKey(deps.settings);
@@ -708,12 +748,53 @@ export function createAppComposition(deps: AppDependencies): {
     return await accessKeyBoundary(c, next);
   });
 
+  // Malformed JSON in a client request body is a 400 wherever a route reads it.
+  app.use("/v1/*", async (c, next) => {
+    tagRequestJsonParseErrors(c);
+    await next();
+  });
+
+  // A request no registered handler answers is a 404 (or a 405 when the path
+  // exists for other methods) before any authentication, authorization, or
+  // contract middleware can turn it into a misleading 401/409/503. This runs
+  // after the deployment perimeter so an unauthenticated caller of a
+  // key-protected deployment learns nothing new.
+  app.use("/v1/*", async (c, next) => {
+    const unmatched = unmatchedRoute(app, c);
+    if (!unmatched) {
+      await next();
+      return;
+    }
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    if (unmatched.status === 405) c.header("allow", unmatched.allow.join(", "));
+    return c.json(
+      ErrorEnvelope.parse({
+        error: {
+          status: unmatched.status,
+          code: "not_found",
+          message:
+            unmatched.status === 405
+              ? `Method ${c.req.method} is not supported for this resource. Allowed: ${unmatched.allow.join(", ")}.`
+              : "Resource not found.",
+          retryable: false,
+          requestId,
+        },
+      }),
+      unmatched.status,
+    );
+  });
+
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
       deps.settings.environment !== "test" &&
-      isApiContractProtectedMutation(c.req.method, new URL(c.req.url).pathname) &&
-      c.req.header(OPENGENI_API_CONTRACT_HEADER) !== OPENGENI_API_CONTRACT_REVISION
+      apiContractAdmission({
+        method: c.req.method,
+        pathname: new URL(c.req.url).pathname,
+        authorization: c.req.header("authorization"),
+        claimedRevision: c.req.header(OPENGENI_API_CONTRACT_HEADER),
+      }) === "reject"
     ) {
       return c.json(
         {
@@ -985,6 +1066,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerMcpOAuthRoutes(app, routeDeps);
 
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
+  registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
@@ -999,6 +1081,7 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
+        claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
@@ -1376,6 +1459,7 @@ export function createAppComposition(deps: AppDependencies): {
 
   registerConnectCallbackReturns(app, routeDeps);
   registerFileRoutes(app, routeDeps);
+  registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
@@ -1387,6 +1471,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerInstallRoutes(app, routeDeps);
   registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerUsageAllowanceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceLearningRoutes(app, routeDeps);
@@ -1420,9 +1505,13 @@ export function createAppComposition(deps: AppDependencies): {
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerWorkspaceIntegrationRoutes(app, routeDeps);
+  registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerWorkspaceModelProviderRoutes(app, routeDeps);
+  registerClaudeSubscriptionOAuthRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
@@ -1459,7 +1548,11 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (workspaceControlBusyHttpError(rawError) ?? rawError);
+        : (allowanceExhaustedHttpError(rawError) ??
+          workspaceControlBusyHttpError(rawError) ??
+          requestBodyValidationHttpError(rawError) ??
+          invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+          rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -1529,6 +1622,32 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
   // the route performs its own organization API-key authorization.
   if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
+  // Organization budget authority is independent of ordinary workspace
+  // membership; these routes apply their own exact account/workspace gate.
+  if (
+    (["GET", "PUT", "DELETE"].includes(method) &&
+      /^\/v1\/workspaces\/[^/]+\/allowance$/.test(pathname)) ||
+    (method === "GET" && /^\/v1\/workspaces\/[^/]+\/allowance\/state$/.test(pathname)) ||
+    (method === "POST" && /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/.test(pathname))
+  )
+    return true;
+  // Allowance tenant mirrors resolve the workspace by exact organization-local
+  // external identity before applying the ordinary workspace authorization.
+  if (
+    (["GET", "PUT", "DELETE"].includes(method) &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/.test(pathname)) ||
+    (method === "GET" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/.test(pathname)) ||
+    (method === "POST" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/.test(pathname)) ||
+    (method === "GET" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage(?:\/me)?$/.test(pathname)) ||
+    (method === "PUT" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/(?:[^/]+|external\/[^/]+\/[^/]+)\/allowance$/.test(
+        pathname,
+      ))
+  )
+    return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
   if (
     method === "GET" &&
@@ -1739,6 +1858,9 @@ export function httpStatusForError(error: unknown): number {
   if (workspaceControlBusyHttpError(error)) {
     return 503;
   }
+  if (isRequestBodyValidationError(error)) {
+    return 400;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }
@@ -1752,7 +1874,7 @@ export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
   if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
-  if (status === 404) return "not_found";
+  if (status === 404 || status === 405) return "not_found";
   if (status === 409) return "conflict";
   if (status === 413 || status === 422 || status === 400) return "validation_failed";
   if (status === 429) return "limit_exceeded";
@@ -1973,6 +2095,7 @@ const routeLabelPatterns: Array<{
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
   { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
+  { pattern: /^\/v1\/analytics-consent$/, label: "/v1/analytics-consent" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
@@ -2322,6 +2445,64 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/external$/,
     label: "/v1/workspaces/external",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance/grants",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance/state",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage\/me$/,
+    label: "/v1/workspaces/external/:source/:externalId/usage/me",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage$/,
+    label: "/v1/workspaces/external/:source/:externalId/usage",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/external\/[^/]+\/[^/]+\/allowance$/,
+    label:
+      "/v1/workspaces/external/:source/:externalId/members/external/:memberSource/:memberExternalId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/external/:source/:externalId/members/:subjectId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/,
+    label: "/v1/workspaces/:workspaceId/allowance/grants",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/:workspaceId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance\/state$/,
+    label: "/v1/workspaces/:workspaceId/allowance/state",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/usage\/me$/,
+    label: "/v1/workspaces/:workspaceId/usage/me",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/usage$/,
+    label: "/v1/workspaces/:workspaceId/usage",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/members\/external\/[^/]+\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/:workspaceId/members/external/:source/:externalId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/members\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/:workspaceId/members/:subjectId/allowance",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks$/,
@@ -2764,6 +2945,54 @@ export function routeLabel(pathname: string, registeredRoutePath?: string | null
 }
 
 /**
+ * API contract revisions no longer admitted from ANY caller, including bearer
+ * integrations that would otherwise be accepted across revisions. Add a
+ * revision here only for a truly breaking wire change (which also requires a
+ * major release-train change); ordinary revision bumps stay additive.
+ */
+export const REFUSED_API_CONTRACT_REVISIONS: ReadonlySet<string> = new Set<string>([]);
+
+const BEARER_AUTHORIZATION = /^bearer\s+\S/i;
+
+/**
+ * The rollout fence for state-changing product calls.
+ *
+ * The exact-revision check exists to stop a stale first-party browser tab
+ * (cookie session, or unauthenticated local mode) from writing with an old
+ * request shape after a deployment; it answers 409 so the page reloads onto
+ * the matching bundle. That tab never sends `Authorization`, so this is not a
+ * header a stale bundle can choose to bypass it with.
+ *
+ * Bearer-authenticated callers (organization/workspace API keys, delegated
+ * tokens, the deployment key sent as a bearer) are integrations pinned to an
+ * SDK version: reloading cannot upgrade them, and the API is additive within a
+ * major release train. They are admitted with an older revision or with no
+ * revision claim at all. Only a revision listed in
+ * `REFUSED_API_CONTRACT_REVISIONS` is refused for them.
+ *
+ * This is a compatibility fence, not an authorization boundary: every route
+ * still authenticates and authorizes the request independently.
+ */
+export function apiContractAdmission(
+  input: {
+    method: string;
+    pathname: string;
+    authorization: string | undefined;
+    claimedRevision: string | undefined;
+  },
+  refusedRevisions: ReadonlySet<string> = REFUSED_API_CONTRACT_REVISIONS,
+): "admit" | "reject" {
+  if (!isApiContractProtectedMutation(input.method, input.pathname)) return "admit";
+  if (input.claimedRevision === OPENGENI_API_CONTRACT_REVISION) return "admit";
+  if (input.claimedRevision !== undefined && refusedRevisions.has(input.claimedRevision)) {
+    return "reject";
+  }
+  return input.authorization !== undefined && BEARER_AUTHORIZATION.test(input.authorization)
+    ? "admit"
+    : "reject";
+}
+
+/**
  * State-changing OpenGeni HTTP calls must never cross an incompatible rollout
  * boundary. Standard third-party protocols and externally initiated callbacks
  * are intentionally outside this product API contract.
@@ -2792,6 +3021,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/github/") ||
     // A stale tab must still report the error that follows a rollout.
     pathname === CLIENT_ERRORS_PATH ||
+    pathname === ANALYTICS_CONSENT_PATH ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
     pathname === "/v1/enrollments/token/exchange"

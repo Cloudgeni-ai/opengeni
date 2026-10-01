@@ -2,7 +2,6 @@
 // `workspace-config-link.tsx`.
 
 export type WorkspaceConfigTarget =
-  | "/workspaces/$workspaceId/agents"
   | "/workspaces/$workspaceId/insights"
   | "/workspaces/$workspaceId/variable-sets"
   | "/workspaces/$workspaceId/rigs"
@@ -20,7 +19,6 @@ export type WorkspaceConfigIcon =
   | "server-cog"
   | "laptop"
   | "brain-circuit"
-  | "map"
   | "plug"
   | "calendar-clock"
   | "panels-top-left"
@@ -52,7 +50,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
     to: "/workspaces/$workspaceId/state",
     icon: "brain-circuit",
-    label: "Agent Knowledge",
+    label: "Knowledge",
     description: "Knowledge, instructions, and skills",
   },
   {
@@ -65,7 +63,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
     label: "Artifacts",
-    description: "Sites, images, documents, and files built with Geni",
+    description: "Sites, images, documents, and files built with Opengeni",
   },
 ];
 
@@ -74,12 +72,6 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
     id: "overview",
     label: "Overview",
     items: [
-      {
-        to: "/workspaces/$workspaceId/agents",
-        icon: "map",
-        label: "Agents",
-        description: "Live agent trees and spawned work",
-      },
       {
         to: "/workspaces/$workspaceId/insights",
         icon: "gauge",

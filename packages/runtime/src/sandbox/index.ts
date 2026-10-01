@@ -55,6 +55,7 @@ import type {
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
+import type { ModalCreateIntent } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
@@ -180,6 +181,7 @@ export {
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
   resolveModalCheckpointProviderBinding,
+  findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBindingForSession,
   sweepModalOrphanSandboxes,
@@ -439,6 +441,8 @@ export {
   type ChannelAExecResult,
   type ChannelAEmitter,
   type SandboxChannelAServiceOptions,
+  type FsWriteFilesRequest,
+  type FsWriteFilesResponse,
   type RepositoryDiscoveryDegradedReason,
   type RepositoryDiscoveryResult,
   type NumstatEntry,
@@ -1386,6 +1390,13 @@ type ResumeCapableClient = {
    * or prove it unavailable without creating anything. */
   resumeExact?: (state: unknown) => Promise<unknown>;
   create?: (manifest?: unknown, options?: unknown) => Promise<unknown>;
+  createWithLifecycle?: (
+    args: { manifest: unknown },
+    lifecycle: {
+      beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
+      onCreated: (session: unknown, intent: ModalCreateIntent) => Promise<void>;
+    },
+  ) => Promise<unknown>;
 };
 
 /**
@@ -1742,6 +1753,16 @@ function settingsForWorkspaceArchiveRestore(
 ): Settings {
   if (backend !== "modal") return settings;
   const workspacePersistence = modalWorkspacePersistenceForRestore(archive);
+  if (workspacePersistence === "snapshot_filesystem" && archive?.kind === "provider_snapshot") {
+    // Boot the selected filesystem image directly. SDK hydrateWorkspace would
+    // create a second box and expose its identity only after old-box teardown.
+    // The ordinary create callback must own the only destination before verify.
+    return {
+      ...settings,
+      modalWorkspacePersistence: workspacePersistence,
+      modalImageId: archive.nativeSnapshot!.snapshotId,
+    };
+  }
   return workspacePersistence && settings.modalWorkspacePersistence !== workspacePersistence
     ? { ...settings, modalWorkspacePersistence: workspacePersistence }
     : settings;
@@ -1770,6 +1791,15 @@ export async function establishSandboxSessionFromEnvelope(
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
+    /** Durable lease owners fence the attempt before invoking a provider create.
+     * Called for each physical attempt, including logical-image fallback. A
+     * rejected hook prevents dispatch; a lost create reply is never permission
+     * to invoke the fallback under the same unresolved operation. */
+    onBeforeSandboxCreate?: (
+      settings: Settings,
+      intent?: ModalCreateIntent,
+      providerContext?: unknown,
+    ) => Promise<void>;
     /** Called after archive hydration but immediately before the exact workspace
      * fingerprint probe. Lease-aware callers persist `verifying` here so a box
      * is never observable as ready while verification is in flight. */
@@ -1796,13 +1826,6 @@ export async function establishSandboxSessionFromEnvelope(
   const createImageSource =
     backend === "modal" && settings.modalImageId ? "provider_immutable" : "logical";
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
-  // Every fresh-create caller crosses this one async boundary, including API
-  // interaction endpoints that do not run inside the turn worker. Resolve a
-  // private registry image before the synchronous client factory reads its
-  // selector. Worker-start prewarming remains only a latency optimization.
-  if (backend === "modal" && opts.recovery === "create-or-restore" && !opts.clientFactory) {
-    await ensureModalRegistryImage(settings);
-  }
   const client = (
     opts.clientFactory
       ? opts.clientFactory(backend, settings, environment)
@@ -1860,11 +1883,9 @@ export async function establishSandboxSessionFromEnvelope(
   const workspaceArchiveBase64 = archiveState?.workspaceArchive;
   const workspaceArchiveMetadata = archiveState?.workspaceArchiveMeta;
 
-  // create() a FRESH box, THEN replay the persisted /workspace snapshot via
-  // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
-  // decodes the snapshot-ref and swaps the box for one booted from the snapshot
-  // image (restoreSnapshotFilesystem). No archive is valid only for a genuinely
-  // new workspace; recovery callers select and verify an exact archive before
+  // Create one destination directly from a Modal filesystem snapshot; other
+  // archive protocols hydrate the fresh destination. No archive is valid only
+  // for a genuinely new workspace; callers select and verify an exact archive before
   // entering this seam. This is the SOLE archive-replay path, shared by the
   // NotFound warm-reattach path and the cold-restore branch (b) below.
   const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
@@ -1926,8 +1947,22 @@ export async function establishSandboxSessionFromEnvelope(
         settings,
         workspaceArchive,
       );
+      const createdFromFilesystemSnapshot =
+        backend === "modal" &&
+        workspaceArchive?.kind === "provider_snapshot" &&
+        workspaceArchive.nativeSnapshot?.provider === "modal_snapshot_filesystem";
+      const restoreImageSource = createdFromFilesystemSnapshot
+        ? "provider_immutable"
+        : createImageSource;
+      // Resolve only the image this create will use. A retained filesystem
+      // snapshot must not depend on the availability of today's registry image
+      // or its secret. Rebuild the Modal client after registry resolution so
+      // fresh/directory creates receive the resolved private-image selector.
+      if (backend === "modal" && !opts.clientFactory) {
+        await ensureModalRegistryImage(restoreSettings);
+      }
       const restoreClient =
-        restoreSettings === settings
+        restoreSettings === settings && (backend !== "modal" || opts.clientFactory)
           ? client
           : ((opts.clientFactory
               ? opts.clientFactory(backend, restoreSettings, environment)
@@ -1944,14 +1979,48 @@ export async function establishSandboxSessionFromEnvelope(
         );
       }
       let createdClient = restoreClient;
+      let attributedDuringCreate = false;
+      let providerDispatchAttempted = false;
+      const createWithAttribution = async (
+        candidate: ResumeCapableClient,
+        createSettings: Settings,
+      ) => {
+        if (candidate.createWithLifecycle && opts.onBeforeSandboxCreate) {
+          return await candidate.createWithLifecycle(
+            { manifest: createManifest },
+            {
+              beforeDispatch: async (intent, providerContext) => {
+                providerDispatchAttempted = true;
+                await opts.onBeforeSandboxCreate!(createSettings, intent, providerContext);
+              },
+              onCreated: async (session) => {
+                const instanceId = readInstanceId(backend, session);
+                if (!instanceId) throw new Error("Modal provider receipt has no physical identity");
+                await opts.onSandboxCreated?.({
+                  client: candidate,
+                  session,
+                  sessionState: (session as { state?: unknown }).state ?? resumeFallbackState,
+                  instanceId,
+                  backendId: candidate.backendId,
+                });
+                attributedDuringCreate = true;
+              },
+            },
+          );
+        }
+        // Non-Modal providers and isolated client-factory fixtures retain their
+        // ordinary admission hook. Production Modal requires the wire intent.
+        await opts.onBeforeSandboxCreate?.(createSettings);
+        return await candidate.create!({ manifest: createManifest });
+      };
       const createStarted = Date.now();
       let restored: Awaited<ReturnType<NonNullable<typeof restoreClient.create>>>;
       try {
-        restored = await restoreClient.create({ manifest: createManifest });
+        restored = await createWithAttribution(restoreClient, restoreSettings);
         recordSandboxCreateMetric(
           opts.metrics,
           restoreClient.backendId,
-          createImageSource,
+          restoreImageSource,
           "completed",
           createStarted,
         );
@@ -1959,7 +2028,7 @@ export async function establishSandboxSessionFromEnvelope(
         recordSandboxCreateMetric(
           opts.metrics,
           restoreClient.backendId,
-          createImageSource,
+          restoreImageSource,
           "failed",
           createStarted,
         );
@@ -1969,7 +2038,13 @@ export async function establishSandboxSessionFromEnvelope(
           "create",
           error,
         );
+        if (providerDispatchAttempted) {
+          // Preserve the actual failure (including a known cleanup/setup
+          // failure); the durable receipt decides whether outcome is unknown.
+          throw error;
+        }
         if (
+          createdFromFilesystemSnapshot ||
           createImageSource !== "provider_immutable" ||
           backend !== "modal" ||
           !isProviderSandboxNotFoundError(restoreClient.backendId, error)
@@ -2004,7 +2079,7 @@ export async function establishSandboxSessionFromEnvelope(
         }
         const fallbackStarted = Date.now();
         try {
-          restored = await fallbackClient.create({ manifest: createManifest });
+          restored = await createWithAttribution(fallbackClient, fallbackSettings);
           recordSandboxCreateMetric(
             opts.metrics,
             fallbackClient.backendId,
@@ -2046,7 +2121,7 @@ export async function establishSandboxSessionFromEnvelope(
         instanceId: restoredInstanceId,
         backendId: createdClient.backendId,
       };
-      if (opts.onSandboxCreated) {
+      if (opts.onSandboxCreated && !attributedDuringCreate) {
         try {
           await opts.onSandboxCreated(established);
         } catch (createCallbackError) {
@@ -2058,7 +2133,11 @@ export async function establishSandboxSessionFromEnvelope(
       if (workspaceArchive) {
         const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
           .hydrateWorkspace;
-        if (workspaceArchive.kind !== "host_spool" && typeof hydrate !== "function") {
+        if (
+          !createdFromFilesystemSnapshot &&
+          workspaceArchive.kind !== "host_spool" &&
+          typeof hydrate !== "function"
+        ) {
           await terminateCreatedSandbox(createdClient, restored, restoredState);
           throw new WorkspaceArchiveIntegrityError(
             "archive_hydration_failed",
@@ -2066,7 +2145,17 @@ export async function establishSandboxSessionFromEnvelope(
           );
         }
         try {
-          // hydrateWorkspace may internally replace the underlying box.
+          if (
+            createdFromFilesystemSnapshot &&
+            (restoredState as { imageId?: unknown } | undefined)?.imageId !==
+              restoreSettings.modalImageId
+          ) {
+            throw new WorkspaceArchiveIntegrityError(
+              "archive_hydration_failed",
+              "Modal destination did not boot the selected filesystem snapshot",
+            );
+          }
+          // Directory/tar hydration operates on the attributed destination.
           if (workspaceArchive.kind === "host_spool") {
             // This is the exact newly-created, unpublished destination. The lease
             // restore fence must exclude admitted writers until verification ends;
@@ -2081,7 +2170,9 @@ export async function establishSandboxSessionFromEnvelope(
             await restoreHostWorkspaceArchive(root, hostSpool!, {
               archiveLimits: Reflect.get(restored as object, "archiveLimits"),
             });
-          } else await hydrate!.call(restored, workspaceArchive.bytes);
+          } else if (!createdFromFilesystemSnapshot) {
+            await hydrate!.call(restored, workspaceArchive.bytes);
+          }
         } catch (error) {
           await terminateCreatedSandbox(
             createdClient,
@@ -2095,8 +2186,8 @@ export async function establishSandboxSessionFromEnvelope(
             { retryable: true, cause: error },
           );
         }
-        // hydrateWorkspace may replace the provider box (Modal's native snapshot
-        // restore does this). Attribute the newly-active identity immediately,
+        // Defend against a backend replacing its provider during hydration.
+        // Attribute the newly-active identity immediately,
         // before restore-state marking, fingerprint verification, or any caller
         // can publish the box warm. The callback is the durable lease/tagging
         // boundary; if it cannot persist the replacement, the caller fails closed

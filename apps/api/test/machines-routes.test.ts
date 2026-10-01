@@ -37,6 +37,18 @@ import {
   handleHelloPayload,
   startMetricsIngestion,
 } from "../src/sandbox/metrics-ingestion";
+import { machineUpdateBlockedReason } from "../src/sandbox/machines";
+
+test("whole-app update bootstrap gate admits fixed Mac builds and preserves other platforms", () => {
+  for (const version of [null, "development", "0.1.27", "0.1.28", "0.1.29-beta.1"]) {
+    expect(machineUpdateBlockedReason("macos", version)).toContain("official Mac installer");
+  }
+  for (const version of ["0.1.29", "0.1.30", "0.2.0", "1.0.0"]) {
+    expect(machineUpdateBlockedReason("macos", version)).toBeNull();
+  }
+  expect(machineUpdateBlockedReason("linux", "0.1.27")).toBeNull();
+  expect(machineUpdateBlockedReason("windows", "0.1.27")).toBeNull();
+});
 
 // Track started ingestion consumers so afterEach can unsubscribe them (each test
 // uses its own bus, but cleaning up keeps subscriptions from leaking).
@@ -415,6 +427,7 @@ afterAll(async () => {
 }, 180_000);
 
 type SeedOpts = {
+  os?: "macos" | "linux" | "windows";
   online?: boolean;
   hasDisplay?: boolean;
   allowScreenControl?: boolean;
@@ -440,7 +453,7 @@ async function seed(opts: SeedOpts = {}) {
     exposure: "whole-machine",
     hasDisplay: opts.hasDisplay ?? true,
     allowScreenControl: opts.allowScreenControl ?? true,
-    os: "linux",
+    os: opts.os ?? "linux",
     arch: "x86_64",
   });
   await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;
@@ -1117,6 +1130,50 @@ describe("Connected Machine signed self-update orchestration", () => {
     },
     90_000,
   );
+
+  test("rejects a legacy Mac updater before reservation or RPC dispatch", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment } = await seed({ os: "macos" });
+    await handleHelloPayload(
+      db,
+      undefined,
+      Hello.encode(
+        Hello.fromPartial({
+          agentId: enrollment.id,
+          workspaceId,
+          agentVersion: "0.1.28",
+          binarySha256: "ab".repeat(32),
+          updateChannel: "stable",
+        }),
+      ).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.hello`,
+    );
+    const requests: ControlRequest[] = [];
+    const app = appFor(
+      busWithAgent({
+        workspaceId,
+        agentId: enrollment.id,
+        online: true,
+        onRequest: (request) => requests.push(request),
+      }),
+      {
+        settings: { ...settings, agentStableVersion: "0.1.29" },
+      },
+    );
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/update`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+        },
+      },
+    );
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain("official Mac installer");
+    expect(requests).toHaveLength(0);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toBeNull();
+  });
 
   test("dispatches to the exact process and completes only after the matching successor Hello", async () => {
     if (!available) return;

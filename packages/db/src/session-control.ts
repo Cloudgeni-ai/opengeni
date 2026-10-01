@@ -252,7 +252,7 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait";
+    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings";
   },
 ): Promise<void> {
   if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
@@ -2371,6 +2371,16 @@ export async function registerSessionWorkflowWakeInTransaction(
  * Internal producers share one outstanding session-level receipt. While a wake
  * remains undelivered, another update makes that same batch richer instead of
  * manufacturing another transport revision or sequential model turn.
+ *
+ * Producers outside the workflow should signal after commit in both cases, so
+ * `shouldSignal` is always `true`; the field stays for callers that read it. An
+ * undelivered row is often a delayed wake that nothing signals before its time
+ * (a `wait_for_input` deadline or goal idle backoff); pulling `next_attempt_at`
+ * to now alone leaves the input waiting for the periodic dispatcher. The signal
+ * is only a hint: the workflow re-reads PostgreSQL, one claim consumes the
+ * whole pending batch, and the admission-aware acknowledgement keeps this
+ * revision open until it does. Terminal background-command settlement does not
+ * signal from its settlement callers yet, so the dispatcher delivers that wake.
  */
 export async function registerInternalUpdateWakeInTransaction(
   db: Database,
@@ -2380,7 +2390,7 @@ export async function registerInternalUpdateWakeInTransaction(
     sessionId: string;
     temporalWorkflowId: string;
   },
-): Promise<{ wakeRevision: number; shouldSignal: boolean }> {
+): Promise<{ wakeRevision: number; shouldSignal: true }> {
   const [existing] = await db
     .select()
     .from(schema.sessionWorkflowWakeOutbox)
@@ -2403,7 +2413,7 @@ export async function registerInternalUpdateWakeInTransaction(
         updatedAt: new Date(),
       })
       .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId));
-    return { wakeRevision: existing.wakeRevision, shouldSignal: false };
+    return { wakeRevision: existing.wakeRevision, shouldSignal: true };
   }
   return {
     wakeRevision: await registerSessionWorkflowWakeInTransaction(db, {

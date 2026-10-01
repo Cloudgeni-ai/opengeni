@@ -1,14 +1,12 @@
-// The shared machine-definition editor: setup script, checks, and default
-// variable sets. Every Rig layers on the deployment-owned platform image; the
-// editable image field is intentionally absent so Computer/Browser/Terminal
-// cannot be replaced by a Rig definition.
+// The shared environment definition editor: setup script, checks, and default
+// variable sets. Every environment layers on the deployment-owned platform
+// image; the editable image field is intentionally absent so Computer/Browser/
+// Terminal cannot be replaced by an environment definition.
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useRef } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import type { ResourceAuthorityScope, RigCheck, VariableSet } from "@/types";
 
 export type RigDefinitionDraft = {
@@ -19,6 +17,19 @@ export type RigDefinitionDraft = {
 
 export function emptyRigDefinitionDraft(): RigDefinitionDraft {
   return { setupScript: "", checks: [], defaultVariableSetIds: [] };
+}
+
+/** Variable sets an environment of this scope may add by default. */
+export function compatibleVariableSets(
+  variableSets: VariableSet[],
+  rigScope: ResourceAuthorityScope,
+): VariableSet[] {
+  return variableSets.filter(
+    (variableSet) =>
+      rigScope === "user" ||
+      variableSet.scope === "organization" ||
+      (rigScope === "workspace" && variableSet.scope === "workspace"),
+  );
 }
 
 export function RigDefinitionFields({
@@ -46,70 +57,60 @@ export function RigDefinitionFields({
     checkKeys.current.length = value.checks.length;
   }
   const setChecks = (checks: RigCheck[]) => onChange({ ...value, checks });
-  const toggleVariableSet = (id: string) => {
-    const has = value.defaultVariableSetIds.includes(id);
-    onChange({
-      ...value,
-      defaultVariableSetIds: has
-        ? value.defaultVariableSetIds.filter((current) => current !== id)
-        : [...value.defaultVariableSetIds, id],
-    });
+  const toggleVariableSet = (id: string, checked: boolean) => {
+    const without = value.defaultVariableSetIds.filter((current) => current !== id);
+    onChange({ ...value, defaultVariableSetIds: checked ? [...without, id] : without });
   };
-
-  const compatibleVariableSets = variableSets.filter(
-    (variableSet) =>
-      rigScope === "user" ||
-      variableSet.scope === "organization" ||
-      (rigScope === "workspace" && variableSet.scope === "workspace"),
-  );
+  const compatible = compatibleVariableSets(variableSets, rigScope);
 
   return (
-    <div className="grid gap-4">
-      <div className="grid gap-1.5">
-        <Label htmlFor={`${idPrefix}-setup`}>Setup script</Label>
-        <Textarea
-          id={`${idPrefix}-setup`}
+    <FieldStack>
+      <Field
+        label="Setup script"
+        optional
+        hint="Bash that runs once when a sandbox starts. Keep it safe to run again."
+      >
+        <TextArea
+          mono
+          rows={5}
           value={value.setupScript}
           disabled={disabled}
           onChange={(event) => onChange({ ...value, setupScript: event.target.value })}
-          placeholder={
-            "# runs once on cold sandbox create — keep it idempotent\napt-get install -y ripgrep"
-          }
-          className="min-h-24 font-mono text-xs leading-5"
+          placeholder={"apt-get install -y ripgrep"}
           spellCheck={false}
         />
-        <p className="text-2xs text-fg-subtle">
-          Bash, run at first boot of every sandbox on this sandbox environment. Must be safe to
-          re-run.
-        </p>
-      </div>
+      </Field>
 
-      <div className="grid gap-2">
-        <div className="flex items-center justify-between">
-          <Label>Checks</Label>
+      <div className="flex min-w-0 flex-col gap-2">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm leading-5 font-medium text-fg">
+              Checks <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
+            </p>
+            <p className="text-xs leading-4.5 text-fg-muted">
+              Commands that must succeed for the environment to count as healthy.
+            </p>
+          </div>
           <Button
             type="button"
-            variant="ghost"
-            size="xs"
+            variant="outline"
+            size="sm"
             disabled={disabled}
+            className="shrink-0 pointer-coarse:h-11"
             onClick={() => setChecks([...value.checks, { name: "", command: "" }])}
           >
-            <PlusIcon className="size-3" />
+            <PlusIcon aria-hidden="true" />
             Add check
           </Button>
         </div>
-        {value.checks.length === 0 ? (
-          <p className="text-2xs text-fg-subtle">
-            A check is a command that must exit zero for the machine to count as healthy. None yet.
-          </p>
-        ) : (
-          <div className="grid gap-1.5">
+        {value.checks.length > 0 ? (
+          <div className="flex min-w-0 flex-col gap-2">
             {value.checks.map((check, index) => (
               <div
                 key={checkKeys.current[index]}
-                className="grid grid-cols-[10rem_minmax(0,1fr)_auto] items-center gap-1.5"
+                className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_auto]"
               >
-                <Input
+                <TextInput
                   value={check.name}
                   disabled={disabled}
                   onChange={(event) =>
@@ -119,11 +120,12 @@ export function RigDefinitionFields({
                       ),
                     )
                   }
-                  placeholder="node present"
+                  placeholder="Node installed"
                   aria-label={`Check ${index + 1} name`}
-                  className="h-8 text-xs"
+                  className="max-sm:col-span-1"
                 />
-                <Input
+                <TextInput
+                  mono
                   value={check.command}
                   disabled={disabled}
                   onChange={(event) =>
@@ -135,62 +137,60 @@ export function RigDefinitionFields({
                   }
                   placeholder="node --version"
                   aria-label={`Check ${index + 1} command`}
-                  className="h-8 font-mono text-xs"
+                  className="max-sm:order-3 max-sm:col-span-2"
                 />
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon-sm"
+                  size="icon"
                   disabled={disabled}
                   aria-label={`Remove check ${index + 1}`}
-                  className="hover:text-status-failed"
+                  className="text-fg-muted hover:text-danger pointer-coarse:size-11"
                   onClick={() => {
                     checkKeys.current.splice(index, 1);
                     setChecks(value.checks.filter((_, i) => i !== index));
                   }}
                 >
-                  <Trash2Icon className="size-3.5" />
+                  <Trash2Icon aria-hidden="true" />
                 </Button>
               </div>
             ))}
           </div>
-        )}
+        ) : null}
       </div>
 
-      {compatibleVariableSets.length > 0 ? (
-        <div className="grid gap-2">
-          <Label>Default variable sets</Label>
-          <p className="-mt-1 text-2xs text-fg-subtle">
-            Preselected on new sessions that pick this sandbox environment. A session can still
-            override them.
-          </p>
-          <div className="grid gap-1 sm:grid-cols-2">
-            {compatibleVariableSets.map((variableSet) => {
-              const checked = value.defaultVariableSetIds.includes(variableSet.id);
-              return (
-                <label
-                  key={variableSet.id}
-                  className="flex cursor-pointer items-center gap-2 rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5 text-xs hover:border-border-strong"
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={disabled}
-                    onChange={() => toggleVariableSet(variableSet.id)}
-                    className="size-3.5 accent-brand"
-                  />
-                  <span className="min-w-0 flex-1 truncate">{variableSet.name}</span>
-                  <span className="shrink-0 text-2xs text-fg-subtle">
-                    {variableSet.variables.length} var
-                    {variableSet.variables.length === 1 ? "" : "s"}
-                  </span>
-                </label>
-              );
-            })}
+      {compatible.length > 0 ? (
+        <div
+          role="group"
+          aria-labelledby={`${idPrefix}-default-sets`}
+          className="flex min-w-0 flex-col gap-3"
+        >
+          <div className="min-w-0">
+            <p id={`${idPrefix}-default-sets`} className="text-sm leading-5 font-medium text-fg">
+              Default variable sets
+              <span className="ml-1.5 text-xs font-normal text-fg-subtle">Optional</span>
+            </p>
+            <p className="text-xs leading-4.5 text-fg-muted">
+              Added to new sessions that use this environment. A session can still change them.
+            </p>
           </div>
+          {compatible.map((variableSet) => (
+            <CheckboxField
+              key={variableSet.id}
+              label={variableSet.name}
+              description={
+                variableSet.variables.length === 1
+                  ? "1 variable"
+                  : `${variableSet.variables.length} variables`
+              }
+              checked={value.defaultVariableSetIds.includes(variableSet.id)}
+              disabled={disabled}
+              onCheckedChange={(checked) => toggleVariableSet(variableSet.id, checked)}
+            />
+          ))}
         </div>
       ) : null}
-    </div>
+    </FieldStack>
   );
 }
 

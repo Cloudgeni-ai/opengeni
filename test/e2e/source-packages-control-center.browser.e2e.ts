@@ -78,6 +78,104 @@ describe("Bundles section browser acceptance", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
+  test("inactive skill removal preserves the originating tab and visible status", async () => {
+    const state = readyState({ skillInstalled: false, pluginInstalled: false });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const page = await context.newPage();
+    const id = "11111111-1111-4111-8111-111111111111";
+    const skill = {
+      id,
+      title: "Inactive example",
+      stableKey: "inactive-example",
+      scope: "workspace",
+      scopeVersion: 1,
+      status: "disabled",
+      activeRevisionId: null,
+      revisionId: "22222222-2222-4222-8222-222222222222",
+      pendingRevisionIds: [],
+      activationMode: "workspace_managed",
+      description: "Example skill",
+      source: null,
+      contentHash: "b".repeat(64),
+      files: [
+        {
+          path: "SKILL.md",
+          content:
+            "---\nname: inactive-example\ndescription: Example skill\n---\nExample instructions.",
+        },
+      ],
+    };
+    let removed = false;
+    const requests: unknown[] = [];
+    try {
+      await installApi(page, state);
+      const json = (body: unknown) => ({
+        headers: { "x-opengeni-api-contract": apiContractRevision },
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+      await page.route("**/skills/content**", async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (path.endsWith("/remove")) {
+          requests.push(route.request().postDataJSON());
+          removed = true;
+          return route.fulfill(json({ removed: true, outcome: "applied" }));
+        }
+        return route.fulfill(
+          json(
+            path.endsWith("/content")
+              ? { skills: removed ? [] : [skill], nextCursor: null }
+              : skill,
+          ),
+        );
+      });
+      await page.route(`**/preferences/${id}`, (route) => route.fulfill(json({ revisions: [] })));
+      await openCapabilities(page);
+      const shortcut = page
+        .locator(".og-connection-installed button")
+        .filter({ hasText: "Inactive example" });
+      await expectVisible(
+        shortcut.locator(".og-connection-installed-status", { hasText: "Inactive" }),
+      );
+      await shortcut.click();
+      await expectVisible(page.getByRole("heading", { name: "Inactive example", exact: true }));
+      await leaveCapabilityPage(page);
+      expect(
+        await page.getByRole("tab", { name: "Skills", exact: true }).getAttribute("aria-selected"),
+      ).toBe("true");
+      await page.getByRole("tab", { name: "All", exact: true }).click();
+      const row = page
+        .locator("button.og-capability-catalog-row")
+        .filter({ hasText: "Inactive example" });
+      await row.click();
+      await expectVisible(
+        page.getByRole("button", { name: "Restore as a new revision", exact: true }),
+      );
+      await leaveCapabilityPage(page);
+      expect(
+        await page.getByRole("tab", { name: "All", exact: true }).getAttribute("aria-selected"),
+      ).toBe("true");
+      await row.click();
+      await page.getByRole("button", { name: "Remove skill", exact: true }).click();
+      const confirmation = page.getByRole("dialog", { name: "Remove “Inactive example”?" });
+      await expectVisible(confirmation);
+      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+      expect(requests).toHaveLength(0);
+      await page.getByRole("button", { name: "Remove skill", exact: true }).click();
+      await confirmation.getByRole("button", { name: "Remove skill", exact: true }).click();
+      await expectHidden(confirmation);
+      await expectVisible(page.getByRole("tab", { name: "All", exact: true }));
+      expect(
+        await page.getByRole("tab", { name: "All", exact: true }).getAttribute("aria-selected"),
+      ).toBe("true");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({ expectedRevisionId: null, expectedScopeVersion: 1 });
+      expect(await row.count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("desktop installs immutable Skill and Plugin sources with an exact account recheck", async () => {
     const state = readyState({ skillInstalled: false, pluginInstalled: false });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -87,11 +185,12 @@ describe("Bundles section browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      await page.getByRole("button", { name: "New skill", exact: true }).click();
+      // New skill writes one; importing is the other way in, behind the ⋯.
+      await page.getByRole("button", { name: "More ways to add a skill", exact: true }).click();
       await page.getByRole("menuitem", { name: "Import from URL", exact: true }).click();
       let dialog = page.getByRole("dialog");
       await dialog.getByLabel("GitHub or skills.sh URL").fill(skillUrl);
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await dialog.getByRole("button", { name: "Preview", exact: true }).click();
       await expectText(dialog, "Included files · 2");
       await dialog.getByText("Included files · 2", { exact: true }).click();
       await expectText(dialog, "SKILL.md");
@@ -101,8 +200,9 @@ describe("Bundles section browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.getByRole("button", { name: "Install", exact: true }).click();
 
+      // The installed skill list shows the people-facing name of the imported Skill.
       await expectVisible(
-        page.locator(".og-connection-installed").getByRole("button", { name: /release-operator/ }),
+        page.locator(".og-connection-installed").getByRole("button", { name: /Release operator/ }),
       );
       await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
@@ -120,7 +220,7 @@ describe("Bundles section browser acceptance", () => {
       await page.getByRole("button", { name: "Import plugin", exact: true }).click();
       dialog = page.getByRole("dialog");
       await dialog.getByLabel("Plugin manifest URL").fill(pluginUrl);
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await dialog.getByRole("button", { name: "Preview", exact: true }).click();
       await expectText(dialog, "Plugin ready to review");
       await expectText(dialog, "Manifest digest");
       await expectText(dialog, "Choose an exact Connection for Linear");
@@ -175,14 +275,14 @@ describe("Bundles section browser acceptance", () => {
       await setTheme(page, "dark");
 
       const pluginRow = page.getByRole("button", { name: /Research suite.*Installed/ });
-      await openBundleSheet(page, `plugin:${pluginKey}`);
+      let pluginPage = await openPluginPage(page);
       expect(state.pluginInstallRequests).toHaveLength(0);
-      await page
-        .locator('[data-integration-sheet="bundle-plugin-example/research"]')
-        .getByRole("button", { name: "Review update" })
-        .click();
+      // Keyboard journey: the update review opens from the page's own action.
+      await pluginPage.getByRole("button", { name: "Check for update", exact: true }).focus();
+      await page.keyboard.press("Enter");
       let dialog = page.getByRole("dialog");
-      await dialog.getByRole("button", { name: "Detect and preview" }).click();
+      await expectText(dialog, "Review plugin update");
+      await dialog.getByRole("button", { name: "Preview", exact: true }).click();
       await expectText(dialog, "Update impact");
       await expectText(dialog, "1 added, 1 changed, 0 removed, and 1 unchanged components");
       await dialog.getByLabel("Exact Connection").selectOption(financeConnectionId);
@@ -190,17 +290,19 @@ describe("Bundles section browser acceptance", () => {
       await expectVisible(dialog.getByRole("button", { name: "Update this Plugin" }));
       await dialog.screenshot({ path: `${evidenceDir}update-review-dialog-dark.png` });
       await dialog.getByRole("button", { name: "Update this Plugin" }).click();
+      await expectHidden(dialog);
       expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 2,
       });
 
-      await expectVisible(pluginRow);
-      await openBundleSheet(page, `plugin:${pluginKey}`);
-      await page
-        .locator('[data-integration-sheet="bundle-plugin-example/research"]')
-        .getByRole("button", { name: "Remove" })
-        .click();
+      // The update returns to the same plugin page, now at the next installation version.
+      pluginPage = page.locator("[data-capability-page]");
+      await expectVisible(pluginPage.getByRole("heading", { name: "Research suite", exact: true }));
+      await pluginPage.getByRole("button", { name: "Technical details" }).click();
+      await expectText(pluginPage, "Installation version3");
+      await pluginPage.getByRole("button", { name: "More actions for Research suite" }).click();
+      await page.getByRole("menuitem", { name: "Remove plugin", exact: true }).click();
       dialog = page.getByRole("dialog");
       await expectText(dialog, "Will be removed");
       await expectText(dialog, "Will stay");
@@ -208,27 +310,29 @@ describe("Bundles section browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.screenshot({ path: `${evidenceDir}remove-impact-dialog-dark.png` });
       await dialog.getByRole("button", { name: "Remove plugin", exact: true }).click();
-      await expectHidden(pluginRow);
+      await expectHidden(dialog);
       expect(state.pluginRemoveRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 3,
         expectedPreviewToken: "f".repeat(64),
       });
+      await leaveCapabilityPage(page);
+      await pluginRow.waitFor({ state: "detached", timeout: 15_000 });
 
       await page.getByRole("tab", { name: "Skills", exact: true }).click();
       await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
-      await openBundleSheet(page, `imported:${skillCapabilityId}`);
-      await page
-        .locator(`[data-integration-sheet="bundle-skill-${skillCapabilityId}"]`)
-        .getByRole("button", { name: "Remove" })
-        .click();
+      const skillPage = await openImportedSkillPage(page);
+      await skillPage.getByRole("button", { name: "More actions for Release operator" }).click();
+      await page.getByRole("menuitem", { name: "Remove skill", exact: true }).click();
       dialog = page.getByRole("dialog");
       await expectText(
         dialog,
         "The runtime Skill will be removed because no other owner retains it",
       );
       await dialog.getByRole("button", { name: "Remove direct Skill" }).click();
-      await expectHidden(skillRow);
+      // A removed package has no page: the route returns to the catalog without it.
+      await expectHidden(skillPage);
+      await skillRow.waitFor({ state: "detached", timeout: 15_000 });
       expect(state.skillRemoveRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 3,
       });
@@ -266,18 +370,25 @@ describe("Bundles section browser acceptance", () => {
       ).toBe(true);
       // A viewer who cannot act is told so, rather than shown buttons that do
       // nothing when pressed.
-      await openBundleSheet(page, `plugin:${pluginKey}`);
-      const pluginSheet = page.getByRole("dialog");
-      await expectText(
-        pluginSheet,
-        "Workspace administrators can install, update, and remove imported Skills and Plugins.",
-      );
-      expect(await pluginSheet.getByRole("button", { name: "Review update" }).count()).toBe(0);
-      expect(await pluginSheet.getByRole("button", { name: "Remove", exact: true }).count()).toBe(
+      const pluginPage = await openPluginPage(page);
+      await expectText(pluginPage, "Only workspace admins can install, update and remove plugins.");
+      expect(
+        await pluginPage.getByRole("button", { name: "Check for update", exact: true }).count(),
+      ).toBe(0);
+      expect(
+        await pluginPage.getByRole("button", { name: "More actions for Research suite" }).count(),
+      ).toBe(0);
+      expect(await pluginPage.getByRole("button", { name: "Connect", exact: true }).count()).toBe(
         0,
       );
-      await page.keyboard.press("Escape");
-      await expectHidden(pluginSheet);
+      // The plugin opens as a page, so only its width is bounded by the viewport.
+      const box = await pluginPage.boundingBox();
+      expect(box?.width ?? 0).toBeLessThanOrEqual(390);
+      await assertAccessibleAndBounded(page, "[data-capability-page]");
+      // Keyboard journey: the page's back link returns focus to the row that opened it.
+      await page.getByRole("button", { name: "Capabilities", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await expectHidden(pluginPage);
       await page.waitForFunction(() =>
         document.activeElement?.matches(".og-connection-installed button"),
       );
@@ -330,40 +441,46 @@ async function openInstalledPackages(page: Page): Promise<void> {
     await summary.click();
 }
 
-async function openBundleSheet(page: Page, rowId: string): Promise<void> {
-  if (rowId.startsWith("plugin:")) {
-    await page.getByRole("tab", { name: "Plugins", exact: true }).click();
-    const canManage = await page
-      .getByRole("button", { name: "Import plugin", exact: true })
-      .isEnabled();
-    await page.getByRole("button", { name: /Research suite.*Installed/ }).click();
-    await expectVisible(
-      page
-        .locator(".og-plugin-details")
-        .getByRole("heading", { name: "Research suite", exact: true }),
-    );
-    await expectText(page.getByRole("dialog"), "Reference MCP");
-    if (canManage) {
-      await expectVisible(
-        page.locator(".og-plugin-details").getByRole("button", { name: "Connect", exact: true }),
-      );
-    }
-    const manage = page.getByRole("button", { name: "Manage installation", exact: true });
-    if (canManage) await manage.scrollIntoViewIfNeeded();
-    await page.getByRole("dialog").screenshot({
-      path: `${evidenceDir}installed-plugin-overview-${canManage ? "manager" : "viewer"}.png`,
-    });
-    if (!canManage) {
-      expect(await manage.count()).toBe(0);
-      return;
-    }
-    await manage.focus();
-    await page.keyboard.press("Enter");
-    return;
+/** Opens the installed plugin's page; update and removal live on that page. */
+async function openPluginPage(page: Page) {
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
+  const canManage = await page
+    .getByRole("button", { name: "Import plugin", exact: true })
+    .isEnabled();
+  await page.getByRole("button", { name: /Research suite.*Installed/ }).click();
+  const pluginPage = page.locator("[data-capability-page]");
+  await expectVisible(pluginPage.getByRole("heading", { name: "Research suite", exact: true }));
+  // Details open as a page addressed by the URL, not as a dialog.
+  expect(new URL(page.url()).searchParams.get("open")).toBe(
+    `plugin:${pluginKey.replace("/", ":")}`,
+  );
+  expect(await page.getByRole("dialog").count()).toBe(0);
+  await expectText(pluginPage, "Reference MCP");
+  if (canManage) {
+    await expectVisible(pluginPage.getByRole("button", { name: "Connect", exact: true }));
+    await expectVisible(pluginPage.getByRole("button", { name: "Check for update", exact: true }));
   }
-  await page.getByRole("tab", { name: "Skills", exact: true }).click();
-  await openInstalledPackages(page);
+  await pluginPage.screenshot({
+    path: `${evidenceDir}installed-plugin-overview-${canManage ? "manager" : "viewer"}.png`,
+  });
+  return pluginPage;
+}
+
+/** Opens the directly imported Skill's package page from the installed list. */
+async function openImportedSkillPage(page: Page) {
+  const rowId = `imported:${skillCapabilityId}`;
   await page.locator(`button[data-integration-row="${rowId}"]`).first().click();
+  const skillPage = page.locator("[data-capability-page]");
+  await expectVisible(skillPage.getByRole("heading", { name: "Release operator", exact: true }));
+  expect(new URL(page.url()).searchParams.get("open")).toBe(`package:${rowId}`);
+  return skillPage;
+}
+
+/** Returns from an open capability page to the catalog through its back link. */
+async function leaveCapabilityPage(page: Page): Promise<void> {
+  const capabilityPage = page.locator("[data-capability-page]");
+  await page.getByRole("button", { name: "Capabilities", exact: true }).click();
+  await expectHidden(capabilityPage);
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {

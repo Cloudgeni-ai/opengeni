@@ -8,22 +8,23 @@ import type {
 } from "@opengeni/sdk";
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ErrorMessage } from "@/components/ui/error-message";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
+import {
+  apiErrorAdvice,
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+} from "@/lib/api-error";
 
 export const LEARNING_MODE_LABEL: Record<AgentLearningMode, string> = {
   automatic: "Automatic",
   review_first: "Review first",
   off: "Off",
 };
-const UPDATE_PERMISSION_LABEL: Record<AgentLearningMode, string> = {
-  automatic: "Allow updates",
-  review_first: "Review first",
-  off: "Don’t allow updates",
-};
-
 const UPDATE_PERMISSION_HELP =
-  "Allow updates applies changes automatically. Review first requires approval. Don’t allow updates prevents agent changes.";
+  "Automatic applies agent changes right away. Review first waits for your OK in Knowledge › Review. Off stops agent changes.";
 
 function LearningModeSelect(props: {
   id: string;
@@ -34,8 +35,9 @@ function LearningModeSelect(props: {
   describedBy?: string;
   onChange: (mode: AgentLearningMode | "inherit") => void;
 }) {
-  const labels = props.compact ? UPDATE_PERMISSION_LABEL : LEARNING_MODE_LABEL;
-  const effectiveMode = props.value === "inherit" ? props.defaultMode : props.value;
+  // One vocabulary everywhere: Automatic, Review first, Off. An inherited
+  // value says so, so an override is never mistaken for the default.
+  const labels = LEARNING_MODE_LABEL;
   return (
     <Select
       id={props.id}
@@ -43,13 +45,19 @@ function LearningModeSelect(props: {
       value={props.value}
       className={props.compact ? "w-[174px]" : undefined}
       displayValue={
-        props.compact ? (effectiveMode ? labels[effectiveMode] : "Use default") : undefined
+        props.compact
+          ? props.value === "inherit"
+            ? props.defaultMode
+              ? `Default (${labels[props.defaultMode]})`
+              : "Default"
+            : labels[props.value]
+          : undefined
       }
       onChange={(event) => props.onChange(event.target.value as AgentLearningMode | "inherit")}
     >
       {props.allowInherit ? (
         <option value="inherit">
-          Use default{props.defaultMode ? ` (${labels[props.defaultMode]})` : ""}
+          Default{props.defaultMode ? ` (${labels[props.defaultMode]})` : ""}
         </option>
       ) : null}
       {Object.entries(labels).map(([value, label]) => (
@@ -68,7 +76,7 @@ const CATEGORIES: { key: AgentLearningCategory; label: string; description: stri
   },
   {
     key: "instructions",
-    label: "Workspace instructions",
+    label: "Instructions",
     description: "Standing guidance that shapes how agents work.",
   },
   { key: "skills", label: "Skills", description: "Reusable procedures agents create or improve." },
@@ -92,6 +100,40 @@ export function AgentLearningSettingsEditor(props: AgentLearningSettingsEditorPr
   ]);
   return <AgentLearningSettingsFields key={identity} {...props} />;
 }
+/**
+ * The last settings read per caller and scope. Chat settings in the composer
+ * opens straight onto them and refreshes in place, instead of loading.
+ */
+const settingsCache = new WeakMap<
+  object,
+  Map<string, { record: AgentLearningSettingsRecord; defaults: AgentLearningSettingsRecord }>
+>();
+function settingsCacheKey(props: AgentLearningSettingsEditorProps) {
+  return `${props.workspaceId}|${props.scope}|${props.source?.kind ?? ""}:${props.source?.id ?? ""}`;
+}
+
+/** Reads a chat's settings into the cache before its menu opens. Never throws. */
+export function prefetchAgentLearningSettings(
+  client: ReturnType<typeof useAppContext>["client"],
+  props: AgentLearningSettingsEditorProps,
+): void {
+  const key = settingsCacheKey(props);
+  if (settingsCache.get(client)?.has(key)) return;
+  void Promise.all([
+    client.getAgentLearningSettings(props.workspaceId, props.scope, props.source),
+    client.getAgentLearningSettings(props.workspaceId, props.scope),
+  ])
+    .then(([record, defaults]) => {
+      let byKey = settingsCache.get(client);
+      if (!byKey) {
+        byKey = new Map();
+        settingsCache.set(client, byKey);
+      }
+      if (!byKey.has(key)) byKey.set(key, { record, defaults });
+    })
+    .catch(() => undefined);
+}
+
 function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   const active = useRef(true);
   useEffect(() => {
@@ -102,9 +144,20 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   }, []);
   const context = useAppContext();
   const fieldId = useId();
-  const [record, setRecord] = useState<AgentLearningSettingsRecord | null>(null);
-  const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const cacheKey = settingsCacheKey(props);
+  const cached = settingsCache.get(context.client)?.get(cacheKey) ?? null;
+  const [record, setRecord] = useState<AgentLearningSettingsRecord | null>(
+    () => cached?.record ?? null,
+  );
+  const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(
+    () => cached?.defaults ?? null,
+  );
+  // A failed read and a failed save are different problems with different fixes.
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [saveError, setSaveError] = useState<unknown>(null);
+  // Cached rows show while the read refreshes them, but a save waits for it:
+  // it must go against the current version, not the cached one.
+  const [refreshing, setRefreshing] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [reload, setReload] = useState(0);
@@ -112,8 +165,10 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
   const sourceId = props.source?.id;
   useEffect(() => {
     let current = true;
-    setRecord(null);
-    setError(null);
+    if (!settingsCache.get(context.client)?.has(cacheKey)) setRecord(null);
+    setLoadError(null);
+    setSaveError(null);
+    setRefreshing(true);
     setSaved(false);
     const source = sourceKind && sourceId ? { kind: sourceKind, id: sourceId } : undefined;
     void Promise.all([
@@ -121,26 +176,37 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       context.client.getAgentLearningSettings(props.workspaceId, props.scope),
     ])
       .then(([value, base]) => {
+        let byKey = settingsCache.get(context.client);
+        if (!byKey) {
+          byKey = new Map();
+          settingsCache.set(context.client, byKey);
+        }
+        byKey.set(cacheKey, { record: value, defaults: base });
         if (current) {
           setRecord(value);
           setDefaults(base);
+          setRefreshing(false);
         }
       })
       .catch((reason: unknown) => {
-        if (current) setError(reason instanceof Error ? reason.message : String(reason));
+        if (current) {
+          setLoadError(reason);
+          setRefreshing(false);
+        }
       });
     return () => {
       current = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- cacheKey is derived from these
   }, [context.client, props.workspaceId, props.scope, sourceKind, sourceId, reload]);
 
   async function save(category: AgentLearningCategory, mode: AgentLearningMode | "inherit") {
-    if (!record || saving || props.canEdit === false) return;
+    if (!record || saving || refreshing || props.canEdit === false) return;
     const invocation = context.captureWorkspaceInvocation(props.workspaceId);
     if (!invocation) return;
     setSaving(true);
     setSaved(false);
-    setError(null);
+    setSaveError(null);
     try {
       const next = await context.client.saveAgentLearningSettings(props.workspaceId, {
         scope: props.scope,
@@ -149,6 +215,8 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
         expectedVersion: record.version,
         settings: props.source ? { [category]: mode } : { ...record.settings, [category]: mode },
       });
+      const entry = settingsCache.get(context.client)?.get(cacheKey);
+      if (entry) entry.record = next;
       if (active.current && context.ownsWorkspaceInvocation(props.workspaceId, invocation)) {
         setRecord(next);
         setSaved(true);
@@ -156,25 +224,37 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       }
     } catch (reason) {
       if (active.current && context.ownsWorkspaceInvocation(props.workspaceId, invocation)) {
-        setError(reason instanceof Error ? reason.message : String(reason));
+        setSaveError(reason);
       }
     } finally {
       if (active.current) setSaving(false);
     }
   }
 
+  const retryLoad = () => setReload((n) => n + 1);
   if (!record)
-    return error ? (
-      <div role="alert" className="text-sm text-status-error">
-        {error}
-        <Button variant="ghost" onClick={() => setReload((n) => n + 1)}>
-          Retry
-        </Button>
-      </div>
+    return loadError ? (
+      isPermissionDenied(loadError) ? (
+        <p className="text-sm text-fg-muted">
+          You can't see Agent learning here. Ask a workspace admin for access.
+        </p>
+      ) : (
+        <ErrorMessage
+          variant="inline"
+          title="Couldn't load Agent learning."
+          announce
+          action={
+            <Button variant="ghost" size="sm" onClick={retryLoad}>
+              Try again
+            </Button>
+          }
+          {...apiErrorDetails(loadError)}
+        >
+          {apiErrorAdvice(loadError)}
+        </ErrorMessage>
+      )
     ) : (
-      <p role="status" className="text-sm text-fg-muted">
-        Loading Agent learning…
-      </p>
+      <AgentLearningSkeleton compact={props.compact} />
     );
 
   return (
@@ -189,7 +269,11 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
           {UPDATE_PERMISSION_HELP}
         </p>
       )}
-      <fieldset disabled={saving || props.canEdit === false} className="divide-y divide-border">
+      <fieldset
+        disabled={saving || refreshing || props.canEdit === false}
+        aria-busy={refreshing || undefined}
+        className="divide-y divide-border"
+      >
         <legend className="sr-only">{props.compact ? "Agent updates" : "Agent learning"}</legend>
         {CATEGORIES.map(({ key, label, description }) => (
           <div key={key} className="flex flex-wrap items-center justify-between gap-3 py-3">
@@ -217,7 +301,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
       </fieldset>
       {props.compact ? (
         <p className="text-xs text-fg-muted">
-          Agents can still use these resources when updates are off.
+          Off stops agent changes. Agents still use what's already there.
         </p>
       ) : null}
       {props.canEdit === false ? (
@@ -225,14 +309,51 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
           A workspace administrator can change these defaults.
         </p>
       ) : null}
-      {error ? (
+      {loadError ? (
+        // The rows are the last ones read; say they may be out of date.
+        <ErrorMessage
+          variant="inline"
+          title="Couldn't refresh Agent learning."
+          action={
+            isPermissionDenied(loadError) ? undefined : (
+              <Button variant="ghost" size="sm" onClick={retryLoad}>
+                Try again
+              </Button>
+            )
+          }
+          {...apiErrorDetails(loadError)}
+        >
+          {apiErrorAdvice(loadError)}
+        </ErrorMessage>
+      ) : null}
+      {saveError ? (
         <p role="alert" className="text-xs text-status-error">
-          {error}
+          Couldn't save that. {userErrorText(saveError)}
         </p>
       ) : null}
       <p role="status" className={saving || saved ? "text-xs text-fg-muted" : "sr-only"}>
         {saving ? "Saving…" : saved ? "Saved. Applies from the next agent run." : ""}
       </p>
+    </div>
+  );
+}
+
+/**
+ * The editor's rows while its settings load: the same rows and heights, so a
+ * menu or page that opens onto it never jumps when they arrive.
+ */
+export function AgentLearningSkeleton({ compact }: { compact?: boolean }) {
+  return (
+    <div role="status" aria-label="Loading Agent learning" className="grid gap-3">
+      <div aria-hidden="true" className="divide-y divide-border">
+        {CATEGORIES.map(({ key }) => (
+          <div key={key} className="flex items-center justify-between gap-3 py-3">
+            <span className="h-3 w-24 animate-pulse rounded bg-surface-2" />
+            <span className="h-8 w-36 animate-pulse rounded-md bg-surface-2" />
+          </div>
+        ))}
+      </div>
+      {compact ? <span aria-hidden="true" className="h-4" /> : null}
     </div>
   );
 }
@@ -249,19 +370,18 @@ export function AgentLearningDraftEditor(props: {
   const { client } = useAppContext();
   const id = useId();
   const [defaults, setDefaults] = useState<AgentLearningSettingsRecord | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   useEffect(() => {
     let current = true;
     setDefaults(null);
-    setError(null);
     setError(null);
     void client
       .getAgentLearningSettings(props.workspaceId, props.scope)
       .then((value) => {
         if (current) setDefaults(value);
       })
-      .catch((reason) => {
-        if (current) setError(reason instanceof Error ? reason.message : String(reason));
+      .catch((reason: unknown) => {
+        if (current) setError(reason);
       });
     return () => {
       current = false;
@@ -316,13 +436,19 @@ export function AgentLearningDraftEditor(props: {
       </div>
       {props.compact ? (
         <p className="mt-3 text-xs text-fg-muted">
-          Agents can still use these resources when updates are off.
+          Off stops agent changes. Agents still use what's already there.
         </p>
       ) : null}
       {error ? (
-        <p role="alert" className="text-xs text-status-error">
-          Couldn't load defaults: {error}
-        </p>
+        isPermissionDenied(error) ? (
+          <p className="text-xs text-fg-muted">
+            The workspace defaults aren't visible to you. A workspace admin can see them.
+          </p>
+        ) : (
+          <p role="alert" className="text-xs text-status-error">
+            Couldn't load the defaults. {userErrorText(error)}
+          </p>
+        )
       ) : null}
     </fieldset>
   );

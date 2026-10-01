@@ -30,6 +30,7 @@ const discoverablePlugins = pluginSnapshot.sources
   .flatMap((source) => source.entries.map((entry) => ({ ...entry, provider: source.provider })))
   .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
 import { inspectMcpAuthentication } from "../integrations/oauth-client";
+import { parseRequestJson } from "../http/request-body";
 
 export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -74,7 +75,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
   app.post("/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth", async (c) => {
     await requireAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:read");
-    const { url } = z.object({ url: z.string().url().max(2048) }).parse(await c.req.json());
+    const { url } = await parseRequestJson(c, z.object({ url: z.string().url().max(2048) }));
     return c.json(await inspectMcpAuthentication(url, settings));
   });
 
@@ -91,7 +92,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
-    const payload = CreateCapabilityCatalogItemRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, CreateCapabilityCatalogItemRequest);
     return c.json(
       await createCatalogItem({ db, accountId: grant.accountId, workspaceId, payload }),
       201,
@@ -163,7 +164,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
-    const payload = EnableCapabilityRequest.parse(await c.req.json());
+    const payload = await parseRequestJson(c, EnableCapabilityRequest);
     const installation = await enableCapability({
       db,
       grant,

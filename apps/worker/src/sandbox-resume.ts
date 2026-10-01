@@ -33,10 +33,12 @@ import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   failSandboxRematerialization,
   failWarmingToCold,
+  beginModalProviderCreate,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolderStatus,
   markSandboxRestoreVerifying,
@@ -629,8 +631,9 @@ async function materializeSpawnEnvelopeArchive(
   }
   if (!objectStorage) {
     throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
+      "archive_storage_unavailable",
       "workspace archive object storage is not configured",
+      { retryable: true },
     );
   }
   const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
@@ -1564,6 +1567,8 @@ async function resumeBoxForTurnOnce(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    let providerCreateOperationId: string | undefined;
+    let providerCreateBindingKey: string | undefined;
     let rematerialization: {
       id: string;
       selectedRevision: string;
@@ -1575,30 +1580,53 @@ async function resumeBoxForTurnOnce(
       > | null;
     } | null = null;
     try {
-      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      // An audited decision to continue a definitively lost workspace on a new
+      // EMPTY box: hydrate nothing (not even a per-session legacy archive) and
+      // resume no prior provider identity. Every group member was already told
+      // the workspace is empty; the DB accepts only this exact publication.
+      const freshWorkspaceRecoveryId = acquired.lease.freshWorkspaceRecoveryId ?? null;
+      const envelope = freshWorkspaceRecoveryId
+        ? null
+        : await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // The lease is authoritative. A legacy per-session fallback archive may
       // only be used after beginSandboxRematerialization imports its archive
       // fields under the warming-row lock and records one selected revision.
       // Select the fallback only when the lease has no archive truth at all. A
       // lease-carried unverified/invalid archive must fail closed rather than
       // silently substituting another revision.
+      // Backstop: a session already told its workspace is empty never gets a
+      // legacy per-session archive back, even if the lease marker was lost.
+      const legacyFallbackRefused =
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status === "none" &&
+        workspaceArchiveFieldsFromEnvelope(envelope) !== null &&
+        (await sessionHoldsFreshWorkspaceRecovery(db, ids.workspaceId, ids.sessionId));
       const fallbackArchiveEnvelope =
+        !freshWorkspaceRecoveryId &&
+        !legacyFallbackRefused &&
         acquired.lease.recovery.archive.status === "none" &&
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutSandboxProviderIdentity(envelope)
           : null;
-      let spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      let spawnEnvelope = freshWorkspaceRecoveryId
+        ? null
+        : legacyFallbackRefused
+          ? (acquired.lease.resumeState ?? null)
+          : (fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope);
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
           : acquired.lease.resumeState;
       const continuityRecovery = acquired.lease.recovery.continuity;
+      // A fresh-workspace spawn is deliberately archive-free; commitWarmingToWarm
+      // verifies the exact decision before publication.
       if (
-        (acquired.lease.recovery.archive.status === "available" &&
+        !freshWorkspaceRecoveryId &&
+        ((acquired.lease.recovery.archive.status === "available" &&
           (acquired.lease.archiveComplete ||
             acquired.lease.historicalRecoveryAuthorized === true)) ||
-        (acquired.lease.recovery.archive.status === "none" &&
-          workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
+          (acquired.lease.recovery.archive.status === "none" &&
+            workspaceArchiveFieldsFromEnvelope(archiveSource) !== null))
       ) {
         const rematerializationId = crypto.randomUUID();
         const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -1641,7 +1669,11 @@ async function resumeBoxForTurnOnce(
           legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
           legacyProviderBinding: null,
         };
-      } else if (acquired.lease.recovery.archive.status !== "none" && !continuityRecovery) {
+      } else if (
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status !== "none" &&
+        !continuityRecovery
+      ) {
         throw new SandboxLeaseRecoveryBlockedError(
           ids.sandboxGroupId,
           expectedEpoch,
@@ -1700,6 +1732,34 @@ async function resumeBoxForTurnOnce(
         ...(services.logicalFallbackSettings
           ? { logicalFallbackSettings: services.logicalFallbackSettings }
           : {}),
+        onBeforeSandboxCreate: async (createSettings, intent, providerContext) => {
+          if (ids.backend !== "modal") return;
+          if (!intent || !providerContext)
+            throw new Error("Modal create requires the provider dispatch boundary");
+          throwIfReleasedOrCancelled();
+          const binding = await resolveModalCheckpointProviderBindingForSession(
+            createSettings,
+            providerContext,
+          );
+          const operationId = intent.operationId;
+          await beginModalProviderCreate(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            operationId,
+            providerBindingKey: binding.key,
+            rematerializationId: rematerialization?.id ?? null,
+            selectedRevision: rematerialization?.selectedRevision ?? null,
+            imageId: intent.imageId,
+            imageRef: createSettings.modalImageRef ?? null,
+            appId: intent.appId,
+            providerName: intent.name,
+            requestSha256: intent.requestSha256,
+          });
+          providerCreateOperationId = operationId;
+          providerCreateBindingKey = binding.key;
+        },
         onSandboxCreated: async (created) => {
           createdEstablished = created;
           providerRenewalTarget = {
@@ -1707,7 +1767,16 @@ async function resumeBoxForTurnOnce(
             instanceId: created.instanceId,
           };
           providerRenewedAtMs = Date.now();
-          throwIfReleasedOrCancelled();
+          if (
+            providerCreateBindingKey &&
+            !(await modalSessionMatchesCheckpointProviderBinding(
+              settings,
+              created.session,
+              providerCreateBindingKey,
+            ))
+          ) {
+            throw new Error("Modal creation receipt crossed the fenced provider namespace");
+          }
           if (
             rematerialization &&
             (rematerialization.providerBindingKey || rematerialization.legacyCheckpoint)
@@ -1758,6 +1827,7 @@ async function resumeBoxForTurnOnce(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             rematerializationId: rematerialization?.id ?? null,
+            ...(providerCreateOperationId ? { providerCreateOperationId } : {}),
             ...(created.providerContinuity
               ? { continuityRecovery: created.providerContinuity }
               : {}),
@@ -1896,16 +1966,18 @@ async function resumeBoxForTurnOnce(
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
-        ...(established.providerContinuity
-          ? { continuityRecovery: established.providerContinuity }
-          : rematerialization
-            ? {
-                rematerialization: {
-                  id: rematerialization.id,
-                  verifiedRevision: rematerialization.selectedRevision,
-                },
-              }
-            : {}),
+        ...(freshWorkspaceRecoveryId
+          ? { freshWorkspace: { operationId: freshWorkspaceRecoveryId } }
+          : established.providerContinuity
+            ? { continuityRecovery: established.providerContinuity }
+            : rematerialization
+              ? {
+                  rematerialization: {
+                    id: rematerialization.id,
+                    verifiedRevision: rematerialization.selectedRevision,
+                  },
+                }
+              : {}),
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {

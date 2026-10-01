@@ -247,9 +247,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         };
       }
       case "Target.createTarget": {
+        const url = boundedUrl(params.url ?? "about:blank");
         const result = await this.bridge.request<{ tab: AttachedTab }>({
           type: "tabs.create",
-          url: boundedUrl(params.url ?? "about:blank"),
+          // Installed extensions exclude about: pages from target discovery
+          // and debugger attachment. Bootstrap an inert, network-free document
+          // instead; keep the exact new tab and all restricted-page guards.
+          url: url === "about:blank" ? "data:text/html," : url,
         });
         return { targetId: requireTab(result.tab).id };
       }

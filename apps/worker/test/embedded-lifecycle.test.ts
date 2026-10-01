@@ -609,7 +609,9 @@ describe("embedded worker lifecycle contract", () => {
           owner: "opengeni_migrator",
           can_execute: false,
           public_execute: false,
-          security_definer: true,
+          security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+            name,
+          ),
         })),
       ],
       [

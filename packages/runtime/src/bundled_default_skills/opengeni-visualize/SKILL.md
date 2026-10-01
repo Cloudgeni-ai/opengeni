@@ -1,6 +1,6 @@
 ---
 name: opengeni-visualize
-description: "Create visualizations and interactive tools directly in conversation. Proactively use to show how something works; explore 'what happens when', 'what changes', or 'help me understand'; compare or inspect; create simulations, maps, charts, graphs, and mockups. Use standard tools for static scientific figures."
+description: "Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore 'what happens when' or 'what changes', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."
 ---
 
 # Visualize

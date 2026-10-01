@@ -423,7 +423,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Choose how to power your chats");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(container.textContent).toContain("Use Opengeni credits");
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () =>
@@ -708,7 +708,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.textContent).toContain("Want a more capable model? (optional)");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(container.textContent).toContain("Use Opengeni credits");
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find(
         (button) => button.textContent?.trim() === "Start chatting for free",
@@ -904,9 +904,9 @@ describe("organization onboarding UI", () => {
         ),
       );
       expect(container.querySelector("h1")!.textContent).toBe(
-        "Start chatting with OpenGeni credits",
+        "Start chatting with Opengeni credits",
       );
-      expect(container.textContent).toContain("$7.25 of OpenGeni credits included.");
+      expect(container.textContent).toContain("$7.25 of Opengeni credits included.");
       expect(container.textContent).toContain(
         "New chats use Credits Model with extra high reasoning.",
       );
@@ -917,7 +917,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).not.toContain("free to use. No card");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(container.querySelector('button[aria-label="Connect OpenRouter"]')).not.toBeNull();
-      expect(container.textContent).toContain("Buy more OpenGeni credits");
+      expect(container.textContent).toContain("Buy more Opengeni credits");
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
       const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
@@ -952,7 +952,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.textContent).toContain("OpenGeni credits are included with your account.");
+      expect(container.textContent).toContain("Opengeni credits are included with your account.");
       expect(container.textContent).toContain("New chats use Credits Model.");
       // Without a free default there is nothing to name for after the credits.
       expect(container.textContent).not.toContain("When your credits run out");
@@ -997,7 +997,7 @@ describe("organization onboarding UI", () => {
         modelDefaults: freeModelDefaults,
         defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
         balanceMicros: 10_000_000,
-        heading: "Start chatting with OpenGeni credits",
+        heading: "Start chatting with Opengeni credits",
         billingRead: true,
       },
       {
@@ -1084,8 +1084,8 @@ describe("organization onboarding UI", () => {
         } else {
           expect(getBilling).not.toHaveBeenCalled();
         }
-        if (scenario.heading === "Start chatting with OpenGeni credits") {
-          expect(container.textContent).toContain("$10.00 of OpenGeni credits included.");
+        if (scenario.heading === "Start chatting with Opengeni credits") {
+          expect(container.textContent).toContain("$10.00 of Opengeni credits included.");
           expect(container.textContent).toContain(
             "New chats use Credits Model with low reasoning.",
           );
@@ -1094,9 +1094,9 @@ describe("organization onboarding UI", () => {
           );
         } else if (scenario.heading === "Start chatting for free") {
           expect(container.textContent).toContain("Free Model is set up and free to use");
-          expect(container.textContent).not.toContain("of OpenGeni credits included");
+          expect(container.textContent).not.toContain("of Opengeni credits included");
         } else {
-          expect(container.textContent).not.toContain("of OpenGeni credits included");
+          expect(container.textContent).not.toContain("of Opengeni credits included");
           expect(container.textContent).not.toContain("free to use");
         }
       } finally {
@@ -1712,7 +1712,7 @@ describe("organization onboarding UI", () => {
         expect.objectContaining({ token: "signed-in-token" }),
       );
       expect(container.textContent).toContain("Invitation accepted");
-      expect(container.textContent).toContain("Open OpenGeni");
+      expect(container.textContent).toContain("Open Opengeni");
     } finally {
       currentAuthSession = null;
       await act(async () => root.unmount());

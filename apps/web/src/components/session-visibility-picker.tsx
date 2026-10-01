@@ -42,7 +42,7 @@ export function SessionVisibilityPicker(props: {
 
   return (
     <fieldset className="mt-5 grid gap-2">
-      <legend className="px-0.5 text-2xs font-medium uppercase tracking-[0.08em] text-fg-subtle">
+      <legend className="px-0.5 text-2xs font-medium uppercase tracking-[0.08em] text-fg">
         Who can see this session?
       </legend>
       <div className="grid gap-2 sm:grid-cols-2">

@@ -3,30 +3,33 @@
 //   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
+//   /workspaces/:id/priority, /agents        → sessions redirect (retired "For you" and Agents pages)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
-//   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
-//   /workspaces/:id/variable-sets            → variable sets + variables
+//   /workspaces/:id/variable-sets            → variable sets (?view=new)
+//   /workspaces/:id/variable-sets/:setId     → one variable set (?view=add|paste|edit)
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
-//   /workspaces/:id/schedules                → scheduled tasks + run history
-//   /workspaces/:id/documents                → document bases + search
-//   /workspaces/:id/memory                   → durable workspace memory
+//   /workspaces/:id/schedules                → schedules list
+//   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
+//   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
+//   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
+//   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
+//   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
-//   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
+//   /workspaces/:id/settings                 → workspace settings (general, access, models, API keys)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
-//   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
+//   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 import {
   Navigate,
   RouterProvider,
@@ -34,6 +37,8 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  useParams,
+  useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
 import { NotFoundPanel, RootRouteErrorPanel, routerErrorOptions } from "@/components/route-error";
@@ -43,6 +48,25 @@ import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
+import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
+import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
+import { parseApiKeyParam } from "@/lib/api-keys-route";
+import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
+import {
+  workspaceSettingsSectionFromSearch,
+  type WorkspaceSettingsSection,
+} from "@/lib/workspace-management-location";
+import {
+  parseOrganizationSection,
+  type LegacyOrganizationAdminSection,
+  type OrganizationAdminSection as OrganizationSettingsSection,
+} from "@/lib/organization-admin";
+import {
+  parseOrganizationRecordId,
+  parseOrganizationView,
+  type OrganizationView,
+} from "@/lib/organization-route";
 import {
   parseRootWorkspaceSearch,
   readLastWorkspaceId,
@@ -52,24 +76,9 @@ import {
 } from "@/lib/workspace-navigation-preference";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
-type OrganizationAdminSection =
-  | "integrations"
-  | "overview"
-  | "knowledge"
-  | "models"
-  | "people"
-  | "recovery"
-  | "retention"
-  | "developer"
-  | "billing";
-type WorkspaceSettingsSection =
-  | "learning"
-  | "general"
-  | "members"
-  | "plugins"
-  | "models"
-  | "api-keys"
-  | "danger";
+// Legacy section names (overview, knowledge, recovery, retention) still parse,
+// so older links keep working; they land on the page that holds them now.
+type OrganizationAdminSection = OrganizationSettingsSection | LegacyOrganizationAdminSection;
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
@@ -81,21 +90,13 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "IntegrationsReturnRoute",
 );
-const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
-const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
-  () => import("@/routes/agents"),
-  "AgentTopologyPreviewRoute",
-);
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
-const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
-const LazyMemoryRoute = lazyRouteComponent(() => import("@/routes/memory"), "MemoryRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
-const LazyPriorityRoute = lazyRouteComponent(() => import("@/routes/priority"), "PriorityRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -126,6 +127,14 @@ const LazyRigDetailRoute = lazyRouteComponent(
   "RigDetailRoute",
 );
 const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
+const LazyScheduleDetailRoute = lazyRouteComponent(
+  () => import("@/routes/schedules"),
+  "ScheduleDetailRoute",
+);
+const LazyScheduleFormRoute = lazyRouteComponent(
+  () => import("@/routes/schedules"),
+  "ScheduleFormRoute",
+);
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
 const LazySessionDeepLinkRoute = lazyRouteComponent(
   () => import("@/routes/session-deep-link"),
@@ -262,16 +271,20 @@ const composerChromeGalleryRoute = createRoute({
   path: "dev/composer-chrome",
   component: ComposerChromeGallery,
 });
-const agentTopologyPreviewRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "dev/agent-topology",
-  component: AgentTopologyPreview,
-});
 const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
 });
+// DEV-only component studio. Created only in development so the kit chunk is
+// never emitted into a production build.
+const uiKitRoute = import.meta.env.DEV
+  ? createRoute({
+      getParentRoute: () => rootRoute,
+      path: "dev/ui-kit",
+      component: lazyRouteComponent(() => import("@/dev/ui-kit"), "UiKitRoute"),
+    })
+  : null;
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "workspaces/$workspaceId",
@@ -286,6 +299,18 @@ const workspaceIndexRoute = createRoute({
 const workspaceAgentRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agent",
+  component: WorkspaceIndexRedirect,
+});
+// The "For you" feed and the Agents page were retired. Attention now lives in
+// the sessions rail ("Needs you" view), so their old links land on sessions.
+const workspaceRetiredPriorityRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "priority",
+  component: WorkspaceIndexRedirect,
+});
+const workspaceRetiredAgentsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents",
   component: WorkspaceIndexRedirect,
 });
 const workspaceSessionsRoute = createRoute({
@@ -304,15 +329,26 @@ const workspaceSessionRoute = createRoute({
   }),
   component: SessionView,
 });
-const workspaceAgentsRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "agents",
-  component: Agents,
-});
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "variable-sets",
+  // The list and each set's page share one component, so moving between them
+  // never re-reads the sets. The child routes only match the URL.
   component: VariableSets,
+});
+const workspaceVariableSetsIndexRoute = createRoute({
+  getParentRoute: () => workspaceVariableSetsRoute,
+  path: "/",
+  validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
+    search.view === "new" ? { view: "new" } : {},
+});
+const workspaceVariableSetDetailRoute = createRoute({
+  getParentRoute: () => workspaceVariableSetsRoute,
+  path: "$variableSetId",
+  validateSearch: (search: Record<string, unknown>): { view?: "add" | "paste" | "edit" } =>
+    search.view === "add" || search.view === "paste" || search.view === "edit"
+      ? { view: search.view }
+      : {},
 });
 const workspaceEnvironmentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -322,11 +358,15 @@ const workspaceEnvironmentsRoute = createRoute({
 const workspaceRigsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs",
+  validateSearch: (search: Record<string, unknown>): { view?: "new" } =>
+    search.view === "new" ? { view: "new" } : {},
   component: Rigs,
 });
 const workspaceRigDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "rigs/$rigId",
+  validateSearch: (search: Record<string, unknown>): { view?: "edit" | "edit-setup" } =>
+    search.view === "edit" || search.view === "edit-setup" ? { view: search.view } : {},
   component: RigDetail,
 });
 const workspaceMachinesRoute = createRoute({
@@ -337,12 +377,9 @@ const workspaceMachinesRoute = createRoute({
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
+  // Opened from Organization settings > Billing & usage: back returns there.
+  validateSearch: (search: Record<string, unknown>): ReturnToSearch => parseReturnTo(search),
   component: Insights,
-});
-const workspacePriorityRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "priority",
-  component: Priority,
 });
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -384,12 +421,40 @@ const workspaceSchedulesRoute = createRoute({
   }),
   component: Schedules,
 });
+const SCHEDULE_TEMPLATE_IDS = new Set(["morning-brief", "dependency-pr", "cost-check"]);
+const workspaceScheduleNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/new",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { template?: string; from?: string; sourceSessionId?: string } => ({
+    ...(typeof search.template === "string" && SCHEDULE_TEMPLATE_IDS.has(search.template)
+      ? { template: search.template }
+      : {}),
+    ...(typeof search.from === "string" && SCHEDULES_SEARCH_UUID.test(search.from)
+      ? { from: search.from }
+      : {}),
+    ...(typeof search.sourceSessionId === "string" &&
+    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
+      ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+  }),
+  component: ScheduleNew,
+});
+const workspaceScheduleDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/$scheduleId",
+  component: ScheduleDetail,
+});
+const workspaceScheduleEditRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/$scheduleId/edit",
+  component: ScheduleEdit,
+});
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
-  // Memory used to live inside Documents, so existing timeline links and
-  // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
-  // compatibility redirect to the first-class Memory surface.
+  // Old Documents links (and `?memory=<id>` bookmarks) open Knowledge.
   validateSearch: (
     search: Record<string, unknown>,
   ): { memory?: string; from?: "brain"; authority?: DocumentAuthorityKind } => ({
@@ -406,9 +471,7 @@ const workspaceDocumentsRoute = createRoute({
 const workspaceMemoryRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "memory",
-  // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
-  // Memory page reveals + highlights that record even when the filters would
-  // otherwise hide it. Unknown values are ignored.
+  // Memory is Knowledge now: `?memory=<id>` (from a timeline step) opens that entry.
   validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
@@ -418,35 +481,41 @@ const workspaceMemoryRoute = createRoute({
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "settings",
-  validateSearch: (search: Record<string, unknown>): { section?: WorkspaceSettingsSection } => {
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): {
+    section?: WorkspaceSettingsSection | "plugins";
+    account?: string;
+    view?: ModelsView | AccessUrlView;
+    key?: string;
+    member?: string;
+  } & ReturnToSearch => {
+    // Older sections still parse: Members is Access, Danger zone lives in
+    // General, and the Capabilities stub opens the Capabilities page.
     const section =
-      search.section === "general" ||
-      search.section === "learning" ||
-      search.section === "members" ||
-      search.section === "plugins" ||
-      search.section === "models" ||
-      search.section === "api-keys" ||
-      search.section === "danger"
-        ? search.section
-        : search.section === "capabilities"
-          ? "plugins"
-          : undefined;
-    return section ? { section } : {};
+      search.section === "plugins" || search.section === "capabilities"
+        ? ("plugins" as const)
+        : (workspaceSettingsSectionFromSearch(search.section) ?? undefined);
+    const account = section === "models" ? parseModelsAccount(search.account) : undefined;
+    const view = section === "models" ? parseModelsView(search.view) : undefined;
+    const key = section === "api-keys" ? parseApiKeyParam(search.key) : undefined;
+    const access = section === "access" ? parseAccessSearch(search) : {};
+    return {
+      ...(section ? { section } : {}),
+      ...(account ? { account } : {}),
+      ...(view ? { view } : {}),
+      ...(key ? { key } : {}),
+      ...access,
+      ...parseReturnTo(search),
+    };
   },
   component: WorkspaceSettings,
 });
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { view?: "instructions" | "skills" | "files"; file?: string; review?: boolean } => ({
-    ...(search.review === true ? { review: true } : {}),
-    ...(search.view === "instructions" || search.view === "skills" || search.view === "files"
-      ? { view: search.view }
-      : {}),
-    ...(typeof search.file === "string" ? { file: search.file } : {}),
-  }),
+  validateSearch: (search: Record<string, unknown>): KnowledgeSearch =>
+    parseKnowledgeSearch(search),
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -480,21 +549,39 @@ const workspaceOrganizationRoute = createRoute({
   // redirect so the organization page can confirm the top-up.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { checkout?: CheckoutOutcome; section?: OrganizationAdminSection } => {
+  ): {
+    checkout?: CheckoutOutcome;
+    section?: OrganizationAdminSection;
+    account?: string;
+    view?: ModelsView | OrganizationView;
+    person?: string;
+    invitation?: string;
+    workspace?: string;
+  } & ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
-    const section =
-      search.section === "overview" ||
-      search.section === "knowledge" ||
-      search.section === "models" ||
-      search.section === "people" ||
-      search.section === "recovery" ||
-      search.section === "retention" ||
-      search.section === "integrations" ||
-      search.section === "developer" ||
-      search.section === "billing"
-        ? search.section
-        : undefined;
-    return { ...(checkout ? { checkout } : {}), ...(section ? { section } : {}) };
+    const section = parseOrganizationSection(search.section);
+    const account = section === "models" ? parseModelsAccount(search.account) : undefined;
+    const view =
+      section === "models"
+        ? parseModelsView(search.view)
+        : section === "people" || section === "workspaces" || section === "developer"
+          ? parseOrganizationView(search.view)
+          : undefined;
+    const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
+    const invitation =
+      section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
+    const workspace =
+      section === "workspaces" ? parseOrganizationRecordId(search.workspace) : undefined;
+    return {
+      ...(checkout ? { checkout } : {}),
+      ...(section ? { section } : {}),
+      ...(account ? { account } : {}),
+      ...(view ? { view } : {}),
+      ...(person ? { person } : {}),
+      ...(invitation ? { invitation } : {}),
+      ...(workspace ? { workspace } : {}),
+      ...parseReturnTo(search),
+    };
   },
   component: Organization,
 });
@@ -520,25 +607,30 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
-  ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
-    : []),
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, onboardingPreviewRoute] : []),
+  ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
+    workspaceRetiredPriorityRoute,
+    workspaceRetiredAgentsRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
-    workspaceAgentsRoute,
-    workspaceVariableSetsRoute,
+    workspaceVariableSetsRoute.addChildren([
+      workspaceVariableSetsIndexRoute,
+      workspaceVariableSetDetailRoute,
+    ]),
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
     workspaceInsightsRoute,
-    workspacePriorityRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
+    workspaceScheduleNewRoute,
+    workspaceScheduleDetailRoute,
+    workspaceScheduleEditRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
@@ -640,11 +732,6 @@ function SessionView() {
   );
 }
 
-function Agents() {
-  const { workspaceId } = workspaceAgentsRoute.useParams();
-  return <LazyAgentsRoute workspaceId={workspaceId} />;
-}
-
 function SessionDeepLink() {
   const { sessionId } = sessionDeepLinkRoute.useParams();
   return <LazySessionDeepLinkRoute sessionId={sessionId} />;
@@ -652,7 +739,11 @@ function SessionDeepLink() {
 
 function VariableSets() {
   const { workspaceId } = workspaceVariableSetsRoute.useParams();
-  return <LazyVariableSetsRoute workspaceId={workspaceId} />;
+  const { variableSetId } = useParams({ strict: false });
+  const { view } = useSearch({ strict: false });
+  return (
+    <LazyVariableSetsRoute workspaceId={workspaceId} variableSetId={variableSetId} view={view} />
+  );
 }
 
 function VariableSetsRedirect() {
@@ -662,12 +753,14 @@ function VariableSetsRedirect() {
 
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
-  return <LazyRigsRoute workspaceId={workspaceId} />;
+  const { view } = workspaceRigsRoute.useSearch();
+  return <LazyRigsRoute workspaceId={workspaceId} view={view} />;
 }
 
 function RigDetail() {
   const { workspaceId, rigId } = workspaceRigDetailRoute.useParams();
-  return <LazyRigDetailRoute workspaceId={workspaceId} rigId={rigId} />;
+  const { view } = workspaceRigDetailRoute.useSearch();
+  return <LazyRigDetailRoute workspaceId={workspaceId} rigId={rigId} view={view} />;
 }
 
 function Machines() {
@@ -677,12 +770,8 @@ function Machines() {
 
 function Insights() {
   const { workspaceId } = workspaceInsightsRoute.useParams();
-  return <LazyInsightsRoute workspaceId={workspaceId} />;
-}
-
-function Priority() {
-  const { workspaceId } = workspacePriorityRoute.useParams();
-  return <LazyPriorityRoute workspaceId={workspaceId} />;
+  const search = workspaceInsightsRoute.useSearch();
+  return <LazyInsightsRoute workspaceId={workspaceId} returnTo={returnToOf(search)} />;
 }
 
 function CapabilitiesLegacyRedirect() {
@@ -714,58 +803,90 @@ function Schedules() {
   );
 }
 
+function ScheduleNew() {
+  const { workspaceId } = workspaceScheduleNewRoute.useParams();
+  const { template, from, sourceSessionId } = workspaceScheduleNewRoute.useSearch();
+  return (
+    <LazyScheduleFormRoute
+      workspaceId={workspaceId}
+      mode={{ kind: "create", template, from, sourceSessionId }}
+    />
+  );
+}
+
+function ScheduleDetail() {
+  const { workspaceId, scheduleId } = workspaceScheduleDetailRoute.useParams();
+  return <LazyScheduleDetailRoute workspaceId={workspaceId} scheduleId={scheduleId} />;
+}
+
+function ScheduleEdit() {
+  const { workspaceId, scheduleId } = workspaceScheduleEditRoute.useParams();
+  return <LazyScheduleFormRoute workspaceId={workspaceId} mode={{ kind: "edit", scheduleId }} />;
+}
+
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory, from, authority } = workspaceDocumentsRoute.useSearch();
-  if (memory) {
-    return (
-      <Navigate
-        to="/workspaces/$workspaceId/memory"
-        params={{ workspaceId }}
-        search={{ memory, ...(from ? { from } : {}) }}
-        replace
-      />
-    );
-  }
+  const { memory } = workspaceDocumentsRoute.useSearch();
   return (
-    <LazyDocumentsRoute
-      key={`${workspaceId}:${authority ?? "all"}`}
-      workspaceId={workspaceId}
-      returnToBrain={from === "brain"}
-      authorityKind={authority}
+    <Navigate
+      to="/workspaces/$workspaceId/state"
+      params={{ workspaceId }}
+      search={memory ? parseKnowledgeSearch({ entry: memory }) : { view: "files" }}
+      replace
     />
   );
 }
 
 function Memory() {
   const { workspaceId } = workspaceMemoryRoute.useParams();
-  const { memory, from } = workspaceMemoryRoute.useSearch();
+  const { memory } = workspaceMemoryRoute.useSearch();
   return (
-    <LazyMemoryRoute
-      workspaceId={workspaceId}
-      focusMemoryId={memory}
-      returnToBrain={from === "brain"}
+    <Navigate
+      to="/workspaces/$workspaceId/state"
+      params={{ workspaceId }}
+      search={memory ? parseKnowledgeSearch({ entry: memory }) : {}}
+      replace
     />
   );
 }
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  const { section } = workspaceSettingsRoute.useSearch();
-  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} section={section ?? "general"} />;
+  const { section, account, view, key, member } = workspaceSettingsRoute.useSearch();
+  if (section === "plugins") {
+    return <Navigate to="/workspaces/$workspaceId/plugins" params={{ workspaceId }} replace />;
+  }
+  // Agent learning is the Learning page of Knowledge now.
+  if (section === "learning") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/state"
+        params={{ workspaceId }}
+        search={{ page: "learning" }}
+        replace
+      />
+    );
+  }
+  return (
+    <LazyWorkspaceSettingsRoute
+      workspaceId={workspaceId}
+      section={section ?? "general"}
+      modelsAccount={account}
+      modelsView={section === "models" ? (view as ModelsView | undefined) : undefined}
+      apiKey={key}
+      access={
+        section === "access"
+          ? { ...(view ? { view: view as AccessUrlView } : {}), ...(member ? { member } : {}) }
+          : undefined
+      }
+    />
+  );
 }
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  const { view, file, review } = workspaceStateRoute.useSearch();
-  return (
-    <LazyWorkspaceStateRoute
-      workspaceId={workspaceId}
-      view={view}
-      review={review}
-      {...(file ? { fileId: file } : {})}
-    />
-  );
+  const search = workspaceStateRoute.useSearch();
+  return <LazyWorkspaceStateRoute workspaceId={workspaceId} search={search} />;
 }
 
 function Artifacts() {
@@ -799,8 +920,23 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
-  const { checkout, section } = workspaceOrganizationRoute.useSearch();
-  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} section={section} />;
+  const { checkout, section, account, view, person, invitation, workspace, from, fromLabel } =
+    workspaceOrganizationRoute.useSearch();
+  const page = parseOrganizationSection(section);
+  return (
+    <LazyOrgSettingsRoute
+      workspaceId={workspaceId}
+      checkout={checkout}
+      section={page}
+      modelsAccount={account}
+      modelsView={page === "models" ? parseModelsView(view) : undefined}
+      returnTo={returnToOf({ from, fromLabel })}
+      organizationView={page === "models" ? undefined : parseOrganizationView(view)}
+      person={person}
+      invitation={invitation}
+      workspace={workspace}
+    />
+  );
 }
 
 function AccountRedirect() {
@@ -837,10 +973,6 @@ function AccountAuth() {
 
 function ComposerChromeGallery() {
   return <LazyComposerChromeGalleryRoute />;
-}
-
-function AgentTopologyPreview() {
-  return <LazyAgentTopologyPreviewRoute />;
 }
 
 function BillingReturnRoute() {

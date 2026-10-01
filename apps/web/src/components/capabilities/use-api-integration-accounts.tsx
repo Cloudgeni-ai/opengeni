@@ -10,6 +10,7 @@ import {
 } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import type {
   IntegrationAccessItem,
@@ -64,7 +65,7 @@ export function apiIntegrationOAuthFailureMessage(reason: string | null): string
   if (shared) return shared;
   switch (reason) {
     case "scope_not_granted":
-      return "The provider didn't grant every permission OpenGeni needs. Connect again and approve all requested access.";
+      return "The provider didn't grant every permission Opengeni needs. Connect again and approve all requested access.";
     case "account_mismatch":
       return "You signed in to a different account than the one being reconnected. Connect again with the same account.";
     case "client_unavailable":
@@ -216,10 +217,10 @@ export function useApiIntegrationOAuthCallback({
       });
     })().catch((error) => {
       toast.error("Connected, but couldn't finish setup", {
-        description:
-          error instanceof Error
-            ? error.message
-            : "Retry from this service's row; the connection remains safe.",
+        description: userErrorText(
+          error,
+          "Retry from this service's row; the connection remains safe.",
+        ),
       });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -335,7 +336,7 @@ export function useApiIntegrationAccounts({
     } catch (error) {
       setBusy(false);
       toast.error("Couldn't start account connection", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }
@@ -355,7 +356,7 @@ export function useApiIntegrationAccounts({
       setRemoveTarget({ instance, removesDefinition: preview.removesDefinition });
     } catch (error) {
       toast.error("Couldn't inspect removal impact", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     } finally {
       setBusy(false);
@@ -385,7 +386,7 @@ export function useApiIntegrationAccounts({
       return true;
     } catch (error) {
       toast.error("Couldn't remove this account", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -584,7 +585,7 @@ export function useIntegrationDefinitionRow({
             items: controller.accessItems,
             ...(canManage
               ? {
-                  editLabel: "+ Add account",
+                  editLabel: "Add account",
                   onEdit: controller.addAccount,
                   editDisabled: controller.busy,
                 }
@@ -595,6 +596,10 @@ export function useIntegrationDefinitionRow({
     options: [],
     footer,
     ...(controller.tools.length > 0 ? { tools: { tools: controller.tools } } : {}),
+    outcomes: (
+      definitions.find((definition) => definition.id === definitionId)?.presentation
+        ?.capabilities ?? []
+    ).slice(0, 4),
   };
 
   return { model, dialogs: controller.dialogs };

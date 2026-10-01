@@ -150,6 +150,73 @@ test("startup-only timeline groups have no verbose step-count shell", async () =
   await r.unmount();
 });
 
+test("readable startup stays primary through phase gaps and first byte, then hands its clock to Working", async () => {
+  const start = new Date(Date.now() - 12_000).toISOString();
+  const first = phase({ startedAt: start, occurredAt: start });
+  const r = await renderComponent(
+    <MessageTimeline items={[first]} turnSummary={{ rolling: true }} />,
+  );
+  try {
+    const orb = r.container.querySelector("canvas");
+    expect(orb).not.toBeNull();
+    expect(r.container.querySelector("[data-og-work-header]")).toBeNull();
+    const ready = [
+      { ...first, status: "complete" as const },
+      phase({ id: "byte", phase: "provider_first_byte", status: "complete" }),
+    ];
+    await r.rerender(<MessageTimeline items={ready} turnSummary={{ rolling: true }} />);
+    expect(r.container.querySelector("canvas")).toBe(orb);
+    const progress = {
+      kind: "agent-message" as const,
+      id: "progress",
+      turnId: "turn",
+      text: "Checking the **ledger**",
+      streaming: false,
+      occurredAt: new Date().toISOString(),
+    };
+    await r.rerender(
+      <MessageTimeline items={[...ready, progress]} turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+    expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toMatch(
+      /^Working · 1[2-4]s$/,
+    );
+    expect(r.container.querySelector("[data-og-work-header]")?.textContent).not.toContain(
+      "Preparation",
+    );
+    const trigger = r.container.querySelector<HTMLButtonElement>("[data-og-work-header]")!;
+    await act(async () => trigger.click());
+    expect(r.container.querySelector("[data-og-fold-content] .og-genie-loading")).toBeNull();
+    await r.rerender(
+      <MessageTimeline
+        items={[...ready, progress, phase({ id: "late" })]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+  } finally {
+    await r.unmount();
+  }
+});
+
+test("readable startup failure and cancellation never hide behind a closed Working row", async () => {
+  for (const status of ["failed", "cancelled"] as const) {
+    const r = await renderComponent(
+      <MessageTimeline items={[phase({ status })]} turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+    expect(r.container.querySelector("[data-og-work-header]")?.getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+    expect(r.container.textContent).toContain(
+      status === "failed" ? "Sandbox didn’t start" : "Sandbox startup interrupted",
+    );
+    await r.unmount();
+  }
+});
+
 test("the same orb survives gaps between startup phases", async () => {
   const first = phase();
   const r = await renderComponent(<MessageTimeline items={[first]} />);
@@ -295,20 +362,26 @@ test("rolling steps start closed and preserve explicit expansion", async () => {
   const r = await renderComponent(
     <MessageTimeline items={[item]} turnSummary={{ rolling: true }} />,
   );
-  expect(r.container.querySelector(".og-rolling-status")).toBeNull();
+  // The first step already lives in the one status row.
+  const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(trigger.textContent).toContain("Working");
+  expect(trigger.textContent).toContain("1 step");
+  expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
+  expect(r.container.textContent).not.toContain("secret detail");
   await r.rerender(
     <MessageTimeline
       items={[item, { ...item, id: "tool2", callId: "call2", arguments: { cmd: "bun run build" } }]}
       turnSummary={{ rolling: true }}
     />,
   );
-  const trigger = r.container.querySelector("button[aria-expanded]") as HTMLButtonElement;
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
-  expect(r.container.querySelector(".og-rolling-status")).not.toBeNull();
-  expect(r.container.textContent).toContain("+1 earlier");
+  expect(trigger.textContent).toContain("2 steps");
+  // The status line counts steps; the reel does not repeat the count.
+  expect(r.container.textContent).not.toContain("+1 earlier");
   expect(r.container.textContent).toContain("bun test");
   expect(r.container.textContent).toContain("bun run build");
-  // Both faces exist during the first standalone-to-reel transition.
+  // Both faces exist while the reel rolls to the new step.
   expect(r.container.querySelectorAll(".og-rolling-face").length).toBe(2);
   await act(async () => trigger.click());
   expect(trigger.getAttribute("aria-expanded")).toBe("true");

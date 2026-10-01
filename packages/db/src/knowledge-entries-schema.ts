@@ -200,6 +200,12 @@ export const knowledgeIndexJobs = pgTable("knowledge_index_jobs", {
   accountId: uuid("account_id").notNull(),
   entryId: uuid("entry_id").notNull(),
   revisionId: uuid("revision_id").primaryKey(),
+  // Captured by the revision enqueue trigger, never the async dispatcher's
+  // identity or mutable session head. Legacy rows remain explicitly unknown.
+  billingAttribution: jsonb("billing_attribution")
+    .$type<import("./credit-debit-attribution").CreditDebitAttribution>()
+    .notNull()
+    .default({ kind: "unknown" }),
   state: text("state")
     .$type<"pending" | "running" | "ready" | "obsolete">()
     .notNull()

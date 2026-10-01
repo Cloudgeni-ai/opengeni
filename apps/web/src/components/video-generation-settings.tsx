@@ -1,11 +1,13 @@
 import type { VideoGenerationFundingSource, WorkspaceVideoGenerationSettings } from "@opengeni/sdk";
-import { VideoIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { PreferenceToggleRow } from "@/components/transcription-settings";
-import { Select } from "@/components/ui/select";
+import { RowSelect } from "@/components/settings/row-select";
+import type { SelectOption } from "@/components/ui/select-menu";
+import { SettingRow, SettingRowLink } from "@/components/ui/setting-row";
+import { Switch } from "@/components/ui/switch";
 import { useAppContext } from "@/context";
+import { userErrorText } from "@/lib/api-error";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";
 const GROK_IMAGINE_VIDEO_1_5 = "xai/grok-imagine-video-1.5";
@@ -18,10 +20,13 @@ export function VideoGenerationPreferenceRow({
   workspaceId,
   canManage,
   refreshKey,
+  onConnectGateway,
 }: {
   workspaceId: string;
   canManage: boolean;
   refreshKey: number;
+  /** Opens the page that connects a workspace AI Gateway key. */
+  onConnectGateway?: () => void;
 }) {
   const client = useAppContext().client;
   const [settings, setSettings] = useState<WorkspaceVideoGenerationSettings | null>(null);
@@ -77,11 +82,13 @@ export function VideoGenerationPreferenceRow({
     if (!settings || !canManage || saving || (!enabled && !available)) return;
     try {
       await updatePolicy(selectedFundingSource, !enabled);
-      toast.success(enabled ? "Video generation disabled" : "Video generation enabled");
+      toast.success(
+        enabled
+          ? "Video generation is off for new sessions"
+          : "Video generation is on for new sessions",
+      );
     } catch (error) {
-      toast.error("Couldn't update video generation", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't update video generation", { description: userErrorText(error) });
     }
   }
 
@@ -91,56 +98,77 @@ export function VideoGenerationPreferenceRow({
       await updatePolicy(fundingSource, enabled);
       toast.success(
         fundingSource === "opengeni_credits"
-          ? "Video generation will use OpenGeni credits"
+          ? "Video generation will use Opengeni credits"
           : fundingSource === "supergrok_subscription"
             ? "Video generation will use SuperGrok"
             : "Video generation will use your Gateway",
       );
     } catch (error) {
       toast.error("Couldn't update video generation funding", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     }
   }
 
+  const payerOptions: SelectOption<VideoGenerationFundingSource>[] = (
+    settings?.fundingOptions ?? []
+  ).map((option) => ({
+    value: option.source,
+    label: option.label,
+    description: option.description,
+    disabled: !option.available,
+    ...(option.available
+      ? {}
+      : { disabledReason: option.unavailableReason ?? "Not available in this workspace." }),
+  }));
+  const noFunding =
+    Boolean(settings) && !settings!.fundingOptions.some((option) => option.available);
+  const reason = failed
+    ? "Couldn't load video generation settings. Reload to try again."
+    : !canManage
+      ? "Only workspace admins can change this."
+      : !enabled && settings && !available
+        ? (selectedFunding?.unavailableReason ?? "Nothing is set up to pay for videos yet.")
+        : undefined;
+
   return (
-    <PreferenceToggleRow
-      icon={<VideoIcon className="size-3.5 text-brand" />}
+    <SettingRow
       label="Video generation"
       description={
-        failed
-          ? "Video generation settings are unavailable."
-          : !settings
-            ? "Loading video generation availability…"
-            : selectedFunding?.available
-              ? selectedFunding.description
-              : (selectedFunding?.unavailableReason ?? "No video funding route is configured.")
+        noFunding
+          ? "Let agents make short videos. Needs an AI Gateway key or a plan to pay for them."
+          : "Let agents make short videos. Paid by the account you choose."
       }
-      checked={enabled}
-      disabled={!canManage || !settings || (!enabled && !available) || saving}
-      saving={saving}
+      hint={
+        noFunding && canManage && onConnectGateway ? (
+          <SettingRowLink onClick={onConnectGateway}>Connect AI Gateway</SettingRowLink>
+        ) : undefined
+      }
       control={
-        settings ? (
-          <Select
-            aria-label="Video generation funding"
-            value={selectedFundingSource}
-            disabled={
-              !canManage || saving || !settings.fundingOptions.some((option) => option.available)
-            }
-            onChange={(event) =>
-              void changeFunding(event.currentTarget.value as VideoGenerationFundingSource)
-            }
-            className="h-7 w-32 py-0 text-xs"
-          >
-            {settings.fundingOptions.map((option) => (
-              <option key={option.source} value={option.source} disabled={!option.available}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-        ) : null
+        <Switch
+          checked={enabled}
+          pending={saving || (!settings && !failed)}
+          disabled={Boolean(reason)}
+          disabledReason={reason}
+          onCheckedChange={() => void toggle()}
+        />
       }
-      onToggle={() => void toggle()}
-    />
+    >
+      {settings && enabled ? (
+        <SettingRow
+          label="Paid by"
+          description="Every video shows who paid for it."
+          controlWidth="select"
+          control={
+            <RowSelect
+              options={payerOptions}
+              value={selectedFundingSource}
+              disabled={!canManage || saving}
+              onValueChange={(next) => void changeFunding(next)}
+            />
+          }
+        />
+      ) : null}
+    </SettingRow>
   );
 }

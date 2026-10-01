@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
+  MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
@@ -31,7 +32,10 @@ const definition = (method: string, input: string, output: string, streaming = f
   responseDeserialize: (bytes: Buffer) => modalRouterWire.lookupType(output).decode(bytes),
 });
 const payload = Buffer.from(Array.from({ length: 8 }, (_, i) => `line:${i}\n`).join(""));
-const large = Buffer.alloc(80 * 1024, 97);
+const large = Buffer.alloc(MODAL_ROUTER_READ_PAGE_BYTES + 16 * 1024, 97);
+// A finished command's multi-megabyte backlog, delivered in small provider
+// messages as the router does.
+const backlog = Buffer.alloc(8 * 1024 * 1024, 98);
 const server = new Server();
 let directory: string;
 let endpoint: string;
@@ -99,6 +103,12 @@ beforeAll(async () => {
         if (execId === "silent") return;
         if (execId === "failed") {
           call.destroy({ code: status.UNAVAILABLE, details: "read unavailable" });
+          return;
+        }
+        if (execId === "backlog") {
+          for (let start = Number(offset); start < backlog.length; start += 64 * 1024)
+            call.write({ data: backlog.subarray(start, start + 64 * 1024) });
+          call.end();
           return;
         }
         const source = execId === "large" ? large : payload;
@@ -262,11 +272,33 @@ test("bounded reads resume inside a provider chunk without loss or false EOF", a
   const client = wire();
   try {
     const first = await client.read(identity("large"), "stdout", 0, 2000);
-    expect(first.bytes.length).toBe(64 * 1024);
+    expect(first.bytes.length).toBe(MODAL_ROUTER_READ_PAGE_BYTES);
     expect(first.eof).toBe(false);
     const second = await client.read(identity("large"), "stdout", first.bytes.length, 2000);
     expect(second.eof).toBe(true);
     expect(Buffer.concat([first.bytes, second.bytes])).toEqual(large);
+  } finally {
+    client.close();
+  }
+});
+
+test("a finished command's multi-megabyte backlog drains in a few page-sized reads", async () => {
+  const client = wire();
+  try {
+    const pages: Buffer[] = [];
+    let offset = 0,
+      eof = false,
+      reads = 0;
+    while (!eof) {
+      const page = await client.read(identity("backlog"), "stdout", offset, 2000);
+      expect(page.bytes.length).toBeLessThanOrEqual(MODAL_ROUTER_READ_PAGE_BYTES);
+      pages.push(page.bytes);
+      offset += page.bytes.length;
+      eof = page.eof;
+      reads++;
+      expect(reads).toBeLessThanOrEqual(backlog.length / MODAL_ROUTER_READ_PAGE_BYTES + 1);
+    }
+    expect(Buffer.concat(pages)).toEqual(backlog);
   } finally {
     client.close();
   }

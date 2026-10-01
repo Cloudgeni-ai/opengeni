@@ -8,16 +8,21 @@ const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
 // removing legacy surface tightens the boundary, while adding a browser-unused
 // method to the eager client fails review until it moves to a focused subpath.
 const legacyBrowserUnusedMethods = [
+  // Identity proposals are confirmed in the conversation that made them.
+  "activateCompanyProfileRevision",
   "addDocument",
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
   "browseAtlassianSources",
+  // Only the removed Agents page cancelled sessions from the web client.
+  "cancelSession",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
   "codexStatus",
   "codexUsage",
   "createDocumentBase",
+  "createWorkspaceInstructionPolicyOnboardingProposal",
   "createOrganization",
   "deleteDocument",
   "diffCompanyProfileRevisions",
@@ -32,7 +37,6 @@ const legacyBrowserUnusedMethods = [
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",
-  "getScheduledTask",
   "getSessionRetainedArtifactContent",
   "getVideoGenerationOperation",
   "gitLog",
@@ -43,6 +47,9 @@ const legacyBrowserUnusedMethods = [
   // override-settings navigation was removed in #2490.
   "listAgentLearningOverrides",
   "listDocuments",
+  // The rebuilt Knowledge page folds Files into Knowledge entries, and the
+  // organization identity is drafted rather than edited or rolled back inline.
+  "listFiles",
   "listGoalRevisionPage",
   "listGoalRevisions",
   "listTranscriptionRecordings",
@@ -52,14 +59,15 @@ const legacyBrowserUnusedMethods = [
   "rejectGoalRevision",
   "resumeGoal",
   "revokeUserResourceGrant",
+  "rollbackCompanyProfile",
   "rollbackGoalRevision",
-  "rollbackWorkspaceInstructionPolicyRevision",
   "setAtlassianLifecycle",
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
   "supergrokStatus",
   "undoGovernedLearningActivation",
+  "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
   "verifyPersonalGitHubRepositorySelections",
 ];

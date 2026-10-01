@@ -19,6 +19,14 @@ export type OpenGeniProviderProps = {
   workspaceId: string;
   onWorkspaceControlEvent?: ((event: WorkspaceControlEvent) => void) | undefined;
   onWorkspaceInteractionEvent?: ((event: WorkspaceInteractionRevisionEvent) => void) | undefined;
+  /**
+   * Stale-tab protection for the stock OpenGeni web app: when the server's API
+   * contract revision differs from this bundle's, cover the page and reload it
+   * once. Off by default, because an embedded product's page must never be
+   * blocked or reloaded when OpenGeni deploys; there a mismatch is ignored and
+   * the SDK's tolerant-reader compatibility applies.
+   */
+  reloadOnApiContractChange?: boolean | undefined;
   children?: ReactNode;
 };
 
@@ -31,6 +39,7 @@ export function OpenGeniProvider({
   workspaceId,
   onWorkspaceControlEvent,
   onWorkspaceInteractionEvent,
+  reloadOnApiContractChange = false,
   children,
 }: OpenGeniProviderProps) {
   const [workspaceControlEvent, setWorkspaceControlEvent] = useState<WorkspaceControlEvent | null>(
@@ -59,10 +68,11 @@ export function OpenGeniProvider({
   callbackRef.current = onWorkspaceControlEvent;
   interactionCallbackRef.current = onWorkspaceInteractionEvent;
 
+  const strictContract = reloadOnApiContractChange;
   const verifyApiContract = useCallback(async (): Promise<void> => {
     try {
       const config = await client.getClientConfig();
-      if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+      if (strictContract && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
         throw new OpenGeniApiContractMismatchError(
           OPENGENI_API_CONTRACT_REVISION,
           String(config.apiContractRevision || "(missing)"),
@@ -70,12 +80,14 @@ export function OpenGeniProvider({
       }
     } catch (error) {
       if (error instanceof OpenGeniApiContractMismatchError) {
+        // Embedded hosts: a revision difference is not a reason to block or reload the page.
+        if (!strictContract) return;
         setContractMismatch(error);
         reloadForContractMismatchOnce(error);
       }
       throw error;
     }
-  }, [client]);
+  }, [client, strictContract]);
 
   const registerSessionReconciler = useMemo(
     () =>
@@ -175,7 +187,7 @@ export function OpenGeniProvider({
           }
         }
       } catch (error) {
-        if (error instanceof OpenGeniApiContractMismatchError) {
+        if (strictContract && error instanceof OpenGeniApiContractMismatchError) {
           setContractMismatch(error);
           reloadForContractMismatchOnce(error);
         }
@@ -186,7 +198,14 @@ export function OpenGeniProvider({
       }
     })();
     return () => controller.abort();
-  }, [client, pageLive, supportsWorkspaceLiveStream, verifyApiContract, workspaceId]);
+  }, [
+    client,
+    pageLive,
+    strictContract,
+    supportsWorkspaceLiveStream,
+    verifyApiContract,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (supportsWorkspaceLiveStream) return;
@@ -222,7 +241,7 @@ export function OpenGeniProvider({
           callbackRef.current?.(event);
         }
       } catch (error) {
-        if (error instanceof OpenGeniApiContractMismatchError) {
+        if (strictContract && error instanceof OpenGeniApiContractMismatchError) {
           setContractMismatch(error);
           reloadForContractMismatchOnce(error);
         }
@@ -230,7 +249,14 @@ export function OpenGeniProvider({
       }
     })();
     return () => controller.abort();
-  }, [client, pageLive, supportsWorkspaceLiveStream, verifyApiContract, workspaceId]);
+  }, [
+    client,
+    pageLive,
+    strictContract,
+    supportsWorkspaceLiveStream,
+    verifyApiContract,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (supportsWorkspaceLiveStream) return;
@@ -265,7 +291,7 @@ export function OpenGeniProvider({
           interactionCallbackRef.current?.(event);
         }
       } catch (error) {
-        if (error instanceof OpenGeniApiContractMismatchError) {
+        if (strictContract && error instanceof OpenGeniApiContractMismatchError) {
           setContractMismatch(error);
           reloadForContractMismatchOnce(error);
         }
@@ -273,7 +299,14 @@ export function OpenGeniProvider({
       }
     })();
     return () => controller.abort();
-  }, [client, pageLive, supportsWorkspaceLiveStream, verifyApiContract, workspaceId]);
+  }, [
+    client,
+    pageLive,
+    strictContract,
+    supportsWorkspaceLiveStream,
+    verifyApiContract,
+    workspaceId,
+  ]);
 
   const value = useMemo(
     () => ({
@@ -329,7 +362,7 @@ function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContract
       data-opengeni-api-contract-mismatch
     >
       <div className="w-full max-w-md rounded-xl border border-og-border bg-og-surface p-6 shadow-2xl">
-        <p className="text-og-menu font-semibold text-og-fg">OpenGeni updated</p>
+        <p className="text-og-menu font-semibold text-og-fg">Opengeni updated</p>
         <p className="mt-2 text-og-menu leading-6 text-og-muted">
           This tab cannot safely continue with the new server version. Reload it before sending or
           controlling work.
@@ -339,7 +372,7 @@ function ApiContractMismatchScreen({ mismatch }: { mismatch: OpenGeniApiContract
         </p>
         <button
           type="button"
-          className="mt-5 inline-flex h-9 items-center rounded-md bg-og-fg px-3 text-og-menu font-medium text-og-bg"
+          className="mt-5 inline-flex h-9 items-center rounded-md border border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover px-3 text-og-menu font-medium"
           onClick={() => window.location.reload()}
         >
           Reload now

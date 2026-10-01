@@ -52,15 +52,39 @@ try {
             metadata: string[];
             downloads: string[];
             prompts: string[];
+            siteHtml: string[];
           },
       );
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    const outside: string[] = [];
+    page.on("request", (request) => {
+      if (/^https?:/.test(request.url()) && !request.url().startsWith(baseUrl))
+        outside.push(request.url());
+    });
+    await page.addInitScript(() => {
+      window.addEventListener("message", (event) => {
+        if (event.data === "site-ran") Reflect.set(window, "siteRan", true);
+      });
+    });
     await page.goto(`${baseUrl}/test/artifact-library.html`, { waitUntil: "networkidle" });
-    await page.getByRole("link", { name: "Open Project mark", exact: true }).waitFor();
+    // The first load pays Vite's cold transforms, slow on a busy machine.
     await page
-      .getByRole("link", { name: "Open Project mark", exact: true })
-      .scrollIntoViewIfNeeded();
+      .getByRole("link", { name: "Project mark", exact: true })
+      .waitFor({ timeout: 90_000 });
+    const site = page.getByRole("link", { name: "Product analytics", exact: true });
+    const still = page.getByTitle("Preview of Product analytics", { exact: true });
+    if (height === 600) {
+      assert.ok(
+        await site.evaluate(
+          (element) => element.closest("li")!.getBoundingClientRect().top >= innerHeight,
+        ),
+        "the short viewport starts with the Site card below the visible gallery",
+      );
+      assert.deepEqual((await activity()).siteHtml, [], "an offscreen Site does not fetch HTML");
+      assert.equal(await still.count(), 0, "an offscreen Site does not mount a still");
+    }
+    await page.getByRole("link", { name: "Project mark", exact: true }).scrollIntoViewIfNeeded();
     await page.getByRole("img", { name: "Project mark", exact: true }).waitFor();
     await page.locator('[data-slot="content-page"]').evaluate((element) => {
       element.scrollTop = 0;
@@ -70,30 +94,48 @@ try {
       (await activity()).prompts.at(-1),
       "Help me create a workspace artifact. Ask what I want to make before creating it.",
     );
-    assert.equal(await page.locator("iframe").count(), 0, "catalog must not run a Site");
+    // The gallery (default) shows a Site as a still: sandboxed with no scripts, no network.
+    // Activate this card's viewport gate explicitly, rather than relying on the
+    // preceding image scroll to happen to bring a nearby Site into view too.
+    await site.scrollIntoViewIfNeeded();
+    await still.waitFor({ state: "attached" });
+    await still.contentFrame().getByText("Weekly active teams by plan.", { exact: true }).waitFor();
+    assert.equal((await activity()).siteHtml.length, 1, "the visible Site fetches its HTML once");
+    assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
+    assert.equal(
+      await page.locator("iframe:not([sandbox=''])").count(),
+      0,
+      "catalog must not run a Site",
+    );
+    assert.equal(await page.evaluate(() => Reflect.get(window, "siteRan") ?? false), false);
+    assert.deepEqual(outside, [], "a Site still makes no network requests");
+    assert.equal(
+      await page.getByRole("radio", { name: "Gallery", exact: true }).getAttribute("aria-checked"),
+      "true",
+    );
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
       false,
       "no horizontal overflow",
     );
-    await page.screenshot({ path: `${output}/grid-${suffix}.png`, fullPage: true });
-    await page.getByRole("button", { name: "List view", exact: true }).click();
-    await page.reload({ waitUntil: "networkidle" });
-    assert.equal(
-      await page
-        .getByRole("button", { name: "List view", exact: true })
-        .getAttribute("aria-pressed"),
-      "true",
-    );
+    await page.screenshot({ path: `${output}/site-still-${suffix}.png`, fullPage: true });
+    await page.locator('[data-slot="content-page"]').evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await page.screenshot({ path: `${output}/gallery-${suffix}.png`, fullPage: true });
+    await page.getByRole("radio", { name: "List", exact: true }).click();
+    assert.equal(await page.locator("iframe").count(), 0, "the list shows no Site stills");
+    assert.equal(await page.locator("[data-slot=list-row]").count(), 7);
     await page.screenshot({ path: `${output}/list-${suffix}.png`, fullPage: true });
-    await page.getByRole("button", { name: "Images", exact: true }).click();
+    await page.getByRole("radio", { name: "Gallery", exact: true }).click();
+    await page.getByRole("tab", { name: "Images", exact: true }).click();
     assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 2);
     await page.getByRole("button", { name: "New artifact", exact: true }).click();
     assert.equal(
       (await activity()).prompts.at(-1),
       "Help me create a workspace image. Ask what it should contain before creating it.",
     );
-    await page.getByRole("link", { name: "Open Project mark", exact: true }).click();
+    await page.getByRole("link", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     const imageBounds = await page
       .getByRole("img", { name: "Project mark.svg", exact: true })
@@ -112,8 +154,8 @@ try {
     const download = page.waitForEvent("download");
     await page.getByRole("button", { name: "Download", exact: true }).click();
     assert.equal((await download).suggestedFilename(), "Project mark.svg");
-    await page.getByRole("link", { name: "All artifacts", exact: true }).click();
-    await page.getByRole("link", { name: "Open Generated cover", exact: true }).click();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Generated cover", exact: true }).click();
     await page.getByRole("button", { name: "Expand Generated cover.svg", exact: true }).waitFor();
     assert.match(
       (await page
@@ -121,21 +163,24 @@ try {
         .getAttribute("src")) ?? "",
       /\/test\/artifact-library-image\.svg$/,
     );
-    await page.getByRole("link", { name: "All artifacts", exact: true }).click();
-    await page.getByRole("link", { name: "Open Research export.csv", exact: true }).click();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Research export.csv", exact: true }).click();
     await page
       .getByText("Preview is not available for this file. Download it to open it.")
       .waitFor();
     const fileDownload = page.waitForEvent("download");
     await page.getByRole("button", { name: "Download", exact: true }).click();
     assert.equal((await fileDownload).suggestedFilename(), "Research export.csv");
-    await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
     await page.getByRole("searchbox", { name: "Search artifacts by title" }).fill("Launch");
-    await page.getByRole("link", { name: "Open Launch brief", exact: true }).waitFor();
-    assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 1);
+    await page.getByRole("link", { name: "Launch brief", exact: true }).waitFor();
+    assert.equal(await page.locator('ul[aria-label="Search results"] > li').count(), 1);
     await page.getByRole("searchbox", { name: "Search artifacts by title" }).fill("");
-    await page.getByRole("combobox", { name: "Artifact status" }).selectOption("archived");
-    await page.getByRole("link", { name: "Open Previous dashboard", exact: true }).waitFor();
+    await page.getByRole("tab", { name: "All", exact: true }).click();
+    await page.getByRole("button", { name: "Filter", exact: true }).click();
+    await page.getByRole("menuitemcheckbox", { name: "Archived", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await page.getByRole("link", { name: "Previous dashboard", exact: true }).waitFor();
     const accessibility = await new AxeBuilder({ page }).analyze();
     assert.deepEqual(
       accessibility.violations
@@ -146,9 +191,9 @@ try {
     await page.goto(`${baseUrl}/test/artifact-library.html?session=1`, {
       waitUntil: "networkidle",
     });
-    await page.getByRole("button", { name: "Open Project mark", exact: true }).click();
+    await page.getByRole("button", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
-    assert.equal(await page.getByRole("link", { name: "All artifacts", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("link", { name: "Artifacts", exact: true }).count(), 0);
     assert.equal(await page.getByRole("button", { name: "Browse session artifacts" }).count(), 1);
     const embeddedScroll = await page.locator('[data-slot="content-page"]').evaluate((element) => {
       const bottom = element.getBoundingClientRect().bottom;
@@ -180,12 +225,16 @@ try {
           : page.getByText(state === "error" ? "Couldn't load artifacts" : /No artifacts yet/);
       await expected.waitFor();
     }
-    for (const view of ["grid", "list"]) {
+    for (const view of ["gallery", "list"]) {
       await page.evaluate(
-        (mode) => localStorage.setItem("opengeni:artifact-library:view:v1", mode),
+        (next) => localStorage.setItem("opengeni:artifact-library:view:v1", next),
         view,
       );
       await page.goto(`${baseUrl}/test/artifact-library.html?many=1`, { waitUntil: "networkidle" });
+      // Network idleness can precede the fixture's async React render and
+      // IntersectionObserver delivery. Observe a loaded nearby thumbnail before
+      // checking the request counts; retain the offscreen bounds below.
+      await page.getByRole("img", { name: "Gallery image 1", exact: true }).waitFor();
       const initial = await activity();
       const lastId = "77777777-7777-4777-8777-000000000059";
       assert.ok(
@@ -199,7 +248,7 @@ try {
       assert.ok(!initial.metadata.includes(lastId));
       assert.ok(!initial.downloads.includes(lastId));
       await page
-        .getByRole("link", { name: "Open Gallery image 60", exact: true })
+        .getByRole("link", { name: "Gallery image 60", exact: true })
         .scrollIntoViewIfNeeded();
       await page.getByRole("img", { name: "Gallery image 60", exact: true }).waitFor();
       const scrolled = await activity();
@@ -212,7 +261,7 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
     console.log(
-      `Artifact library ${suffix}: CTA, grid/list, viewport-gated thumbnails, persistence, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
+      `Artifact library ${suffix}: gallery with Site stills, list toggle, CTA, type tabs, viewport-gated thumbnails, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
     );
   }
 } finally {

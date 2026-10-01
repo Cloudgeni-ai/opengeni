@@ -86,6 +86,8 @@ describe("compact session view on the live local workspace route (API fixture)",
         childReadStarted?: ReturnType<typeof deferred>;
         failReads: boolean;
         failFirstPage?: boolean;
+        allowStaleFirstPage?: boolean;
+        overlapRootOnContinuation?: boolean;
         staleFirstPageRoot?: FixtureRow;
         holdSearch?: ReturnType<typeof deferred>;
         searchStarted?: boolean;
@@ -223,8 +225,10 @@ describe("compact session view on the live local workspace route (API fixture)",
             nextCursor: null,
             filtersApplied: true,
           });
-        const sortBy = url.searchParams.get("sortBy") ?? "updatedAt";
         const archiveStatus = url.searchParams.get("archiveStatus") ?? "active";
+        const sortBy =
+          url.searchParams.get("sortBy") ??
+          (archiveStatus === "archived" ? "archivedAt" : "updatedAt");
         const fixture = archiveFixture;
         if (fixture && url.searchParams.get("parentSessionId") === fixture.root.id) {
           const hold = fixture.holdChildRead;
@@ -251,25 +255,47 @@ describe("compact session view on the live local workspace route (API fixture)",
             (row) => row.parentSessionId === url.searchParams.get("parentSessionId"),
           );
         if (url.searchParams.get("pinsOnly")) selected = [];
+        const archiveTime = (row: FixtureRow) => {
+          const timestamp =
+            fixture && row.rootSessionId === fixture.root.id
+              ? fixture.root.archivedAt
+              : row.archivedAt;
+          return timestamp ? Date.parse(timestamp) : 0;
+        };
         selected.sort((a, b) =>
-          sortBy === "name"
-            ? a.title.localeCompare(b.title)
-            : Date.parse(b[sortBy as "createdAt" | "updatedAt"]) -
-              Date.parse(a[sortBy as "createdAt" | "updatedAt"]),
+          sortBy === "archivedAt"
+            ? archiveTime(b) - archiveTime(a) || b.id.localeCompare(a.id)
+            : sortBy === "name"
+              ? a.title.localeCompare(b.title)
+              : Date.parse(b[sortBy as "createdAt" | "updatedAt"]) -
+                Date.parse(a[sortBy as "createdAt" | "updatedAt"]),
         );
         const offset = Number(url.searchParams.get("cursor") ?? 0);
         const limit = Number(url.searchParams.get("limit") ?? 50);
+        const pageRows = selected.slice(offset, offset + limit);
+        if (
+          fixture?.overlapRootOnContinuation &&
+          !search &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          url.searchParams.has("cursor") &&
+          selected.some((row) => row.id === fixture.root.id) &&
+          !pageRows.some((row) => row.id === fixture.root.id)
+        ) {
+          // Model the deliberate overlapping continuation from the original
+          // causal test, while keeping the server page bounded to its limit.
+          pageRows.unshift(fixture.root);
+          pageRows.splice(limit);
+        }
         const response = {
-          sessions: selected
-            .slice(offset, offset + limit)
-            .map((row) =>
-              fixture?.staleFirstPageRoot &&
-              limit === 50 &&
-              url.searchParams.get("parentSessionId") === "null" &&
-              row.id === fixture.root.id
-                ? fixture.staleFirstPageRoot
-                : row,
-            ),
+          sessions: pageRows.map((row) =>
+            fixture?.staleFirstPageRoot &&
+            limit === 50 &&
+            !url.searchParams.has("cursor") &&
+            url.searchParams.get("parentSessionId") === "null" &&
+            row.id === fixture.root.id
+              ? fixture.staleFirstPageRoot
+              : row,
+          ),
           pinned: [],
           nextCursor: offset + limit < selected.length ? String(offset + limit) : null,
           sortBy,
@@ -286,8 +312,17 @@ describe("compact session view on the live local workspace route (API fixture)",
           const hold = fixture.holdRead;
           fixture.holdRead = undefined;
           fixture.readStarted = true;
+          // A held read was answered by the server when it started; only its
+          // delivery is delayed, so it keeps the outcome of that moment.
+          const failedAtStart = fixture.failReads;
           await hold?.promise;
-          if (fixture.failReads || (fixture.failFirstPage && limit === 50))
+          const firstPage = !url.searchParams.has("cursor");
+          const allowStaleFirstPage = firstPage && fixture.allowStaleFirstPage;
+          if (firstPage) fixture.allowStaleFirstPage = false;
+          if (
+            (hold ? failedAtStart : fixture.failReads) ||
+            (fixture.failFirstPage && firstPage && !allowStaleFirstPage)
+          )
             return json({ message: "Deliberate read failure" }, 500);
         }
         return json(response);
@@ -406,9 +441,13 @@ describe("compact session view on the live local workspace route (API fixture)",
         ?.textContent?.includes("Session 01"),
     );
     expect(listRequests.some((url) => url.searchParams.get("sortBy") === "name")).toBe(true);
-    await rail
-      .getByRole("button", { name: "Load older sessions in sessions", exact: true })
-      .click();
+    expect(await rail.locator("a[data-session-row]").count()).toBe(4);
+    for (let visible = 8; visible <= 64; visible += 4) {
+      await rail
+        .getByRole("button", { name: "Show 4 more sessions in sessions", exact: true })
+        .click();
+      await waitFor(async () => (await rail.locator("a[data-session-row]").count()) === visible);
+    }
     await rail.getByText("Session 64", { exact: true }).waitFor();
     const titles = await rail.locator("a[data-session-row]").allTextContents();
     expect(titles.length).toBe(64);
@@ -430,6 +469,19 @@ describe("compact session view on the live local workspace route (API fixture)",
     expect(await rail.locator("a[data-session-row]").count()).toBe(1);
     await choose("Status", "All");
     await choose("Group by", "Project");
+    const archivedFolder = rail.getByRole("group", { name: "Archived", exact: true });
+    expect(
+      await archivedFolder
+        .getByRole("button", { name: "Archived", exact: true })
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(await archivedFolder.locator("a[data-session-row]").count()).toBe(0);
+    expect(
+      await rail
+        .getByRole("group", { name: "Default", exact: true })
+        .getByText("Session 00", { exact: true })
+        .count(),
+    ).toBe(0);
     expect(await rail.getByRole("group", { name: "Empty project", exact: true }).count()).toBe(0);
     await page.getByRole("button", { name: /^Session view/ }).click();
     await page.getByRole("menuitemcheckbox", { name: "Show empty groups" }).click();
@@ -472,6 +524,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         ...rows[0]!,
         title: "Nonmatching root",
         archived: !localArchived,
+        archivedAt: localArchived ? null : now,
         treeStats: { directChildren: 55, totalDescendants: 55, truncated: false },
       };
       archiveFixture = {
@@ -489,11 +542,13 @@ describe("compact session view on the live local workspace route (API fixture)",
               ...rows[index + 1]!,
               title: `Unrelated ${String(index).padStart(2, "0")}`,
               archived: !localArchived,
+              archivedAt: localArchived ? null : rows[index + 1]!.updatedAt,
             }))
           : [],
         mutationStarted: false,
         readStarted: false,
         failReads: false,
+        overlapRootOnContinuation: continuationFirst,
       };
       await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions`, {
         waitUntil: "networkidle",
@@ -503,9 +558,18 @@ describe("compact session view on the live local workspace route (API fixture)",
         .and(page.locator(":focus"))
         .waitFor();
       await choose("Group by", "None");
+      await choose("Sort by", "Last activity");
       await choose("Status", localArchived ? "Active" : "Archived");
       const rail = page.locator("[data-sessionpin-session-list]");
       const matchingChildren = rail.locator("a[data-session-row]").filter({ hasText: /Needle \d/ });
+      const rootRows = rail.locator(
+        'a[data-session-row]:not([data-session-row^="55555555-5555-4555-8555-"])',
+      );
+      const disclosure = rail.getByRole("button", {
+        name: new RegExp(
+          `^(?:Show \\d+ more|Retry) sessions in ${localArchived ? "sessions" : "Archived"}$`,
+        ),
+      });
       const rootRow = rail.locator(`a[data-session-row][href$="/${root.id}"]`);
       await rootRow.waitFor();
       await rootRow
@@ -555,9 +619,10 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(await matchingChildren.count()).toBe(0);
       expect(await rootRow.count()).toBe(0);
       const pendingRows = await rail.locator("a[data-session-row]").count();
-      expect(pendingRows).toBe(continuationFirst ? 49 : 0);
-      // Start another browse read BEFORE completion, but deliver it AFTER
-      // the successful receipt and its deliberately failed refresh.
+      expect(pendingRows).toBe(continuationFirst ? 4 : 0);
+      // Start another browse read BEFORE completion, but deliver its stale
+      // pre-commit page AFTER the successful receipt. The rail's own refresh
+      // queues behind that read, then deliberately fails.
       const delayed = deferred();
       archiveFixture.holdRead = delayed;
       archiveFixture.readStarted = false;
@@ -569,6 +634,12 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(await rail.locator("a[data-session-row]").count()).toBe(pendingRows);
       archiveFixture.failReads = true;
       archiveFixture.mutation.resolve();
+      await page.waitForResponse(
+        (response) =>
+          response.request().method() !== "GET" &&
+          new URL(response.url()).pathname.endsWith(`/sessions/${root.id}/archive`),
+      );
+      delayed.resolve();
       await page
         .getByText(localArchived ? "Chat archived" : "Chat restored", { exact: true })
         .waitFor();
@@ -592,25 +663,48 @@ describe("compact session view on the live local workspace route (API fixture)",
 
       // Another client reverses revision 1 to revision 2. Search cannot retire
       // the rail receipt; only accepted browse evidence can reconcile the tree.
-      archiveFixture.root = { ...archiveFixture.root, archived: !localArchived, archiveVersion: 2 };
+      archiveFixture.root = {
+        ...archiveFixture.root,
+        archived: !localArchived,
+        archivedAt: localArchived ? null : now,
+        archiveVersion: 2,
+      };
       if (continuationFirst) {
         const restoredChildren = deferred();
         archiveFixture.holdChildRead = restoredChildren;
         archiveFixture.childReadStarted = deferred();
         // Keep the accepted first page from BEFORE mutation completion. Only
-        // the 100-row continuation may confirm membership after the reversal;
+        // the overlapping 50-row continuation may confirm membership after the reversal;
         // it overlaps cached roots and adds six continuation-only roots.
         archiveFixture.failFirstPage = true;
         await invalidate();
         await settleRead();
         expect(await matchingChildren.count()).toBe(0);
         await rail.getByText("Unrelated 00", { exact: true }).waitFor();
+        for (let visible = 8; visible <= 48; visible += 4) {
+          await disclosure.click();
+          await waitFor(async () => (await rootRows.count()) === visible);
+          expect(await rootRow.count()).toBe(0);
+          expect(await matchingChildren.count()).toBe(0);
+        }
+        if (localArchived) {
+          // The independently requested workspace window now also starts at
+          // 50, just like discovery. Permit its one overlapping stale first
+          // page; only the following cursor page carries revision 2.
+          archiveFixture.staleFirstPageRoot = root;
+          archiveFixture.allowStaleFirstPage = true;
+        }
         const [continuationResponse] = await Promise.all([
           page.waitForResponse((response) => {
             const url = new URL(response.url());
-            return url.pathname.endsWith("/sessions") && url.searchParams.get("limit") === "100";
+            return (
+              url.pathname.endsWith("/sessions") &&
+              url.searchParams.get("parentSessionId") === "null" &&
+              url.searchParams.get("limit") === "50" &&
+              url.searchParams.get("cursor") === "50"
+            );
           }),
-          rail.getByRole("button", { name: /^Load older sessions in/ }).click(),
+          disclosure.click(),
         ]);
         const continuationPage = await continuationResponse.json();
         expect(
@@ -619,8 +713,34 @@ describe("compact session view on the live local workspace route (API fixture)",
           archived: !localArchived,
           archiveVersion: 2,
         });
-        await rootRow.waitFor();
-        await rail.getByText("Unrelated 54", { exact: true }).waitFor();
+        expect(continuationPage.sessions.length).toBeLessThanOrEqual(50);
+        expect(
+          continuationPage.sessions.some((row: FixtureRow) => row.title === "Unrelated 54"),
+        ).toBe(true);
+        await rootRow.waitFor().catch(async (error) => {
+          console.error(
+            "Causal continuation root did not render",
+            JSON.stringify({
+              localArchived,
+              rootRevision: continuationPage.sessions.find((row: FixtureRow) => row.id === root.id)
+                ?.archiveVersion,
+              archivedAt: continuationPage.sessions.find((row: FixtureRow) => row.id === root.id)
+                ?.archivedAt,
+              childReadHeld: archiveFixture?.holdChildRead === undefined,
+              visibleRootCount: await rootRows.count(),
+              visibleRootIds: await rootRows.evaluateAll((elements) =>
+                elements.slice(0, 4).map((element) => element.getAttribute("data-session-row")),
+              ),
+              disclosure: await disclosure.allTextContents(),
+              rootRequests: listRequests
+                .filter((url) => url.searchParams.get("parentSessionId") === "null")
+                .slice(-10)
+                .map((url) => url.search),
+            }),
+          );
+          throw error;
+        });
+        await waitFor(async () => (await rootRows.count()) === 52);
         await archiveFixture.childReadStarted.promise;
         // Root membership and branch materialization are separate commits.
         // Keep the restoring branch response in flight to prove that seeing
@@ -662,6 +782,14 @@ describe("compact session view on the live local workspace route (API fixture)",
         await rail.getByText("Needle 00", { exact: true }).waitFor();
         await settleRead();
         expect(await rootRow.count()).toBe(1);
+      }
+      if (continuationFirst) {
+        while ((await rootRows.count()) < 56) {
+          const visible = Math.min(56, (await rootRows.count()) + 4);
+          await disclosure.click();
+          await waitFor(async () => (await rootRows.count()) === visible);
+        }
+        await rail.getByText("Unrelated 54", { exact: true }).waitFor();
       }
       await rail
         .getByRole("list", { name: "Spawned sessions from Nonmatching root", exact: true })
@@ -750,13 +878,13 @@ describe("compact session view on the live local workspace route (API fixture)",
       await invalidate();
       await page.waitForTimeout(100);
       expect(archiveFixture.readStarted).toBe(true);
-      await page.getByRole("button", { name: /Switch workspace$/ }).click();
+      await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Other workspace/ }).click();
       await page.waitForURL(`**/workspaces/${otherWorkspaceId}/sessions`);
       oldWorkspaceRead.resolve();
       await settleRead();
       expect(await rail.locator("a[data-session-row]").count()).toBe(0);
-      await page.getByRole("button", { name: /Switch workspace$/ }).click();
+      await page.getByRole("button", { name: /Switch workspace or organization$/ }).click();
       await page.getByRole("menuitem", { name: /Compact view verification/ }).click();
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions`);
       // Wait for the new workspace composer before reopening global search.

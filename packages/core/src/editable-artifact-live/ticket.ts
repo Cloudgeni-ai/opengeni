@@ -1,3 +1,7 @@
+import { AccessGrant } from "@opengeni/contracts";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { z } from "zod";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { EditableArtifactAuthorizationPort } from "../domain/editable-artifacts/ports";
 import {
   assertIsoTimestamp,
@@ -19,11 +23,22 @@ import {
   EDITABLE_ARTIFACT_LIVE_PROTOCOL_VERSION,
   type EditableArtifactLiveTicket,
   type EditableArtifactLiveTicketRecord,
+  type EditableArtifactLiveSourceSessionAuthority,
 } from "./types";
 
 const DEFAULT_TTL_MS = 30_000;
 const MAX_TTL_MS = 60_000;
 const MAX_TOKEN_BYTES = 4_096;
+const SOURCE_AUTHORITY_MARKER = ".ogs1.";
+const COMPRESSED_SOURCE_AUTHORITY_MARKER = ".ogs2.";
+const MAX_SOURCE_AUTHORITY_BYTES = 16 * 1024;
+const SourceSessionAuthority = z
+  .object({
+    sessionId: z.string().uuid(),
+    grant: AccessGrant,
+    externalContinuation: ExternalActorContinuation.optional(),
+  })
+  .strict();
 
 export type EditableArtifactLiveTicketAuthorityDependencies = Readonly<{
   authorization: EditableArtifactAuthorizationPort;
@@ -52,6 +67,7 @@ export class EditableArtifactLiveTicketAuthority {
       modality: EditableArtifactModality;
       actor: EditableArtifactActor;
       allowEdit: boolean;
+      sourceSessionAuthority?: EditableArtifactLiveSourceSessionAuthority;
     }>,
   ): Promise<EditableArtifactLiveTicket> {
     const scope = editableArtifactScope(input.scope);
@@ -74,7 +90,28 @@ export class EditableArtifactLiveTicketAuthority {
         "Editable artifact read permission denied",
       );
     }
-    const token = this.dependencies.tokens.randomOpaqueToken();
+    const sourceSessionAuthority = input.sourceSessionAuthority
+      ? SourceSessionAuthority.parse(input.sourceSessionAuthority)
+      : undefined;
+    if (sourceSessionAuthority) {
+      assertSourceSessionAuthority(sourceSessionAuthority, scope, actor);
+    }
+    const sourceBytes = sourceSessionAuthority
+      ? Buffer.from(JSON.stringify(sourceSessionAuthority))
+      : null;
+    if (sourceBytes && sourceBytes.byteLength > MAX_SOURCE_AUTHORITY_BYTES) {
+      throw new EditableArtifactLiveError(
+        "invalid_ticket",
+        "Live ticket source authority is too large",
+      );
+    }
+    const nonce = this.dependencies.tokens.randomOpaqueToken();
+    // The execute-only PG store persists the digest of this COMPLETE token.
+    // Changing/removing the suffix cannot consume its record. Decode only after
+    // atomic consume authenticates it, keeping the existing fixed SQL DTO intact.
+    const token = sourceBytes
+      ? `${nonce}${COMPRESSED_SOURCE_AUTHORITY_MARKER}${deflateRawSync(sourceBytes).toString("base64url")}`
+      : nonce;
     assertToken(token);
     const tokenDigest = await this.dependencies.tokens.digestOpaqueToken(token);
     assertDigest(tokenDigest);
@@ -124,6 +161,10 @@ export class EditableArtifactLiveTicketAuthority {
       );
     }
     validateTicketRecord(record);
+    const sourceSessionAuthority = decodeSourceSessionAuthority(input.token);
+    if (sourceSessionAuthority) {
+      assertSourceSessionAuthority(sourceSessionAuthority, record.scope, record.actor);
+    }
     if (Date.parse(record.expiresAt) <= this.dependencies.clock.now().getTime()) {
       throw new EditableArtifactLiveError("ticket_expired", "Live ticket has expired", {
         retryable: true,
@@ -145,6 +186,7 @@ export class EditableArtifactLiveTicketAuthority {
       ...record,
       scope: editableArtifactScope(record.scope),
       actor: Object.freeze({ ...record.actor }) as EditableArtifactActor,
+      ...(sourceSessionAuthority ? { sourceSessionAuthority } : {}),
     });
   }
 }
@@ -192,6 +234,49 @@ function validateTicketRecord(record: EditableArtifactLiveTicketRecord): void {
   }
   assertIsoTimestamp(record.issuedAt, "ticket issuedAt");
   assertIsoTimestamp(record.expiresAt, "ticket expiresAt");
+}
+
+function decodeSourceSessionAuthority(
+  token: string,
+): EditableArtifactLiveSourceSessionAuthority | undefined {
+  const compressed = token.includes(COMPRESSED_SOURCE_AUTHORITY_MARKER);
+  const marker = compressed ? COMPRESSED_SOURCE_AUTHORITY_MARKER : SOURCE_AUTHORITY_MARKER;
+  const separator = token.lastIndexOf(marker);
+  if (separator === -1) return undefined;
+  try {
+    return SourceSessionAuthority.parse(
+      JSON.parse(
+        (compressed
+          ? inflateRawSync(Buffer.from(token.slice(separator + marker.length), "base64url"), {
+              maxOutputLength: MAX_SOURCE_AUTHORITY_BYTES,
+            })
+          : Buffer.from(token.slice(separator + marker.length), "base64url")
+        ).toString("utf8"),
+      ),
+    );
+  } catch {
+    throw new EditableArtifactLiveError(
+      "invalid_ticket",
+      "Live ticket source authority is invalid",
+    );
+  }
+}
+
+function assertSourceSessionAuthority(
+  authority: EditableArtifactLiveSourceSessionAuthority,
+  scope: EditableArtifactScope,
+  actor: EditableArtifactActor,
+): void {
+  if (
+    authority.grant.accountId !== scope.accountId ||
+    authority.grant.workspaceId !== scope.workspaceId ||
+    authority.grant.subjectId !== actor.subjectId
+  ) {
+    throw new EditableArtifactLiveError(
+      "invalid_ticket",
+      "Live ticket source scope does not match",
+    );
+  }
 }
 
 function assertModality(value: EditableArtifactModality): EditableArtifactModality {

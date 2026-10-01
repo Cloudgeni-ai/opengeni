@@ -34,6 +34,7 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniAllowanceExhaustedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,

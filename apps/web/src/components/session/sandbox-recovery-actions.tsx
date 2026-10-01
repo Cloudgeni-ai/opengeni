@@ -3,6 +3,7 @@ import type { SandboxRecoverySelection } from "@opengeni/sdk";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
+  automaticRecoveryRetryNotice,
   createSandboxRecoveryController,
   sameRecoverySelection,
   sandboxRecoveryBlocker,
@@ -57,8 +58,17 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
   ) {
     return props.children;
   }
+  // An automatic lane is system continuity for this session's lost sandbox:
+  // its latest verified checkpoint, or a new empty workspace (no checkpoint).
+  const automaticAvailable =
+    projection?.status === "eligible" &&
+    projection.automaticAvailable === true &&
+    (projection.automaticLane === "fresh_workspace"
+      ? projection.checkpoint === null
+      : projection.checkpoint?.sessionId === props.sessionId);
   const eligible =
-    projection?.status === "eligible" && projection.checkpoint?.sessionId === props.sessionId;
+    automaticAvailable ||
+    (projection?.status === "eligible" && projection.checkpoint?.sessionId === props.sessionId);
   const changed = Boolean(
     selection && (!eligible || !sameRecoverySelection(selection, projection?.checkpoint ?? null)),
   );
@@ -72,8 +82,10 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
     !state.submitting &&
     props.canControl &&
     (restored ||
+      automaticAvailable ||
       (projection?.status === "unsupported" && projection.reason === "connected_machine_selected"));
-  const canConsent = eligible && props.canControl && !state.request && !state.submitting;
+  const canConsent =
+    eligible && !automaticAvailable && props.canControl && !state.request && !state.submitting;
 
   return (
     <div className="mt-3 text-fg">
@@ -88,14 +100,18 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
                 ? "Restoring the selected checkpoint. Restoration has not completed."
                 : restored
                   ? "Checkpoint restored. No commands were retried or replayed."
-                  : eligible
-                    ? "An older checkpoint is available for this session. Review what will be restored before continuing."
-                    : projection
-                      ? "Checkpoint recovery is unavailable for this session."
-                      : "Checking checkpoint recovery availability…"}
+                  : automaticAvailable && projection
+                    ? automaticRecoveryRetryNotice(projection)
+                    : eligible
+                      ? "An older checkpoint is available for this session. Review what will be restored before continuing."
+                      : projection
+                        ? "Checkpoint recovery is unavailable for this session."
+                        : "Checking checkpoint recovery availability…"}
       </p>
       {projection?.reason ? (
-        <p className="mt-1 text-xs text-fg-muted">{sandboxRecoveryBlocker(projection.reason)}</p>
+        <p className="mt-1 text-xs text-fg-muted">
+          {sandboxRecoveryBlocker(projection.reason, projection.availableAt)}
+        </p>
       ) : null}
       {!props.canControl ? (
         <p className="mt-1 text-xs text-fg-muted">
@@ -116,7 +132,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
         <Button
           type="button"
           size="sm"
-          variant="secondary"
+          variant="outline"
           className="mt-2"
           disabled={state.reading}
           onClick={() => void controller.refresh()}

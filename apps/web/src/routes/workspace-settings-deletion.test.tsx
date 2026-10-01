@@ -56,10 +56,10 @@ describe("workspace deletion confirmation", () => {
       await act(async () => {
         root.render(<DangerZone workspaceName="Workspace A" {...props} onDelete={onDelete} />);
       });
-      const button = container.querySelector<HTMLButtonElement>("button");
-      expect(button?.disabled).toBe(true);
+      // The reason replaces the action: no ghosted Delete button beside it.
+      expect(container.querySelector("button")).toBeNull();
       expect(container.textContent).toContain(props.reason);
-      expect(document.body.querySelector("#confirm-workspace-name")).toBeNull();
+      expect(document.body.querySelector('input[placeholder="Workspace name"]')).toBeNull();
       expect(onDelete).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
@@ -101,7 +101,9 @@ describe("workspace deletion confirmation", () => {
         container.querySelector<HTMLButtonElement>("button")!.click();
       });
 
-      const input = document.body.querySelector<HTMLInputElement>("#confirm-workspace-name")!;
+      const input = document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Workspace name"]',
+      )!;
       await setInputValue(input, "Workspace A");
 
       const form = input.closest("form")!;
@@ -145,7 +147,9 @@ describe("workspace deletion confirmation", () => {
       await act(async () => {
         container.querySelector<HTMLButtonElement>("button")!.click();
       });
-      const input = document.body.querySelector<HTMLInputElement>("#confirm-workspace-name")!;
+      const input = document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Workspace name"]',
+      )!;
       await setInputValue(input, "Workspace A");
       await act(async () => {
         input.closest("form")!.requestSubmit();
@@ -153,7 +157,7 @@ describe("workspace deletion confirmation", () => {
       });
 
       expect(onDelete).toHaveBeenCalledTimes(1);
-      expect(document.body.querySelector("#confirm-workspace-name")).toBeNull();
+      expect(document.body.querySelector('input[placeholder="Workspace name"]')).toBeNull();
       expect(container.querySelector<HTMLButtonElement>("button")?.disabled).toBe(false);
     } finally {
       await act(async () => root.unmount());

@@ -5,6 +5,20 @@ refresh credentials. Integrating backends provision connections through the
 same connection APIs used by interactive clients, under the canonical actor.
 Personal selections remain bound to the named user captured by accepted work.
 
+## Discovery bounds
+
+Tool discovery shares a 4,096-entry allowance across the prepared catalog. One
+provider may use that allowance; there is no separate 1,000-tool cutoff. Re-listing
+replaces the provider's prior contribution rather than counting it twice. The
+runtime still bounds each definition to 128 KiB, each provider list to 4 MiB,
+and the aggregate to 16 MiB. It does not truncate an oversized list or silently
+select a subset. A best-effort provider whose discovery fails contributes no
+tools for that turn; successful authentication alone does not prove that its
+catalog was admitted.
+Connector-permissions discovery and explicit tool-name updates use the same
+count allowance, so an admitted catalog can be managed without a lower cutoff.
+Duplicate names and repeated pagination cursors remain rejected.
+
 ## Attached accounts
 
 An enabled native connector can attach multiple authorized connections, including

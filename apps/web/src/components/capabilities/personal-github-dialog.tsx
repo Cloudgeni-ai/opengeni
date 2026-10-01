@@ -83,7 +83,7 @@ export function PersonalGitHubDialog(props: {
         <DialogHeader>
           <DialogTitle>Your GitHub identity</DialogTitle>
           <DialogDescription>
-            Connected as @{props.login}. Choose the repositories OpenGeni may use as you.
+            Connected as @{props.login}. Choose the repositories Opengeni may use as you.
           </DialogDescription>
         </DialogHeader>
 
@@ -169,7 +169,7 @@ export function PersonalGitHubDialog(props: {
         </div>
 
         <p className="text-xs leading-5 text-fg-muted">
-          GitHub grants account-wide OAuth access. This list is OpenGeni's additional allowlist.
+          GitHub grants account-wide OAuth access. This list is Opengeni's additional allowlist.
           Repository writes still follow the GitHub action approvals configured on this integration.
         </p>
 

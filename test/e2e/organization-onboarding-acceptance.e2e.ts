@@ -41,7 +41,7 @@ const RUN_ID = crypto.randomUUID();
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with OpenGeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
@@ -573,19 +573,25 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(privateSession?.visibility).toBe("user_private");
 
     await page.goto(
-      `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=overview`,
+      `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=workspaces`,
       { waitUntil: "domcontentloaded" },
     );
-    await page.getByRole("heading", { name: "Workspaces & access" }).waitFor();
-    await page.getByRole("button", { name: "Create new workspace" }).click();
-    await page.getByLabel("New workspace name").fill("Launch Room");
-    await page.getByRole("button", { name: "Create workspace" }).click();
-    await page.getByText("Launch Room created").waitFor();
-    const launchDetails = page.locator("details", { hasText: "Launch Room" }).first();
-    await launchDetails.locator("summary").click();
-    await page.getByLabel("Workspace name for Launch Room").fill("Launch Operations");
-    await launchDetails.getByRole("button", { name: "Save name" }).click();
-    await page.getByText("Workspace name updated").waitFor();
+    await page.getByRole("heading", { name: "Workspaces", exact: true }).first().waitFor();
+    await page.getByRole("button", { name: "New workspace", exact: true }).first().click();
+    await page.getByRole("heading", { name: "New workspace", exact: true }).waitFor();
+    await page.getByRole("textbox", { name: "Name", exact: true }).fill("Launch Room");
+    await page.getByRole("button", { name: "Create workspace", exact: true }).click();
+    await page.getByText("Created Launch Room. You're its workspace admin.").waitFor();
+    // Creating opens the new workspace's page; Rename is in its menu.
+    await page.getByRole("heading", { name: "Launch Room", exact: true }).waitFor();
+    await page.getByRole("button", { name: "More actions for Launch Room", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+    const renameDialog = page.getByRole("dialog", { name: "Rename workspace" });
+    await renameDialog
+      .getByRole("textbox", { name: "Name", exact: true })
+      .fill("Launch Operations");
+    await renameDialog.getByRole("button", { name: "Rename", exact: true }).click();
+    await page.getByText("Renamed Launch Room to Launch Operations").waitFor();
 
     const overview = await owner.getOrganizationAdministrationOverview(organizationId);
     expect(overview.workspaces).toHaveLength(1);
@@ -598,12 +604,26 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
 
     const peopleUrl = `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`;
     await page.goto(peopleUrl, { waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: "People", exact: true }).waitFor();
-    const soleOwnerRole = page.getByLabel("Organization role for Onboarding Owner (you)");
-    expect(await soleOwnerRole.isDisabled()).toBe(true);
-    expect(await soleOwnerRole.getAttribute("aria-describedby")).toMatch(/^sole-owner-reason-/);
-    await page.getByText(/Assign another active owner/i).waitFor();
-    expect(await page.getByText("Personal content stays personal").count()).toBe(1);
+    const people = page.getByRole("list", { name: "People in Onboarding Greenfield Org" });
+    await people
+      .getByText("Only owner", { exact: true })
+      .filter({ visible: true })
+      .first()
+      .waitFor();
+    // The sole owner's role is locked on their page, with the reason.
+    await people.getByRole("button", { name: "Onboarding Owner", exact: true }).click();
+    await page.getByRole("heading", { name: "Onboarding Owner", exact: true }).waitFor();
+    await page
+      .getByText("You're the only owner. Make someone else an owner first.", { exact: true })
+      .waitFor();
+    const ownerRoles = page.getByRole("radiogroup", { name: "Organization role" });
+    expect(await ownerRoles.getByRole("radio", { name: /^Admin/ }).isDisabled()).toBe(true);
+    // Personal content stays personal: the person's Personal workspace is private to them.
+    await page
+      .getByText("Private to you. Nobody else can open it, including owners and admins.", {
+        exact: true,
+      })
+      .waitFor();
     await expectNoAxeViolations(page, "body");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -641,14 +661,18 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`,
       { waitUntil: "domcontentloaded" },
     );
-    await ownerPage.getByRole("heading", { name: "People & invitations", level: 2 }).waitFor();
-    await ownerPage.getByRole("button", { name: "Invite person", exact: true }).click();
-    await ownerPage.getByLabel("Email address").fill(invitedEmail);
-    await ownerPage.getByLabel("Name", { exact: true }).fill("Onboarding Invited");
-    await ownerPage.getByText("Workspace access", { exact: true }).click();
-    await ownerPage.getByLabel("Launch Operations", { exact: true }).check();
+    await ownerPage.getByRole("heading", { name: "People", exact: true }).first().waitFor();
+    await ownerPage.getByRole("button", { name: "Invite people", exact: true }).first().click();
+    await ownerPage.getByRole("heading", { name: "Invite people", exact: true }).waitFor();
+    const inviteEmail = ownerPage.getByRole("textbox", { name: "Email addresses" });
+    await inviteEmail.fill(invitedEmail);
+    await inviteEmail.press("Enter");
+    const launchAccess = ownerPage.getByRole("checkbox", { name: "Launch Operations" });
+    await launchAccess.focus();
+    await ownerPage.keyboard.press("Space");
+    expect(await launchAccess.isChecked()).toBe(true);
     await ownerPage.getByRole("button", { name: "Send invitation", exact: true }).click();
-    await ownerPage.getByText("Invitation sent", { exact: true }).waitFor();
+    await ownerPage.getByText(`Invited ${invitedEmail}`, { exact: true }).waitFor();
 
     const setupEmail = await takeEmail("organization_user_setup", invitedEmail);
     const token = setupToken(setupEmail);
