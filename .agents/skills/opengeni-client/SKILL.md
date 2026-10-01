@@ -202,7 +202,10 @@ Choose one only for its stated reason; read
   materially different interaction model but still wants canonical event,
   queue, composer, approval, and human-input behavior.
 - **SDK only**: a non-React frontend (Svelte, Vue, native mobile), a CLI, or
-  backend automation. Keep the SDK on a product backend route.
+  backend automation. Keep the SDK on a product backend route. For a runnable
+  native Vue host, start with the
+  [Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md).
+  Run its consumer commands from `examples/vue-conversation/app`.
 - **A non-JavaScript backend** (Django, Rails, Go, PHP, Java): keep the React
   conversation and implement the proxy's small HTTP contract in that backend
   instead of adding a Node sidecar. See

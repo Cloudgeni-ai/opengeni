@@ -113,8 +113,10 @@ For non-React renderers, use `parseOpenGeniLink` with `isReservedOpenGeniLink`; 
 ## Other UI shapes
 
 - **Headless hooks** from `@opengeni/react/session` when you need a materially different interaction model but want the same event, queue, composer, and approval behavior.
-- **The SDK alone** for a non-React frontend, a CLI, or backend automation.
+- **The SDK alone** for a non-React frontend, a CLI, or backend automation. Start with the [runnable Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md) for a native Vue host behind the existing Bun Fetch session proxy and published SDK.
 - **The chat facade** when you already have a chat UI. See [Keep your existing chat UI](/integrate/existing-chat-ui).
+
+Run the Vue recipe's install, onboarding and consumer checks from `examples/vue-conversation/app`, following its deployment and host-auth prerequisites. Its UI renders escaped text, not full rich Markdown, artifacts or files; organization credentials stay on the server.
 
 See the [React reference](/reference/react) for the full component list.
 
