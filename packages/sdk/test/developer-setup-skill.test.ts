@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
   CreateConnectionRequest,
+  CreateOrganizationApiKeyRequest,
   CreateSessionRequest,
   EnsureWorkspaceRequest,
   InstallApiIntegrationRequest,
@@ -36,9 +37,10 @@ describe("developer setup skill", () => {
       JSON.parse(match[1]!),
     );
     expect(examples).toHaveLength(16);
-    // The scoped key contract is checked by preset tests; never permit arbitrary
-    // organization-key permissions. Tokens and remote ids below are fake fixtures.
+    // Never permit arbitrary organization-key permissions. Tokens and remote
+    // ids below are fake fixtures; the key request uses the actual public schema.
     expect(examples[0]).toEqual({ name: "Product developer setup", access: "developer_setup" });
+    expectPreservedRequest(CreateOrganizationApiKeyRequest, examples[0]);
     expectPreservedRequest(EnsureWorkspaceRequest, examples[1]);
     expectPreservedRequest(UpdateWorkspaceSettingsRequest, examples[2]);
     expectPreservedRequest(AddExternalWorkspaceMemberRequest, examples[3]);
