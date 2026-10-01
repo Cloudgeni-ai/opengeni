@@ -435,7 +435,12 @@ Cleanup **only disposable staging resources this ledger says this run created**.
 Pause/remove schedules, disable automation triggers/sources, delete webhooks and
 provider, uninstall the exact API Integration instance, delete its disposable
 Connection, cancel/remove the smoke session, then delete the throwaway workspace.
-Never delete reused resources. Verify inventory/GET absence after each removal.
+Never delete reused resources. Automation DELETE calls disable, not delete:
+verify the saved ids remain with `status === "disabled"` in
+`GET .../automations/triggers` / `listTriggers` and
+`GET .../automations/sources` / `listSources`. Disabled records remain listed.
+For resources actually deleted, verify inventory absence and, where an exact
+GET is supported, 404.
 
 REST → SDK cleanup calls:
 
