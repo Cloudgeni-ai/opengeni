@@ -34,6 +34,7 @@ export default defineConfig({
     "src/sites.ts",
     "src/session-ui.ts",
     "src/machines.ts",
+    "src/usage.ts",
     "src/model-policy.ts",
     "src/realtime.ts",
     "src/artifacts.ts",

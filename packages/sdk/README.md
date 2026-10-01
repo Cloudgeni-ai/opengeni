@@ -40,6 +40,11 @@ authority and returns 409 after any later allowance lifecycle change. On 409,
 read the current state and decide whether a new operation is intended; never
 guess a CAS version. The SDK does not automatically retry mutations.
 
+The same reads and administration are free functions on the
+`@opengeni/sdk/usage-allowances` subpath for browser code that only has the
+narrow `OpenGeniBrowserClient` (`getMyUsage(client, workspaceId)`,
+`getAllUsage`, `setMemberAllowance`, ...); they call the same routes as the root methods.
+
 State reads require the same budget-read authority as configuration reads.
 Full usage additionally requires target workspace access; organization budget
 authority alone does not expose the member roster. Agents cannot read or

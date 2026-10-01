@@ -67,7 +67,8 @@
           "guides/self-host",
           "run-locally",
           "guides/connect-a-machine",
-          "guides/webhooks-and-credentials"
+          "guides/webhooks-and-credentials",
+          "guides/usage-allowances"
         ]
       },
       {

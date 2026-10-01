@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AccountTrigger } from "@/components/rail/account-trigger";
 import { useRail } from "@/components/rail/rail-context";
+import { AccountUsageMenuItem } from "@/components/usage/usage-entry";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import {
   accountMenuAriaLabel,
@@ -279,6 +280,7 @@ export function BrowserAccountMenu({
           />
           {newOrganization.item}
           <DropdownMenuSeparator />
+          <AccountUsageMenuItem workspaceId={rail.workspaceId} />
           <AppearanceSubmenu />
           <HelpMenu
             documentationUrl={context.clientConfig.documentationUrl}

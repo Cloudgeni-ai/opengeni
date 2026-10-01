@@ -362,4 +362,28 @@ describe("web bundle budget policy", () => {
     expect(source).toContain("wholeKibEnvelope(2_533_407, 1.5 * kib)");
     expect(wholeKibEnvelope(2_533_407, 1.5 * KIB) - 2_533_407).toBeGreaterThanOrEqual(1.5 * KIB);
   });
+
+  test("keeps usage allowance pages lazy without a session-graph envelope", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    // The usage UI fits the existing caps: the session graph carries only the
+    // refusal row and the small eager usage entry. Keep it that way.
+    expect(source).not.toContain("Usage allowance UI:");
+    const vite = readFileSync(new URL("../apps/web/vite.config.ts", import.meta.url), "utf8");
+    expect(vite).toContain('name: "usage-allowances"');
+    // The eager account-menu/composer usage entry must not join the budget pages.
+    expect(vite).toContain("(?!usage-entry\\.)");
+    expect(vite).not.toContain('name: "usage-surfaces"');
+    expect(vite).toContain("react-slider");
+    // Settings-only rows stay out of the paused banner/provider chunk that
+    // direct workspace and session loads import.
+    expect(vite).toContain('name: "workspace-chrome"');
+    expect(vite).toContain("default-sandbox-environment-row");
+    // Module-scope composer panel callers must not sit in a chunk cycle.
+    expect(vite).toContain('name: "composer-menu-primitives"');
+  });
+
+  test("bounds the usage allowances UI session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_536_098, 1.5 * kib)");
+  });
 });

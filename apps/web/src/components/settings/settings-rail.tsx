@@ -10,6 +10,7 @@ import {
   BarChart3Icon,
   CodeIcon,
   ContainerIcon,
+  GaugeIcon,
   GraduationCapIcon,
   KeyRoundIcon,
   LaptopIcon,
@@ -67,6 +68,10 @@ export const WORKSPACE_SETTINGS_COPY: Record<
   models: {
     title: "Models",
   },
+  usage: {
+    title: "Usage",
+    description: ({ workspace }) => `Your usage and the monthly budget in ${workspace}.`,
+  },
   "api-keys": {
     title: "API keys",
     description: () => "Keys that let your own tools start work in this workspace.",
@@ -86,6 +91,7 @@ const SECTION_ICONS = {
   general: SlidersHorizontalIcon,
   access: UsersIcon,
   models: SparklesIcon,
+  usage: GaugeIcon,
   learning: GraduationCapIcon,
   "api-keys": KeyRoundIcon,
   developer: CodeIcon,
@@ -97,6 +103,7 @@ const SECTION_ICONS = {
 const SECTION_ORDER: readonly WorkspaceSettingsSection[] = [
   "general",
   "access",
+  "usage",
   "api-keys",
   "developer",
 ];
@@ -340,8 +347,12 @@ export function useSettingsRail(input: {
           items: [
             // Nobody administers a Personal workspace, so its API keys and
             // Developer pages could only say they aren't available.
+            // Budgets apply to shared workspaces only, so a Personal workspace
+            // has no Usage page either.
             ...SECTION_ORDER.filter(
-              (section) => !personal || (section !== "api-keys" && section !== "developer"),
+              (section) =>
+                !personal ||
+                (section !== "api-keys" && section !== "developer" && section !== "usage"),
             ).map((section) => ({
               id: `workspace:${section}`,
               label: WORKSPACE_SETTINGS_COPY[section].title,

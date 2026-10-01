@@ -3054,6 +3054,17 @@ if those must never reach the browser, provide a same-origin authenticated
 server projection returning only allowed fraction/status/reset fields.
 Keep the organization key on the backend.
 
+React hosts can use `@opengeni/react/usage` instead of hand-building this:
+`useUsage`/`<UsageMeter>` read `/usage/me` (shares only unless the host passes
+`formatAmount`), `<UsageLimitNotice>` is the composer's near/at-limit line
+(`labels` and `action` let the host name its own remedy, such as "Upgrade"),
+and `<UsageMemberList>` is an admin roster with a share slider whose
+`onChangeRule` must call the host backend (never the proxy). The timeline's
+"usage limit reached" row takes `allowanceExhaustedLabels` or
+`renderAllowanceExhausted` on `SessionConversation`/`MessageTimeline`.
+Browser code with only the narrow client uses `@opengeni/sdk/usage-allowances`
+free functions over `requestJson`.
+
 Share-based ceilings use included credits plus **remaining unexpired grants**,
 so they vary with grants, consumption, expiry, and membership. They are not a
 promise of a fixed monthly slice.

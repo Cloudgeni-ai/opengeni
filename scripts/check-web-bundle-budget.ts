@@ -482,6 +482,9 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Usage allowances UI (composer limit notice, conversation refusal row)
+    // with #3053's final-reply notice: 2,536,098 raw on Bun 1.4 macOS/arm64.
+    wholeKibEnvelope(2_536_098, 1.5 * kib),
     // Runtime robustness (empty-final-reply notice, per-model availability) on
     // main with usage allowances and the pill dodge: 2,533,812 raw on Bun 1.4
     // macOS/arm64 with the notice grouped into session-shared-primitives.

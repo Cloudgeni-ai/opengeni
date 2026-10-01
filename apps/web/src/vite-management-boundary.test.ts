@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { parseSync } from "oxc-parser";
 
 describe("web management chunk boundary", () => {
   test("keeps revision and diff UI behind the existing lazy management group", async () => {
@@ -31,7 +32,7 @@ describe("web management chunk boundary", () => {
     }
   });
 
-  test("keeps the shared scheduling glyph out of management entry-aware chunks", async () => {
+  test("keeps shared scheduling and usage glyphs out of management entry-aware chunks", async () => {
     const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
     const group = config.match(/name: "session-shared-primitives",[\s\S]*?priority: (\d+),/u);
     const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
@@ -40,9 +41,11 @@ describe("web management chunk boundary", () => {
     const primitiveTest = new RegExp(pattern!);
     for (const separator of ["/", "\\"]) {
       const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
-      expect(
-        primitiveTest.test(moduleId("node_modules/lucide-react/dist/esm/icons/calendar-clock.mjs")),
-      ).toBe(true);
+      for (const icon of ["calendar-clock", "gauge"]) {
+        expect(
+          primitiveTest.test(moduleId(`node_modules/lucide-react/dist/esm/icons/${icon}.mjs`)),
+        ).toBe(true);
+      }
       for (const module of ["diff-view", "revision-history", "error-message"]) {
         expect(primitiveTest.test(moduleId(`apps/web/src/components/ui/${module}.tsx`))).toBe(
           false,
@@ -51,5 +54,36 @@ describe("web management chunk boundary", () => {
     }
     const sessionPriority = config.match(/name: "session",[\s\S]*?priority: (\d+),/u)?.[1];
     expect(Number(group?.[1])).toBeGreaterThan(Number(sessionPriority));
+  });
+
+  test("keeps agent defaults and usage pages as separate lazy settings entries", async () => {
+    const source = await readFile(
+      new URL("./routes/workspace-settings.tsx", import.meta.url),
+      "utf8",
+    );
+    const { program, errors } = parseSync("workspace-settings.tsx", source);
+    expect(errors).toEqual([]);
+    const imports = program.body
+      .filter((node) => node.type === "ImportDeclaration")
+      .map((node) => node.source.value);
+    const declarations = program.body.flatMap((node) =>
+      node.type === "VariableDeclaration" ? node.declarations : [],
+    );
+    for (const [name, module] of [
+      ["LazySessionDefaultsPage", "@/components/settings/session-defaults-page"],
+      ["LazyWorkspaceUsagePage", "@/components/usage/workspace-usage-page"],
+    ]) {
+      expect(imports).not.toContain(module);
+      const declaration = declarations.find(
+        (node) => node.id.type === "Identifier" && node.id.name === name,
+      );
+      expect(declaration?.init).toMatchObject({
+        type: "CallExpression",
+        callee: { type: "Identifier", name: "lazy" },
+      });
+      expect(source.slice(declaration?.start ?? 0, declaration?.end ?? 0)).toContain(
+        `import("${module}")`,
+      );
+    }
   });
 });

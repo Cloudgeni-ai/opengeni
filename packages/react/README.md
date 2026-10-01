@@ -1130,6 +1130,40 @@ function Fleet({ sessionId }: { sessionId: string }) {
 See the [Connected Machines guide](../../docs/connected-machines.md) for the
 end-to-end embedder story (create-on-machine, discover, swap, enroll, revoke).
 
+## Usage allowances (`@opengeni/react/usage`)
+
+Show people where they stand against a workspace or member usage allowance.
+A separate subpath, so hosts that don't meter usage never load it.
+
+- `useUsage({ workspaceId? })` — the signed-in person's own `/usage/me`
+  (through `getMyUsage` or any client with `requestJson`) plus a summary of
+  which limit binds first. `refreshKey` re-reads when work settles.
+- `UsageMeter` — "38% left · Resets Nov 1". Shares only; pass `formatAmount`
+  for money, credits or plan multiples. `density="compact"` for menus,
+  `"hero"` to lead a page.
+- `UsageLimitNotice` — the calm composer line: nothing while comfortable, a
+  dismissible heads-up near the limit, then who can raise it and when it
+  resets. `labels` rewords it; `action` adds your own "Upgrade" button.
+- `UsageMemberList` — the admin roster with a share-of-budget slider,
+  optional fixed amounts, and a visible note when shares add up to more than
+  the pool. Save rules through your backend in `onChangeRule`.
+
+```tsx
+import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
+
+<UsageMeter workspaceId={workspaceId} />
+<SessionConversation
+  sessionId={sessionId}
+  composerProps={{ header: <UsageLimitNotice workspaceId={workspaceId} /> }}
+  allowanceExhaustedLabels={{ memberRemedy: "Ask your team admin for more." }}
+/>
+```
+
+The conversation's "usage limit reached" row is customized on
+`MessageTimeline`/`SessionConversation` with `allowanceExhaustedLabels` or
+replaced with `renderAllowanceExhausted`. See
+[usage allowances](../../docs/usage-allowances.md#react-components-and-the-console).
+
 ## Optional peer dependencies
 
 The chat/timeline surface needs only the required React/React DOM peers. All

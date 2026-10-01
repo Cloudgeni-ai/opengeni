@@ -26,6 +26,9 @@ On [app.opengeni.ai](https://app.opengeni.ai), agent usage is paid with prepaid 
 
 For per-seat included usage, administrator splits, top-ups, team budgets, or
 browser progress meters, see [Usage allowances](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/usage-allowances.md).
+Use the session proxy's own-usage read and render `fraction`, or the
+[usage components](/guides/usage-allowances), for browser meters. Responses still
+include amounts; hiding them requires your own authenticated server projection.
 Keep organization-budget writes on your backend; the conversation proxy exposes
 only the user's own usage. Allowances are post-call ceilings, not prepaid reservations.
 

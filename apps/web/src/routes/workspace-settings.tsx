@@ -209,6 +209,23 @@ function OperationalWorkspaceSettingsRoute({
         )
       ) : null}
 
+      {section === "usage" ? (
+        personal ? (
+          <Notice tone="muted" title="Budgets apply to shared workspaces">
+            Your Personal workspace uses {organizationLabel}'s credits without a monthly budget.
+          </Notice>
+        ) : (
+          <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
+            <LazyWorkspaceUsagePage
+              key={workspaceId}
+              workspaceId={workspaceId}
+              workspaceName={activeWorkspace?.name ?? "this workspace"}
+              organizationId={accountId}
+            />
+          </Suspense>
+        )
+      ) : null}
+
       {section === "api-keys" ? (
         <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
       ) : null}
@@ -881,6 +898,12 @@ function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: str
 const LazySessionDefaultsPage = lazy(async () => {
   const module = await import("@/components/settings/session-defaults-page");
   return { default: module.SessionDefaultsPage };
+});
+
+// Usage reads load only on their page, never with the rest of settings.
+const LazyWorkspaceUsagePage = lazy(async () => {
+  const module = await import("@/components/usage/workspace-usage-page");
+  return { default: module.WorkspaceUsagePage };
 });
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {

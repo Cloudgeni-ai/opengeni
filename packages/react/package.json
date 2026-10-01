@@ -70,6 +70,10 @@
       "types": "./src/accounts.tsx",
       "default": "./src/accounts.tsx"
     },
+    "./usage": {
+      "types": "./src/usage.ts",
+      "default": "./src/usage.ts"
+    },
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"

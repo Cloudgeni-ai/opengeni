@@ -591,9 +591,10 @@ const workspaceOrganizationRoute = createRoute({
     const invitation =
       section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
     // Workspaces: the workspace whose page is open. Models: the workspace whose
-    // model page is open, or that a page was opened from.
+    // model page is open, or that a page was opened from. Billing: the
+    // workspace whose budget page is open.
     const workspace =
-      section === "workspaces" || section === "models"
+      section === "workspaces" || section === "models" || section === "billing"
         ? parseOrganizationRecordId(search.workspace)
         : undefined;
     return {
