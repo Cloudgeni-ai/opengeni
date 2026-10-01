@@ -249,6 +249,12 @@ Never distribute an OpenGeni credential to a Connected Machine or try to inject 
 
 ## Billing And Limits
 
+For per-seat plans, team budgets, administrator splits, and top-ups, read
+[Usage allowances](usage-allowances.md). Amounts are integer USD micros,
+configuration/member writes are versioned, grants are operation-keyed, and
+the conversation proxy exposes only `/usage/me`. Verify actual debit/reset
+and webhook behavior before promising enforcement or notifications.
+
 Managed SaaS uses prepaid Stripe credits and local usage/cost accounting. Client behavior should be simple:
 
 - Show billing/credit status from `/v1/billing` when the user has billing permission.

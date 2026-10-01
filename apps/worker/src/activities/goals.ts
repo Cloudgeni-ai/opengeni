@@ -19,14 +19,10 @@ import {
 import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
-  getBillingBalance,
   getWorkspaceModelPolicy,
   getSessionGoal,
-  isCodexBilledTurn,
   materializeGoalContinuation,
   requireSession,
-  sumUsageQuantity,
-  type Database,
 } from "@opengeni/db";
 import type {
   ControlActivityServices,
@@ -38,6 +34,7 @@ import {
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
+import { agentRunAdmissionDenial } from "./agent-run-admission";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -109,30 +106,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
-    // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
-    // so it must not be budget-paused for zero OpenGeni credits. This file uses
-    // BASE settings (no codex overlay); the predicate does its own credential read.
-    const isCodexRun = await isCodexBilledTurn({
-      db,
-      settings,
-      workspaceId: input.workspaceId,
-      model: continuationModel,
-    });
-    const fundedWithoutCredits = goalContinuationFundedWithoutCredits(
-      settings,
-      continuationModel,
-      isCodexRun,
-    );
-    // Budget exhaustion pauses the goal visibly instead of failing the
-    // session. Computed up front and applied inside the locked decision so a
-    // limits pause never consumes continuation budget.
-    const budgetBlocked = await goalRunBudgetBlocked(
-      settings,
-      db,
-      input.accountId,
-      input.workspaceId,
-      fundedWithoutCredits,
-    );
     const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
       modelId: continuationModel,
       requestedModelId: null,
@@ -157,7 +130,25 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
-      budgetBlocked: modelPolicyBlocked ?? budgetBlocked,
+      admission: async (tx, causalTurn) => {
+        const budgetBlocked = modelPolicyBlocked
+          ? null
+          : await goalRunBudgetBlocked(
+              { ...service, settings, db: tx },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                model: continuationModel,
+                initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
+              },
+            );
+        return {
+          budgetBlocked: modelPolicyBlocked ?? budgetBlocked?.message ?? null,
+          budgetPausedReason: modelPolicyBlocked
+            ? "limits"
+            : (budgetBlocked?.pausedReason ?? "limits"),
+        };
+      },
       policy: {
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
@@ -336,55 +327,22 @@ export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolR
 }
 
 /**
- * Non-throwing variant of the scheduled-run admission check: returns a human
- * readable reason when balance or monthly caps block another agent run.
+ * Goals share scheduled admission and pause visibly without synthesizing work.
  */
-async function goalRunBudgetBlocked(
-  settings: Settings,
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-  fundedWithoutCredits: boolean,
-): Promise<string | null> {
-  // Free, subscription, and workspace-funded continuations skip OpenGeni's
-  // credit-balance gate and monthly model-cost cap. The agent-run COUNT cap
-  // below is a volume quota (not a credit/cost gate) and remains enforced.
-  if (
-    !fundedWithoutCredits &&
-    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
-  ) {
-    const balance = await getBillingBalance(db, accountId);
-    if (balance.balanceMicros <= 0) {
-      return "insufficient OpenGeni credits";
-    }
+export async function goalRunBudgetBlocked(
+  services: Parameters<typeof agentRunAdmissionDenial>[0],
+  input: Omit<Parameters<typeof agentRunAdmissionDenial>[1], "requestedAgentRuns">,
+): Promise<{ pausedReason: "limits" | "allowance"; message: string } | null> {
+  const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
+  if (denial === null) return null;
+  if (denial === "allowance_exhausted") {
+    return { pausedReason: "allowance", message: "OpenGeni usage allowance exhausted" };
   }
-  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
-    const limits = configuredStaticUsageLimits(settings);
-    if (!fundedWithoutCredits && limits.maxMonthlyCostMicrosPerAccount) {
-      const used = await sumUsageQuantity(db, {
-        accountId,
-        eventType: "model.cost",
-        since: startOfUtcMonth(),
-      });
-      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-        return `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`;
-      }
-    }
-    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
-        eventType: "agent_run.created",
-        since: startOfUtcMonth(),
-      });
-      if (used + 1 > limits.maxMonthlyAgentRunsPerWorkspace) {
-        return `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`;
-      }
-    }
-  }
-  return null;
-}
-
-function startOfUtcMonth(): Date {
-  const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const limits = configuredStaticUsageLimits(services.settings);
+  const messages = {
+    insufficient_credits: "insufficient OpenGeni credits",
+    monthly_model_cost_limit: `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
+    monthly_agent_run_limit: `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
+  };
+  return { pausedReason: "limits", message: messages[denial] };
 }

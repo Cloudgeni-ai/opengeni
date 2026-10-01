@@ -117,6 +117,33 @@ describe("optional resource credits and verified signup trial", () => {
   });
 });
 
+describe("usage allowance rolling activation", () => {
+  test("defaults producers off in every environment", () => {
+    for (const environment of ["local", "test", "production"]) {
+      expect(
+        withEnv({ OPENGENI_ENVIRONMENT: environment }, () => getSettings()).usageAllowancesEnabled,
+      ).toBe(false);
+    }
+  });
+  test("parses explicit activation and opt-out without boolean coercion", () => {
+    for (const enabled of ["true", "1", "on"]) {
+      expect(
+        withEnv({ OPENGENI_USAGE_ALLOWANCES_ENABLED: enabled }, () => getSettings())
+          .usageAllowancesEnabled,
+      ).toBe(true);
+    }
+    for (const disabled of ["false", "0", "off"]) {
+      expect(
+        withEnv({ OPENGENI_USAGE_ALLOWANCES_ENABLED: disabled }, () => getSettings())
+          .usageAllowancesEnabled,
+      ).toBe(false);
+    }
+    expect(() =>
+      withEnv({ OPENGENI_USAGE_ALLOWANCES_ENABLED: "invalid" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("API request source settings", () => {
   test("ignores forwarded client addresses unless proxy hops are explicit", () => {
     expect(withEnv({}, () => getSettings()).apiTrustedProxyHops).toBe(0);

@@ -78,6 +78,32 @@ async function call(method: string, path: string, body?: unknown, bearer = token
   });
 }
 describe("organization integration routes (PostgreSQL)", () => {
+  test("organization usage subscriptions return a clear 422 without changing registrations", async () => {
+    const created = await call("POST", "/webhooks", {
+      url: "https://receiver.example/usage",
+      workspaceFilter: null,
+      eventTypes: ["usage.exhausted"],
+    });
+    expect(created.status).toBe(422);
+    expect(await created.text()).toContain("workspace webhook");
+    const accepted = await call("POST", "/webhooks", {
+      url: "https://receiver.example/session",
+      workspaceFilter: null,
+      eventTypes: ["turn.completed"],
+    });
+    expect(accepted.status).toBe(201);
+    const { webhook } = await accepted.json();
+    const updated = await call("PATCH", `/webhooks/${webhook.id}`, {
+      workspaceFilter: null,
+      eventTypes: ["usage.period_reset"],
+    });
+    expect(updated.status).toBe(422);
+    expect(await updated.text()).toContain("workspace webhook");
+    expect((await (await call("GET", `/webhooks/${webhook.id}`)).json()).eventTypes).toEqual([
+      "turn.completed",
+    ]);
+    await call("DELETE", `/webhooks/${webhook.id}`);
+  });
   test("read-only organization keys cannot read or modify integration registrations", async () => {
     const readToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     await createApiKey(client.db, {

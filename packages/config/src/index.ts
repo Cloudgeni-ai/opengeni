@@ -388,6 +388,9 @@ const SettingsSchema = z.object({
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
+  // Gate new allowance policies until every API/worker in the fleet enforces
+  // them. Persisted-policy enforcement and recovery reads/clears stay active.
+  usageAllowancesEnabled: EnvBoolean.default(false),
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
@@ -3261,6 +3264,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
+    usageAllowancesEnabled: optional("OPENGENI_USAGE_ALLOWANCES_ENABLED"),
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),

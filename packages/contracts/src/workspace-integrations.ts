@@ -2,6 +2,11 @@ import { z } from "zod";
 import type { TurnInitiator, TurnInitiatorContext } from "./index";
 
 import { WORKSPACE_WEBHOOK_EVENT_TYPES } from "./workspace-integration-wire";
+import {
+  UsageAllowancePeriod,
+  UsageAllowanceStatus,
+  UsageAllowanceWindow,
+} from "./usage-allowances";
 
 export * from "./workspace-integration-wire";
 
@@ -102,18 +107,43 @@ export const ListWorkspaceWebhooksResponse = z
   .strict();
 export type ListWorkspaceWebhooksResponse = z.infer<typeof ListWorkspaceWebhooksResponse>;
 
+/** Organization webhooks fan out session events only; usage events are per-workspace. */
+export const OrganizationWebhookEventType = WorkspaceWebhookEventType.exclude([
+  "usage.threshold_reached",
+  "usage.exhausted",
+  "usage.period_reset",
+]);
+export type OrganizationWebhookEventType = z.infer<typeof OrganizationWebhookEventType>;
+const OrganizationEventTypes = z
+  .array(WorkspaceWebhookEventType)
+  .min(1)
+  .max(WorkspaceWebhookEventType.options.length)
+  .refine((types) => types.every((type) => !type.startsWith("usage.")), {
+    message:
+      "Organization webhooks accept session events only; subscribe to usage events on a workspace webhook.",
+  })
+  .transform((types) => [...new Set(types)]);
+
 export const OrganizationWebhook = WorkspaceWebhook.omit({ workspaceId: true }).extend({
   organizationId: z.string().uuid(),
+  eventTypes: z
+    .array(WorkspaceWebhookEventType)
+    .refine((types) => types.every((type) => !type.startsWith("usage.")), {
+      message:
+        "Organization webhooks accept session events only; subscribe to usage events on a workspace webhook.",
+    }),
   workspaceFilter: IntegrationWorkspaceFilter.nullable(),
 });
 export type OrganizationWebhook = z.infer<typeof OrganizationWebhook>;
 
 export const CreateOrganizationWebhookRequest = CreateWorkspaceWebhookRequest.extend({
+  eventTypes: OrganizationEventTypes,
   workspaceFilter: IntegrationWorkspaceFilter.nullable(),
 });
 export type CreateOrganizationWebhookRequest = z.input<typeof CreateOrganizationWebhookRequest>;
 
 export const UpdateOrganizationWebhookRequest = UpdateWorkspaceWebhookRequest.extend({
+  eventTypes: OrganizationEventTypes.optional(),
   /** Explicit on every update: null covers all non-personal workspaces. */
   workspaceFilter: IntegrationWorkspaceFilter.nullable(),
 });
@@ -168,8 +198,8 @@ export type ListOrganizationWebhookDeliveriesResponse = z.infer<
  * The thin body POSTed to a webhook endpoint. It identifies what changed;
  * receivers read details through the authenticated API.
  */
-export const WorkspaceWebhookEvent = z.object({
-  lane: z.enum(["organization", "workspace"]),
+export const SessionWorkspaceWebhookEvent = z.object({
+  lane: z.enum(["organization", "workspace"]).default("workspace"),
   id: z.string().uuid(),
   type: z.string(),
   workspaceId: z.string().uuid(),
@@ -188,6 +218,42 @@ export const WorkspaceWebhookEvent = z.object({
   initiatingHuman: InitiatingHuman.nullable().optional(),
   data: z.object({ status: z.string().optional(), reason: z.string().optional() }).passthrough(),
 });
+export type SessionWorkspaceWebhookEvent = z.infer<typeof SessionWorkspaceWebhookEvent>;
+/** Workspace allowance events have no synthetic session or turn identity.
+ * Optional null context fields let transport adapters share an envelope. */
+export const WorkspaceUsageWebhookEvent = z.object({
+  lane: z.literal("workspace").default("workspace"),
+  id: z.string().uuid(),
+  type: z.enum(["usage.threshold_reached", "usage.exhausted", "usage.period_reset"]),
+  workspaceId: z.string().uuid(),
+  workspace: z
+    .object({
+      id: z.string().uuid(),
+      externalSource: z.string().nullable(),
+      externalId: z.string().nullable(),
+    })
+    .optional(),
+  sessionId: z.null().optional(),
+  turnId: z.null().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  occurredAt: z.string(),
+  data: z
+    .object({
+      scope: z.enum(["workspace", "member"]).optional(),
+      subjectId: z.string().nullable().optional(),
+      threshold: z.number().finite().optional(),
+      fraction: z.number().finite().nullable().optional(),
+      resetsAt: z.string().nullable().optional(),
+      status: UsageAllowanceStatus.optional(),
+      period: z.union([UsageAllowanceWindow, UsageAllowancePeriod, z.literal("*")]).optional(),
+    })
+    .passthrough(),
+});
+export type WorkspaceUsageWebhookEvent = z.infer<typeof WorkspaceUsageWebhookEvent>;
+export const WorkspaceWebhookEvent = z.union([
+  SessionWorkspaceWebhookEvent,
+  WorkspaceUsageWebhookEvent,
+]);
 export type WorkspaceWebhookEvent = z.infer<typeof WorkspaceWebhookEvent>;
 
 export const WorkspaceCredentialProvider = z

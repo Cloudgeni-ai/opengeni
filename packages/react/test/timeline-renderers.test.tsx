@@ -96,6 +96,42 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
   throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
 }
 
+describe("allowance refusal rendering", () => {
+  test.each(["workspace", "member"] as const)(
+    "renders one %s remedy from paired usage and completed events",
+    async (scope) => {
+      const refusal = {
+        code: "allowance_exhausted",
+        scope,
+        ...(scope === "member" ? { subjectId: "user:member" } : {}),
+        resetsAt: "2026-10-01T02:30:00+02:00",
+        message: "Private wrapper says buy credits",
+      };
+      const r = await renderComponent(
+        <MessageTimeline
+          events={[
+            timelineEvent("usage.exhausted", refusal),
+            timelineEvent("turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
+          ]}
+        />,
+      );
+      await flush();
+      const text = r.container.textContent ?? "";
+      expect(text).toContain(
+        scope === "workspace" ? "organization administrator" : "workspace administrator",
+      );
+      expect(text).toContain("2026-10-01 00:30 UTC");
+      expect(
+        [...r.container.querySelectorAll('[role="status"]')].filter((row) =>
+          row.textContent?.includes("usage allowance is exhausted"),
+        ),
+      ).toHaveLength(1);
+      expect(text).not.toMatch(/buy credits|subscription|private wrapper/i);
+      await r.unmount();
+    },
+  );
+});
+
 describe("context compaction rendering", () => {
   test("labels before and after values as estimated history tokens", async () => {
     const r = await renderComponent(

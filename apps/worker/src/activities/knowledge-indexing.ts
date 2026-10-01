@@ -4,8 +4,10 @@ import {
   applyCreditDebitAfterUse,
   appendKnowledgeIndexChunks,
   claimKnowledgeIndexJobs,
+  checkWorkspaceAllowance,
   completeKnowledgeIndexJob,
   continueKnowledgeIndexJob,
+  creditDebitAttributionMetadata,
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
   getBillingBalance,
@@ -198,10 +200,36 @@ export function createKnowledgeIndexingActivities(
                 return;
               }
               const paid = frozenPolicy.mode === "credits";
+              if (paid && claim.billingAttribution.kind === "unknown") {
+                // Unknown legacy/source-preparation causality is not service.
+                // Keep the checkpoint without making an uncountable paid call.
+                observability.warn("Paid Knowledge indexing awaits initiating attribution", {
+                  errorCode: "knowledge_index_attribution_unavailable",
+                });
+                await deferKnowledgeIndexJob(lockedDb, claim);
+                result.deferred++;
+                return;
+              }
               if (paid && current.nextIndex === 0) {
                 const balance = await getBillingBalance(lockedDb, claim.accountId);
                 if (balance.balanceMicros <= 0) {
                   await waitKnowledgeIndexForFunding(lockedDb, claim);
+                  result.deferred++;
+                  return;
+                }
+              }
+              if (paid) {
+                const refusal = await checkWorkspaceAllowance(lockedDb, {
+                  accountId: claim.accountId,
+                  workspaceId: current.billingWorkspaceId,
+                  subjectId:
+                    claim.billingAttribution.kind === "turn" ||
+                    claim.billingAttribution.kind === "human"
+                      ? claim.billingAttribution.initiatingHumanSubjectId
+                      : null,
+                });
+                if (refusal) {
+                  await deferKnowledgeIndexJob(lockedDb, claim);
                   result.deferred++;
                   return;
                 }
@@ -309,6 +337,7 @@ export function createKnowledgeIndexingActivities(
                     sourceId: claim.revisionId,
                     idempotencyKey: `knowledge.embedding:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
                     metadata: {
+                      ...creditDebitAttributionMetadata(claim.billingAttribution),
                       model: claim.model,
                       bytes,
                       chunks: chunks.length,

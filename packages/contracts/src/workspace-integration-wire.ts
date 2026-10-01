@@ -11,6 +11,9 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "session.status.changed",
   "session.requiresAction",
   "session.humanInput.requested",
+  "usage.threshold_reached",
+  "usage.exhausted",
+  "usage.period_reset",
 ] as const;
 
 export const OPENGENI_SIGNATURE_HEADER = "OpenGeni-Signature";

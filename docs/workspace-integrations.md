@@ -328,6 +328,11 @@ secret and a subset of:
 | `session.status.changed` | The session status changes |
 | `session.requiresAction` | The agent waits for a tool approval |
 | `session.humanInput.requested` | The agent asks the user a structured question |
+| `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | Allowance lifecycle signals; see [usage allowances](usage-allowances.md#errors-and-event-handling) |
+
+Organization webhooks accept session events only. A create or update that names
+`usage.*` returns HTTP 422 with guidance to register a workspace webhook instead;
+the shared public event-type vocabulary remains unchanged.
 
 ```ts
 // Optional extra delivery destination for one workspace.
@@ -361,6 +366,8 @@ Organization endpoints receive matching non-personal workspaces' selected events
 workspace endpoints still receive their own events independently. Both gain
 the additive `workspace` routing object; turn events gain `initiatingHuman`
 when known. Pre-upgrade queued deliveries may lack these additions.
+Receivers default a missing `lane` to `"workspace"` for both session and usage
+events, after verifying the signature against the unchanged raw body.
 Import `listOrganizationWebhookDeliveries` and
 `redeliverOrganizationWebhookDelivery` from the focused subpath for organization
 registrations; call them with `client` first.
@@ -403,6 +410,14 @@ enqueue errors are logged without aborting the turn's lifecycle transaction.
 A pump in every
 API replica claims them with short leases, so replicas share the work and a
 crash only delays a delivery. Settled deliveries are pruned after seven days.
+
+Usage events are workspace-scoped, without a synthetic session/turn identity
+or session sequence. Periodic allowance maintenance in the API dispatch loop
+evaluates thresholds, idle rollover, and grant expiry independently of usage
+GETs. Receipt/outbox enqueue is transactional and failed maintenance retries;
+bounded sweeps do not guarantee delivery at the exact wall-clock boundary. See
+[usage allowances](usage-allowances.md#errors-and-event-handling) before using
+them for a product meter.
 
 ## MCP identity
 

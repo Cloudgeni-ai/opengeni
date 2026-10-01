@@ -10,6 +10,7 @@ import {
   claimWorkspaceWebhookDeliveries,
   claimOrganizationWebhookDeliveries,
   decryptEnvironmentValue,
+  maintainWorkspaceAllowances,
   pruneOrganizationWebhookDeliveries,
   pruneWorkspaceWebhookDeliveries,
   settleOrganizationWebhookDelivery,
@@ -97,6 +98,9 @@ async function deliverOne(
 export async function drainWorkspaceWebhookDeliveries(
   deps: WorkspaceWebhookDispatchDeps,
 ): Promise<WorkspaceWebhookBatchResult> {
+  // Allowance rollover/expiry does not depend on webhook secrets, usage
+  // readers, inference or having any pending delivery.
+  await maintainWorkspaceAllowances(deps.db);
   const key = environmentsEncryptionKeyBytes(deps.settings);
   if (!key) return { claimed: 0, delivered: 0, failed: 0 };
   const claimId = randomUUID();
