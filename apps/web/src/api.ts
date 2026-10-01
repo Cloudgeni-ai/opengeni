@@ -8,6 +8,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
 } from "@opengeni/sdk/browser";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import { userActivityHeaders } from "./lib/user-activity";
 
 import type { AuthSession, ClientConfig } from "./types";
 import { beginAnalyticsRequest } from "./lib/analytics-observer";
@@ -182,7 +183,7 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBr
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
-    headers: () => authHeaders(),
+    headers: () => ({ ...authHeaders(), ...userActivityHeaders() }),
     fetch: async (input, init) => {
       const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
       if (actorBound) {
@@ -833,6 +834,7 @@ export async function requestResponse(path: string, init?: RequestInit): Promise
       "content-type": "application/json",
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...authHeaders(),
+      ...userActivityHeaders(),
       ...init?.headers,
     },
   });

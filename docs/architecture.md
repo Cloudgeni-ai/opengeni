@@ -1066,6 +1066,10 @@ The TypeScript system is a Bun workspace over `apps/*`, `examples/*`, and
 `packages/*`. Internal packages are consumed from source. The Connected Machine
 agent and relay are a separate Rust Cargo workspace under `agent/`.
 
+`examples/vue-conversation/app` sits below the root workspace glob: its
+standalone npm lock installs the published SDK rather than linking repository
+source, so the non-React recipe is also a real consumer build.
+
 Package manifests and `.changeset/config.json` own exact publication status and
 entrypoints. The lists below describe responsibility, not current publish
 metadata.
@@ -1131,6 +1135,7 @@ handlers because its host owns process lifecycle.
 | `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
+| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue SFC conversation; Bun same-origin session proxy, explicit host cookie/CSRF boundary, replay and decisions; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 

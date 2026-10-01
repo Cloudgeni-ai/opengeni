@@ -120,12 +120,23 @@ A change to a running session applies from its next turn. Sessions created by an
 ## Check what the agent can do
 
 ```ts
+import type { AgentEffectiveTools } from "@opengeni/sdk";
+
 const session = await og.getSession(workspaceId, sessionId);
 session.agent; // the resolved settings, or null for sessions created before them
-session.effectiveTools; // every known tool, its capability, and whether it is sent up front
+const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
+const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+for (const tool of session.effectiveTools?.tools ?? []) {
+  const group = byCapability.get(tool.capability) ?? [];
+  group.push(tool);
+  byCapability.set(tool.capability, group);
+}
+const knowledgeTools = byCapability.get("knowledge") ?? [];
 ```
 
-A connected app's own tools are listed once a turn starts. The OpenGeni web app shows the same in the session's Agent panel, and the exact instructions sent in Debug > Context.
+`effectiveTools.tools` is a flat list of known tools, not a capability-keyed object; group it locally as above. An absent projection on an older session means unknown, not that every capability is off. Tool `visibility` (`"upfront"` or `"search"`) describes model discovery, not human access. `mcpServers[].toolsKnown: false` means that server's schemas are not known in this projection; do not invent names or infer that it is disabled.
+
+Human visibility is `session.tenancy?.visibility`, not top-level `session.visibility`. Top-level `visibility` is a create-request field. A missing tenancy projection means unknown, not `"workspace"`. The OpenGeni web app shows the agent's settings in the session's Agent panel, and the exact instructions sent in Debug > Context.
 
 <Tip>
   Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) walks it through these

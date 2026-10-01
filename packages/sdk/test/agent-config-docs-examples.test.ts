@@ -10,7 +10,12 @@ import { OpenGeniClient } from "../src/index";
 import { OpenGeniSetupError } from "../src/errors";
 import { createSessionProxyHandler } from "../src/session-proxy";
 import { createWorkspaceIdResolver } from "../src/tenant-workspaces";
-import type { AgentConfigRequest, CreateSessionRequest } from "../src/types";
+import type {
+  AgentConfigRequest,
+  AgentEffectiveTools,
+  CreateSessionRequest,
+  Session,
+} from "../src/types";
 
 // Placeholder environment so the module-level clients construct; nothing is called.
 process.env.OPENGENI_API_BASE_URL ??= "https://opengeni.example.test";
@@ -35,7 +40,24 @@ async function inspect(og: OpenGeniClient, workspaceId: string, sessionId: strin
   const session = await og.getSession(workspaceId, sessionId);
   // session.agent: the frozen configuration (null for sessions created before it).
   // session.effectiveTools: the tools it can use, with upfront or on-demand visibility.
-  return { admitted, offered, defaults, agent: session.agent, tools: session.effectiveTools };
+  const visibility = session.tenancy?.visibility;
+  const byCapability = groupByCapability(session.effectiveTools?.tools ?? []);
+  return { admitted, offered, defaults, agent: session.agent, visibility, byCapability };
+}
+
+// Read shapes: tenancy visibility is nested; effectiveTools.tools is flat.
+function groupByCapability(tools: AgentEffectiveTools["tools"]) {
+  const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+  for (const tool of tools) {
+    const group = byCapability.get(tool.capability) ?? [];
+    group.push(tool);
+    byCapability.set(tool.capability, group);
+  }
+  return byCapability;
+}
+
+function humanVisibility(session: Pick<Session, "tenancy">) {
+  return session.tenancy?.visibility;
 }
 
 // 2. One agent object: capabilities, identity, instructions, renderer.
@@ -139,6 +161,7 @@ const chatEndpoint = createChatHandler(facade, {
       : new Response("Unauthorized", { status: 401 });
   },
   format: "vercel",
+  toolParts: true, // activity only; actual tool results remain omitted
 });
 
 // 6. Workspace defaults, schedules, and a change in a running session.
@@ -166,6 +189,41 @@ async function workspaceDefaultsAndSchedules(workspaceId: string, sessionId: str
 }
 
 describe("agent configuration docs examples", () => {
+  test("groups the flat inventory without losing discovery metadata", () => {
+    const tools: AgentEffectiveTools["tools"] = [
+      {
+        name: "knowledge_search",
+        capability: "knowledge",
+        source: "first_party",
+        visibility: "search",
+      },
+      {
+        name: "knowledge_get",
+        capability: "knowledge",
+        source: "first_party",
+        visibility: "upfront",
+      },
+      { name: "skill_read", capability: "skills", source: "first_party", visibility: "upfront" },
+    ];
+    const grouped = groupByCapability(tools);
+    expect(grouped.get("knowledge")).toEqual(tools.slice(0, 2));
+    expect(grouped.get("skills")).toEqual([tools[2]!]);
+    expect(grouped.get("knowledge")![0]).toBe(tools[0]!);
+    expect(groupByCapability([]).size).toBe(0);
+    expect(tools).toHaveLength(3);
+  });
+
+  test("does not default an absent tenancy projection to workspace visibility", () => {
+    expect(humanVisibility({})).toBeUndefined();
+    const tenancy: NonNullable<Session["tenancy"]> = {
+      visibility: "private",
+      authorityEpoch: 1,
+      ownedByCurrentUser: true,
+      fork: null,
+    };
+    expect(humanVisibility({ tenancy })).toBe("private");
+  });
+
   test("compile against the SDK", () => {
     expect(typeof inspect).toBe("function");
     expect(typeof createAssistantSession).toBe("function");

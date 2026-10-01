@@ -1,5 +1,6 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { createRequire } from "node:module";
+import { DrizzleQueryError } from "drizzle-orm";
 
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
@@ -355,6 +356,63 @@ function codexFailureDeps(
     },
   };
 }
+
+describe("raw database rollback settlement", () => {
+  const rawFailure = (sqlState: string) =>
+    new DrizzleQueryError(
+      "INSERT INTO runtime_records (payload) VALUES ($1)",
+      ["fixture-value"],
+      Object.assign(new Error("transaction aborted"), { name: "PostgresError", code: sqlState }),
+    );
+
+  test("startup exports the exact recovery identity and retains its diagnostic cause", async () => {
+    for (const [sqlState, code] of [
+      ["40P01", "db_deadlock"],
+      ["40001", "db_serialization_failure"],
+    ] as const) {
+      const error = rawFailure(sqlState);
+      const { deps } = codexFailureDeps({ error });
+      deps.billingState.isCodexTurn = false;
+      deps.attempt.modelRequestStarted = false;
+      deps.eventing.turnStartedPublished = false;
+      Object.assign(deps.eventing, { publish: undefined });
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [{ turnId: "turn-1", triggerEventId: "trigger-1", executionGeneration: 1, code }],
+      });
+      expect(deps.control.activityStatus).toBe("recovering");
+      expect(deps.control.activityError).toBe(error);
+    }
+  });
+
+  test("a model that already started cannot acquire database startup replay authority", async () => {
+    const settle = mock(async () => true);
+    const error = rawFailure("40P01");
+    const { deps } = codexFailureDeps({ error, settle });
+    deps.billingState.isCodexTurn = false;
+    expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "failed" });
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        events: expect.arrayContaining([
+          {
+            type: "turn.failed",
+            payload: expect.objectContaining({
+              error: "OpenGeni encountered a database error.",
+              code: "db_deadlock",
+              sqlState: "40P01",
+            }),
+          },
+        ]),
+        turnStatus: "failed",
+        sessionStatus: "failed",
+        activeTurnId: null,
+      }),
+    );
+    expect(JSON.stringify(settle.mock.calls)).not.toContain("fixture-value");
+    expect(deps.control.activityError).toBe(error);
+  });
+});
 
 describe("early accepted-definition mismatch", () => {
   function earlyDeps(error: unknown = new TurnExecutionPolicyDefinitionMismatchError()) {

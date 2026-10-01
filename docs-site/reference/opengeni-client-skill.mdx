@@ -32,6 +32,12 @@ Use this skill when a customer's product and OpenGeni remain separate systems.
 That is the normal integration shape: the product owns its users and business
 UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 
+For first-time organization and workspace provisioning, start with
+[OpenGeni developer setup](https://docs.opengeni.ai/guides/developer-plugin), then return here to write
+the embedding code. That skills-only workflow uses the coding agent's own
+browser and public REST/SDK, with a scoped Developer setup key; no OpenGeni MCP
+server is required.
+
 Do not confuse two meanings of "skill": this file teaches a customer's coding
 agent how to integrate OpenGeni; session `skills` are runtime capabilities or
 instructions attached to an OpenGeni agent. The former designs the integration.
@@ -210,7 +216,10 @@ Choose one only for its stated reason; read
   materially different interaction model but still wants canonical event,
   queue, composer, approval, and human-input behavior.
 - **SDK only**: a non-React frontend (Svelte, Vue, native mobile), a CLI, or
-  backend automation. Keep the SDK on a product backend route.
+  backend automation. Keep the SDK on a product backend route. For a runnable
+  native Vue host, start with the
+  [Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md).
+  Run its consumer commands from `examples/vue-conversation/app`.
 - **A non-JavaScript backend** (Django, Rails, Go, PHP, Java): keep the React
   conversation and implement the proxy's small HTTP contract in that backend
   instead of adding a Node sidecar. See
@@ -886,11 +895,21 @@ export const POST = createChatHandler(og, {
     return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
   },
   format: "vercel", // or "openai-chat" / "openai-responses"; default: native chunks
+  toolParts: true, // optional Vercel activity indicators; off by default
 });
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
 ```
+
+For the Vercel format, `toolParts: true` emits OpenGeni's tool activity as
+`dynamic`, `providerExecuted` parts, not tools for your app to execute. The
+successful output is only `{ status }`, not the actual result: this opt-in does
+not restore tool results, artifacts or attachments. Leave it off for text-only
+activity. Approval requests are emitted independently of this option (AI SDK
+6+ is needed to answer them). When composing your own AI SDK stream, pass the
+same option to `uiMessageStreamParts(chunks, { framing: false, toolParts: true })`;
+`framing: false` leaves message framing to the outer stream.
 
 Each tenant maps to one workspace and each conversation to one deterministic
 session. Conversation IDs are independent of the acting user; authorization
@@ -916,7 +935,7 @@ They run in the customer's backend: they do not add `/responses` or
 
 ## `references/compatibility-and-troubleshooting.md`
 
-```markdown
+````markdown
 # Verify compatibility and recover setup problems
 
 ## Product documentation without repository access
@@ -932,6 +951,39 @@ unavailable and inspect the installed package and authorized service instead.
 Documentation availability and deployed feature availability are separate.
 Inspect the installed package exports/types and `/v1/config/client`; verify the
 chosen contract against the intended deployment before implementing against it.
+
+To check the full Skill's HTTP Markdown export from a repository checkout:
+
+```bash
+bun scripts/check-client-skill-markdown-export.ts
+```
+
+This opt-in network check compares the published `.md` sections with the local
+generated mirror, including nested code fences. A mismatch may mean the docs
+deployment has not caught up with the checkout; it is not evidence of a runtime
+API failure. Use `--url` and `--expected` to check another deployment or a known
+matching mirror. The local HTTP regression tests run without external services.
+
+## CommonJS hosts
+
+The SDK is ESM-only. In an existing `.cjs` host, use dynamic `import()` inside
+an async initializer; `require("@opengeni/sdk")` is not the supported loading
+path. Do not change the entire project's module type just to load the SDK.
+
+```js
+// opengeni.cjs — callers await createOpenGeniClient().
+async function createOpenGeniClient() {
+  const { OpenGeniClient } = await import("@opengeni/sdk");
+  return new OpenGeniClient({
+    baseUrl: process.env.OPENGENI_API_BASE_URL,
+    apiKey: process.env.OPENGENI_API_KEY,
+  });
+}
+
+module.exports = { createOpenGeniClient };
+```
+
+Keep this initialization on the server: never send the API key to a browser.
 
 ## Decide what is being replaced
 
@@ -1001,7 +1053,7 @@ report the attempted repair and exact missing requirement, rather than handing
 back an avoidable package installation. Never substitute a whitespace check for
 unit, type, or integration tests. Report code written, committed, tested,
 integration verified, and published as distinct facts within the requested scope.
-```
+````
 
 ## `references/configure-the-agent.md`
 
@@ -1222,11 +1274,36 @@ Rules the server enforces:
 
 ## Verify
 
+Read response visibility from `session.tenancy?.visibility`, not
+`session.visibility`. The top-level `visibility` field belongs to create
+requests; the response's tenancy projection may be absent when private-session
+support is unavailable. Absence means unknown, not `"workspace"`.
+
+`effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
+locally if your UI needs capability sections:
+
+```ts
+import type { AgentEffectiveTools } from "@opengeni/sdk";
+
+const session = await og.getSession(workspaceId, sessionId);
+const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
+const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+for (const tool of session.effectiveTools?.tools ?? []) {
+  const group = byCapability.get(tool.capability) ?? [];
+  group.push(tool);
+  byCapability.set(tool.capability, group);
+}
+const knowledgeTools = byCapability.get("knowledge") ?? [];
+```
+
+An absent `effectiveTools` projection on an older session means the inventory is
+unknown, not that every capability is off. Each tool's `visibility` means model
+discovery (`"upfront"` or `"search"`), not who can see the session. Preserve it
+when grouping. `mcpServers[].toolsKnown: false` means that server's schemas are
+not known in this projection; do not invent tool names or treat it as disabled.
+
 - `session.agent`: the resolved configuration, including `source` (request,
   workspace default, inherited, ...) and `unavailable`.
-- `session.effectiveTools.tools`: every known tool with its capability and
-  `visibility: "upfront" | "search"`. `mcpServers[].toolsKnown: false` means that
-  server lists its tools when a turn starts.
 - The model-context inspector in the OpenGeni web app (session > Debug >
   Context) shows the instructions actually sent, split into titled sections.
 ````
@@ -1378,7 +1455,7 @@ The normal workspace-scoped API Integration flow is deterministic control-plane 
 2. Create or resolve the appropriate encrypted Connection when authentication is required. An `api_key` Connection must say where the secret goes: `credential: { headers: { Authorization: "Token ..." } }`, or `credential: { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }` (query and cookie placements work for API Integrations only). Match `preview.auth.carrier`/`name` from step 3; a bare `{ apiKey }` is rejected with 422, and preview adds a warning when the Connection's placement differs from the description.
 3. Call previewApiIntegration with the source and, when needed, the Connection. The source can be a URL or an inline document: `{ kind: "openapi_document", sourceKey: "<stable id>", document: "<OpenAPI JSON/YAML>", baseUrl? }` (8 MiB max, absolute server URLs or `baseUrl`; resend it on install; the preview echoes only its digest). Inlining does not make a localhost or private API reachable: tool calls still follow the deployment network policy, so a local product needs a public tunnel.
 4. Apply the customer's policy to the compiled operation list, safety classification, warnings, and approval modes. Select only intended operations.
-5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
+5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). Use the exact compiled identifiers from `preview.tools[].id`, not a guessed OpenAPI operationId or model-facing prefixed name. The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
 6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions: omit `tools` to follow the workspace defaults, or list it explicitly as `tools: [{ kind: "mcp", id: serverId }]`. An explicit `tools` array is an exact allow-list; `[]` selects no workspace server.
 
 Preview and install are ordinary backend API calls and can be automated. Human review is required only when the customer's policy or the operation risk requires it. The immutable revision/digest fence ensures that automation cannot install a different schema from the one it evaluated.
@@ -1390,6 +1467,13 @@ An agent-focused API description is often helpful: concise descriptions, stable 
 ## MCP lifecycle
 
 A workspace MCP capability is suitable when many sessions in that workspace use the same server and authority. A session may also receive an explicit mcpServers definition with URL, allowed tools, approval policy, and write-only credential headers or a non-secret Connection reference.
+
+For a per-session MCP server, `requireApproval: ["update_ticket"]` matches the
+original tool name returned by the server's `tools/list`, not the model-facing
+`acme__update_ticket` name (for server id `acme`). `true` gates every tool.
+This MCP name list is distinct from an API Integration's compiled
+`autoApprovedTools` identifiers; a session MCP policy does not override an API
+Integration's install-time approval policy.
 
 A server attached through a top-level createSession `mcpServers` entry is selected by that attachment, whether `tools` is omitted or explicit (including `tools: []`); there is no separate selection step. Every other MCP server (workspace capability, installed API Integration, deployment server) is reachable only when `tools` selects it or the omitted-`tools` workspace default includes it. A selected server the model never finds usually means it was not selected: check `session.effectiveToolPolicy`.
 
@@ -2434,7 +2518,17 @@ Default to the full conversation component. Deviate only when the product needs 
 
 Inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Prefer, in order: `SessionConversation` customized through `composerProps` and `renderMessageText`; `MessageTimeline`, `ChatComposer`, and the session hooks composed into product layout; then a fully custom SDK-driven UI. Do not force a packaged component when the product needs a materially different interaction model.
 
+## Native non-React frontends
+
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
+
+Start with the [runnable Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md)
+for native Vue single-file components, Vite and the existing Bun Fetch session
+proxy using the published SDK. Follow the README's deployment and host-auth
+prerequisites; run install, onboarding and consumer checks from
+`examples/vue-conversation/app`, not the repository root. The sample handles
+durable conversations and decisions with an escaped-text UI, not a full rich
+Markdown, artifact or file renderer. Keep organization credentials server-only.
 
 ## Links, downloads, artifacts, and Sites
 

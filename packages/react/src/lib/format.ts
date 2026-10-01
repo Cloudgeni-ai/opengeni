@@ -218,6 +218,18 @@ export function presentFailure(payload: Record<string, unknown>): {
   reason: string | null;
   safetyRefusal: boolean;
 } {
+  const databaseFailure =
+    payload.code === "db_deadlock" ||
+    payload.code === "db_serialization_failure" ||
+    payload.code === "db_failure" ||
+    (typeof payload.sqlState === "string" &&
+      /^[0-9A-Z]{5}$/.test(payload.sqlState) &&
+      payload.database !== null &&
+      typeof payload.database === "object" &&
+      !Array.isArray(payload.database));
+  if (databaseFailure) {
+    return { reason: "OpenGeni encountered a database error.", safetyRefusal: false };
+  }
   const text = (key: string): string | null => {
     const value = payload[key];
     return typeof value === "string" && value.trim() ? value : null;

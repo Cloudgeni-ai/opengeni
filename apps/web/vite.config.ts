@@ -109,9 +109,15 @@ export default defineConfig({
               // Workspace forms, provider marks, and administration links are
               // shared route primitives. They must not pull the settings
               // implementation into the workspace shell or direct sessions.
+              // Preserve each primitive's consumers: a session-used Dialog must
+              // not carry the workspace-only administration boundary or lazy
+              // feedback Textarea into every direct session. Coalesce only the
+              // tiny shared form chunks, not the whole mixed-consumer group.
               name: "workspace-form-primitives",
               test: /apps[\\/]web[\\/]src[\\/]components[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark|settings[\\/]organization-workspace-administration)\.tsx$/,
               includeDependenciesRecursively: false,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 4 * 1024,
               priority: 20,
             },
             {
@@ -322,8 +328,11 @@ export default defineConfig({
               // this group they land in the section's chunk and form a cycle
               // (settings-pages <-> organization-models-section) that leaves
               // React undefined when the section evaluates.
+              // Organization API-key setup is dynamically imported by Developer
+              // settings. Pin its implementation here too so shared dependencies
+              // cannot merge it into the direct-session graph.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -370,11 +379,14 @@ export default defineConfig({
               // settings route. Keep its sizeable roster and permission editor
               // graph behind that second boundary so it cannot be folded into
               // startup or a direct session load through shared UI primitives.
+              // At 28 KiB the developer-settings graph folds lazy Site HTTP and
+              // crypto helpers into direct sessions. Keep the merge below that
+              // boundary while coalescing genuinely shared member primitives.
               name: "workspace-members",
               test: /src[\\/]routes[\\/]workspace-members-section\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 28 * 1024,
+              entriesAwareMergeThreshold: 24 * 1024,
               priority: 4,
             },
             {

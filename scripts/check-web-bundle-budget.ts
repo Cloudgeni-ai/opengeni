@@ -619,6 +619,12 @@ const effectiveBudgets = {
     // Bound only these measured aggregates with the established 1.5 KiB
     // headroom; every initial, per-file, file-count, lazy and CSS cap stays fixed.
     wholeKibEnvelope(2_572_187, 1.5 * kib),
+    // Server-side presence: the shared API client marks requests made while the
+    // tab is visible and recently used (lib/user-activity plus its contract
+    // header constants), so idle tabs and polling never count as activity.
+    // Linux/x64 CI measures 2,575,385 raw on main 6a9731344. Keep the
+    // established 1.5 KiB headroom; gzip and every other cap stay fixed.
+    wholeKibEnvelope(2_575_385, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,

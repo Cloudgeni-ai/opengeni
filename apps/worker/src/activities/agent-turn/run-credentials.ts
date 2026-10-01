@@ -65,6 +65,7 @@ import {
   sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
+import { turnCredentialRestriction } from "./credential-restriction";
 import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type {
@@ -91,6 +92,7 @@ export type PrepareRunCredentialsDeps = {
   sandboxRuntime: SandboxTurnRuntime;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
   workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
@@ -129,6 +131,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     sandboxState,
     turn,
     session,
+    turnExecutionPolicy,
     fileAuthoritySubjectId,
     runSettings,
     workspaceVariableSet,
@@ -346,11 +349,13 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
           turn,
         })
       : undefined;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const codemodeAuthority = {
     sessionId: input.sessionId,
     turnId: turn.id,
     attemptId: input.attemptId,
     executionGeneration: turn.executionGeneration,
+    ...(credentialRestriction ? { credentialRestriction } : {}),
   };
   const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
     settings,
