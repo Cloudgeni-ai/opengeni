@@ -1,17 +1,21 @@
 // Actual Vue SFC browser acceptance with synthetic API/SSE fixtures only.
 import { chromium, type Page } from "playwright";
 import { mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { strict as assert } from "node:assert";
 import type { Session, SessionEvent, SessionHumanInputRequest } from "@opengeni/sdk";
 
-const output = process.env.VUE_PREVIEW_OUTPUT ?? "/workspace/previews";
+const output =
+  process.env.VUE_PREVIEW_OUTPUT ??
+  (existsSync("/workspace/.opengeni") ? "/workspace/previews" : join(process.cwd(), "previews"));
+const executablePath =
+  process.env.VUE_CHROMIUM ??
+  (existsSync("/usr/local/bin/chromium") ? "/usr/local/bin/chromium" : undefined);
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({
   headless: true,
-  ...(process.env.VUE_CHROMIUM || process.platform === "linux"
-    ? { executablePath: process.env.VUE_CHROMIUM ?? "/usr/local/bin/chromium" }
-    : {}),
+  ...(executablePath ? { executablePath } : {}),
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 960 } });
 const errors: string[] = [];

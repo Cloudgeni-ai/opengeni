@@ -123,6 +123,8 @@ initial text and an idempotency key. Files and browser model selection are off.
 - `streamEvents` owns replay, reconnect/backoff, duplicate suppression and gap
   backfill. Selection changes and unmount abort old streams; generation guards
   prevent old-session state/errors replacing the new selection.
+  Identity epochs additionally fence context loads and mutation completions;
+  account changes reset UI/drafts and never clear another account's saved retry.
 - Session read and pending human-input reads reconcile at stream connection and
   lifecycle changes. Unknown additive event types are tolerated, not displayed
   as accidental tool prose. Text deltas reconcile with completed messages and
@@ -154,9 +156,11 @@ npm run preview:check
 `app/src/visual-check.ts` renders the **actual** Vue components with clearly
 synthetic HTTP/SSE fixtures. It verifies replay, refresh, create/send, approval,
 human input, error/retry, pause/resume and mobile layout, then writes desktop,
-decision and mobile PNGs into `/workspace/previews` (override with
-`VUE_PREVIEW_OUTPUT`). For Chromium outside this sandbox, set
-`VUE_CHROMIUM` to an installed executable or run `npx playwright install chromium`.
+decision and mobile PNGs into `/workspace/previews` in the managed sandbox,
+or `app/previews` on other hosts (override with `VUE_PREVIEW_OUTPUT`). Set
+`VUE_CHROMIUM` to an installed executable, or run `npx playwright install chromium`.
+Without an override it uses the sandbox binary when present, otherwise
+Playwright's installed default browser, including on ordinary Linux hosts.
 No production or public host is provisioned. Synthetic checks are separate from
 live service/model execution, which needs the deployment prerequisites above.
 

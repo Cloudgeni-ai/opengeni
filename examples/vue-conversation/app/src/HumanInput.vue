@@ -51,7 +51,7 @@ function submit() {
           {{ option.label }}{{ option.description ? ` — ${option.description}` : "" }}
         </option>
       </select>
-      <label v-if="q.allowOther">Other<input v-model="other[q.id]" /></label>
+      <label v-if="q.allowOther && q.kind !== 'text'">Other<input v-model="other[q.id]" /></label>
       <p v-if="q.validation?.minSelections || q.validation?.maxSelections">
         Select {{ q.validation.minSelections || 0 }} to
         {{ q.validation.maxSelections || "any number of" }} options.

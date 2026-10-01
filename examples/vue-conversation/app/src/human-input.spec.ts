@@ -35,3 +35,26 @@ test("expired input is not silently submitted", () => {
     ]),
   ).toContain("expired");
 });
+test("Other counts as one selection for single choice and both multi-choice bounds", () => {
+  const single = {
+    ...request,
+    questions: [{ ...request.questions[0]!, kind: "single_select" as const }],
+  };
+  expect(
+    validateAnswers(single, [{ questionId: "q", values: ["walk"], other: "Garden" }]),
+  ).not.toBeNull();
+  expect(validateAnswers(single, [{ questionId: "q", values: [], other: "Garden" }])).toBeNull();
+  expect(
+    validateAnswers(request, [{ questionId: "q", values: ["walk"], other: "Garden" }]),
+  ).not.toBeNull();
+  const minTwo = {
+    ...request,
+    questions: [{ ...request.questions[0]!, validation: { minSelections: 2, maxSelections: 2 } }],
+  };
+  expect(
+    validateAnswers(minTwo, [{ questionId: "q", values: [], other: "Garden" }]),
+  ).not.toBeNull();
+  expect(
+    validateAnswers(minTwo, [{ questionId: "q", values: ["walk"], other: "Garden" }]),
+  ).toBeNull();
+});

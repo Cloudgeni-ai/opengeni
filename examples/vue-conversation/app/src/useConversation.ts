@@ -9,7 +9,7 @@ import {
 } from "@opengeni/sdk";
 import { project } from "./projection";
 
-type Context = { workspaceId: string; storageScope: string; csrf: string };
+type Context = Readonly<{ workspaceId: string; storageScope: string; csrf: string }>;
 type Pending = { kind: "create" | "send"; text: string; id: string; sessionId?: string };
 
 export function friendlyError(error: unknown): string {
@@ -36,39 +36,55 @@ export function useConversation() {
   const questions = ref<SessionHumanInputRequest[]>([]);
   const error = ref("");
   const signedIn = ref(false);
+  const identityScope = ref("");
   const busy = ref(false);
   const connection = ref("offline");
   const pending = ref<Pending | null>(null);
-  let context: Context;
-  let client: OpenGeniClient;
+  let context: Context | undefined;
+  let client: OpenGeniClient | undefined;
   let abort: AbortController | undefined;
   let generation = 0;
+  let identityEpoch = 0;
   let refreshRevision = 0;
   const view = computed(() => project(events.value));
-  const key = () => `harbor:${context.storageScope}`;
-  const savePending = () => {
-    if (pending.value) sessionStorage.setItem(`${key()}:pending`, JSON.stringify(pending.value));
-    else sessionStorage.removeItem(`${key()}:pending`);
+  const key = (scope: Context) => `harbor:${scope.storageScope}`;
+  const savePending = (scope: Context, request: Pending | null) => {
+    if (request) sessionStorage.setItem(`${key(scope)}:pending`, JSON.stringify(request));
+    else sessionStorage.removeItem(`${key(scope)}:pending`);
   };
   const fail = (cause: unknown) => {
     error.value = friendlyError(cause);
   };
 
   async function refresh(expected = generation) {
+    const epoch = identityEpoch;
+    const scope = context;
+    const scopedClient = client;
+    if (expected !== generation || !scope || !scopedClient || !signedIn.value) return;
     const revision = ++refreshRevision;
     const id = active.value?.id;
     if (!id) return;
     const [session, requests] = await Promise.all([
-      client.getSession(context.workspaceId, id),
-      client.listHumanInputRequests(context.workspaceId, id, { status: "pending" }),
+      scopedClient.getSession(scope.workspaceId, id),
+      scopedClient.listHumanInputRequests(scope.workspaceId, id, { status: "pending" }),
     ]);
-    if (expected !== generation || active.value?.id !== id || revision !== refreshRevision) return;
+    if (
+      epoch !== identityEpoch ||
+      expected !== generation ||
+      active.value?.id !== id ||
+      revision !== refreshRevision
+    )
+      return;
     active.value = session;
     questions.value = requests;
     sessions.value = sessions.value.map((s) => (s.id === id ? session : s));
   }
 
   async function select(session: Session) {
+    const epoch = identityEpoch;
+    const scope = context;
+    const scopedClient = client;
+    if (!scope || !scopedClient || !signedIn.value) return;
     abort?.abort();
     const current = ++generation;
     const controller = new AbortController();
@@ -77,18 +93,18 @@ export function useConversation() {
     questions.value = [];
     active.value = session;
     error.value = "";
-    sessionStorage.setItem(`${key()}:session`, session.id);
+    sessionStorage.setItem(`${key(scope)}:session`, session.id);
     try {
       // Start from 0 because the in-memory projection was reset. The SDK owns
       // replay, sequence deduplication, gap backfill and reconnect pacing.
-      for await (const event of client.streamEvents(context.workspaceId, session.id, {
+      for await (const event of scopedClient.streamEvents(scope.workspaceId, session.id, {
         signal: controller.signal,
         onStateChange: (state) => {
-          if (current === generation) connection.value = state;
+          if (epoch === identityEpoch && current === generation) connection.value = state;
         },
         beforeLive: () => refresh(current),
       })) {
-        if (current !== generation) return;
+        if (epoch !== identityEpoch || current !== generation) return;
         events.value.push(event);
         if (
           event.type.startsWith("session.") ||
@@ -96,12 +112,12 @@ export function useConversation() {
           event.type.startsWith("user.")
         ) {
           void refresh(current).catch((cause) => {
-            if (current === generation) fail(cause);
+            if (epoch === identityEpoch && current === generation) fail(cause);
           });
         }
       }
     } catch (cause) {
-      if (current === generation && !controller.signal.aborted) {
+      if (epoch === identityEpoch && current === generation && !controller.signal.aborted) {
         connection.value = "offline";
         fail(cause);
       }
@@ -110,54 +126,68 @@ export function useConversation() {
 
   async function load() {
     abort?.abort();
+    const epoch = ++identityEpoch;
     ++generation;
+    context = undefined;
+    client = undefined;
     active.value = null;
     sessions.value = [];
     events.value = [];
     questions.value = [];
     pending.value = null;
     signedIn.value = false;
+    identityScope.value = "";
+    busy.value = false;
+    connection.value = "offline";
     error.value = "";
     try {
       const response = await fetch("/api/context", { credentials: "same-origin" });
+      if (epoch !== identityEpoch) return;
       if (response.status === 401) return;
       if (!response.ok) throw new Error("Host context unavailable");
-      context = await response.json();
+      const scope: Context = Object.freeze(await response.json());
+      if (epoch !== identityEpoch) return;
       // Credentials are cookies only; no API key, tenant or actor headers.
-      client = new OpenGeniClient({
+      const scopedClient = new OpenGeniClient({
         baseUrl: `${location.origin}/api/conversation`,
         fetch: async (input, init) => {
           const headers = new Headers(init?.headers);
           if (!["GET", "HEAD"].includes(init?.method ?? "GET"))
-            headers.set("x-host-csrf", context.csrf);
+            headers.set("x-host-csrf", scope.csrf);
           return fetch(input, { ...init, headers, credentials: "same-origin" });
         },
       });
-      signedIn.value = true;
-      const page = await client.listSessionPage(context.workspaceId, {
+      const page = await scopedClient.listSessionPage(scope.workspaceId, {
         limit: 50,
         parentSessionId: null,
       });
+      if (epoch !== identityEpoch) return;
+      context = scope;
+      client = scopedClient;
+      signedIn.value = true;
+      identityScope.value = scope.storageScope;
       sessions.value = [...page.pinned, ...page.sessions];
-      const saved = sessionStorage.getItem(`${key()}:pending`);
+      const saved = sessionStorage.getItem(`${key(scope)}:pending`);
       if (saved) {
         try {
           pending.value = JSON.parse(saved);
         } catch {
-          sessionStorage.removeItem(`${key()}:pending`);
+          sessionStorage.removeItem(`${key(scope)}:pending`);
         }
       }
       const selected =
-        sessions.value.find((s) => s.id === sessionStorage.getItem(`${key()}:session`)) ??
+        sessions.value.find((s) => s.id === sessionStorage.getItem(`${key(scope)}:session`)) ??
         sessions.value[0];
       if (selected) void select(selected);
     } catch (cause) {
-      fail(cause);
+      if (epoch === identityEpoch) fail(cause);
     }
   }
 
   async function login() {
+    const epoch = identityEpoch;
     const response = await fetch("/api/demo-login", { method: "POST", credentials: "same-origin" });
+    if (epoch !== identityEpoch) return;
     if (!response.ok) {
       error.value = "Demo sign-in is unavailable. Use your host's normal sign-in.";
       return;
@@ -166,6 +196,7 @@ export function useConversation() {
   }
 
   function newChat() {
+    if (!context || !signedIn.value || busy.value) return;
     abort?.abort();
     ++generation;
     active.value = null;
@@ -173,60 +204,76 @@ export function useConversation() {
     questions.value = [];
     connection.value = "offline";
     error.value = "";
-    sessionStorage.removeItem(`${key()}:session`);
+    sessionStorage.removeItem(`${key(context)}:session`);
   }
 
   async function send(text: string) {
-    if (busy.value || !text.trim() || pending.value) return;
+    if (!context || !signedIn.value || busy.value || !text.trim() || pending.value) return;
     pending.value = {
       kind: active.value ? "send" : "create",
       text: text.trim(),
       id: crypto.randomUUID(),
       ...(active.value ? { sessionId: active.value.id } : {}),
     };
-    savePending();
+    savePending(context, pending.value);
     await retry();
   }
 
   async function retry() {
+    const epoch = identityEpoch;
+    const scope = context;
+    const scopedClient = client;
     const request = pending.value;
-    if (!request || busy.value) return;
+    if (!scope || !scopedClient || !signedIn.value || !request || busy.value) return;
     busy.value = true;
     error.value = "";
     try {
       if (request.kind === "create") {
-        const session = await client.createSession(context.workspaceId, {
+        const session = await scopedClient.createSession(scope.workspaceId, {
           initialMessage: request.text,
           idempotencyKey: request.id,
         });
+        if (epoch !== identityEpoch) return;
         sessions.value = [session, ...sessions.value.filter((s) => s.id !== session.id)];
         void select(session);
       } else {
-        await client.sendMessage(context.workspaceId, request.sessionId!, {
+        await scopedClient.sendMessage(scope.workspaceId, request.sessionId!, {
           text: request.text,
           clientEventId: request.id,
         });
       }
+      if (epoch !== identityEpoch) return;
       pending.value = null;
-      savePending();
+      savePending(scope, null);
     } catch (cause) {
-      fail(cause);
+      if (epoch === identityEpoch) fail(cause);
     } finally {
-      busy.value = false;
+      if (epoch === identityEpoch) busy.value = false;
     }
   }
 
-  async function action(operation: () => Promise<unknown>) {
-    if (busy.value) return;
+  async function action(
+    operation: (
+      scopedClient: OpenGeniClient,
+      scope: Context,
+      session: Session | null,
+    ) => Promise<unknown>,
+  ) {
+    const epoch = identityEpoch;
+    const current = generation;
+    const scope = context;
+    const scopedClient = client;
+    const selected = active.value;
+    if (!scope || !scopedClient || !signedIn.value || busy.value) return;
     busy.value = true;
     error.value = "";
     try {
-      await operation();
-      await refresh();
+      await operation(scopedClient, scope, selected);
+      if (epoch === identityEpoch && current === generation) await refresh(current);
     } catch (cause) {
-      fail(cause);
+      if (epoch === identityEpoch && current === generation) fail(cause);
     } finally {
-      busy.value = false;
+      if (epoch === identityEpoch) busy.value = false;
     }
   }
   const decisionIds = new Map<string, string>();
@@ -235,27 +282,30 @@ export function useConversation() {
     return decisionIds.get(scope)!;
   };
   const approve = (approvalId: string, decision: "approve" | "reject") =>
-    action(() =>
-      client.sendApprovalDecision(context.workspaceId, active.value!.id, {
+    action((scopedClient, scope, selected) =>
+      scopedClient.sendApprovalDecision(scope.workspaceId, selected!.id, {
         approvalId,
         decision,
-        clientEventId: operationId(`${active.value!.id}:${approvalId}:${decision}`),
+        clientEventId: operationId(`${key(scope)}:${selected!.id}:${approvalId}:${decision}`),
       }),
     );
   const answer = (requestId: string, response: SubmitHumanInputResponseRequest) =>
-    action(() =>
-      client.submitHumanInputResponse(context.workspaceId, active.value!.id, requestId, response, {
-        clientEventId: operationId(`${active.value!.id}:${requestId}:${JSON.stringify(response)}`),
+    action((scopedClient, scope, selected) =>
+      scopedClient.submitHumanInputResponse(scope.workspaceId, selected!.id, requestId, response, {
+        clientEventId: operationId(
+          `${key(scope)}:${selected!.id}:${requestId}:${JSON.stringify(response)}`,
+        ),
       }),
     );
   const togglePause = () =>
-    action(() =>
-      active.value!.effectiveControl?.state === "paused"
-        ? client.resumeSession(context.workspaceId, active.value!.id)
-        : client.pauseSession(context.workspaceId, active.value!.id),
+    action((scopedClient, scope, selected) =>
+      selected!.effectiveControl?.state === "paused"
+        ? scopedClient.resumeSession(scope.workspaceId, selected!.id)
+        : scopedClient.pauseSession(scope.workspaceId, selected!.id),
     );
   onBeforeUnmount(() => {
     abort?.abort();
+    ++identityEpoch;
     ++generation;
   });
   return {
@@ -265,6 +315,7 @@ export function useConversation() {
     questions,
     error,
     signedIn,
+    identityScope,
     busy,
     connection,
     pending,

@@ -49,6 +49,28 @@ test("replay shows only undecided approvals and does not clear another turn's ap
   ).toEqual([]);
   expect(project([...events, event(2, "turn.failed", {})]).approvals).toEqual([]);
 });
+test("legacy text-only completions in one turn remain separate without deltas or message IDs", () => {
+  const result = project([
+    event(1, "agent.message.completed", { text: "First message" }),
+    event(2, "agent.message.completed", { text: "Second message" }),
+    event(3, "turn.completed", { output: "Second message" }),
+  ]);
+  expect(result.messages.map((message) => message.text)).toEqual([
+    "First message",
+    "Second message",
+  ]);
+});
+test("legacy completed text reconciles its open delta before starting the next message", () => {
+  const result = project([
+    event(1, "agent.message.delta", { text: "First" }),
+    event(2, "agent.message.completed", { text: "First message" }),
+    event(3, "agent.message.completed", { text: "Second message" }),
+  ]);
+  expect(result.messages.map((message) => message.text)).toEqual([
+    "First message",
+    "Second message",
+  ]);
+});
 test("future events do not become chat prose and failures are visible", () => {
   expect(
     project([

@@ -26,10 +26,7 @@ export function project(events: SessionEvent[]) {
       if (typeof p.text !== "string") continue;
       const key = JSON.stringify([event.turnId, p.messageId ?? "legacy"]);
       let message = identified.get(key);
-      if (
-        !message ||
-        (p.messageId == null && !message.streaming && event.type === "agent.message.delta")
-      ) {
+      if (!message || (p.messageId == null && !message.streaming)) {
         message = {
           id: event.id,
           role: "assistant",

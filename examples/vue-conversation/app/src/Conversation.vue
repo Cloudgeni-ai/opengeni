@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 import HumanInput from "./HumanInput.vue";
 import { useConversation } from "./useConversation";
 
@@ -10,6 +10,7 @@ const {
   questions,
   error,
   signedIn,
+  identityScope,
   busy,
   connection,
   pending,
@@ -25,10 +26,18 @@ const {
   refresh,
 } = useConversation();
 const draft = ref("");
+watch(
+  identityScope,
+  () => {
+    draft.value = "";
+  },
+  { flush: "sync" },
+);
 async function submit() {
+  const scope = identityScope.value;
   const text = draft.value;
   await send(text);
-  if (!pending.value) draft.value = "";
+  if (scope === identityScope.value && !pending.value) draft.value = "";
 }
 onMounted(load);
 </script>
