@@ -1651,9 +1651,9 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test.each([false, true])(
-    "cumulative one-pixel pointer leave survives intermediate scroll-end (%s)",
-    async (intermediateScrollEnd) => {
+  test.each(["plain", "intermediate scroll-end", "pinned camera write"])(
+    "cumulative one-pixel pointer leave preserves its budget (%s)",
+    async (interleaving) => {
       const frames: FrameRequestCallback[] = [];
       globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
         frames.push(cb);
@@ -1683,11 +1683,19 @@ describe("MessageTimeline pagination affordances", () => {
             }),
           ),
         );
+        if (interleaving === "pinned camera write") {
+          layout.setContentHeight(2050);
+          await r.rerender(<MessageTimeline events={events} />);
+          await drainFrames(frames);
+          expect(distanceFromBottom(scroller)).toBe(0);
+        }
         for (let step = 0; step < 80; step += 1) {
           await actRun(() => {
             scroller.scrollTop -= 1;
             scroller.dispatchEvent(new Event("scroll"));
-            if (intermediateScrollEnd) scroller.dispatchEvent(new Event("scrollend"));
+            if (interleaving === "intermediate scroll-end") {
+              scroller.dispatchEvent(new Event("scrollend"));
+            }
           });
         }
         expect(scroller.dataset.ogBottomFollow).toBe("false");

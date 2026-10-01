@@ -925,8 +925,9 @@ export function MessageTimeline({
     if (before === next) {
       return;
     }
-    // A camera/anchor write is not a continuation of the reader's gesture.
-    readerIntentStartRef.current = null;
+    // Unpinned camera/anchor writes invalidate return intent. A pinned
+    // pointer gesture still needs its cumulative leave budget across writes.
+    if (!pinnedRef.current || !readerIntentArmRef.current) readerIntentStartRef.current = null;
     programmaticScrollRef.current += 1;
     node.scrollTop = next;
     if (node.scrollTop === before) {
