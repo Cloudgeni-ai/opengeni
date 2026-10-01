@@ -2343,7 +2343,12 @@ function SessionChatPane(props: {
       ),
     [props.events],
   );
-  const { optimisticMessages, retryOptimisticMessage, removeOptimisticMessage } = composer;
+  const {
+    optimisticMessages,
+    retryOptimisticMessage,
+    restoreOptimisticMessage,
+    removeOptimisticMessage,
+  } = composer;
   const failedOptimisticMessageCount = (optimisticMessages ?? []).filter(
     (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
   ).length;
@@ -2365,6 +2370,7 @@ function SessionChatPane(props: {
       {
         optimisticMessages,
         retryOptimisticMessage,
+        restoreOptimisticMessage,
         removeOptimisticMessage,
       },
     );
@@ -2376,6 +2382,7 @@ function SessionChatPane(props: {
     props.queue.snapshot,
     props.timeline,
     retryOptimisticMessage,
+    restoreOptimisticMessage,
   ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const admissionControl = admissionRecheckControl(
