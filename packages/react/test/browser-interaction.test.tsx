@@ -1735,7 +1735,59 @@ describe("BrowserViewer", () => {
     }
   });
 
-  test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
+  test("keeps diagnostic counts unavailable until the tab has an observation", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    let completeObservation!: (value: BrowserObservation) => void;
+    const pendingObservation = new Promise<BrowserObservation>((resolve) => {
+      completeObservation = resolve;
+    });
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => pendingObservation,
+      attachBrowserSession: async () => attachment(currentTarget.id),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    try {
+      await flush(40);
+      const debug = rendered.container.querySelector<HTMLButtonElement>(
+        "button[aria-controls='browser-diagnostics-drawer']",
+      );
+      expect(debug).not.toBeNull();
+      await actRun(() => debug!.click());
+      await flush(10);
+      const summary = rendered.container.querySelector(
+        "section[aria-labelledby='browser-page-title']",
+      );
+      expect(summary).not.toBeNull();
+      const counts = () => [...summary!.querySelectorAll("dd")].map((cell) => cell.textContent);
+      expect(counts()).toEqual(["Unavailable", "Unavailable", "Unavailable", "Unavailable"]);
+
+      await actRun(() => completeObservation(observation(BROWSER_SESSION_ID, currentTarget)));
+      await flush(10);
+      expect(counts()).toEqual(["0", "0", "0", "0"]);
+    } finally {
+      completeObservation(observation(BROWSER_SESSION_ID, currentTarget));
+      await rendered.unmount();
+    }
+  });
+
+  test("opens actionable runtime and tab diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();
     const download = browserDownload();
@@ -1815,6 +1867,15 @@ describe("BrowserViewer", () => {
     await flush(10);
 
     const drawer = rendered.container.querySelector("[aria-label='Browser diagnostics']");
+    expect(drawer?.querySelector("#browser-page-title")?.textContent?.trim()).toBe(
+      "Tab diagnostics",
+    );
+    expect(drawer?.textContent).toContain("Includes earlier pages in this tab.");
+    expect(
+      [...drawer!.querySelectorAll("section[aria-labelledby='browser-page-title'] dd")].map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(["1", "0", "1", "1"]);
     expect(drawer?.textContent).toContain("chromium 151 · headless");
     expect(drawer?.textContent).toContain("opengeni.cdp.v1");
     expect(drawer?.textContent).toContain("Semantic page structure available");
