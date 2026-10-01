@@ -1124,11 +1124,12 @@ export function createAppComposition(deps: AppDependencies): {
               workspaceId,
             })
           ).settings;
-          selections = await resolveCallerWorkspaceModelSelections(deps.db, catalogSettings, {
-            accountId: grant.accountId,
-            workspaceId,
-            subjectId: grant.subjectId,
-          });
+          selections = await resolveCallerWorkspaceModelSelections(
+            deps.db,
+            catalogSettings,
+            { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+            { observeAvailability: true },
+          );
           if (!hasPermission(grant.permissions, "sessions:create")) {
             modelSelectionForbidden = true;
             selections = [];

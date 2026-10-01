@@ -337,6 +337,7 @@ export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
+  options: { observeAvailability?: boolean } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
   const [
@@ -356,7 +357,9 @@ export async function loadWorkspaceModelSelectionInput(
     connectionRestrictionsAndXaiReadiness(db, settings, context),
     getWorkspaceModelPolicy(db, workspaceId),
     workspaceCodexSubscriptionActive(db, settings, workspaceId),
-    loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
+    options.observeAvailability === false
+      ? Promise.resolve({})
+      : loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
     workspaceVercelAiGatewayConnectionActive(db, workspaceId),
     listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
     workspaceOpenRouterConnectionActive(db, workspaceId),
@@ -425,14 +428,21 @@ export async function loadWorkspaceModelSelectionInput(
   };
 }
 
-/** Caller-scoped fresh selection; never use this to re-admit already accepted work. */
+/**
+ * Caller-scoped stable fresh admission; never re-admit already accepted work.
+ * Live discovery is opt-in: its token refresh can mutate connection readiness,
+ * so a health hint must not change the billing rail of an explicit create.
+ */
 export async function resolveCallerWorkspaceModelSelections(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
+  options: { observeAvailability?: boolean } = {},
 ): Promise<WorkspaceModelSelection[]> {
   return resolveWorkspaceModelSelection(
-    await loadWorkspaceModelSelectionInput(db, settings, context),
+    await loadWorkspaceModelSelectionInput(db, settings, context, {
+      observeAvailability: options.observeAvailability === true,
+    }),
   );
 }
 

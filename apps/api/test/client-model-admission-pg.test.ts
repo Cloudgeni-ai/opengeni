@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
 import postgres from "postgres";
 import { z } from "zod";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
@@ -10,6 +11,9 @@ import {
   createDb,
   createWorkspaceProviderCustomModel,
   getModelConnectionAccess,
+  getCodexCredentialStatus,
+  getBillingBalance,
+  encryptEnvironmentValue,
   ensureCodexRotationSettings,
   updateCodexRotationSettings,
   updateModelConnectionAccess,
@@ -87,9 +91,10 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     path: string,
     body?: unknown,
     actor: AccessGrant = grant,
+    method?: "GET" | "POST" | "PUT",
   ): Promise<Response> {
     return app.request(path, {
-      method: body === undefined ? "GET" : "POST",
+      method: method ?? (body === undefined ? "GET" : "POST"),
       headers: {
         authorization: `Bearer ${await signDelegatedAccessToken(SECRET, {
           ...actor,
@@ -285,6 +290,91 @@ test("PG: ready Codex model permissions and workspace policy affect list and cre
   expect((await f.parity(["codex/gpt-6-sol", "gpt-5.6-luna"])).allowedModels).toEqual([
     "gpt-5.6-sol",
   ]);
+}, 180_000);
+
+test("PG: an explicit Codex draft creates with zero credits without refreshing its near-expiry token", async () => {
+  if (!client || !shared) return;
+  const encryptionKey = Buffer.alloc(32, 82);
+  const f = await fixture({
+    usageLimitsMode: "managed",
+    environmentsEncryptionKey: encryptionKey.toString("base64"),
+  });
+  expect((await getBillingBalance(client.db, f.grant.accountId)).balanceMicros).toBe(0);
+  await upsertCodexSubscriptionCredential(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    credentialEncrypted: encryptEnvironmentValue(
+      encryptionKey,
+      JSON.stringify({
+        access_token: "synthetic-access-token",
+        refresh_token: "synthetic-refresh-token",
+        id_token: "synthetic-id-token",
+      }),
+    ),
+    chatgptAccountId: crypto.randomUUID(),
+    scopes: null,
+    planType: "pro",
+    isFedramp: false,
+    expiresAt: new Date(Date.now() + 60_000),
+    lastRefreshAt: new Date(),
+  });
+  await ensureCodexRotationSettings(client.db, f.grant.accountId, f.grant.workspaceId);
+  await updateCodexRotationSettings(client.db, f.grant.workspaceId, { rotationEnabled: true });
+  const refresh = spyOn(codex, "refreshCodexToken").mockRejectedValue(
+    new codex.CodexReloginRequired("Synthetic refresh tokens are not provider credentials"),
+  );
+  const models = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+    ok: false,
+    status: 503,
+    slugs: [],
+  });
+  try {
+    const draft = {
+      expectedRevision: 0,
+      text: "Use the chosen subscription without OpenGeni credits",
+      resources: [],
+      tools: [],
+      toolsProvided: true,
+      model: "codex/gpt-6-sol",
+      modelProvided: true,
+      reasoningEffort: "xhigh",
+      latencyMode: "standard",
+      options: { visibility: "workspace" },
+    };
+    const savedResponse = await f.request(
+      `/v1/workspaces/${f.grant.workspaceId}/new-session-draft`,
+      draft,
+      f.grant,
+      "PUT",
+    );
+    expect(savedResponse.status).toBe(200);
+    const saved = await savedResponse.json();
+    const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+      initialMessage: draft.text,
+      resources: draft.resources,
+      tools: draft.tools,
+      model: draft.model,
+      reasoningEffort: draft.reasoningEffort,
+      latencyMode: draft.latencyMode,
+      visibility: "workspace",
+      expectedNewSessionDraftRevision: saved.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      model: "codex/gpt-6-sol",
+      reasoningEffort: "xhigh",
+    });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(models).not.toHaveBeenCalled();
+    expect(await getCodexCredentialStatus(client.db, f.grant.workspaceId)).toMatchObject({
+      connected: true,
+      status: "active",
+    });
+  } finally {
+    refresh.mockRestore();
+    models.mockRestore();
+  }
 }, 180_000);
 
 test("PG: workspace Claude custom models use the same readiness and model permissions", async () => {
