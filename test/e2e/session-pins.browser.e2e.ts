@@ -748,8 +748,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           .getByRole("radio", { name: "Parent sessions", exact: true })
           .getAttribute("aria-checked"),
       ).toBe("true");
-      await dialog.getByRole("radio", { name: "All sessions", exact: true }).click();
       const matchingSessions = dialog.locator('[aria-label="Matching sessions"]');
+      await matchingSessions
+        .getByText("No matching sessions. Try a shorter phrase or different words.", {
+          exact: true,
+        })
+        .waitFor();
+      expect(
+        await matchingSessions.getByRole("button", { name: /Created grouping child/ }).count(),
+      ).toBe(0);
+      await dialog.getByRole("radio", { name: "All sessions", exact: true }).click();
       await matchingSessions.getByRole("button", { name: /Created grouping child/ }).waitFor();
       expect(await matchingSessions.locator("[data-search-result]").count()).toBe(1);
       // All-session search includes the child as a flat result but never changes
