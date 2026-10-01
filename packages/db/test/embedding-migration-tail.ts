@@ -66,4 +66,6 @@ export const embeddingMigrationTail = [
   // Allowance receipts compile against the withheld Knowledge/embedding and
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
   ...allowanceMigrationTail,
+  // Extends the attachment helper from withheld 0499; replay after it.
+  "0560_archived_session_imports.sql",
 ];

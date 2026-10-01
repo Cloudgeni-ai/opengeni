@@ -10,7 +10,9 @@ import {
   type VariableSet,
 } from "@opengeni/contracts";
 import {
+  assertSessionIsNotImported,
   forkSessionContent,
+  getSessionForSubject,
   getRig,
   getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
@@ -422,6 +424,13 @@ export async function forkManagedHumanSession(
 
   // Validate all requested runtime resources before committing the independent
   // fork so ordinary authorization failures cannot leave an unusable copy.
+  const source = await getSessionForSubject(
+    deps.db,
+    workspaceId,
+    sourceSessionId,
+    authorization.grant.subjectId,
+  );
+  if (source) assertSessionIsNotImported(source);
   const runtimeConfiguration = runtimeSetupRequested ? await resolveRuntimeConfiguration() : null;
   const result = await runTenancyMutation(
     async () =>

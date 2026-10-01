@@ -17,6 +17,7 @@ import { resolveTurnSurface } from "../turn-surface";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
+import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
 
@@ -3913,6 +3914,7 @@ async function acceptSessionUserMessageInFileScope(
     // turn's effective model (a follow-up turn inherits the session's model). A
     // pure read with no side effects.
     const existingSession = await requireSession(db, workspaceId, sessionId);
+    assertSessionIsNotImported(existingSession);
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
       grant,

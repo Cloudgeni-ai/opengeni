@@ -25,6 +25,7 @@ const demoInputs = {
   computer: resolve(__dirname, "computer.html"),
   composerResponsive: resolve(__dirname, "composer-responsive.html"),
   commandUx: resolve(__dirname, "command-ux.html"),
+  sessionHistoryImport: resolve(__dirname, "session-history-import.html"),
   embeddedChat: resolve(__dirname, "embedded-chat.html"),
 };
 

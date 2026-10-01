@@ -4680,6 +4680,13 @@ export const sessions = pgTable(
     // attempt-snapshot boundary.
     policyRole: text("policy_role"),
     admissionBlock: jsonb("admission_block").$type<StoredSessionAdmissionBlock>(),
+    // Immutable timeline-only import identity, never inferred from metadata or
+    // a user's mutable session archive preference.
+    importedArchiveImportId: text("imported_archive_import_id"),
+    importedArchiveImportedAt: timestamp("imported_archive_imported_at", { withTimezone: true }),
+    importedArchiveRequestHash: text("imported_archive_request_hash"),
+    importedArchiveSubjectId: text("imported_archive_subject_id"),
+    importedArchiveNextOffset: integer("imported_archive_next_offset"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -4938,6 +4945,26 @@ export const sessions = pgTable(
     ),
     accountIdentity: uniqueIndex("sessions_id_account_idx").on(table.id, table.accountId),
     workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
+    workspaceImportedArchive: uniqueIndex("sessions_workspace_imported_archive_idx")
+      .on(table.workspaceId, table.importedArchiveImportId)
+      .where(sql`${table.importedArchiveImportId} is not null`),
+    importedArchiveIdentity: check(
+      "sessions_imported_archive_identity_check",
+      sql`
+      (${table.importedArchiveImportId} is null and ${table.importedArchiveImportedAt} is null
+        and ${table.importedArchiveRequestHash} is null and ${table.importedArchiveSubjectId} is null
+        and ${table.importedArchiveNextOffset} is null)
+      or (${table.importedArchiveImportId} is not null and octet_length(${table.importedArchiveImportId}) between 1 and 800
+        and ${table.importedArchiveImportedAt} is not null and ${table.importedArchiveRequestHash} is not null
+        and ${table.importedArchiveRequestHash} ~ '^[0-9a-f]{64}$' and ${table.importedArchiveSubjectId} is not null
+        and ${table.importedArchiveNextOffset} is not null and ${table.importedArchiveNextOffset} >= 0)`,
+    ),
+    importedArchiveInert: check(
+      "sessions_imported_archive_inert_check",
+      sql`
+      ${table.importedArchiveImportId} is null or
+      (${table.status} = 'idle' and ${table.activeTurnId} is null and ${table.temporalWorkflowId} is null and ${table.parentSessionId} is null)`,
+    ),
     workspaceCreated: index("sessions_workspace_created_idx").on(
       table.workspaceId,
       table.createdAt,
@@ -9117,6 +9144,59 @@ export const sessionEventCursors = pgTable(
     ),
     sequenceValid: check("session_event_cursors_sequence_check", sql`${table.lastSequence} >= 0`),
     revisionValid: check("session_event_cursors_revision_check", sql`${table.revision} >= 0`),
+  }),
+);
+
+export const sessionImportBatches = opengeniPrivateSchema.table(
+  "session_import_batches",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    batchId: text("batch_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    requestHash: text("request_hash").notNull(),
+    eventOffset: integer("event_offset").notNull(),
+    eventCount: integer("event_count").notNull(),
+    nextOffset: integer("next_offset").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.sessionId, table.batchId] }),
+    workspaceAccountFk: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSessionFk: foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    batchIdValid: check(
+      "session_import_batches_batch_id_check",
+      sql`octet_length(${table.batchId}) between 1 and 800`,
+    ),
+    requestHashValid: check(
+      "session_import_batches_request_hash_check",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    eventOffsetValid: check(
+      "session_import_batches_event_offset_check",
+      sql`${table.eventOffset} >= 0`,
+    ),
+    eventCountValid: check(
+      "session_import_batches_event_count_check",
+      sql`${table.eventCount} between 1 and 100`,
+    ),
+    nextOffsetValid: check(
+      "session_import_batches_next_offset_check",
+      sql`${table.nextOffset} = ${table.eventOffset} + ${table.eventCount}`,
+    ),
   }),
 );
 

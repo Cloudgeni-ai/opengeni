@@ -61,6 +61,11 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // the production shapes.
     await admin`
       alter table sessions
+      add column imported_archive_import_id text,
+      add column imported_archive_imported_at timestamptz,
+      add column imported_archive_request_hash text,
+      add column imported_archive_subject_id text,
+      add column imported_archive_next_offset integer,
       add column mcp_approval_policies jsonb not null default '{}'::jsonb,
       add column admission_block jsonb,
       add column variable_set_ids jsonb not null default '[]'::jsonb,
@@ -279,6 +284,11 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column timer_pause_revision`;
     await admin`
       alter table sessions
+      drop column imported_archive_import_id,
+      drop column imported_archive_imported_at,
+      drop column imported_archive_request_hash,
+      drop column imported_archive_subject_id,
+      drop column imported_archive_next_offset,
       drop column admission_block,
       drop column variable_set_ids,
       drop column mcp_approval_policies,

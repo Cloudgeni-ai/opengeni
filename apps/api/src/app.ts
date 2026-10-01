@@ -238,6 +238,11 @@ import { registerChannelRoutes } from "./routes/channels";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
+import {
+  archivedSessionImportErrorResponse,
+  isSessionHistoryImportRequest,
+  registerSessionHistoryImportRoutes,
+} from "./routes/session-history-imports";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerUsageAllowanceRoutes } from "./routes/usage-allowances";
@@ -636,7 +641,8 @@ export function createAppComposition(deps: AppDependencies): {
     // streamed body; the generic ceiling would buffer far more first.
     if (
       isClientErrorReportRequest(c.req.method, pathname) ||
-      isAnalyticsConsentReportRequest(c.req.method, pathname)
+      isAnalyticsConsentReportRequest(c.req.method, pathname) ||
+      isSessionHistoryImportRequest(c.req.method, pathname)
     ) {
       await next();
       return;
@@ -1606,6 +1612,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
@@ -1645,6 +1652,14 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   app.onError((rawError, c) => {
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_CORRELATION_HEADER, requestId);
+    if (new URL(c.req.url).pathname.startsWith("/v1/")) {
+      c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    }
+    // Archives remain read-only through the existing Send/Steer/control paths.
+    const importErrorResponse = archivedSessionImportErrorResponse(c, rawError);
+    if (importErrorResponse) return importErrorResponse;
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
     const error =
@@ -1662,11 +1677,6 @@ export function createAppComposition(deps: AppDependencies): {
     const code: ErrorCode = compactionLock
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
-    c.header(OPENGENI_CORRELATION_HEADER, requestId);
-    if (new URL(c.req.url).pathname.startsWith("/v1/")) {
-      c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
-    }
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
@@ -1725,6 +1735,10 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
   // the route performs its own organization API-key authorization.
   if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
+  // Import adapters apply their own exact create/control gates and request-local
+  // RLS in core. Tenant mirrors first resolve the organization-local mapping;
+  // "external" itself is not a native workspace id.
+  if (isSessionHistoryImportRequest(method, pathname)) return true;
   // Organization budget authority is independent of ordinary workspace
   // membership; these routes apply their own exact account/workspace gate.
   if (
@@ -2382,6 +2396,14 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/session-imports$/,
+    label: "/v1/workspaces/:workspaceId/session-imports",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/session-imports\/[^/]+\/events$/,
+    label: "/v1/workspaces/:workspaceId/session-imports/:importId/events",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/session-message-search$/,
     label: "/v1/workspaces/:workspaceId/session-message-search",
   },
@@ -2678,6 +2700,14 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/external$/,
     label: "/v1/workspaces/external",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/session-imports$/,
+    label: "/v1/workspaces/external/:source/:externalId/session-imports",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/session-imports\/[^/]+\/events$/,
+    label: "/v1/workspaces/external/:source/:externalId/session-imports/:importId/events",
   },
   {
     pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/,

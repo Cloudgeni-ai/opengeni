@@ -95,6 +95,15 @@ minimal `firstPartyMcpTools` instead. Removing
 cross-session tools from a shared workspace is defense in depth, not a hard
 tenant boundary.
 
+## Archived session migration
+
+For a move from an embedded/in-process runtime to a standalone deployment, use
+the server-only `@opengeni/sdk/session-history-import` functions, not session
+creation plus synthetic Send/Steer calls. Follow
+[Archived session history import](session-history-import.md) for exact mappings,
+file-reference replacement, idempotency and read-only rendering. Imported events
+are historical facts only; they are never model-facing history or live execution.
+
 ## Automated work
 
 Use the server-side `client.asService(name, context?)` for product jobs, bots,
