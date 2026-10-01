@@ -585,6 +585,10 @@ AS $function$
   )
 $function$;
 
+-- Runtime roles receive EXECUTE explicitly below and through provisionRoles;
+-- restricted roles (artifact dispatcher/materializer) never do.
+REVOKE ALL ON FUNCTION opengeni_private.lifecycle_backfill_read_active() FROM PUBLIC;
+
 -- SELECT-only owner reads of each FORCE-RLS source table while the capability
 -- is active. Restrictive SELECT policies on those tables admit the same
 -- capability, so their existing tenant rules are otherwise unchanged. The
