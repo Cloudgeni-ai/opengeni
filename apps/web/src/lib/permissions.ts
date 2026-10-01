@@ -45,6 +45,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
   "api_keys:manage": "Admin & account",
+  "usage_allowances:manage": "Admin & account",
   "connections:read": "Connections",
   "connections:write": "Connections",
   "capabilities:manage": "Connections",
@@ -166,6 +167,7 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   const notFirstPartyMcp = new Set<string>(["codemode:call"]);
   return buildApiKeyPermissionGroups()
@@ -199,6 +201,7 @@ export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   // Membership itself is the workspace-access boundary. `workspace:read` is
   // the baseline capability that lets an admitted human discover and open the

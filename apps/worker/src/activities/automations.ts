@@ -13,6 +13,7 @@ import {
   recordWorkspaceUsage,
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
+  isDeveloperSetupDelegatedPermissionAllowed,
 } from "@opengeni/core";
 import {
   AutomationAuthorityRevokedError,
@@ -107,6 +108,20 @@ export function createAutomationActivities(
         }
 
         const template = accepted.sessionTemplate;
+        if (
+          template.credentialRestriction === "developer_setup" &&
+          template.firstPartyMcpPermissions.some(
+            (permission) => !isDeveloperSetupDelegatedPermissionAllowed(permission),
+          )
+        ) {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: "credential_restriction_violation",
+          });
+          return { action: "failed", reason: "credential_restriction_violation" };
+        }
         const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
         const catalogSettings =
           requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
@@ -209,7 +224,7 @@ export function createAutomationActivities(
           });
           return { action: "failed", reason: "dispatch_failed" };
         }
-        const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
+        const resolvedTurnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
           modelId: model,
           requestedModelId: template.model,
           modelSource: template.model ? "explicit" : "deployment",
@@ -218,6 +233,12 @@ export function createAutomationActivities(
           latencyMode: "standard",
           latencyModeSource: "deployment",
         });
+        const turnExecutionPolicy = template.credentialRestriction
+          ? {
+              ...resolvedTurnExecutionPolicy,
+              credentialRestriction: template.credentialRestriction,
+            }
+          : resolvedTurnExecutionPolicy;
         const created = await createSession({
           db: service.db,
           bus: service.bus,

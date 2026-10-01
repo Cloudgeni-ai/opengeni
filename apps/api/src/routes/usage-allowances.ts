@@ -78,12 +78,14 @@ export function requireAllowanceAuthority(
     )
       return;
   } else if (operation === "workspace-write") {
-    // Match organization API-key control: full organization wildcard plus the
-    // literal key-management permission. An asUser context carries no key stamp.
+    // Existing full keys retain key-control budget authority. Setup keys use
+    // literal account allowance authority plus the canonical organization-key
+    // workspace stamp; asUser carries neither account scope nor key stamp.
     if (sameOrganizationKey) {
       if (
         sameOrganizationKey.permissions.includes("workspace:admin") &&
-        sameOrganizationKey.permissions.includes("api_keys:manage")
+        (sameOrganizationKey.permissions.includes("api_keys:manage") ||
+          authorization.accountGrant?.permissions.includes("usage_allowances:manage"))
       )
         return;
     } else if (

@@ -25,6 +25,10 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
+import {
+  requireDeveloperSetupDelegatedPermissions,
+  withDeveloperSetupCredentialRestriction,
+} from "../developer-setup-credential-ceiling";
 
 import {
   CLAUDE_CONNECTION_KINDS,
@@ -2219,15 +2223,18 @@ export async function retryFailedSession(
     throw error;
   }
   await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
-  const executionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: model,
-    requestedModelId: request.model ?? null,
-    modelSource: request.model === undefined ? "session" : "explicit",
-    reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
-    reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
-    latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
-    latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
-  });
+  const executionPolicy = withDeveloperSetupCredentialRestriction(
+    resolveTurnExecutionPolicyV1(settings, {
+      modelId: model,
+      requestedModelId: request.model ?? null,
+      modelSource: request.model === undefined ? "session" : "explicit",
+      reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
+      reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
+      latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
+      latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
+    }),
+    { grant, trustedMetadata: [session.metadata, turn?.metadata] },
+  );
   await requireLimit(
     { ...deps, settings },
     {
@@ -3037,30 +3044,33 @@ async function createSessionForRequestInFileScope(
         }
       : null;
   const inheritedFromParent = parentSession !== null;
-  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: model,
-    requestedModelId: payload.model ?? null,
-    modelSource:
-      payload.model === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-    reasoningEffort,
-    reasoningSource:
-      payload.reasoningEffort === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-    latencyMode,
-    latencyModeSource:
-      payload.latencyMode === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-  });
+  const turnExecutionPolicy = withDeveloperSetupCredentialRestriction(
+    resolveTurnExecutionPolicyV1(settings, {
+      modelId: model,
+      requestedModelId: payload.model ?? null,
+      modelSource:
+        payload.model === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+      reasoningEffort,
+      reasoningSource:
+        payload.reasoningEffort === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+      latencyMode,
+      latencyModeSource:
+        payload.latencyMode === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+    }),
+    { grant, authorization, trustedMetadata: [parentSession?.metadata] },
+  );
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
   // grant instead of silently expanding to standalone worker defaults.
@@ -3074,6 +3084,7 @@ async function createSessionForRequestInFileScope(
   const parentFirstPartyMcpPermissions = parentSession
     ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
     : null;
+  requireDeveloperSetupDelegatedPermissions(turnExecutionPolicy, payload.firstPartyMcpPermissions);
   if (
     parentFirstPartyMcpPermissions &&
     payload.firstPartyMcpPermissions?.some(
@@ -3989,15 +4000,18 @@ async function acceptSessionUserMessageInFileScope(
     const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
     const sessionLatencyMode = existingSession.latencyMode;
     const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: effectiveModel,
-      requestedModelId: input.model ?? null,
-      modelSource: input.model == null ? "session" : "explicit",
-      reasoningEffort: effectiveReasoningEffort,
-      reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
-      latencyMode: effectiveLatencyMode,
-      latencyModeSource: input.latencyMode == null ? "session" : "explicit",
-    });
+    const turnExecutionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: effectiveModel,
+        requestedModelId: input.model ?? null,
+        modelSource: input.model == null ? "session" : "explicit",
+        reasoningEffort: effectiveReasoningEffort,
+        reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+        latencyMode: effectiveLatencyMode,
+        latencyModeSource: input.latencyMode == null ? "session" : "explicit",
+      }),
+      { grant, authorization: input.authorization, trustedMetadata: [existingSession.metadata] },
+    );
     if (composerDraftResources) {
       const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
       const unacceptedDraftResource = composerDraftResources.find(

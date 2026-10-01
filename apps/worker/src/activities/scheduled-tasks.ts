@@ -10,6 +10,7 @@ import {
   SessionAgentAccess,
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
+  metadataWithTurnExecutionPolicyV1,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
@@ -128,6 +129,30 @@ type ScheduledTemporalActivityIdentity = {
   workflowExecution?: { workflowId: string; runId: string };
   activityId: string;
 };
+
+export function scheduledTaskRunExecutionPolicy(
+  policy: TurnExecutionPolicyV1,
+  input: DispatchScheduledTaskRunInput,
+  creatorRestriction?: "developer_setup",
+): TurnExecutionPolicyV1 {
+  return creatorRestriction === "developer_setup" ||
+    (input.triggerType !== "scheduled" && input.credentialRestriction === "developer_setup")
+    ? { ...policy, credentialRestriction: "developer_setup" }
+    : policy;
+}
+
+/** Only a creator ceiling is standing; a manual caller ceiling is per-run. */
+export function scheduledSessionExecutionPolicyMetadata(
+  policy: unknown,
+  creatorRestriction?: "developer_setup",
+): Record<string, unknown> {
+  if (policy === undefined || policy === null) return {};
+  const acceptedPolicy = TurnExecutionPolicyV1.parse(policy);
+  return creatorRestriction === "developer_setup" &&
+    acceptedPolicy.credentialRestriction === "developer_setup"
+    ? metadataWithTurnExecutionPolicyV1({}, acceptedPolicy)
+    : {};
+}
 
 export function scheduledTaskRunProducerKey(
   input: DispatchScheduledTaskRunInput,
@@ -1007,23 +1032,28 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             }
           }
         : undefined;
-      const turnExecutionPolicy: TurnExecutionPolicyV1 = resolveTurnExecutionPolicyV1(settings, {
-        modelId: acceptedModel,
-        requestedModelId: generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
-        modelSource: generatedTarget
-          ? task.agentConfig.model
-            ? "explicit"
-            : "deployment"
-          : "session",
-        reasoningEffort: acceptedReasoningEffort,
-        reasoningSource: generatedTarget
-          ? task.agentConfig.reasoningEffort
-            ? "explicit"
-            : "deployment"
-          : "session",
-        latencyMode: acceptedLatencyMode,
-        latencyModeSource: generatedTarget ? "deployment" : "session",
-      });
+      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
+        resolveTurnExecutionPolicyV1(settings, {
+          modelId: acceptedModel,
+          requestedModelId:
+            generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
+          modelSource: generatedTarget
+            ? task.agentConfig.model
+              ? "explicit"
+              : "deployment"
+            : "session",
+          reasoningEffort: acceptedReasoningEffort,
+          reasoningSource: generatedTarget
+            ? task.agentConfig.reasoningEffort
+              ? "explicit"
+              : "deployment"
+            : "session",
+          latencyMode: acceptedLatencyMode,
+          latencyModeSource: generatedTarget ? "deployment" : "session",
+        }),
+        input,
+        creatorPolicy?.credentialRestriction,
+      );
       const deferredEvents: Array<{
         sessionId: string;
         events: Awaited<ReturnType<typeof appendSessionEvents>>;
@@ -1282,6 +1312,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   : {}),
                 metadata: {
                   ...taskMetadata,
+                  ...scheduledSessionExecutionPolicyMetadata(
+                    turnExecutionPolicy,
+                    creatorPolicy?.credentialRestriction,
+                  ),
                   model,
                   reasoningEffort,
                   scheduledTaskId: task.id,
@@ -2237,6 +2271,11 @@ async function recoverBoundScheduledTaskDispatch(input: {
   const generatedSession =
     task.runMode === "new_session_per_run" ||
     (task.runMode === "reusable_session" && task.reusableSessionId === null);
+  // The immutable creator policy determines standing session authority, not
+  // a manual caller's per-run ceiling. Read it for creation and recovery checks.
+  const recoveredCreatorPolicy = generatedSession
+    ? await getScheduledTaskCreatorPolicy(input.db, task.workspaceId, task.id)
+    : null;
   const frozenSlack = input.acceptedExecution.resolvedSlackBotConnection;
   if (frozenSlack) {
     const currentSlack = await requireOpenGeniSlackBotConnection(
@@ -2305,14 +2344,6 @@ async function recoverBoundScheduledTaskDispatch(input: {
     }
     const taskMetadata = { ...task.agentConfig.metadata };
     delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
-    // Tools and permissions were frozen into the accepted execution. The
-    // creator session policy is immutable on the task row (a tombstoned task
-    // still answers), so re-reading it here is deterministic for the same run.
-    const recoveredCreatorPolicy = await getScheduledTaskCreatorPolicy(
-      input.db,
-      task.workspaceId,
-      task.id,
-    );
     const created = await createSessionWithIdempotencyKeyResult(input.db, {
       accountId: task.accountId,
       workspaceId: task.workspaceId,
@@ -2337,6 +2368,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
         : {}),
       metadata: {
         ...taskMetadata,
+        ...scheduledSessionExecutionPolicyMetadata(
+          input.acceptedExecution.turnExecutionPolicy,
+          recoveredCreatorPolicy?.credentialRestriction,
+        ),
         model: input.acceptedExecution.resolvedModel,
         reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
         scheduledTaskId: task.id,
@@ -2469,6 +2504,10 @@ async function recoverBoundScheduledTaskDispatch(input: {
     const expectedMetadata = metadataWithAgentConfigCreateIdentity(
       {
         ...expectedTaskMetadata,
+        ...scheduledSessionExecutionPolicyMetadata(
+          input.acceptedExecution.turnExecutionPolicy,
+          recoveredCreatorPolicy?.credentialRestriction,
+        ),
         model: input.acceptedExecution.resolvedModel,
         reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
         scheduledTaskId: task.id,

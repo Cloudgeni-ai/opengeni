@@ -18,6 +18,12 @@ Use this skill when a customer's product and OpenGeni remain separate systems.
 That is the normal integration shape: the product owns its users and business
 UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 
+For first-time organization and workspace provisioning, start with
+[OpenGeni developer setup](https://docs.opengeni.ai/guides/developer-plugin), then return here to write
+the embedding code. That skills-only workflow uses the coding agent's own
+browser and public REST/SDK, with a scoped Developer setup key; no OpenGeni MCP
+server is required.
+
 Do not confuse two meanings of "skill": this file teaches a customer's coding
 agent how to integrate OpenGeni; session `skills` are runtime capabilities or
 instructions attached to an OpenGeni agent. The former designs the integration.
