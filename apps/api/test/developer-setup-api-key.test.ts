@@ -513,7 +513,7 @@ describe("Developer setup organization API keys", () => {
         (
           await request(
             app,
-            "/v1/billing/portal",
+            ["/v1/billing", "portal"].join("/"),
             "POST",
             {
               accountId,
