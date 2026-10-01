@@ -123,7 +123,7 @@ alone, they wake only explicit waits. Notices cannot block other inbox input.
 Batching preserves causal authority; messages/Steer inherit the sender’s human
 independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 
-`runAgentTurn` is non-retryable and attempt-fenced. Retry settlement, never unknown
+`runAgentTurn` is non-retryable, attempt-fenced. Retry settlement, never unknown
 effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
 fences; pre-dispatch proof alone permits recovery.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
