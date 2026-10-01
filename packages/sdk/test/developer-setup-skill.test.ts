@@ -66,6 +66,25 @@ describe("developer setup skill", () => {
     expectPreservedRequest(CreateSessionRequest, examples[15]);
   });
 
+  test("cleanup distinguishes disabled automations from deleted resources", async () => {
+    const markdown = await readFile(referencePath, "utf8");
+    const cleanup = (markdown.split("## Reruns, failures and cleanup")[1] ?? "").replace(
+      /\s+/g,
+      " ",
+    );
+    expect(cleanup).toContain(
+      "Cleanup **only disposable staging resources this ledger says this run created**.",
+    );
+    expect(cleanup).toContain("Never delete reused resources.");
+    expect(cleanup).toContain('status === "disabled"');
+    expect(cleanup).toContain("`GET .../automations/triggers` / `listTriggers`");
+    expect(cleanup).toContain("`GET .../automations/sources` / `listSources`");
+    expect(cleanup).toContain("Disabled records remain listed.");
+    expect(cleanup).toContain("For resources actually deleted, verify inventory absence");
+    expect(cleanup).toContain("where an exact GET is supported, 404.");
+    expect(cleanup).not.toContain("Verify inventory/GET absence after each removal.");
+  });
+
   test("SDK examples remain callable and typechecked with the actual SDK", () => {
     expect(sdkExamples.productAgent.capabilities).toBe("none");
     for (const example of [
