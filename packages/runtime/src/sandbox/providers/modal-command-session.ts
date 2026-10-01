@@ -10,6 +10,7 @@ import {
   type ProviderCommandPersistence,
   type ProviderCommandSession,
   admittedProviderCommandHandle,
+  ProviderCommandStartOutcomeUnknownError,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
 import { verifyModalMaterializedPath } from "./modal-materialization-verification";
@@ -246,6 +247,16 @@ export function installModalCommandSession(
           exitCode: null,
         });
       }
+    } catch (error) {
+      if (error instanceof ProviderCommandStartOutcomeUnknownError) {
+        const entry = entries.get(handle);
+        if (entry && !sameExecution(entry.command, error.command))
+          throw new Error("Reserved Modal command changed during failed dispatch", {
+            cause: error,
+          });
+        entries.set(handle, entry ?? { command: error.command });
+      }
+      throw error;
     } finally {
       pendingStarts.delete(cancellation);
     }

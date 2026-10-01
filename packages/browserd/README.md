@@ -73,6 +73,16 @@ action count and later error code; this is not evidence of controller loss.
 Re-observe the target before continuing, and do not replay the batch. A definite
 failure on the first action still returns `failed` with its original error code.
 
+Chromium `upload` accepts either a file input or the visible control that opens
+its native file picker. Files remain workspace-staged and selection uses the
+browser's native input/change events. Picker interception lasts only for that
+serialized action, stays within the control's frame, and refuses selection if
+that document changes. A single-file input rejects multiple files; directory
+pickers are unsupported. If a click produces no picker or opens a JavaScript
+dialog, its receipt reports `outcome_unknown`, not controller loss: inspect the
+page and do not replay the click. Lightpanda retains direct file-input uploads;
+attached-browser upload availability still follows the placement capability.
+
 For custom listboxes, `press` with a locator explicitly focuses that element
 before sending the key. After opening a menu, omit the locator to navigate its
 existing focus within the same fenced target, inspect the intended focused

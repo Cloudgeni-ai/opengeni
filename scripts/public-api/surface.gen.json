@@ -2982,6 +2982,18 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/credential-provider/test",
+      "sdk": [
+        "createSessionProxyHandler",
+        "testWorkspaceCredentialProvider"
+      ],
+      "request": [],
+      "response": [
+        "TestWorkspaceCredentialProviderResponse"
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/default-rig",
       "sdk": [
@@ -3679,6 +3691,17 @@
       "request": [],
       "response": [
         "WorkspaceInferenceControlResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/inherited-integrations",
+      "sdk": [
+        "getWorkspaceInheritedIntegrations"
+      ],
+      "request": [],
+      "response": [
+        "WorkspaceInheritedIntegrationsResponse"
       ]
     },
     {
@@ -7412,6 +7435,17 @@
       "request": [],
       "response": [
         "RotateWorkspaceWebhookSecretResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/webhooks/:webhookId/test",
+      "sdk": [
+        "testWorkspaceWebhook"
+      ],
+      "request": [],
+      "response": [
+        "TestWorkspaceWebhookResponse"
       ]
     },
     {
@@ -14304,6 +14338,36 @@
         "$.summary": "string!"
       }
     },
+    "IntegrationEndpointTestResult": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.credentials": "object! null",
+        "$.credentials.authNeeded": "array!",
+        "$.credentials.authNeeded[]": "object",
+        "$.credentials.authNeeded[].message": "string! null",
+        "$.credentials.authNeeded[].providerDomain": "string! null",
+        "$.credentials.authNeeded[].reason": "string!",
+        "$.credentials.environment": "array!",
+        "$.credentials.environment[]": "string",
+        "$.credentials.expiresAt": "string! null",
+        "$.credentials.files": "array!",
+        "$.credentials.files[]": "string",
+        "$.credentials.git": "array!",
+        "$.credentials.git[]": "string",
+        "$.credentials.mcp": "array!",
+        "$.credentials.mcp[]": "string",
+        "$.credentials.status": "enum!=[\"\\\"auth_needed\\\"\",\"\\\"not_applicable\\\"\",\"\\\"ok\\\"\"]",
+        "$.durationMs": "integer!",
+        "$.error": "string! null",
+        "$.ok": "boolean!",
+        "$.request": "string!",
+        "$.responseBody": "string! null",
+        "$.status": "integer! null"
+      }
+    },
     "IntegrationFacetBindingSummary": {
       "io": [
         "output"
@@ -20874,6 +20938,26 @@
         "$.wallTimeSeconds": "number!"
       }
     },
+    "TestWorkspaceCredentialProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.lane": "enum!=[\"\\\"organization\\\"\",\"\\\"workspace\\\"\"]",
+        "$.result": "ref(IntegrationEndpointTestResult)!",
+        "$.url": "string!"
+      }
+    },
+    "TestWorkspaceWebhookResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.result": "ref(IntegrationEndpointTestResult)!"
+      }
+    },
     "TimelineAnnotation": {
       "io": [
         "output"
@@ -22935,6 +23019,25 @@
         "$.wakeCount": "integer!"
       }
     },
+    "WorkspaceInheritedIntegrationsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.credentialProvider": "object! null",
+        "$.credentialProvider.timeoutMs": "integer!",
+        "$.credentialProvider.updatedAt": "string!",
+        "$.credentialProvider.url": "string!",
+        "$.webhooks": "array!",
+        "$.webhooks[]": "object",
+        "$.webhooks[].description": "string! null",
+        "$.webhooks[].eventTypes": "array!",
+        "$.webhooks[].eventTypes[]": "ref(WorkspaceWebhookEventType)",
+        "$.webhooks[].id": "string!",
+        "$.webhooks[].url": "string!"
+      }
+    },
     "WorkspaceInsightsResponse": {
       "io": [
         "output"
@@ -24534,6 +24637,7 @@
       "InstallSkillRequest": "type",
       "IntegrationClientMetadata": "type",
       "IntegrationDefinitionSummary": "type",
+      "IntegrationEndpointTestResult": "type",
       "IntegrationFacetBindingSummary": "type",
       "IntegrationFacetDefinitionSummary": "type",
       "IntegrationFacetKind": "type",
@@ -24730,7 +24834,9 @@
       "OPENGENI_SITE_BRIDGE_REQUEST": "value",
       "OPENGENI_SITE_BRIDGE_RESPONSE": "value",
       "OPENGENI_SITE_BRIDGE_VERSION": "value",
+      "OPENGENI_TEST_REQUEST_NIL_ID": "value",
       "OPENGENI_WEBHOOK_HEADERS": "value",
+      "OPENGENI_WEBHOOK_TEST_EVENT_TYPE": "value",
       "OpenGeniAllowanceExhaustedError": "value",
       "OpenGeniApiContractMismatchError": "value",
       "OpenGeniApiError": "value",
@@ -25183,6 +25289,8 @@
       "TerminalPtyOutputDeltaPayload": "type",
       "TerminalPtyStartedPayload": "type",
       "terminalSocketUrl": "value",
+      "TestWorkspaceCredentialProviderResponse": "type",
+      "TestWorkspaceWebhookResponse": "type",
       "TimelineAnnotation": "type",
       "TimelineAnnotationSource": "type",
       "TimelineAnnotationSourceEventType": "type",
@@ -25351,6 +25459,7 @@
       "WorkspaceGatewayCustomModel": "type",
       "WorkspaceGatewayCustomModelsResponse": "type",
       "WorkspaceInferenceControlResponse": "type",
+      "WorkspaceInheritedIntegrationsResponse": "type",
       "WorkspaceInsightsResponse": "type",
       "WorkspaceInsightsSnapshot": "type",
       "WorkspaceInstructionPolicyActivationEvent": "type",
@@ -25421,6 +25530,7 @@
       "WorkspaceStateGetOptions": "type",
       "WorkspaceStateGovernanceDriftStatus": "type",
       "WorkspaceStateResponse": "type",
+      "WorkspaceTestWebhookEvent": "type",
       "WorkspaceTranscriptionPolicy": "type",
       "WorkspaceTranscriptionTarget": "type",
       "WorkspaceUsageResponse": "type",
@@ -26333,8 +26443,10 @@
       "GetOrganizationCredentialProviderResponse": "type",
       "getOrganizationWebhook": "value",
       "GetWorkspaceCredentialProviderResponse": "type",
+      "getWorkspaceInheritedIntegrations": "value",
       "getWorkspaceWebhook": "value",
       "InitiatingHuman": "type",
+      "IntegrationEndpointTestResult": "type",
       "IntegrationWorkspaceFilter": "type",
       "listOrganizationWebhookDeliveries": "value",
       "ListOrganizationWebhookDeliveriesResponse": "type",
@@ -26345,7 +26457,9 @@
       "OPENGENI_DELIVERY_ID_HEADER": "value",
       "OPENGENI_EVENT_ID_HEADER": "value",
       "OPENGENI_SIGNATURE_HEADER": "value",
+      "OPENGENI_TEST_REQUEST_NIL_ID": "value",
       "OPENGENI_WEBHOOK_HEADERS": "value",
+      "OPENGENI_WEBHOOK_TEST_EVENT_TYPE": "value",
       "OpenGeniSignatureError": "value",
       "OrganizationCredentialProvider": "type",
       "OrganizationWebhook": "type",
@@ -26366,6 +26480,10 @@
       "RotateWorkspaceWebhookSecretResponse": "type",
       "SessionWorkspaceWebhookEvent": "type",
       "signOpenGeniPayload": "value",
+      "testWorkspaceCredentialProvider": "value",
+      "TestWorkspaceCredentialProviderResponse": "type",
+      "testWorkspaceWebhook": "value",
+      "TestWorkspaceWebhookResponse": "type",
       "updateOrganizationWebhook": "value",
       "UpdateOrganizationWebhookRequest": "type",
       "UpdateWorkspaceWebhookRequest": "type",
@@ -26374,7 +26492,9 @@
       "verifyWebhookEvent": "value",
       "WORKSPACE_WEBHOOK_EVENT_TYPES": "value",
       "WorkspaceCredentialProvider": "type",
+      "WorkspaceInheritedIntegrationsResponse": "type",
       "WorkspaceSandboxImages": "type",
+      "WorkspaceTestWebhookEvent": "type",
       "WorkspaceUsageWebhookEvent": "type",
       "WorkspaceWebhook": "type",
       "WorkspaceWebhookDelivery": "type",

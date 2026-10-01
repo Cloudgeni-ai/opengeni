@@ -11,6 +11,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { Sandbox } from "modal";
 import {
   MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
@@ -153,6 +155,62 @@ function wire() {
   return new ModalCommandRouterWire({ url: endpoint, jwt: "test-token" }, certificate);
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
+
+test("both pinned SDK distributions dispatch ambiguous Start once without transient replay", async () => {
+  const sdkServer = new Server();
+  let calls = 0;
+  sdkServer.addService(
+    { start: definition("TaskExecStart", "Start", "Empty") } as ServiceDefinition,
+    {
+      start(_call: unknown, callback: (error: unknown) => void) {
+        calls++;
+        callback({
+          code: status.UNAVAILABLE,
+          details:
+            "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443",
+        });
+      },
+    },
+  );
+  const port = await new Promise<number>((resolve, reject) =>
+    sdkServer.bindAsync("127.0.0.1:0", ServerCredentials.createInsecure(), (error, boundPort) =>
+      error ? reject(error) : resolve(boundPort),
+    ),
+  );
+  const cjs = createRequire(import.meta.url)("modal") as { Sandbox: typeof Sandbox };
+  try {
+    for (const SandboxClass of [Sandbox, cjs.Sandbox]) {
+      const sdk = new SandboxClass(
+        {
+          profile: { serverUrl: "http://localhost" },
+          logger: { debug: () => {}, warn: () => {} },
+          cpClient: {
+            taskGetCommandRouterAccess: async () => ({
+              url: `https://127.0.0.1:${port}`,
+              jwt: "test-token",
+            }),
+          },
+        } as never,
+        "sb-sdk-test",
+        { taskId: "task-test" },
+      );
+      const before = calls;
+      try {
+        const error = await sdk.exec(["true"]).catch((failure) => failure);
+        expect(error).toMatchObject({
+          name: "ClientError",
+          path: `/${service}/TaskExecStart`,
+          code: status.UNAVAILABLE,
+        });
+        expect(calls - before).toBe(1);
+      } finally {
+        sdk.detach();
+      }
+    }
+  } finally {
+    sdkServer.forceShutdown();
+  }
+});
 
 test("real no-port DNS target never dispatches Start; the client readiness gate proves it", async () => {
   const host = "task-notarealtask2707.w.modal.host";

@@ -329,6 +329,12 @@ describe("web bundle budget policy", () => {
     expect(wholeKibEnvelope(713_634, 1.5 * KIB) - 713_634).toBeGreaterThanOrEqual(1.5 * KIB);
   });
 
+  test("bounds the organization Models page session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(2_533_407, 1.5 * kib)");
+    expect(wholeKibEnvelope(2_533_407, 1.5 * KIB) - 2_533_407).toBeGreaterThanOrEqual(1.5 * KIB);
+  });
+
   test("keeps usage allowance pages lazy without a session-graph envelope", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     // The usage UI fits the existing caps: the session graph carries only the
@@ -344,6 +350,5 @@ describe("web bundle budget policy", () => {
     // direct workspace and session loads import.
     expect(vite).toContain('name: "workspace-chrome"');
     expect(vite).toContain("default-sandbox-environment-row");
-    expect(vite).toContain("workspace-developer-settings");
   });
 });

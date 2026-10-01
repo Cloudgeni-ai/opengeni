@@ -81,6 +81,17 @@ export class ModalCommandStartPreDispatchUnavailableError extends Error {
   }
 }
 
+/** Local cancellation/closure before Start dispatch. This permits exact
+ * never-started reservation settlement, NOT another launch or turn recovery. */
+export class ModalCommandStartNotDispatchedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Modal command Start was never dispatched", {
+      cause,
+    });
+    this.name = "ModalCommandStartNotDispatchedError";
+  }
+}
+
 export type ModalRouterIdentity = { taskId: string; execId: string };
 export type ModalRouterAccess = { url: string; jwt: string };
 export type ModalRouterStart = ModalRouterIdentity & {
@@ -170,12 +181,18 @@ export class ModalCommandRouterWire {
   }
 
   async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
-    if (this.closed) throw new Error("Modal command router is closed");
     try {
+      if (this.closed) throw new Error("Modal command router is closed");
       await ModalCommandStartPreDispatchUnavailableError.ensureReady(this.client, signal);
+      signal?.throwIfAborted();
+      if (this.closed) throw new Error("Modal command router is closed");
     } catch (error) {
-      if (this.closed) throw new Error("Modal command router is closed", { cause: error });
-      throw error;
+      if (this.closed)
+        throw new ModalCommandStartNotDispatchedError(
+          new Error("Modal command router is closed", { cause: error }),
+        );
+      if (error instanceof ModalCommandStartPreDispatchUnavailableError) throw error;
+      throw new ModalCommandStartNotDispatchedError(error);
     }
     try {
       await this.unary(

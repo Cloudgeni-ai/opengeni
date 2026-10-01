@@ -123,9 +123,9 @@ alone, they wake only explicit waits. Notices cannot block other inbox input.
 Batching preserves causal authority; messages/Steer inherit the sender’s human
 independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 
-`runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
-operations have external effects. Recovery is explicit and attempt-fenced.
-Provider work stays outside retries; retry only idempotent settlement.
+`runAgentTurn` is non-retryable and attempt-fenced. Retry settlement, never unknown
+effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
+fences; pre-dispatch proof alone permits recovery.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`

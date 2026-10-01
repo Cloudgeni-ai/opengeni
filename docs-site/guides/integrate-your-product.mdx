@@ -71,6 +71,8 @@ export async function onboard(tenant: Tenant, user: User, operationId: string) {
 
 These permissions cover the conversation: create, read, and stream sessions, send and steer messages, answer pending decisions, and attach files. Drop the `files:*` permissions if you do not offer attachments. These are organization workspaces, not Personal workspaces. See [external-user onboarding](/reference/authentication#external-user-onboarding).
 
+To hear when work finishes without polling, or to hand each run short-lived credentials from your backend, register one webhook and one credential provider for all your customers' workspaces: see [Webhooks and credentials](/guides/webhooks-and-credentials).
+
 ## Create sessions on your server
 
 Your server decides how each session is configured. Create it as the user, with an explicit tool selection and a stable idempotency key so retries return the same session:

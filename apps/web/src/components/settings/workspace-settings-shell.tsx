@@ -26,6 +26,7 @@ import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner
 function isSubPage(section: WorkspaceSettingsSection, search: Record<string, unknown>): boolean {
   if (section === "api-keys") return Boolean(search.key);
   if (section === "access") return Boolean(search.view);
+  if (section === "developer") return Boolean(search.view || search.webhook);
   return false;
 }
 

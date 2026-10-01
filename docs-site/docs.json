@@ -51,6 +51,7 @@
           "guides/self-host",
           "guides/connect-a-machine",
           "guides/integrate-your-product",
+          "guides/webhooks-and-credentials",
           "guides/usage-allowances"
         ]
       },

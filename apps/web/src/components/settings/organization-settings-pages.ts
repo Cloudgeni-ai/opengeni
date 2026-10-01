@@ -73,7 +73,7 @@ export function organizationSettingsDescription(
     case "billing":
       return "Credits, plan and usage by workspace.";
     case "developer":
-      return "Organization API keys and the integration guide.";
+      return "API keys, webhooks and a credential provider for products built on Opengeni.";
     case "security":
       return "Private chats, how long data is kept, and recovery.";
   }
