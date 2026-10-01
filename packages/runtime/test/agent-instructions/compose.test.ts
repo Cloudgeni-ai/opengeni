@@ -112,6 +112,20 @@ describe("modular composer: module selection (AC12)", () => {
     for (const marker of Object.values(MARKERS)) expect(result.composed).toMatch(marker);
   });
 
+  test("goal completion retains upstream final-answer guidance only when goals are enabled", () => {
+    const enabled = compose(allAgentCapabilities(), NO_RESOURCES).composed;
+    const disabled = compose({ ...allAgentCapabilities(), goals: false }, NO_RESOURCES).composed;
+    for (const sentence of [
+      "Goal completion records short ledger proof, not the user-facing deliverable.",
+      "After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.",
+      "Never use evidence as the final reply.",
+      "A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
+    ]) {
+      expect(enabled).toContain(sentence);
+      expect(disabled).not.toContain(sentence);
+    }
+  });
+
   const capabilityCases: Array<[AgentCapabilityId, keyof typeof MARKERS]> = [
     ["goals", "goals"],
     ["knowledge", "knowledge"],

@@ -6,6 +6,13 @@ composition (`operational-instructions.ts` + the persona template + CORE in
 `../index.ts`) byte for byte; `test/agent-instructions/legacy-prompt-lock.test.ts`
 pins those bytes.
 
+The legacy locks track the reviewed upstream CORE. After main's #3053 added
+the four goal-completion handoff sentences, the locks and worker request hashes
+were refreshed against main `709eef238d523a892b54e43304d4e1fdaa393eba`.
+All fourteen omitted/null legacy cases retain that main composition and layer
+order exactly. The modular goals module retains those sentences verbatim too;
+they are not intentional removals or modular-only additions.
+
 ## Authoring rule
 
 With `capabilities: "all"`, renderer `opengeni`, and every resource present
