@@ -1756,7 +1756,8 @@ function BrowserProfileMenu(props: {
         ) : null}
         {canSave ? (
           <p className="mt-2 text-[10px] leading-4 text-og-fg-subtle">
-            Saving briefly restarts this browser. Other open browsers are unchanged.
+            Saving restarts this browser. Save unfinished work on its pages first; unsaved form
+            entries may be lost. Other open browsers are unchanged.
           </p>
         ) : null}
       </div>

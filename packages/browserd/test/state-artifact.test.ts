@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createCipheriv, createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
@@ -14,6 +14,45 @@ const key = Buffer.alloc(32, 0x2a);
 const aad = Buffer.from("browser-state:test-workspace:test-object", "utf8");
 
 describe("encrypted browser profile artifacts", () => {
+  test("omits the Mac runtime version symlink only at the profile root", async () => {
+    await withDirectory(async (directory) => {
+      const profile = join(directory, "profile");
+      const artifact = join(directory, "profile.ogbs");
+      const restored = join(directory, "restored");
+      const nested = join(profile, "Default", "RunningChromeVersion");
+      await mkdir(join(profile, "Default"), { recursive: true });
+      const outside = join(directory, "outside");
+      await writeFile(outside, "must not be archived");
+      await symlink(outside, join(profile, "RunningChromeVersion"));
+      await writeFile(nested, "site-owned state");
+      const input = {
+        profileDirectory: profile,
+        artifactPath: artifact,
+        dataKey: key,
+        aad,
+        manifest: manifest(),
+      };
+      const captured = await captureEncryptedBrowserProfile(input);
+      expect(captured.fileCount).toBe(1);
+      await restoreEncryptedBrowserProfile({
+        artifactPath: artifact,
+        outputProfileDirectory: restored,
+        dataKey: key,
+        aad,
+        expectedArtifactDigest: captured.artifactDigest,
+        expectedContentDigest: captured.contentDigest,
+        expectedSizeBytes: captured.sizeBytes,
+      });
+      expect(await readdir(restored)).not.toContain("RunningChromeVersion");
+      expect(await readFile(join(restored, "Default", "RunningChromeVersion"), "utf8")).toBe(
+        "site-owned state",
+      );
+      await rm(nested);
+      await symlink(outside, nested);
+      await expectRejected(captureEncryptedBrowserProfile(input), "unsupported symbolic link");
+    });
+  });
+
   test("round-trips a bounded profile without runtime locks or disposable caches", async () => {
     await withDirectory(async (directory) => {
       const profile = join(directory, "profile");
