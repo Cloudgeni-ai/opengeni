@@ -3539,6 +3539,7 @@ async function renderViewerInputFixture(
   ) => Promise<BrowserActionReceipt>,
   fencedInputBatches = false,
   focusedInputObservations = false,
+  observeInput?: (current: BrowserObservation) => Promise<BrowserObservation>,
 ) {
   const current = browserSession();
   let currentTarget = target();
@@ -3558,7 +3559,10 @@ async function renderViewerInputFixture(
       controllerGeneration: "controller-1",
       targets: [currentTarget, secondTarget],
     }),
-    observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+    observeBrowserTarget: async () =>
+      observeInput
+        ? await observeInput(observation(BROWSER_SESSION_ID, currentTarget))
+        : observation(BROWSER_SESSION_ID, currentTarget),
     attachBrowserSession: async () => ({
       ...attachment(currentTarget.id),
       ...(fencedInputBatches ? { fencedInputBatches: true as const } : {}),
@@ -3888,6 +3892,7 @@ for (const negotiated of [false, true]) {
     );
     try {
       await fixture.frame(1);
+      expect(fixture.rendered.container.textContent?.includes("Choose option")).toBe(!negotiated);
       await clickFixtureCanvas(fixture);
       expect(fixture.actions[0]?.observationMode).toBe(negotiated ? "input" : "none");
       const panel = fixture.rendered.container.querySelector(
@@ -3905,6 +3910,7 @@ for (const negotiated of [false, true]) {
         });
         expect(fixture.rendered.container.querySelector("section")).toBeNull();
         expect(document.activeElement).toBe(fixture.keyboard);
+        expect(fixture.rendered.container.textContent?.includes("Choose option")).toBe(false);
       }
     } finally {
       await fixture.rendered.unmount();
@@ -3912,6 +3918,71 @@ for (const negotiated of [false, true]) {
     }
   });
 }
+
+for (const negotiated of [false, true]) {
+  test(`keyboard Alt+Down opens native options with legacy or current controller (${negotiated})`, async () => {
+    const canvas = mockBrowserCanvas();
+    const fixture = await renderViewerInputFixture(
+      async (request, view) => ({
+        ...receipt(view, request.operationId),
+        observation: null,
+      }),
+      false,
+      negotiated,
+      async (view) => nativeSelectObservation(view),
+    );
+    try {
+      await fixture.frame(1);
+      await actRun(() =>
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowDown", altKey: true, bubbles: true }),
+        ),
+      );
+      await flush();
+      expect(fixture.actions[0]).toMatchObject({
+        action: { type: "press", key: "Alt+ArrowDown" },
+        observationMode: "none",
+      });
+      const panel = fixture.rendered.container.querySelector(
+        'section[aria-label="Page selection options"]',
+      );
+      expect(panel?.textContent).toContain("High");
+      expect(fixture.rendered.container.textContent?.includes("Choose option")).toBe(!negotiated);
+      await actRun(() =>
+        panel!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+      );
+      await flush();
+      expect(
+        fixture.rendered.container.querySelector('section[aria-label="Page selection options"]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(fixture.keyboard);
+      expect(fixture.actions).toHaveLength(1);
+    } finally {
+      await fixture.rendered.unmount();
+      canvas.restore();
+    }
+  });
+}
+
+test("ordinary page input does not show page selection controls", async () => {
+  const canvas = mockBrowserCanvas();
+  const fixture = await renderViewerInputFixture(
+    async (request, view) => receipt(view, request.operationId),
+    false,
+    true,
+  );
+  try {
+    await fixture.frame(1);
+    await clickFixtureCanvas(fixture);
+    expect(fixture.rendered.container.textContent?.includes("Choose option")).toBe(false);
+    expect(
+      fixture.rendered.container.querySelector('section[aria-label="Page selection options"]'),
+    ).toBeNull();
+  } finally {
+    await fixture.rendered.unmount();
+    canvas.restore();
+  }
+});
 
 test("late dropdown metadata cannot reopen after newer canvas input", async () => {
   const canvas = mockBrowserCanvas();

@@ -1948,6 +1948,7 @@ function BrowserViewport(props: {
     controllerGeneration: string;
     targetId: string;
     fencedInputBatches?: true | undefined;
+    focusedInputObservations?: true | undefined;
     expiresAt: string;
   } | null;
   activityLabel?: string | undefined;
@@ -2000,6 +2001,7 @@ function BrowserViewport(props: {
   } | null>(null);
   const actionRef = useRef(props.onAction);
   const readClipboardRef = useRef(props.onReadClipboard);
+  const observeInputRef = useRef(props.onObserveForInput);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   const actionQueueEpochRef = useRef(0);
@@ -2016,6 +2018,7 @@ function BrowserViewport(props: {
   const mountedRef = useRef(true);
   actionRef.current = props.onAction;
   readClipboardRef.current = props.onReadClipboard;
+  observeInputRef.current = props.onObserveForInput;
   errorRef.current = props.onError;
 
   const clearBufferedInput = useCallback(() => {
@@ -2192,8 +2195,23 @@ function BrowserViewport(props: {
           // frame from that render even when its input fence contains no bytes.
           const receipt = await actionRef.current(dispatchedAction, frame);
           if (!mountedRef.current || epoch !== actionQueueEpochRef.current) return;
-          if (selectAnchor && receipt.observation && inputSequence === inputSequenceRef.current) {
-            setSelectPopup({ observation: receipt.observation, anchor: selectAnchor });
+          // Alt+Down explicitly opens a native dropdown from the keyboard.
+          // Existing controllers return focused-input metadata for clicks only,
+          // so use the ordinary authorized read for this explicit gesture.
+          const keyboardSelect =
+            dispatchedAction.type === "press" && dispatchedAction.key === "Alt+ArrowDown";
+          if ((selectAnchor || keyboardSelect) && inputSequence === inputSequenceRef.current) {
+            const observation = keyboardSelect
+              ? await observeInputRef.current()
+              : receipt.observation;
+            if (
+              mountedRef.current &&
+              epoch === actionQueueEpochRef.current &&
+              inputSequence === inputSequenceRef.current &&
+              observation
+            ) {
+              setSelectPopup({ observation, anchor: selectAnchor ?? null });
+            }
           }
           await after?.(receipt);
         })
@@ -2486,6 +2504,7 @@ function BrowserViewport(props: {
         onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
         aria-label="Browser keyboard input"
+        aria-keyshortcuts="Alt+ArrowDown"
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
@@ -2505,6 +2524,7 @@ function BrowserViewport(props: {
       ) : null}
       {showCanvas ? (
         <BrowserSelectControl
+          manualFallback={props.inputBatchAttachment?.focusedInputObservations !== true}
           activation={selectPopup}
           onDismiss={() => inputRef.current?.focus({ preventScroll: true })}
           observe={async () => {

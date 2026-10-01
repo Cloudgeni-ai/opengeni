@@ -56,6 +56,8 @@ function focusedSelect(
 
 /** Human fallback for native popup windows missing from Chromium page frames. */
 export function BrowserSelectControl(props: {
+  /** Older controllers need an explicit read to discover native popup options. */
+  manualFallback?: boolean;
   activation?: {
     observation: BrowserObservation | null;
     anchor: { x: number; y: number } | null;
@@ -186,6 +188,7 @@ export function BrowserSelectControl(props: {
       if (current === request.current) setBusy(false);
     }
   };
+  if (props.manualFallback === false && !open) return null;
   return (
     <div
       ref={popupRef}
@@ -199,7 +202,7 @@ export function BrowserSelectControl(props: {
           : { bottom: 12, left: 12 }
       }
     >
-      {!anchor || !open || error ? (
+      {(props.manualFallback !== false && (!anchor || !open)) || error ? (
         <button
           type="button"
           className="rounded-og-sm border border-og-border bg-og-bg px-2 py-1 text-og-fg"
