@@ -5,6 +5,12 @@ Normal preparation shows the MIT-licensed `thinking-orbs` React component (`sear
 randomly selected every five seconds. After 30 seconds, factual waiting copy
 replaces the phrases. Failure and cancellation stop the animation; actual
 reasoning/tool activity replaces it. Reduced-motion preferences disable animation.
+Once the model request is dispatched, the same indicator reads “Waiting for a
+response…” and later “Still waiting for a response…” rather than implying setup
+is still running. This transition uses the recorded provider request phase,
+preserves the existing elapsed time and orb, and does not claim model progress.
+The waiting-state disclosure reads “Show details”. Explicit host phrase/message
+overrides still apply in both states.
 
 Startup phase events and their projection remain unchanged. The Debug inspector's
 Startup tab displays recorded durations, including overlapping phases. Its
@@ -67,9 +73,10 @@ For an entirely different visual, supply `genieLoading.render`:
 />
 ```
 
-The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optionally
-keep the diagnostics affordance. The SDK still owns loading visibility and exit
-transitions. Returning `null` hides the visual.
+The renderer receives `startedAt`, `phase` (`preparing` or `waiting`),
+`detailsOpen`, and `onShowDetails` to optionally keep the diagnostics affordance.
+The SDK still owns loading visibility and exit transitions. Returning `null`
+hides the visual.
 
 ## Readable turns (`turnSummary.rolling`)
 
