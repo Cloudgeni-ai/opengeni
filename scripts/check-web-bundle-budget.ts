@@ -482,6 +482,10 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Main after #3071 (organization Models page) and #3039: Linux/x64 CI
+    // measures 2,533,407 raw, 31 bytes over the previous envelope. Record the
+    // measurement with the established 1.5 KiB allowance; other caps unchanged.
+    wholeKibEnvelope(2_533_407, 1.5 * kib),
     // Usage allowances: typed allowance refusal rendering in the session timeline
     // plus usage event types in shared contracts, on top of main f874217f5
     // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
