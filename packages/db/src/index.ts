@@ -33350,7 +33350,7 @@ export type SessionCreateInput = {
   /** Freezes a new root session's code_search decision; omitted uses the boot-installed policy. */
   codeSearchDeploymentPolicy?: CodeSearchDeploymentPolicy;
   /**
-   * Frozen agent configuration (migration 0551). Omitted or null writes a
+   * Frozen agent configuration (migration 0558). Omitted or null writes a
    * legacy session. When provided it also participates in keyed-create replay.
    */
   agentConfig?: ResolvedAgentConfig | null;
@@ -84316,7 +84316,7 @@ type LockedSessionUpdateResult = {
     resources?: ResourceRef[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
-    /** Agent configuration (migration 0551); written with the tool-policy CAS. */
+    /** Agent configuration (migration 0558); written with the tool-policy CAS. */
     agentConfig?: ResolvedAgentConfig | null;
     /** Session instructions (the `agent.instructions` alias). */
     instructions?: string | null;

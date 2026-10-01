@@ -122,8 +122,8 @@ config:
   # Keep false for the image rollout, then flip true only after API, worker, and
   # web replicas all understand the host authority discriminator.
   OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
-  # Agent configuration (sessions.agent_config, migration 0551). Readers first:
-  # roll every worker onto the 0551-aware image with both switches off, then
+  # Agent configuration (sessions.agent_config, migration 0558). Readers first:
+  # roll every worker onto the 0558-aware image with both switches off, then
   # set ADMISSION to "true" so the API accepts `agent` inputs (and PUT
   # .../agent, workspace defaults, scheduled/automation `agent`). DEFAULT makes
   # new top-level sessions that omit `agent` resolve { capabilities: "all" }.

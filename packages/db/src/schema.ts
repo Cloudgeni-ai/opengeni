@@ -4912,7 +4912,7 @@ export const sessions = pgTable(
     // Frozen at create (migration 0520): whether the optional Jev-backed
     // code_search tool is offered. NULL, as on every older row, means off.
     codeSearchEnabled: boolean("code_search_enabled"),
-    // Frozen agent configuration (migration 0551); NULL means a legacy
+    // Frozen agent configuration (migration 0558); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

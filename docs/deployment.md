@@ -1322,8 +1322,8 @@ inheritance, and workers consume them regardless of their local switch value;
 the switch gates only new external admission and static configuration.
 
 Agent configuration (`sessions.agent_config`, rolling migration
-`0551_session_agent_config.sql`) has two switches, both `false` in config and
-Helm. Deploy the 0551-aware API, control worker, and turn worker everywhere
+`0558_session_agent_config.sql`) has two switches, both `false` in config and
+Helm. Deploy the 0558-aware API, control worker, and turn worker everywhere
 with both off: every session keeps a NULL configuration and byte-identical
 legacy behavior, and an old worker reading a new row ignores the column. Then
 set `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true` to admit `agent` on session
