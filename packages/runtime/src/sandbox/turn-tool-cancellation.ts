@@ -5,7 +5,10 @@ import {
   parseExecBannerExitCode,
   parseExecBannerSessionId,
 } from "./exec-banner";
-import { RoutingMutationOutcomeUnknownError } from "./routing/routing-session";
+import {
+  RoutingMutationOutcomeUnknownError,
+  renderRoutingMutationOutcomeUnknownToolResult,
+} from "./routing/routing-session";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -633,6 +636,8 @@ export function renderDirectToolFault(error: unknown, retainedProcessSessionId?:
   } catch {
     // A hostile error Proxy must not replace the original safe fault renderer.
   }
+  if (error instanceof RoutingMutationOutcomeUnknownError)
+    return renderRoutingMutationOutcomeUnknownToolResult(error);
   const details = error instanceof Error ? error.toString() : String(error);
   return `An error occurred while running the tool. Please try again. Error: ${details}`;
 }
@@ -1226,6 +1231,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 });
               }
               pendingStart?.settle();
+              if (error instanceof RoutingMutationOutcomeUnknownError)
+                return renderRoutingMutationOutcomeUnknownToolResult(error);
               throw error;
             } finally {
               remoteExec?.settle();
