@@ -54,12 +54,15 @@ function manifest(
   return { name, version, type: "module", exports: { ".": "./index.js" }, dependencies };
 }
 
-async function sourceFor(packed: PackedCandidate) {
+async function sourceFor(
+  packed: PackedCandidate,
+  tarball = "https://registry.npmjs.org/fixture.tgz",
+) {
   const bytes = await readFile(packed.tarball);
   const published: RegistryManifest = {
     ...packed.manifest,
     dist: {
-      tarball: "https://registry.npmjs.org/fixture.tgz",
+      tarball,
       integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
     },
   };
@@ -141,6 +144,69 @@ test("legitimate new Connect and React versions install by declared ranges and p
     }
   });
 });
+
+for (const hasExport of [false, true]) {
+  test(`compatible new Connect ${hasExport ? "retains" : "removes"} the required export while minimum retains the published floor`, async () => {
+    await fixture(async (root) => {
+      const old = await pack(root, "registry", manifest("@opengeni/connect", "0.3.0"), closed);
+      const connect = await pack(
+        root,
+        "connect",
+        manifest("@opengeni/connect", "0.3.1"),
+        hasExport ? closed : timeout,
+      );
+      const react = await pack(
+        root,
+        "react",
+        manifest("@opengeni/react", "7.5.0", { "@opengeni/connect": "^0.3.0" }),
+        importer,
+      );
+      const candidates = new Map([
+        [connect.manifest.name, connect],
+        [react.manifest.name, react],
+      ]);
+      const bytes = await readFile(old.tarball);
+      const published = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () => new Response(bytes),
+      });
+      let registry: Awaited<ReturnType<typeof effectiveRegistry>> | undefined;
+      try {
+        const source = await sourceFor(old, `${published.url}fixture.tgz`);
+        registry = await effectiveRegistry(
+          candidates,
+          source,
+          root,
+          new Set(["@opengeni/connect@0.3.1", "@opengeni/react@7.5.0"]),
+        );
+        const proof = proveEffectiveConsumers(candidates, profiles, registry, root);
+        if (hasExport) await proof;
+        else {
+          await expect(proof).rejects.toThrow(
+            /@opengeni\/react resolved:[\s\S]*ConnectPopupClosedError/u,
+          );
+          await expect(proof).rejects.not.toThrow("@opengeni/react minimum:");
+        }
+        expect(registry.metadata.get("@opengeni/connect")!["dist-tags"].latest).toBe("0.3.1");
+        expect((await source.metadata("@opengeni/connect"))["dist-tags"].latest).toBe("0.3.0");
+        for (const [lane, version] of [
+          ["resolved", "0.3.1"],
+          ["minimum", "0.3.0"],
+        ] as const) {
+          const installed = join(root, `_opengeni_react-${lane}`, "node_modules/@opengeni/react");
+          const dependency = JSON.parse(
+            await readFile(Bun.resolveSync("@opengeni/connect/package.json", installed), "utf8"),
+          ) as SmokeManifest;
+          expect(dependency.version).toBe(version);
+        }
+      } finally {
+        registry?.stop();
+        published.stop(true);
+      }
+    });
+  });
+}
 
 test("new dependency candidates must belong to the requested publication set when supplied", async () => {
   await fixture(async (root) => {

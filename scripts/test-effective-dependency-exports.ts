@@ -170,6 +170,9 @@ export async function effectiveRegistry(
           integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
         },
       };
+      // Stable publication makes a genuinely new intended version latest. Bun
+      // prefers a compatible latest tag, so leaving npm's old tag can hide it.
+      packument["dist-tags"].latest = candidate.manifest.version;
       process.stdout.write(
         `[effective-exports] ${name}@${candidate.manifest.version}: new release candidate\n`,
       );
