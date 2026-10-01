@@ -33,7 +33,7 @@
 
 ---
 
-**Opengeni is open-source infrastructure for adding AI agents to your product.** Your product keeps its users, data, and UI. Opengeni runs the agent behind them: streaming sessions that survive reloads and restarts, a sandbox to run code in, your APIs and MCP servers called as the signed-in user, memory across conversations, and a separate workspace for every customer. Drop the React conversation into your app and restyle it with CSS variables, or drive everything from the TypeScript SDK and HTTP API. Use the managed cloud at [app.opengeni.ai](https://app.opengeni.ai) or self-host the same Apache-2.0 code.
+**Opengeni is open-source infrastructure for adding AI agents to your product.** Your product keeps its users, data, and UI. Opengeni runs the agent behind them: streaming sessions that survive reloads and restarts, a sandbox to run code in, your MCP servers called as the signed-in user and your APIs through OpenAPI, memory across conversations, and a separate workspace for every customer. Drop the React conversation into your app and restyle it with CSS variables, or drive everything from the TypeScript SDK and HTTP API. Use the managed cloud at [app.opengeni.ai](https://app.opengeni.ai) or self-host the same Apache-2.0 code.
 
 **Who it's for:** teams shipping an agent inside a SaaS or internal product, such as a support agent, an analyst, or an operations or coding agent, who would rather configure that agent than build and run the platform underneath it. The same platform is also a ready-to-use agent workspace for your own team in the browser. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
 
@@ -41,7 +41,7 @@
 
 1. **Your server** mounts one route with `createSessionProxyHandler` from `@opengeni/sdk`. It runs your existing auth, maps each customer to an Opengeni workspace, and keeps your API key on the server.
 2. **Your frontend** renders `OpenGeniChat` from `@opengeni/react`: the user's chats and a conversation with streaming replies, tool activity, attachments, and questions, styled with your colors, fonts, and corner radii.
-3. **Opengeni** runs every session: the model loop, calls to your MCP server or OpenAPI-described API with a short-lived token for that user, code in a sandbox, files, and memory. Every event is stored in Postgres, so any client can reconnect mid-stream and continue where it left off.
+3. **Opengeni** runs every session: the model loop, calls to your MCP server with a short-lived token for that user or to your API through an OpenAPI description, code in a sandbox, files, and memory. Every event is stored in Postgres, so any client can reconnect mid-stream and continue where it left off.
 
 The fastest way to wire it up is to give your coding agent (Claude Code, Codex, or Cursor) the [`opengeni-client` skill](https://docs.opengeni.ai/embed-with-a-coding-agent) and one prompt. To do it by hand, follow [Embed manually](https://docs.opengeni.ai/embed-manually), or see the code [below](#use-it-from-your-code-and-product).
 
@@ -49,7 +49,7 @@ The fastest way to wire it up is to give your coding agent (Claude Code, Codex, 
 
 ## Get started
 
-**The fastest way is the managed cloud.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, and start your first session. Nothing to deploy. New accounts get Opengeni credits to start; after that it is pay as you go at the provider's model price plus 5%, with no seat or platform fees. You can also use your own ChatGPT/Codex or SuperGrok plan or a provider API key, billed by that provider. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
+**The fastest way is the managed cloud.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, and start your first session. Nothing to deploy. New sign-ups get Opengeni credits to start. After that it is pay as you go: usage is charged to your credits at the provider's model price plus 5%, with no seat or platform fees. You can also use your own ChatGPT/Codex or SuperGrok plan or a provider API key, billed by that provider. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
 
 Prefer to run it yourself? Everything is open source under Apache-2.0. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production with the Helm chart and reference Terraform for AWS, Azure, and GCP.
 
