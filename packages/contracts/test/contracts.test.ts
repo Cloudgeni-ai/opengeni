@@ -138,6 +138,20 @@ describe("API key descriptions", () => {
       "read",
     );
     expect(
+      CreateOrganizationApiKeyRequest.parse({ name: "setup", preset: "developer_setup" }),
+    ).toEqual({ name: "setup", access: "full", preset: "developer_setup" });
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({
+        name: "setup",
+        access: "read",
+        preset: "developer_setup",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({ name: "setup", preset: "all_permissions" })
+        .success,
+    ).toBe(false);
+    expect(
       CreateOrganizationApiKeyRequest.safeParse({ name: "backend", access: "write" }).success,
     ).toBe(false);
     expect(

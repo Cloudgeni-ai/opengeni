@@ -61,6 +61,7 @@ export const HostMcpCreateSelections = z
   });
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -102,6 +103,7 @@ export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
+export * from "./api-key-presets";
 export * from "./session-titles";
 export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
@@ -3490,8 +3492,14 @@ export const CreateOrganizationApiKeyRequest = z
     expiresAt: z.string().datetime({ offset: true }).optional(),
     /** Access tier; omitted means `full` so existing callers keep their keys. */
     access: OrganizationApiKeyAccess.default("full"),
+    /** Optional creation preset; stored authority remains `full` or `read`. */
+    preset: OrganizationApiKeyPreset.optional(),
   })
-  .strict();
+  .strict()
+  .refine((request) => request.preset !== "developer_setup" || request.access === "full", {
+    path: ["access"],
+    message: "Developer setup requires full organization API key access",
+  });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
