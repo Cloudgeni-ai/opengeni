@@ -5,7 +5,7 @@ import type { Database } from "./database";
 import { rawRows } from "./database";
 
 /**
- * Server-side usage analytics reads and writes (migration 0561). Every value
+ * Server-side usage analytics reads and writes (migration 0565). Every value
  * is content-free: opaque `user:` subjects for presence, and bounded classes
  * for credit grants. None of these is an authorization input.
  */
@@ -69,7 +69,7 @@ export async function countActiveUsers(db: Database): Promise<Record<ActiveUserW
 export type CreditGrantTotals = Record<CreditGrantClass, { count: number; micros: number }>;
 
 /**
- * Positive credit grants observed since migration 0561, by class, including
+ * Positive credit grants observed since migration 0565, by class, including
  * zeroes. The ledger trigger observes every writer: the verified-signup trial
  * trigger, Stripe coupon checkouts, and operator grants.
  */

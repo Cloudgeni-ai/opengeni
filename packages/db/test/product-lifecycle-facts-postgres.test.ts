@@ -58,7 +58,7 @@ const migrationText = readFileSync(
   "utf8",
 );
 const usageAnalyticsMigrationText = readFileSync(
-  new URL("../drizzle/0561_usage_analytics_presence_and_facts.sql", import.meta.url),
+  new URL("../drizzle/0565_usage_analytics_presence_and_facts.sql", import.meta.url),
   "utf8",
 );
 

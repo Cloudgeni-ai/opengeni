@@ -1170,7 +1170,7 @@ events in that interval are deliberately not recoverable. Normal deploys must us
 Canonical sources: `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES` in
 `packages/contracts/src/product-lifecycle-facts.ts`, the `HostLifecycleFactExport` contract in
 `packages/contracts/src/index.ts`, and migrations `0532_product_lifecycle_fact_export.sql` and
-`0561_usage_analytics_presence_and_facts.sql`.
+`0565_usage_analytics_presence_and_facts.sql`.
 
 A third export kind, `lifecycle_fact`, carries one content-free fact per person-level product
 milestone, so a host can answer who signed up, verified, signed in, set up an organization, and
@@ -1252,7 +1252,7 @@ exist for sessions that are still stored; email-password verification time is ap
 account's last update; `user.active` history is approximated from the UTC days on which a stored
 browser session was created or refreshed; `connection.revoked` covers connections still stored as
 revoked (deleted connections are gone). Both new kinds only backfill rows older than the moment
-their live capture began: migration 0561, or the first lifecycle consumer registration when that
+their live capture began: migration 0565, or the first lifecycle consumer registration when that
 came later.
 
 ### EventBus

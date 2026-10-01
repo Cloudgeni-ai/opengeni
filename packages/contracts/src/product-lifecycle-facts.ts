@@ -3,7 +3,7 @@
  *
  * Migration `0532_product_lifecycle_fact_export.sql` captures one fact per
  * product change with row triggers and writes it to the durable host export as
- * the `lifecycle_fact` kind; `0561_usage_analytics_presence_and_facts.sql` adds
+ * the `lifecycle_fact` kind; `0565_usage_analytics_presence_and_facts.sql` adds
  * `user.active`, `credits.granted` and `connection.revoked`. Every value is drawn from a fixed list; the
  * database function `opengeni_private.product_lifecycle_fact_valid` enforces
  * the same lists and a test keeps the two copies identical.

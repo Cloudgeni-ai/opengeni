@@ -2,7 +2,7 @@ import postgres from "postgres";
 
 /**
  * One-time, operator-invoked backfill of product lifecycle facts captured
- * before the first `lifecycle_fact` consumer registered (migration 0561).
+ * before the first `lifecycle_fact` consumer registered (migration 0565).
  *
  * Each source is drained through
  * `opengeni_private.backfill_product_lifecycle_facts`: the first call reads

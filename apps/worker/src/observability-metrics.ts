@@ -1130,7 +1130,7 @@ export function recordCreditBalanceGauges(
 
 /**
  * Distinct managed people with authenticated browser activity in each fixed
- * window (migration 0561 presence). Every control worker publishes the same
+ * window (migration 0565 presence). Every control worker publishes the same
  * global value, so dashboards must aggregate with `max()` across pods, never
  * `sum()`. API keys, services and embedded hosts are never counted.
  */
@@ -1149,7 +1149,7 @@ export function recordActiveUserGauges(
 }
 
 /**
- * Positive credit grants observed by the ledger trigger since migration 0561,
+ * Positive credit grants observed by the ledger trigger since migration 0565,
  * by closed class. These are cumulative database totals published as gauges by
  * every control worker: aggregate with `max()` across pods, then `increase()`.
  * Counting in the database covers the grants no application process writes:
@@ -1163,13 +1163,13 @@ export function recordCreditGrantGauges(
     const total = totals[grantClass];
     observability.setGauge({
       name: "opengeni_credit_grants_total",
-      help: "Positive credit grants observed in the ledger since migration 0561, by grant class (global cumulative; use max across pods).",
+      help: "Positive credit grants observed in the ledger since migration 0565, by grant class (global cumulative; use max across pods).",
       labels: { grant_class: grantClass },
       value: total.count,
     });
     observability.setGauge({
       name: "opengeni_credit_granted_micros_total",
-      help: "Credit micros granted in the ledger since migration 0561, by grant class (global cumulative; use max across pods).",
+      help: "Credit micros granted in the ledger since migration 0565, by grant class (global cumulative; use max across pods).",
       labels: { grant_class: grantClass },
       value: total.micros,
     });
