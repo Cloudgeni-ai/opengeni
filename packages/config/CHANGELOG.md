@@ -1,5 +1,37 @@
 # @opengeni/config
 
+## 3.2.0
+
+### Minor Changes
+
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [6a97313]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/xai-subscription@0.1.5
+
 ## 3.1.1
 
 ### Patch Changes
