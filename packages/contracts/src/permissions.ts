@@ -27,6 +27,8 @@ export const Permission = z.enum([
   "github:manage",
   "github:use",
   "api_keys:manage",
+  /** Literal organization-key authority to configure workspace usage allowances. */
+  "usage_allowances:manage",
   "connections:read",
   "connections:write",
   "capabilities:manage",

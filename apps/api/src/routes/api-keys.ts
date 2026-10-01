@@ -26,8 +26,8 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   organizationApiKeyAccess,
   requireAccessContext,
-  requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireApiKeyManagementContext,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
@@ -59,18 +59,21 @@ export const organizationReadApiKeyPermissions: Permission[] = [
 export function organizationApiKeyPermissionsForAccess(
   access: OrganizationApiKeyAccess,
 ): Permission[] {
-  return access === "read"
-    ? [...organizationReadApiKeyPermissions]
-    : [...organizationApiKeyPermissions];
+  return access === "developer_setup"
+    ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+    : access === "read"
+      ? [...organizationReadApiKeyPermissions]
+      : [...organizationApiKeyPermissions];
 }
 
 /** Existing callers retain their expiry; setup keys default to one day. */
 export function organizationApiKeyExpiryDate(
-  request: Pick<CreateOrganizationApiKeyRequest, "preset" | "expiresAt">,
+  request: Pick<CreateOrganizationApiKeyRequest, "preset" | "expiresAt"> &
+    Partial<Pick<CreateOrganizationApiKeyRequest, "access">>,
   now: Date = new Date(),
 ): Date | null {
   if (request.expiresAt !== undefined) return new Date(request.expiresAt);
-  return request.preset === "developer_setup"
+  return request.preset === "developer_setup" || request.access === "developer_setup"
     ? new Date(now.getTime() + DEVELOPER_SETUP_API_KEY_PRESET.defaultExpiryHours * 60 * 60 * 1000)
     : null;
 }
@@ -82,7 +85,7 @@ function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {
 export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/api-keys", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json({ apiKeys: await listApiKeys(deps.db, workspaceId) });
   });
 
@@ -91,12 +94,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     zValidator("json", CreateApiKeyRequest.omit({ workspaceId: true })),
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "api_keys:manage",
-      );
+      const authorization = await requireWorkspaceApiKeyControl(c, deps, workspaceId);
       const grant = authorization.grant;
       const body = c.req.valid("json");
       const permissions: Permission[] =
@@ -126,7 +124,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/api-keys/:apiKeyId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
 
@@ -241,6 +239,7 @@ export function requireOrganizationApiKeyControlPermission(
   context: AccessContext,
   organizationId: string,
 ): void {
+  requireApiKeyManagementContext(context);
   requireAccountPermission(context, organizationId, "api_keys:manage");
   if (!context.subjectId.startsWith("api_key:")) return;
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
@@ -251,6 +250,27 @@ export function requireOrganizationApiKeyControlPermission(
   ) {
     throw new HTTPException(403, { message: "organization API key authority required" });
   }
+}
+
+async function requireWorkspaceApiKeyControl(
+  c: Parameters<typeof requireAccessContext>[0],
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
+  requireApiKeyManagementContext(await requireAccessContext(c, deps));
+  const authorization = await requireAccessGrantAuthorization(
+    c,
+    deps,
+    workspaceId,
+    "api_keys:manage",
+  );
+  const grant = authorization.grant;
+  // Attempt credentials must never turn the workspace-admin wildcard inherited
+  // from setup into a durable credential/delegation escape hatch.
+  if (grant.principalKind === "agent_attempt" || grant.metadata?.sessionId !== undefined) {
+    throw new HTTPException(403, { message: "Agent attempts cannot manage API keys" });
+  }
+  return authorization;
 }
 
 function authenticatedApiKeyId(context: AccessContext): string | null {

@@ -39,6 +39,39 @@ import { serviceInitiatorFromHeaders } from "./service-initiator";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
+const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
+
+/** Only canonical authentication can prove setup-key provenance. */
+export function isDeveloperSetupApiKeyContext(context: AccessContext): boolean {
+  return developerSetupApiKeyContexts.has(context);
+}
+
+/** Canonical authentication provenance, including the backing key of asUser. */
+export function requireApiKeyManagementContext(context: AccessContext): void {
+  if (developerSetupApiKeyContexts.has(context)) {
+    throw new HTTPException(403, { message: "Developer setup keys cannot manage API keys" });
+  }
+}
+
+/** Membership is not an escape hatch for minting durable credentials. */
+export function requireApiKeyDelegationContext(
+  context: AccessContext,
+  permissions: Permission[],
+): void {
+  if (
+    (hasPermission(permissions, "api_keys:manage") ||
+      hasPermission(permissions, "members:manage")) &&
+    (developerSetupApiKeyContexts.has(context) ||
+      context.workspaceGrants.some(
+        (grant) =>
+          grant.principalKind === "agent_attempt" || grant.metadata?.sessionId !== undefined,
+      ))
+  ) {
+    throw new HTTPException(403, {
+      message: "Setup keys and agent attempts cannot delegate API key management",
+    });
+  }
+}
 
 /**
  * Contexts that were authenticated by a verified canonical managed cookie
@@ -169,6 +202,7 @@ const accountScopedApiKeyAccountPermissions = new Set<Permission>([
   "billing:read",
   "billing:manage",
   "api_keys:manage",
+  "usage_allowances:manage",
 ]);
 const accountScopedApiKeyWorkspaceExcludedPermissions = new Set<Permission>([
   "account:read",
@@ -176,6 +210,7 @@ const accountScopedApiKeyWorkspaceExcludedPermissions = new Set<Permission>([
   "workspace:create",
   "billing:read",
   "billing:manage",
+  "usage_allowances:manage",
 ]);
 
 export type AccountScopedApiKeyWorkspaceAuthority = Readonly<{
@@ -210,8 +245,14 @@ export function accountScopedApiKeyWorkspaceAuthority(
   };
 }
 
-/** The organization access tier is derived from the stored workspace-admin wildcard. */
+/** Classify stored scopes without changing the legacy full/read permission sets. */
 export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
+  if (
+    permissions.includes("workspace:admin") &&
+    permissions.includes("usage_allowances:manage") &&
+    !permissions.includes("api_keys:manage")
+  )
+    return "developer_setup";
   return permissions.includes("workspace:admin") ? "full" : "read";
 }
 
@@ -558,6 +599,28 @@ async function accessGrantAuthorization(
       workspaceId,
       principalKind ? { principalKind } : undefined,
     ));
+  if (grant && developerSetupApiKeyContexts.has(context)) {
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    const workspace = await requireWorkspace(deps.db, workspaceId);
+    if (!authority || workspace.accountId !== authority.accountId || workspace.kind !== "shared") {
+      throw new HTTPException(403, {
+        message: "Developer setup requires a shared organization workspace",
+      });
+    }
+    // A persisted creator/membership grant cannot widen the authenticated key
+    // ceiling, including literal secret reads and inherited session authority.
+    const storedPermissions = grant.permissions;
+    grant = {
+      ...grant,
+      permissions: Permission.options.filter(
+        (value) =>
+          value !== "api_keys:manage" &&
+          !accountScopedApiKeyWorkspaceExcludedPermissions.has(value) &&
+          hasPermission(storedPermissions, value) &&
+          hasPermission(authority.permissions, value),
+      ),
+    };
+  }
   if (!grant) {
     const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
     if (!workspace) {
@@ -881,6 +944,9 @@ async function apiKeyAccessContext(
       permissions: [...apiKey.permissions],
       ...(linked ? { linked } : {}),
     });
+    if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
+      developerSetupApiKeyContexts.add(context);
+    }
     return context;
   }
   const subjectId = `api_key:${apiKey.id}`;
@@ -920,6 +986,12 @@ async function apiKeyAccessContext(
     defaultWorkspaceId: apiKey.workspaceId,
   };
   if (service) apiKeyServiceContexts.set(context, service);
+  if (
+    apiKey.credentialKind === "organization" &&
+    organizationApiKeyAccess(apiKey.permissions) === "developer_setup"
+  ) {
+    developerSetupApiKeyContexts.add(context);
+  }
   if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
     accountScopedApiKeyContexts.set(
       context,
@@ -949,6 +1021,7 @@ async function apiKeyAccessContext(
       workspaceId: apiKey.workspaceId,
       effectiveWorkspacePermissions: Permission.options.filter(
         (permission) =>
+          !(developerSetupApiKeyContexts.has(context) && permission === "api_keys:manage") &&
           !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
           hasPermission(workspacePermissions, permission),
       ),

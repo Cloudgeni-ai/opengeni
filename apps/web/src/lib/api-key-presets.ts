@@ -31,6 +31,7 @@ const ORGANIZATION_SCOPES = new Set<string>([
   "workspace:create",
   "billing:read",
   "billing:manage",
+  "usage_allowances:manage",
 ]);
 
 /** Old names still accepted by the API; never offered, but labelled on old keys. */

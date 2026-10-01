@@ -2848,10 +2848,11 @@ export type AccessGrant = z.infer<typeof AccessGrant>;
  * Organization API key access tier. `full` keys administer the organization
  * (create workspaces, mint keys, run sessions in every shared workspace);
  * `read` keys only inventory shared workspaces and read their sessions, events,
- * and files. The tier is derived from the key's stored permissions, never
+ * and files. Developer setup keys configure workspaces and budgets without key
+ * management or credential delegation. The tier is derived from stored permissions, never
  * stored separately: a key whose permissions omit `workspace:admin` is `read`.
  */
-export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export const OrganizationApiKeyAccess = z.enum(["full", "read", "developer_setup"]);
 export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
 
 /** Informational projection of direct API-key authority, not an authorization grant. */
@@ -3492,13 +3493,13 @@ export const CreateOrganizationApiKeyRequest = z
     expiresAt: z.string().datetime({ offset: true }).optional(),
     /** Access tier; omitted means `full` so existing callers keep their keys. */
     access: OrganizationApiKeyAccess.default("full"),
-    /** Optional creation preset; stored authority remains `full` or `read`. */
+    /** Optional creation alias for the developer_setup access tier. */
     preset: OrganizationApiKeyPreset.optional(),
   })
   .strict()
-  .refine((request) => request.preset !== "developer_setup" || request.access === "full", {
+  .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
     path: ["access"],
-    message: "Developer setup requires full organization API key access",
+    message: "Developer setup is not read-only organization API key access",
   });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 

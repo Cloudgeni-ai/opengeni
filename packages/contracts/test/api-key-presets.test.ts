@@ -8,12 +8,13 @@ describe("Developer setup API key preset", () => {
       id: "developer_setup",
       label: "Developer setup",
       defaultExpiryHours: 24,
-      permissions: ["workspace:create", "workspace:admin", "api_keys:manage"],
+      permissions: ["workspace:create", "workspace:admin", "usage_allowances:manage"],
     });
     for (const permission of DEVELOPER_SETUP_API_KEY_PRESET.permissions) {
       expect(Permission.safeParse(permission).success).toBe(true);
     }
     expect(new Set(DEVELOPER_SETUP_API_KEY_PRESET.permissions).size).toBe(3);
+    expect(DEVELOPER_SETUP_API_KEY_PRESET.permissions).not.toContain("api_keys:manage");
     expect(DEVELOPER_SETUP_API_KEY_PRESET.permissions.length).toBeLessThan(
       Permission.options.length,
     );
