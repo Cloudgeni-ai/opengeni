@@ -365,6 +365,9 @@ export function postClaimDatabaseRecoveryDetail(
   const hasProviderRecoveryCount = detail.providerRecoveryCount !== undefined;
   const hasProviderFailureCode = detail.providerFailureCode !== undefined;
   if (
+    (detail.sandboxSetupOutcomeUnknown !== undefined &&
+      detail.sandboxSetupOutcomeUnknown !== true) ||
+    (detail.sandboxSetupOutcomeUnknown === true && hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||

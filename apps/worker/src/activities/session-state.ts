@@ -247,6 +247,11 @@ export function createSessionStateActivities(
       : undefined;
     const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
     const hasProviderFailureCode = providerFailureCode !== undefined;
+    const setupOutcomeUnknown =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupOutcomeUnknown === true;
+    if (setupOutcomeUnknown && (hasProviderRecoveryCount || hasProviderFailureCode)) {
+      return { action: "stale" };
+    }
     if (hasProviderRecoveryCount !== hasProviderFailureCode) {
       return { action: "stale" };
     }
@@ -275,11 +280,17 @@ export function createSessionStateActivities(
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: input.attemptId,
-        reason: providerFailureCode ?? "claimed_attempt_database_failure",
+        reason: setupOutcomeUnknown
+          ? "sandbox_command_start_outcome_unknown"
+          : (providerFailureCode ?? "claimed_attempt_database_failure"),
+        ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
         ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
         detail: {
-          code: providerFailureCode ?? recoveredClaimCode,
-          retryable: true,
+          code: setupOutcomeUnknown
+            ? "sandbox_command_start_outcome_unknown"
+            : (providerFailureCode ?? recoveredClaimCode),
+          retryable: !setupOutcomeUnknown,
+          ...(setupOutcomeUnknown ? { setupOutcome: "unknown", replay: "blocked" } : {}),
           ...(providerRecoveryCount !== undefined
             ? {
                 databaseFailureCode: recoveredClaimCode,

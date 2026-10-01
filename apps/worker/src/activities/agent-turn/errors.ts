@@ -395,6 +395,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  sandboxSetupOutcomeUnknown?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
@@ -402,6 +403,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (input.sandboxSetupOutcomeUnknown && input.providerRecovery) return null;
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
@@ -416,6 +418,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
@@ -1194,7 +1197,7 @@ function baseAgentRunFailurePayload(
   if (isModalCommandStartOutcomeUnknownError(error)) {
     return {
       error:
-        "A managed sandbox command may have started, but its acknowledgement was lost. Automatic replay is disabled; inspect the sandbox state before retrying.",
+        "A managed sandbox command has an unknown outcome. Its original invocation remains fenced; setup is blocked without replay until the incomplete operation can be reconciled.",
       code: "sandbox_command_start_outcome_unknown",
       retryable: false,
     };
