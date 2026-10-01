@@ -1,5 +1,10 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 export { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import {
+  beginIntegrationConnect,
+  integrationConnectErrorOutcome,
+  modelConnectionClass,
+} from "@/lib/integration-connect-analytics";
 import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
@@ -157,6 +162,10 @@ export function useOrganizationProviderConnection({
     pendingSaveRef.current = { key: credentialIdentity, version, operationId };
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
+    const journey = beginIntegrationConnect(
+      modelConnectionClass(providerKind) ?? "other",
+      "api_key",
+    );
     const mutate = () =>
       client.upsertOrganizationModelProviderConnection(organizationId, providerKind, {
         operationId,
@@ -164,6 +173,7 @@ export function useOrganizationProviderConnection({
         apiKey: key,
       });
     const commit = (saved: Connection) => {
+      journey.finish("connected");
       pendingSaveRef.current = null;
       setConnection(saved);
       setConnectionError(null);
@@ -187,6 +197,7 @@ export function useOrganizationProviderConnection({
       }
       // A newer version can belong to another administrator. Only the mutation's
       // idempotent receipt proves that this token and identity were committed.
+      journey.finish(integrationConnectErrorOutcome(finalError));
       await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
         description: userErrorText(finalError),

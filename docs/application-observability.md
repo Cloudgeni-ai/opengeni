@@ -188,6 +188,36 @@ rising `rate_limited` series as either a real incident or abuse. See
 `apps/web/docs/browser-analytics.md` for the browser side, the `chunk_load`
 semantics and the coverage limits.
 
+### Web client failure and health signals
+
+The same route admits closed operational signals, discriminated by a `signal`
+field. A body without `signal` is an error report as above; an older API refuses
+a signal body as `invalid`, so the extension is backward compatible.
+
+| `signal` | Series | Labels (closed values) |
+| --- | --- | --- |
+| `request_failure` | `opengeni_client_request_failures_total` (counter) | `action`: `create_session`, `send_message` (includes sends the server queues), `steer_message`, `composer_submit`, `retry_turn`, `connect_integration`, `connect_model`, `checkout_start`; `reason`: `network`, `timeout`, `offline` |
+| `stream` | `opengeni_client_stream_events_total` (counter) | `stream`: `session`, `workspace`; `event`: `reconnect`, `reconnect_exhausted`, `long_disconnect` |
+| `web_vital` | `opengeni_client_web_vital` (histogram: `_bucket`, `_sum`, `_count`) | `metric`: `lcp`, `inp`, `ttfb` (seconds), `cls` (unitless score); `page`: the closed journey page label (`sessions`, `home`, `other`, ...) |
+
+Both counters are published at zero for every label pair on API start, and a
+rate-limited signal is counted in
+`opengeni_client_error_reports_rejected_total{reason="rate_limited",kind=<signal>}`.
+Admission uses the same token-bucket bounds as the error kinds (burst 30, then
+one every two seconds per process) in separate buckets, one per request action,
+per stream event, and per vital metric, so a burst of one signal never spends
+the error budget. A request failure and a degraded stream (`reconnect_exhausted`
+or `long_disconnect`) write one warning (`Web client request failed before a
+response` / `Web client live stream degraded`) with `surface`, `op` (the action
+or stream), `reason`, `clientRoute` and `clientRevision`; reconnects and vitals
+do not log. Histogram buckets cover the published thresholds: CLS 0.1/0.25, INP
+0.2/0.5 s, TTFB 0.8/1.8 s, LCP 2.5/4 s.
+
+Useful ratios: `opengeni_client_request_failures_total` against the matching
+HTTP request rate for that route, `long_disconnect` per active session view, and
+p75 of each vital per page from the histogram. Every series is a lower bound for
+the same reasons as the error counter.
+
 ## Analytics consent
 
 The public, anonymous `POST /v1/analytics-consent` route counts answers to the

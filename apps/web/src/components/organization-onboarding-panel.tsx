@@ -32,6 +32,7 @@ import {
   userErrorTextWithoutReference,
 } from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -123,6 +124,16 @@ export function OrganizationOnboardingPanel({
     includedModel: IncludedOnboardingModel | null;
     startingCredits: StartingCreditsOnboarding | null;
   } | null>(null);
+  // Consent-gated onboarding journey; the model step reports itself.
+  useOnboardingStep(
+    state === null || state === "unavailable" || createdSetup
+      ? null
+      : state === "invitation_pending" || invitation
+        ? "invitation"
+        : "organization_name",
+    undefined,
+    !previewState,
+  );
   const confirmingOrganizationId = createdSetup?.organizationId ?? null;
   const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
 
@@ -234,6 +245,7 @@ export function OrganizationOnboardingPanel({
       });
       invitationOperationIds.current.delete(selectedInvitation.id);
       clearOrganizationInvitationContinuation();
+      onboardingJourney().completed("invitation", "joined");
       onComplete();
     } catch (error) {
       setInvitationError(userErrorText(error));
@@ -255,6 +267,7 @@ export function OrganizationOnboardingPanel({
           organizationName: normalizedName,
           operationId: operationId.current,
         });
+        onboardingJourney().completed("organization_name", "created");
         setCreatedSetup({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,

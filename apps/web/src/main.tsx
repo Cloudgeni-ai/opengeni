@@ -14,6 +14,7 @@ import {
   installVitePreloadErrorReporting,
   setClientErrorReporter,
 } from "./lib/client-error-reporting";
+import { createClientSignalReporter, setClientSignalReporter } from "./lib/client-signals";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
 import { setAnalyticsConsentDecisionSender } from "./lib/analytics-consent";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
@@ -26,10 +27,20 @@ import "./styles.css";
 
 retainIdentityLinkContinuation(window);
 // Content-free operational error counter; see lib/client-error-reporting.ts.
+// An undeliverable report is retried once when the browser is next online.
+const sendBeacon = beaconSender(`${apiBaseUrl}${CLIENT_ERRORS_PATH}`, globalThis.fetch, {
+  retryTarget: window,
+});
 setClientErrorReporter(
-  createClientErrorReporter({
-    send: beaconSender(`${apiBaseUrl}${CLIENT_ERRORS_PATH}`),
+  createClientErrorReporter({ send: sendBeacon, revision: bundleDeploymentRevision || "dev" }),
+);
+// Failed key requests, live-stream health and web vitals share that beacon;
+// see lib/client-signals.ts.
+setClientSignalReporter(
+  createClientSignalReporter({
+    send: sendBeacon,
     revision: bundleDeploymentRevision || "dev",
+    routePattern: appRoutePattern,
   }),
 );
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
@@ -46,6 +57,18 @@ if (preloadRecoveryStorage) {
     reload: () => window.location.reload(),
   });
 }
+
+// Web vitals load after the page settles, outside the initial bundle graph.
+window.addEventListener(
+  "load",
+  () =>
+    setTimeout(() => {
+      void import("./lib/web-vitals-reporting")
+        .then(({ installWebVitalsReporting }) => installWebVitalsReporting())
+        .catch(() => undefined);
+    }, 0),
+  { once: true },
+);
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

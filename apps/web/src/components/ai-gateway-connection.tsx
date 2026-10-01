@@ -9,6 +9,7 @@ import {
   type ClaudeUsageState,
 } from "@/components/models/claude-usage";
 import { trackModelConnection } from "@/lib/analytics-observer";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
@@ -550,7 +551,7 @@ export function useProviderConnection(
             config.id === "openrouter" ? "openrouter" : "ai-gateway",
             props.workspaceId,
           )
-        : () => {};
+        : beginModelConnectJourney(config.id, "api_key");
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);

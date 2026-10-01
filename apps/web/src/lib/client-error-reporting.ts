@@ -123,24 +123,61 @@ export function createClientErrorReporter(
   };
 }
 
+export type BeaconSenderOptions = {
+  /**
+   * Where `online` is observed. When set, a report that could not be
+   * delivered (the browser was offline, or the request failed) is queued and
+   * retried once when the browser comes back online.
+   */
+  retryTarget?: Pick<Window, "addEventListener">;
+  /** Whether the browser currently reports connectivity. Defaults to `navigator.onLine`. */
+  isOnline?: () => boolean;
+  /** Most reports held for the retry. Older ones are dropped first. */
+  maxPending?: number;
+};
+
 /**
  * Fire-and-forget delivery. A text/plain body with no credentials or custom
  * headers is a simple request: no preflight, no cookies, and `keepalive` lets
- * it finish when the user reloads straight from the error page.
+ * it finish when the user reloads straight from the error page. With a
+ * `retryTarget`, an undeliverable report gets exactly one more attempt when
+ * the browser is next online; it is never retried twice.
  */
 export function beaconSender(
   url: string,
   fetchImpl: typeof fetch | undefined = globalThis.fetch,
+  options: BeaconSenderOptions = {},
 ): (body: string) => void {
-  return (body) => {
-    if (!fetchImpl) return;
-    void fetchImpl(url, {
+  const isOnline =
+    options.isOnline ??
+    (() => (typeof navigator === "undefined" ? true : navigator.onLine !== false));
+  const maxPending = options.maxPending ?? 20;
+  let pending: string[] = [];
+  const post = (body: string) =>
+    fetchImpl!(url, {
       method: "POST",
       body,
       credentials: "omit",
       keepalive: true,
       headers: { "content-type": "text/plain;charset=UTF-8" },
-    }).catch(() => undefined);
+    });
+  const hold = (body: string) => {
+    if (!options.retryTarget) return;
+    pending.push(body);
+    if (pending.length > maxPending) pending = pending.slice(-maxPending);
+  };
+  options.retryTarget?.addEventListener("online", () => {
+    const retry = pending;
+    pending = [];
+    for (const body of retry) void post(body).catch(() => undefined);
+  });
+  return (body) => {
+    if (!fetchImpl) return;
+    if (options.retryTarget && !isOnline()) {
+      hold(body);
+      return;
+    }
+    void post(body).catch(() => hold(body));
   };
 }
 
