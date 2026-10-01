@@ -2227,7 +2227,9 @@ export function MessageTimeline({
       return;
     }
     cancelLeaveFallback();
-    clearReaderIntent();
+    // Engines can emit scrollend between tiny pointer steps. Keep the pinned
+    // gesture's cumulative leave budget until it actually leaves the tip.
+    if (!pinnedRef.current || !readerIntentArmRef.current) clearReaderIntent();
     if (disclosureKeepsUnpinnedRef.current) {
       programmaticScrollRef.current = 0;
       stopFollow();

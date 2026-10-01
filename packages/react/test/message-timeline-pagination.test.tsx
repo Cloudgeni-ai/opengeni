@@ -1651,6 +1651,54 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test.each([false, true])(
+    "cumulative one-pixel pointer leave survives intermediate scroll-end (%s)",
+    async (intermediateScrollEnd) => {
+      const frames: FrameRequestCallback[] = [];
+      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+        frames.push(cb);
+        return frames.length;
+      };
+      globalThis.cancelAnimationFrame = () => undefined;
+      const events = manyEvents(20);
+      const r = await renderComponent(<MessageTimeline events={events} />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2000,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        await r.rerender(<MessageTimeline events={events} />);
+        await drainFrames(frames);
+        await actRun(() =>
+          scroller.dispatchEvent(
+            new PointerEvent("pointerdown", {
+              button: 0,
+              pointerType: "touch",
+              bubbles: true,
+            }),
+          ),
+        );
+        for (let step = 0; step < 80; step += 1) {
+          await actRun(() => {
+            scroller.scrollTop -= 1;
+            scroller.dispatchEvent(new Event("scroll"));
+            if (intermediateScrollEnd) scroller.dispatchEvent(new Event("scrollend"));
+          });
+        }
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+        expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+      } finally {
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
   test("pointer-armed scroll-up during growth unpins without a wheel event", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
