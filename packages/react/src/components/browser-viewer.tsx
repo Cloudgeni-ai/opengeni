@@ -208,6 +208,11 @@ export function BrowserViewer({
     () => registry.relevantSessions.filter((session) => isLiveBrowser(session)),
     [registry.relevantSessions],
   );
+  const latestRelevantBrowser = registry.relevantSessions[0];
+  const unavailableBrowser =
+    latestRelevantBrowser?.lifecycle === "lost" || latestRelevantBrowser?.lifecycle === "failed"
+      ? latestRelevantBrowser
+      : undefined;
   const [selection, setSelection] = useState<BrowserSelection>(() =>
     initialBrowserSessionId ? { sessionId: initialBrowserSessionId, pinned: true } : null,
   );
@@ -769,7 +774,8 @@ export function BrowserViewer({
     );
   }
   if (liveSessions.length === 0) {
-    if (renderEmpty) return <>{renderEmpty(() => createBrowser(), creating)}</>;
+    if (renderEmpty && !unavailableBrowser)
+      return <>{renderEmpty(() => createBrowser(), creating)}</>;
     return (
       <div
         className={cn("flex h-full min-h-0 items-center justify-center bg-og-bg p-6", className)}
@@ -778,16 +784,22 @@ export function BrowserViewer({
           <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
             <Globe2Icon className="size-4.5" />
           </span>
-          <p className="mt-3 text-og-menu font-medium text-og-fg">
-            {attachedGenerationLoss
-              ? "Chrome reconnected—open a fresh browser/desktop."
-              : "No browser open"}
-          </p>
-          <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
-            {attachedGenerationLoss
-              ? "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome."
-              : "A browser appears here when this agent—or another agent in the workspace—opens one."}
-          </p>
+          {unavailableBrowser && !attachedGenerationLoss ? (
+            <BrowserUnavailableNotice session={unavailableBrowser} />
+          ) : (
+            <>
+              <p className="mt-3 text-og-menu font-medium text-og-fg">
+                {attachedGenerationLoss
+                  ? "Chrome reconnected—open a fresh browser/desktop."
+                  : "No browser open"}
+              </p>
+              <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
+                {attachedGenerationLoss
+                  ? "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome."
+                  : "A browser appears here when this agent—or another agent in the workspace—opens one."}
+              </p>
+            </>
+          )}
           <BrowserLaunchMenu
             attachedBridges={onlineAttachedBridges}
             attachedDevices={attached.devices}
@@ -855,6 +867,7 @@ export function BrowserViewer({
       />
       {!selectedRegistrySession ? (
         <BrowserUnselectedPanel
+          unavailableBrowser={unavailableBrowser}
           peerCount={liveSessions.length}
           creating={creating}
           onCreate={() => createBrowser()}
@@ -1186,6 +1199,7 @@ function BrowserToolbar(props: {
 }
 
 function BrowserUnselectedPanel(props: {
+  unavailableBrowser: BrowserSession | undefined;
   peerCount: number;
   creating: boolean;
   onCreate: () => void;
@@ -1196,7 +1210,11 @@ function BrowserUnselectedPanel(props: {
         <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted">
           <Globe2Icon className="size-4.5" />
         </span>
-        <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
+        {props.unavailableBrowser ? (
+          <BrowserUnavailableNotice session={props.unavailableBrowser} />
+        ) : (
+          <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
+        )}
         <p className="mt-1 text-og-control leading-5 text-og-fg-muted">
           {props.peerCount === 1
             ? "One workspace browser is available from the browser menu."
@@ -1212,6 +1230,25 @@ function BrowserUnselectedPanel(props: {
           {props.creating ? "Opening…" : "New browser"}
         </button>
       </div>
+    </div>
+  );
+}
+
+function BrowserUnavailableNotice({ session }: { session: BrowserSession }) {
+  const reason =
+    session.failureCode === "provider_deadline_rotation"
+      ? "The computer running it reached its time limit."
+      : session.failureCode === "source_placement_changed"
+        ? "This chat moved to another computer."
+        : session.lifecycle === "failed"
+          ? "It stopped unexpectedly."
+          : "The connection to it was lost.";
+  return (
+    <div role="status">
+      <p className="mt-3 text-og-menu font-medium text-og-fg">Browser unavailable</p>
+      <p className="mt-1 break-words text-og-control leading-5 text-og-fg-muted">
+        {session.name}. {reason} Open a new browser to continue.
+      </p>
     </div>
   );
 }
