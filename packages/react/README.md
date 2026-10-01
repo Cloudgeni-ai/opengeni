@@ -906,6 +906,8 @@ intentional changes should regenerate those snapshots and review the diff.
   paragraphs, user bubbles, and nested or standalone Markdown keep their normal
   width; oversized tables retain table-only horizontal scrolling. No host prop
   or viewport-wide layout override is required.
+  Remeasurement during host rerenders or tail streaming does not temporarily
+  resize the live table or displace an unpinned history reader.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render
