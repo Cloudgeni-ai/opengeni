@@ -2206,6 +2206,12 @@ export function MessageTimeline({
       clearReaderIntent();
       return;
     }
+    if (readerIntentStart) {
+      // This scroll already accounted for the gesture's movement. Retain a
+      // fresh start for continuous input across the next commit, not stale
+      // movement that could turn a later native clamp into a return to tip.
+      readerIntentStartRef.current = { scrollTop: nextTop, maxScroll: nextMaxScroll };
+    }
     if (!olderPrefetchArmedRef.current) {
       olderPrefetchArmedRef.current = true;
       setOlderPrefetchArmed(true);

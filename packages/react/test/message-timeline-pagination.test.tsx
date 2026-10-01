@@ -1079,6 +1079,53 @@ describe("MessageTimeline pagination affordances", () => {
     },
   );
 
+  test.each(["native clamp", "commit before clamp scroll", "continuing reader gesture"])(
+    "observed downward intent is rebased without scrollend (%s)",
+    async (continuation) => {
+      setScrollEndSupportForTests(false);
+      const events = manyEvents(20);
+      const r = await renderComponent(<MessageTimeline events={events} />);
+      const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 2400,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      try {
+        layout.syncTipAtBottom();
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        await readerScrollUp(scroller, 1000);
+        await actRun(() => {
+          scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: 800, bubbles: true }));
+          scroller.scrollTop = 1800;
+          scroller.dispatchEvent(new Event("scroll"));
+        });
+        expect(scroller.dataset.ogBottomFollow).toBe("false");
+
+        const readerContinues = continuation === "continuing reader gesture";
+        if (readerContinues) {
+          // Inertial/continuous scrolling need not deliver another input event.
+          scroller.scrollTop = 2000;
+        } else {
+          layout.setClientHeight(800);
+          // The engine clamps to the shorter range, without reader input.
+          scroller.scrollTop = 1600;
+        }
+        if (continuation !== "native clamp") {
+          await r.rerender(<MessageTimeline events={events} />);
+        }
+        await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+        expect(scroller.dataset.ogBottomFollow).toBe(readerContinues ? "true" : "false");
+        expect(distanceFromBottom(scroller)).toBe(0);
+      } finally {
+        setScrollEndSupportForTests(null);
+        layout.restore();
+        await r.unmount();
+      }
+    },
+  );
+
   test("a sentinel-owned prepend restores an unpinned compact tail instead of snapping to the tip", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
