@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 
 export type GenieLoadingRenderProps = {
   startedAt: string;
+  phase: "preparing" | "waiting";
   detailsOpen: boolean;
   onShowDetails: () => void;
 };
@@ -55,19 +56,23 @@ const PHRASES = [
   "Putting a wish into motion…",
   "A little hocus. A little pocus…",
 ];
+const WAITING_PHRASES = ["Waiting for a response…"];
 
 /** Decorative copy never substitutes for a failure or claims measurable progress. */
 export function GenieLoading({
   startedAt,
+  phase = "preparing",
   onShowDetails,
   detailsOpen = false,
 }: {
   startedAt: string;
+  phase?: GenieLoadingRenderProps["phase"];
   onShowDetails: () => void;
   detailsOpen?: boolean;
 }) {
   const options = useContext(GenieLoadingOptionsContext);
-  const phrases = options?.phrases?.length ? options.phrases : PHRASES;
+  const waiting = phase === "waiting";
+  const phrases = options?.phrases?.length ? options.phrases : waiting ? WAITING_PHRASES : PHRASES;
   const theme = useThemeType(undefined);
   const [phrase, setPhrase] = useState(0);
   const [showDetails, setShowDetails] = useState(false);
@@ -82,7 +87,7 @@ export function GenieLoading({
     const timer = window.setInterval(update, 5_000);
     return () => window.clearInterval(timer);
   }, [startedAt, phrases]);
-  if (options?.render) return options.render({ startedAt, detailsOpen, onShowDetails });
+  if (options?.render) return options.render({ startedAt, phase, detailsOpen, onShowDetails });
   return (
     <div className="og-genie-loading">
       <div
@@ -99,12 +104,17 @@ export function GenieLoading({
       <div className="og-genie-copy">
         <span className="sr-only" role="status">
           {slow
-            ? (options?.messages?.slowStatus ?? "Preparing your task. Taking longer than usual.")
-            : (options?.messages?.status ?? "Preparing your task.")}
+            ? (options?.messages?.slowStatus ??
+              (waiting
+                ? "Waiting for a response. Taking longer than usual."
+                : "Preparing your task. Taking longer than usual."))
+            : (options?.messages?.status ??
+              (waiting ? "Waiting for a response." : "Preparing your task."))}
         </span>
         <span key={slow ? "slow" : phrase} className="og-genie-phrase" aria-hidden="true">
           {slow
-            ? (options?.messages?.slowText ?? "A little longer than usual…")
+            ? (options?.messages?.slowText ??
+              (waiting ? "Still waiting for a response…" : "A little longer than usual…"))
             : phrases[phrase % phrases.length]}
         </span>
         {showDetails || detailsOpen ? (
@@ -116,7 +126,7 @@ export function GenieLoading({
           >
             {detailsOpen
               ? (options?.messages?.hideDetails ?? "Hide details")
-              : (options?.messages?.showDetails ?? "Behind the magic")}
+              : (options?.messages?.showDetails ?? (waiting ? "Show details" : "Behind the magic"))}
             <span aria-hidden="true"> ↗</span>
           </button>
         ) : null}

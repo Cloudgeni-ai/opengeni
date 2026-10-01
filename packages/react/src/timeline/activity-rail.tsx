@@ -105,7 +105,8 @@ export function ActivityRail({
   const providerResponded = phases.some(
     (item) => item.phase === "provider_first_byte" && item.status === "complete",
   );
-  const preparing =
+  const responsePending = phases.some((item) => item.phase === "provider_first_byte");
+  const loading =
     !hasWork &&
     !interrupted &&
     (startupActive ?? (!providerResponded && phases.some((item) => item.status === "running")));
@@ -164,7 +165,7 @@ export function ActivityRail({
       )}
     >
       <AnimatePresence initial={false}>
-        {preparing && !debug ? (
+        {loading && !debug ? (
           <motion.div
             key="startup"
             initial={{ opacity: 0 }}
@@ -182,13 +183,14 @@ export function ActivityRail({
           >
             <GenieLoading
               startedAt={startedAt}
+              phase={responsePending ? "waiting" : "preparing"}
               detailsOpen={detailsOpen}
               onShowDetails={() => setDetailsOpen((open) => !open)}
             />
           </motion.div>
         ) : null}
       </AnimatePresence>
-      {detailsOpen && !debug && !preparing ? (
+      {detailsOpen && !debug && !loading ? (
         <button
           type="button"
           className="og-genie-details self-start"
