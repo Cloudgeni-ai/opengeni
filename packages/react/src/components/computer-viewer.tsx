@@ -659,9 +659,9 @@ export function ComputerViewer({
                 connectionError={frames.error ?? computer.error}
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
+                clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 pointerInput={computer.session?.capabilities?.pointerInput === true}
                 keyboardInput={computer.session?.capabilities?.keyboardInput === true}
-                clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
                 onReconnect={
@@ -1024,9 +1024,9 @@ function ComputerViewport(props: {
   connectionError: Error | null;
   mutating: boolean;
   backgroundActions: boolean;
+  clipboardEnabled: boolean;
   pointerInput: boolean;
   keyboardInput: boolean;
-  clipboardEnabled: boolean;
   onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
   onReadClipboard: () => Promise<ComputerClipboard>;
   onReconnect: () => void;
@@ -1073,8 +1073,6 @@ function ComputerViewport(props: {
     !streamFailed &&
     !props.machineLocked &&
     (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
-  const pointerInputEnabled = rawInputEnabled && props.pointerInput;
-  const keyboardInputEnabled = rawInputEnabled && props.keyboardInput;
 
   const clearBufferedInput = useCallback(() => {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
@@ -1087,6 +1085,9 @@ function ComputerViewport(props: {
     lastClickRef.current = null;
     if (inputRef.current) inputRef.current.value = "";
   }, []);
+
+  const pointerInputEnabled = rawInputEnabled && props.pointerInput;
+  const keyboardInputEnabled = rawInputEnabled && props.keyboardInput;
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;

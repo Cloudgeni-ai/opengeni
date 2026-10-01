@@ -1563,8 +1563,21 @@ describe("ComputerViewer input reliability", () => {
     { pointerInput: false, keyboardInput: false },
   ])("honors mouse and keyboard availability independently (%p)", async (capabilities) => {
     const canvasMock = mockComputerCanvas();
-    const fixture = await renderComputerInputFixture(undefined, undefined, { capabilities });
+    const fixture = await renderComputerInputFixture();
     try {
+      const currentSession = computerSession();
+      Object.assign(currentSession.capabilities!, capabilities);
+      fixture.client.getComputerSession = async () => currentSession;
+      fixture.client.listComputerSessions = async () => ({
+        revision: 2,
+        sessions: [currentSession],
+      });
+      await actRun(() =>
+        fixture.rendered.container
+          .querySelector<HTMLButtonElement>("button[aria-label='Refresh desktops']")!
+          .click(),
+      );
+      await flush(40);
       await fixture.frame(1);
       await canvasMock.finishDecode(0);
       expect(fixture.canvas.className).not.toContain("invisible");
@@ -1908,17 +1921,14 @@ function computerWheel(deltaY: number): WheelEvent {
 async function renderComputerInputFixture(
   actInComputer?: (request: ComputerActionRequest) => Promise<ComputerActionReceipt>,
   readComputerClipboard?: () => Promise<ComputerClipboard>,
-  options: { capabilities?: Partial<NonNullable<ComputerSession["capabilities"]>> } = {},
 ) {
   const currentTarget = target();
-  const currentSession = computerSession();
-  Object.assign(currentSession.capabilities!, options.capabilities);
   const secondTarget = { ...target("window-2"), title: "Second desktop", focused: false };
   const actions: ComputerActionRequest[] = [];
   const sockets: FakeComputerSocket[] = [];
   const client = fakeClient({
-    listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
-    getComputerSession: async () => currentSession,
+    listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+    getComputerSession: async () => computerSession(),
     listComputerTargets: async () => ({
       computerSessionId: COMPUTER_SESSION_ID,
       controllerGeneration: "controller-1",
@@ -1954,6 +1964,7 @@ async function renderComputerInputFixture(
   await flush(40);
   await dispatch(sockets[0]!, "open");
   return {
+    client,
     rendered,
     actions,
     get canvas() {
