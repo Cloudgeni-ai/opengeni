@@ -63,6 +63,10 @@ bun run test:e2e
   an unchanged PR starts another run of the same source; it does not incorporate
   fixes from a newer base. Keep current-main integration evidence separate from
   exact-head CI evidence.
+- Workflow-owned registry regressions run from the exact workflow revision, even
+  when a frozen candidate predates them. Candidate builds, impact and admission
+  retain exact candidate authority; incomplete tooling and failed tests never
+  become capability-based skips.
 - Before retrying a failed check, inspect its failing leaf and checkout SHA.
   If the candidate contains a real defect already fixed on `main`, apply the
   necessary scoped correction to the candidate and run review and CI on that new
@@ -133,8 +137,9 @@ not yet represent frozen package versions.
 
 The hermetic regression is workflow-owned tooling: CI checks out the immutable
 `github.workflow_sha` separately, installs its frozen dependencies, and uses its
-Bun pin. It still runs when an older exact candidate predates the guard files;
-missing tooling or failing tests fail the job rather than skipping coverage.
+Bun pin. It still runs when an older exact candidate predates the guard files.
+Missing tooling declarations, tests or helpers and failing tests fail the job
+rather than skipping coverage.
 The candidate checkout, impact plan, builds, and effective Version-PR closure
 remain bound to the selected candidate, with its Bun pin restored afterward.
 

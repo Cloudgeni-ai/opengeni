@@ -1,9 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const guardDeclarations = {
+  "test:registry-dependency-exports": "bun scripts/test-registry-dependency-exports.ts",
+  "test:effective-dependency-exports": "bun scripts/test-effective-dependency-exports.ts",
+};
+const guardHelpers = [
+  "test-registry-dependency-exports.ts",
+  "test-effective-dependency-exports.ts",
+  "publishable-workspaces.ts",
+  "rewrite-entry-points.ts",
+  "rewrite-workspace-deps.ts",
+  "release-publish.sh",
+] as const;
 
 type Step = {
   name?: string;
@@ -201,6 +213,12 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
       expect(old.stderr).toContain("filters did not match any test files");
       const tooling = join(fixture, guard["working-directory"]!);
       await mkdir(join(tooling, "scripts"), { recursive: true });
+      await writeFile(
+        join(tooling, "package.json"),
+        JSON.stringify({ scripts: guardDeclarations }),
+      );
+      for (const path of guardHelpers)
+        await cp(join(root, "scripts", path), join(tooling, "scripts", path));
       // Run the real browser/Node and immutable-closure suites, not no-op stubs.
       // Keep this workflow-contract file out of the child to avoid recursive tests.
       for (const path of [
@@ -248,4 +266,128 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
       await rm(fixture, { recursive: true, force: true });
     }
   }, 60_000);
+  for (const scenario of [
+    {
+      name: "tooling with no declarations or tests",
+      declarations: 0,
+      files: 0,
+      missingHelper: false,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "complete matching tooling",
+      declarations: 2,
+      files: 3,
+      missingHelper: false,
+      failing: false,
+      succeeds: true,
+    },
+    {
+      name: "declared tooling missing all tests",
+      declarations: 2,
+      files: 0,
+      missingHelper: false,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "declared tooling missing a test",
+      declarations: 2,
+      files: 2,
+      missingHelper: false,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "tests without tooling declarations",
+      declarations: 0,
+      files: 3,
+      missingHelper: false,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "failing guard regression",
+      declarations: 2,
+      files: 3,
+      missingHelper: false,
+      failing: true,
+      succeeds: false,
+    },
+    {
+      name: "one missing tooling declaration",
+      declarations: 1,
+      files: 3,
+      missingHelper: false,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "one missing tooling helper",
+      declarations: 2,
+      files: 3,
+      missingHelper: true,
+      failing: false,
+      succeeds: false,
+    },
+  ] as const) {
+    test(`workflow-owned CI enforces complete tooling for ${scenario.name}`, async () => {
+      const run = (await workflowSteps("ci.yml"))
+        .flat()
+        .find((step) => step.name === "Registry dependency export guard regression")?.run;
+      expect(run).toBeDefined();
+      const fixture = await mkdtemp(join(tmpdir(), "opengeni-frozen-guard-ci-"));
+      try {
+        await writeFile(
+          join(fixture, "package.json"),
+          JSON.stringify({
+            scripts: Object.fromEntries(
+              Object.entries(guardDeclarations).slice(0, scenario.declarations),
+            ),
+          }),
+        );
+        await mkdir(join(fixture, "scripts"));
+        for (const path of guardHelpers) {
+          if (scenario.missingHelper && path === guardHelpers[0]) continue;
+          await writeFile(join(fixture, "scripts", path), "// fixture helper\n");
+        }
+        const paths = [
+          "test-registry-dependency-exports.test.ts",
+          "test-effective-dependency-exports.test.ts",
+          "dependency-export-workflow-contract.test.ts",
+        ];
+        for (const path of paths.slice(0, scenario.files)) {
+          await writeFile(
+            join(fixture, "scripts", path),
+            `import { test, expect } from "bun:test";
+            test("synthetic export guard", () => expect(${!scenario.failing}).toBe(true));`,
+          );
+        }
+        const child = Bun.spawn(["bash", "-e", "-c", run!], {
+          cwd: fixture,
+          env: { PATH: process.env.PATH! },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [, errors, status] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(status === 0).toBe(scenario.succeeds);
+        if (scenario.declarations !== 2) {
+          expect(errors).toContain("Missing workflow-owned guard declaration:");
+        } else if (scenario.files !== 3) {
+          expect(errors).toContain("Missing workflow-owned guard test:");
+        } else if (scenario.missingHelper) {
+          expect(errors).toContain("Missing workflow-owned guard helper:");
+        } else {
+          expect(errors).toContain(scenario.failing ? "3 fail" : "3 pass");
+        }
+      } finally {
+        await rm(fixture, { recursive: true, force: true });
+      }
+    });
+  }
 });

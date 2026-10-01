@@ -1150,6 +1150,14 @@ jobs:
         working-directory: .ci/registry-export-guard
         run: |
           set -euo pipefail
+          bun --no-env-file -e '
+          const manifest = await Bun.file("package.json").json();
+          for (const script of ["test:registry-dependency-exports", "test:effective-dependency-exports"]) {
+            if (typeof manifest.scripts?.[script] !== "string" || !manifest.scripts[script].trim()) {
+              throw new Error("Missing workflow-owned guard declaration: " + script);
+            }
+          }
+          '
           for guard_test in \
             scripts/test-registry-dependency-exports.test.ts \
             scripts/test-effective-dependency-exports.test.ts \
@@ -1159,7 +1167,19 @@ jobs:
               exit 1
             fi
           done
-          bun test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
+          for guard_helper in \
+            scripts/test-registry-dependency-exports.ts \
+            scripts/test-effective-dependency-exports.ts \
+            scripts/publishable-workspaces.ts \
+            scripts/rewrite-entry-points.ts \
+            scripts/rewrite-workspace-deps.ts \
+            scripts/release-publish.sh; do
+            if [ ! -f "$guard_helper" ]; then
+              echo "Missing workflow-owned guard helper: $guard_helper" >&2
+              exit 1
+            fi
+          done
+          bun --no-env-file test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
 
       - name: Restore candidate Bun after registry export regression
         uses: oven-sh/setup-bun@v2

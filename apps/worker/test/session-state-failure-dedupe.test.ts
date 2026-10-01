@@ -366,6 +366,54 @@ describe("failSessionAttempt child-terminal identity", () => {
     expect(recoveryCalls).toHaveLength(0);
   });
 
+  test("DB-only recovery preserves incomplete setup without authorizing a retry or terminal failure", async () => {
+    const recovery = mock(async () => ({ action: "recovering", events: [] }) as any);
+    const terminal = mock(async () => ({ action: "settled", events: [] }) as any);
+    const activities = createSessionStateActivities(
+      async () =>
+        ({ db: {}, bus: {}, settings: {}, observability: {}, wakeSessionWorkflow: null }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 4,
+              metadata: { providerRecoveryCount: 5 },
+            }) as any,
+        ),
+        requestSessionTurnRecovery: recovery as any,
+        applySessionTurnSettlement: terminal as any,
+        publishDurableSessionEvents: mock(async () => undefined),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        postClaimDatabaseRecovery: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 4,
+          code: "db_failure",
+          sandboxSetupOutcomeUnknown: true,
+        },
+      }),
+    ).toEqual({ action: "recovering" });
+    expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+      reason: "sandbox_command_start_outcome_unknown",
+      sandboxSetupOutcomeUnknown: true,
+      detail: { retryable: false, setupOutcome: "unknown", replay: "blocked" },
+    });
+    expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+    expect(terminal).not.toHaveBeenCalled();
+  });
+
   test("recovers an ambiguously committed claim from retryable pre-claim truth", async () => {
     const recoveryCalls: unknown[] = [];
     const terminalSettlement = mock(async () => ({ action: "settled" as const, events: [] }));

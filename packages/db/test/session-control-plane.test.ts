@@ -763,6 +763,72 @@ describe("clean session control plane", () => {
     ).toBeInstanceOf(Date);
   });
 
+  test("incomplete SDK setup parks the exact turn without a lease deadline or redispatch", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "preserve uncertain setup");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const turn = await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId, {
+      attemptId,
+      workflowRunId,
+      dispatchId,
+    });
+    expect(turn).not.toBeNull();
+    await shared.admin`update session_turns
+      set metadata = metadata || jsonb_build_object('providerRecoveryCount', 5)
+      where id = ${turn!.id}`;
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: turn!.triggerEventId,
+        attemptId,
+        reason: "sandbox_command_start_outcome_unknown",
+        sandboxSetupOutcomeUnknown: true,
+        detail: { retryable: false, replay: "blocked" },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const marker = {
+      version: 1,
+      turnId: turn!.id,
+      attemptId,
+      reason: "sandbox_command_start_outcome_unknown",
+    } as const;
+    // No lease at all is not proof that the unwound helper finished. Ordinary
+    // wakes and direct claim attempts cannot bypass the durable marker.
+    for (let wake = 0; wake < 3; wake++) {
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "admission-blocked",
+        reason: "sandbox_setup_outcome_unknown",
+        ref: marker,
+      });
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+      ).toBeNull();
+    }
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "recovering",
+      executionGeneration: turn!.executionGeneration,
+      activeAttemptId: null,
+      metadata: { providerRecoveryCount: 5, sandboxSetupOutcomeUnknown: marker },
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "recovering",
+      activeTurnId: turn!.id,
+    });
+  });
+
   test.each(["draining", "warm", "teardown"] as const)(
     "rotation recovery parks until the %s lease transition wakes it",
     async (liveness) => {

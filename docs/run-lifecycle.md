@@ -701,9 +701,29 @@ batches, message-only lookalikes, HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition never authorize
 automatic Start replay because pre-command safety is not proven. Ambiguous
 model-facing native Starts instead return explicit outcome-unknown tool results,
-keeping inference alive. Internal SDK/probe ambiguity has no adopted durable
-command handle; it is a non-retryable `sandbox_command_start_outcome_unknown`
-failure rather than raw gRPC failure or permission to replay setup. Legacy
+keeping inference alive. Internal SDK setup retains the genuine original
+invocation through the existing authenticated process/admission boundary. A
+missing, conflicting, malformed or unreadable descriptor keeps its original
+admission fenced without fabricating a process; unresolved cleanup cannot claim
+writer quiescence. Read-only original-ID observation can adopt an invocation
+while the original SDK helper frame is alive. If that helper unwinds with a
+genuine unknown outcome, exact-attempt settlement records
+`sandbox_command_start_outcome_unknown` as **recovering**, not failed or
+completed, with a durable `sandboxSetupOutcomeUnknown` turn marker. Work peek
+and direct claim both park it without a new setup attempt or synthetic model
+tool call. This neither resets the existing five-recovery budget nor changes
+the error into retry permission. A checkpoint database outage carries the same
+marker through the exact-identity DB-only recovery lane. Normal Pause/Steer and
+attempt-loss fences still win stale settlement; retained physical writers and
+capture/quiescence proofs keep their independent lifecycle.
+The existing blocked-admission wire kind also parks older workflow workers
+during a rolling deployment; no synthetic physical admission is created.
+
+An observation deadline, NOT_FOUND, provider/lease loss, or one original command
+exiting cannot prove that the rest of the unwound helper completed, so none
+clears the logical setup marker. Automatic continuation of incomplete setup
+requires a verified SDK continuation contract; the parked state is explicitly
+outcome-unknown, not a successful setup or a capacity/human-approval wait. Legacy
 `ContainerExec` still disables SDK retries and cannot recover an execution id
 lost with its response. Required first-party
 connect/tools-list also treats a rolling API
