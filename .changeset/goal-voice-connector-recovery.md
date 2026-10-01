@@ -15,5 +15,4 @@ Freeze initial-turn connector accounts against executable workspace defaults,
 matching follow-up admission while preserving explicit selections and exclusions.
 
 Validate scheduled generated sessions against the full accepted agent
-configuration and instruction alias during database binding and queued recovery.
-Retain optional editor registration in built demo entrypoints.
+configuration and instruction alias during queued recovery.

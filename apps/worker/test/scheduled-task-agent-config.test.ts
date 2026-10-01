@@ -89,6 +89,7 @@ async function generatedTask(
   grant: Awaited<ReturnType<typeof workspaceGrant>>,
   creatorPolicy: ScheduledTaskCreatorPolicy | null,
   agent?: Record<string, unknown>,
+  metadata: Record<string, unknown> = {},
 ) {
   return await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -104,7 +105,7 @@ async function generatedTask(
       prompt: "Run with the creator's boundary",
       resources: [],
       tools: [],
-      metadata: {},
+      metadata,
       ...(agent ? { agent } : {}),
     } as never,
     metadata: {},
@@ -116,16 +117,20 @@ async function dispatchGeneratedSession(
   grant: Awaited<ReturnType<typeof workspaceGrant>>,
   taskId: string,
   settingsOverrides: Parameters<typeof testSettings>[0] = {},
+  producerKey = `scheduled-agent-${crypto.randomUUID()}`,
 ) {
   const { settings, activities: scheduled } = activities(settingsOverrides);
   const result = await scheduled.dispatchScheduledTaskRun({
     workspaceId: grant.workspaceId,
     taskId,
     triggerType: "scheduled",
-    producerKey: `scheduled-agent-${crypto.randomUUID()}`,
+    producerKey,
   });
   if (result.action !== "start" && result.action !== "signal") {
-    throw new Error(`unexpected dispatch result: ${JSON.stringify(result)}`);
+    const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, taskId, 10);
+    throw new Error(
+      `unexpected dispatch result: ${JSON.stringify({ result, status: run?.status, error: run?.error })}`,
+    );
   }
   const session = await getSession(client.db, grant.workspaceId, result.sessionId);
   if (!session) throw new Error("generated session missing");
@@ -208,6 +213,40 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       ].filter((tool) => DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool as never)),
     );
     expect(accepted?.resolvedFirstPartyMcpTools).toEqual(session.firstPartyMcpTools);
+  }, 60_000);
+
+  test("configured dispatch canonicalizes creation metadata and replays its frozen instructions", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const identityKey = "_opengeni_session_create_agent_config_v1";
+    const task = await generatedTask(
+      grant,
+      null,
+      {
+        capabilities: { from: "none", goals: true },
+        identity: "Original reporter",
+        instructions: "Report only the accepted task.",
+      },
+      { purpose: "nightly", [identityKey]: { spoof: true } },
+    );
+    const producerKey = `scheduled-agent-${crypto.randomUUID()}`;
+    const overrides = { agentConfigAdmissionEnabled: true };
+    const first = await dispatchGeneratedSession(grant, task.id, overrides, producerKey);
+    const { source: _source, ...identity } = first.session.agent!;
+    expect(first.session.metadata[identityKey]).toEqual(identity);
+    expect(first.session.metadata.purpose).toBe("nightly");
+    expect(first.session.instructions).toBe("Report only the accepted task.");
+    expect(first.accepted?.resolvedAgentInstructions).toBe(first.session.instructions!);
+    expect(first.accepted?.resolvedAgentConfig).toEqual(first.session.agent!);
+
+    await shared!.admin`update scheduled_tasks
+      set agent_config = jsonb_set(agent_config, '{agent,identity}', '"Updated reporter"'::jsonb)
+      where id = ${task.id}`;
+    const replay = await dispatchGeneratedSession(grant, task.id, overrides, producerKey);
+    expect(replay.session.id).toBe(first.session.id);
+    expect(replay.session.agent).toEqual(first.session.agent);
+    expect(replay.session.instructions).toBe(first.session.instructions);
+    expect(replay.accepted).toEqual(first.accepted);
   }, 60_000);
 
   test("a stored task agent with admission off is refused, never silently dropped", async () => {

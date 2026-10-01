@@ -67,6 +67,7 @@ import {
   getNestedAgentDepthDeploymentPolicy,
   getSessionByCreateIdempotencyKey,
   getSessionCreationExecutionPolicy,
+  metadataWithAgentConfigCreateIdentity,
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
@@ -2443,23 +2444,19 @@ async function recoverBoundScheduledTaskDispatch(input: {
     );
     const expectedTaskMetadata = { ...task.agentConfig.metadata };
     delete expectedTaskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
-    const agentConfigIdentityKey = "_opengeni_session_create_agent_config_v1";
-    delete expectedTaskMetadata[agentConfigIdentityKey];
-    const { source: _agentSource, ...acceptedAgentIdentity } =
-      input.acceptedExecution.resolvedAgentConfig ?? {};
-    const expectedMetadata = {
-      ...expectedTaskMetadata,
-      ...(input.acceptedExecution.resolvedAgentConfig
-        ? { [agentConfigIdentityKey]: acceptedAgentIdentity }
-        : {}),
-      model: input.acceptedExecution.resolvedModel,
-      reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
-      scheduledTaskId: task.id,
-      scheduledTaskRunMode: task.runMode,
-      ...(task.agentConfig.goal ? { scheduledTaskGoal: task.agentConfig.goal } : {}),
-      scheduledTaskRunId: canonicalGeneratedRunId,
-      ...(frozenSlack ? { [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: frozenSlack.id } : {}),
-    };
+    const expectedMetadata = metadataWithAgentConfigCreateIdentity(
+      {
+        ...expectedTaskMetadata,
+        model: input.acceptedExecution.resolvedModel,
+        reasoningEffort: input.acceptedExecution.resolvedReasoningEffort,
+        scheduledTaskId: task.id,
+        scheduledTaskRunMode: task.runMode,
+        ...(task.agentConfig.goal ? { scheduledTaskGoal: task.agentConfig.goal } : {}),
+        scheduledTaskRunId: canonicalGeneratedRunId,
+        ...(frozenSlack ? { [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: frozenSlack.id } : {}),
+      },
+      input.acceptedExecution.resolvedAgentConfig,
+    );
     if (
       session.createIdempotencyKey !== expectedCreateKey ||
       session.initialMessage !== task.agentConfig.prompt ||

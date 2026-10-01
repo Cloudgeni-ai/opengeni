@@ -147,9 +147,9 @@ describe("release schema contract", () => {
         )
           ? "0562_realtime_connection_accounts.sql"
           : sourceContract.migrations.some(
-                (migration) => migration.path === "0561_scheduled_agent_config_fence.sql",
+                (migration) => migration.path === "0561_scheduled_session_agent_identity.sql",
               )
-            ? "0561_scheduled_agent_config_fence.sql"
+            ? "0561_scheduled_session_agent_identity.sql"
             : sourceContract.migrations.some(
                   (migration) => migration.path === "0560_archived_session_imports.sql",
                 )
@@ -529,8 +529,8 @@ describe("release schema contract", () => {
     const externalMembershipRemovalOwnerRls = completeSourceContract.migrations.some(
       (migration) => migration.path === "0558_external_membership_removal_owner_rls.sql",
     );
-    const scheduledAgentConfigFence = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0561_scheduled_agent_config_fence.sql",
+    const scheduledSessionAgentIdentity = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0561_scheduled_session_agent_identity.sql",
     );
     const realtimeConnectionAccounts = completeSourceContract.migrations.some(
       (migration) => migration.path === "0562_realtime_connection_accounts.sql",
@@ -817,7 +817,7 @@ describe("release schema contract", () => {
         (sessionAgentConfig ? 1 : 0) +
         (externalMembershipRemovalOwnerRls ? 1 : 0) +
         (archivedSessionImports ? 1 : 0) +
-        (scheduledAgentConfigFence ? 1 : 0) +
+        (scheduledSessionAgentIdentity ? 1 : 0) +
         (realtimeConnectionAccounts ? 1 : 0) +
         (organizationOauthPendingStates ? 1 : 0) +
         (claudeSubscriptionUsage ? 1 : 0) +
@@ -1256,8 +1256,8 @@ describe("release schema contract", () => {
         : {}),
       ...(sessionAgentConfig ? { latestMigration: "0559_session_agent_config.sql" } : {}),
       ...(archivedSessionImports ? { latestMigration: "0560_archived_session_imports.sql" } : {}),
-      ...(scheduledAgentConfigFence
-        ? { latestMigration: "0561_scheduled_agent_config_fence.sql" }
+      ...(scheduledSessionAgentIdentity
+        ? { latestMigration: "0561_scheduled_session_agent_identity.sql" }
         : {}),
       ...(realtimeConnectionAccounts
         ? { latestMigration: "0562_realtime_connection_accounts.sql" }
@@ -1312,7 +1312,7 @@ describe("release schema contract", () => {
             "0558_external_membership_removal_owner_rls.sql",
             "0559_session_agent_config.sql",
             "0560_archived_session_imports.sql",
-            "0561_scheduled_agent_config_fence.sql",
+            "0561_scheduled_session_agent_identity.sql",
             "0562_realtime_connection_accounts.sql",
           ].includes(migration.path),
       ),
@@ -2629,9 +2629,9 @@ describe("release schema contract", () => {
       )
         ? "0562_realtime_connection_accounts.sql"
         : unfilteredSourceContract.migrations.some(
-              (migration) => migration.path === "0561_scheduled_agent_config_fence.sql",
+              (migration) => migration.path === "0561_scheduled_session_agent_identity.sql",
             )
-          ? "0561_scheduled_agent_config_fence.sql"
+          ? "0561_scheduled_session_agent_identity.sql"
           : unfilteredSourceContract.migrations.some(
                 (migration) => migration.path === "0560_archived_session_imports.sql",
               )
@@ -2839,7 +2839,7 @@ describe("release schema contract", () => {
       "0558_external_membership_removal_owner_rls.sql",
       "0559_session_agent_config.sql",
       "0560_archived_session_imports.sql",
-      "0561_scheduled_agent_config_fence.sql",
+      "0561_scheduled_session_agent_identity.sql",
       "0562_realtime_connection_accounts.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
@@ -3392,7 +3392,7 @@ describe("release schema contract", () => {
       "0558_external_membership_removal_owner_rls.sql",
       "0559_session_agent_config.sql",
       "0560_archived_session_imports.sql",
-      "0561_scheduled_agent_config_fence.sql",
+      "0561_scheduled_session_agent_identity.sql",
       "0562_realtime_connection_accounts.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),

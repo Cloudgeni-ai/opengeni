@@ -337,7 +337,7 @@ privacy semantics are unchanged.
   sessions must match the complete frozen agent configuration, its instruction
   alias, and its creation identity. The database binding fence and worker recovery
   use the same proof; a legacy NULL snapshot still requires a legacy session.
-  Migration `0561_scheduled_agent_config_fence.sql` updates the binding fence
+  Migration `0561_scheduled_session_agent_identity.sql` updates the binding fence
   without changing existing grants or its schema-scoped security boundary.
 - **Goals imply the goals capability.** Setting a goal enables `goals`, and a
   request that disables `goals` while setting a goal is a 422.
