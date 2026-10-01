@@ -2502,8 +2502,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpTools) ||
       stableJson(session.firstPartyMcpPermissions) !==
         stableJson(input.acceptedExecution.resolvedFirstPartyMcpPermissions) ||
-      stableJson(session.agent?.capabilities ?? null) !==
-        stableJson(input.acceptedExecution.resolvedAgentConfig?.capabilities ?? null) ||
+      stableJson(session.agent) !==
+        stableJson(input.acceptedExecution.resolvedAgentConfig ?? null) ||
       session.maxNestedAgentDepthOverride !== (task.agentConfig.maxNestedAgentDepth ?? null) ||
       (session.variableSetId ?? null) !==
         (input.acceptedExecution.resolvedVariableSet?.id ?? null) ||

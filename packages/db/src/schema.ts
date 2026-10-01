@@ -5269,6 +5269,11 @@ export const sessionRealtimeModes = pgTable(
     ownerSubjectId: text("owner_subject_id").notNull(),
     browserInstanceId: text("browser_instance_id").notNull(),
     ownerKeyHash: text("owner_key_hash").notNull(),
+    personalConnectionDelegations: jsonb("personal_connection_delegations")
+      .$type<McpPersonalConnectionDelegation[]>()
+      .notNull()
+      .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     model: text("model").notNull(),
     state: text("state").notNull().default("active"),
     version: integer("version").notNull().default(1),

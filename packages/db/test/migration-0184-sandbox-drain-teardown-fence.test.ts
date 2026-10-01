@@ -97,6 +97,8 @@ const withheldMigrationNames = [
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",
+  // Patches the scheduled producer fence after its withheld prerequisites.
+  "0561_scheduled_session_agent_identity.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -3144,12 +3144,23 @@ async function createSessionForRequestInFileScope(
   const atlassianEnabled =
     firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
     (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
+  // Creation's stored tool snapshot can omit configured workspace defaults.
+  // Freeze initial-turn accounts against the same executable policy as later
+  // messages; explicit selections and exclusions remain exact.
+  const connectionAccountTools = sessionToolsForConnectionAccounts({
+    session: { tools, toolPolicy },
+    runtimeMcpServers: runtimeSettings.mcpServers,
+    defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
+      capabilityRuntimeSettings.mcpServers,
+      workspace.settings,
+    ),
+  });
   const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
     db,
     accountId: grant.accountId,
     workspaceId,
     settings: runtimeSettings,
-    tools,
+    tools: connectionAccountTools,
     resources,
     source: connectionDelegationSource,
     authoritySelections: payload.connectionAccounts,
