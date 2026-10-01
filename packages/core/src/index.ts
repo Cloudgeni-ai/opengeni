@@ -100,6 +100,7 @@ export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
+export * from "./domain/agent-config-resolution";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/sessions";

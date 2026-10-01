@@ -34,7 +34,7 @@ import type {
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 export * from "./knowledge-entries-schema";
-import type { SessionToolPolicy } from "@opengeni/contracts";
+import type { ResolvedAgentConfig, SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
@@ -4912,6 +4912,9 @@ export const sessions = pgTable(
     // Frozen at create (migration 0520): whether the optional Jev-backed
     // code_search tool is offered. NULL, as on every older row, means off.
     codeSearchEnabled: boolean("code_search_enabled"),
+    // Frozen agent configuration (migration 0559); NULL means a legacy
+    // session. Mid-session updates share the tool_policy_version CAS.
+    agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Assigned once by the explicit transaction commit gate whenever canonical

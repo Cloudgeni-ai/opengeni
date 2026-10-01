@@ -23,6 +23,20 @@ credentials, without making those servers deployment-global.
   deployments resolve it through OpenGeni's connection store; embedded hosts
   can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
 
+### Tool selection
+
+On a top-level create, each server attached in `mcpServers` is selected by that
+attachment: core adds a strict `{ kind: "mcp", id }` ref whether `tools` is
+omitted (workspace-default mode) or explicit, including `tools: []`. Attaching is
+already an explicit, `mcp_servers:attach`-authorized choice of this endpoint, so
+selection grants nothing further; the server's `requireApproval` still governs
+each call. An explicit ref for the same id is kept exactly, so `tools` is only
+needed to set `eager: true` (put its schemas on the first model request instead
+of behind `tool_search`) or `optional: true` (skip it on connect/list failure).
+Before this, an attached server that `tools` did not name was stored but never
+contacted, and the model reported that no tools existed. Agent-created children
+keep their inherited selection and may only narrow it.
+
 Session responses and session events expose only metadata:
 
 ```ts

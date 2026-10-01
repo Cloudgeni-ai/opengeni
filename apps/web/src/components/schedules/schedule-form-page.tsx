@@ -54,6 +54,7 @@ const ScheduleSlackPosting = lazy(async () => ({
   default: (await import("@/components/schedule-slack-posting")).ScheduleSlackPosting,
 }));
 import { ComposerField } from "./schedule-composer";
+import { ScheduleAgentCapabilities } from "./schedule-agent-capabilities";
 import {
   NAME_MAX_LENGTH,
   SCHEDULE_FREQUENCIES,
@@ -864,6 +865,19 @@ function AgentScheduleForm({
               suppressAutofill
             />
           </Field>
+          {context.clientConfig.agentConfig?.enabled && eachRun !== "existing_session" ? (
+            <ScheduleAgentCapabilities
+              workspaceId={workspaceId}
+              value={draft.agentCapabilities}
+              onChange={(agentCapabilities) =>
+                setDraft((previous) => {
+                  if (agentCapabilities !== undefined) return { ...previous, agentCapabilities };
+                  const { agentCapabilities: _dropped, ...rest } = previous;
+                  return rest;
+                })
+              }
+            />
+          ) : null}
           <Disclosure
             variant="row"
             title="Advanced"

@@ -96,6 +96,48 @@ const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 </OpenGeniProvider>;
 ```
 
+The proxy and `@opengeni/sdk/chat` facade accept `chats`. The proxy defaults to
+`"private"`; the facade does too when a `user` is present. Without a user and with
+`chats` omitted, the facade keeps workspace visibility, session-only agent reach
+and Knowledge authoring off. Explicit `"private"` requires an authenticated user.
+Private chats use private visibility, session-only agent reach and personal
+Knowledge; `"shared"` uses workspace visibility, agent reach and Knowledge.
+The API wire values are `visibility: "private" | "workspace"`; stored visibility
+is `user_private | workspace_shared`. Explicit hook/create fields override defaults.
+
+For `"isolated"`, pass the facade and return `{ tenant, user }` from `resolve`.
+`og.workspaceIdFor({ tenant, user }, { isolation: "user" })` provisions a separate
+workspace and that user's external membership. It uses stable onboarding keys,
+so retries do not restore revoked access. Other modes need explicit onboarding.
+The standalone resolver is on the server-only `@opengeni/sdk/tenant-workspaces`
+subpath. Keep tenant and user values host-authenticated.
+
+Isolated members get only workspace read, session create/read/control (including
+sending messages), file upload/read, and `mcp_servers:attach` for host-provided
+per-session servers. No admin permissions are included. Pass `memberPermissions`
+to the `OpenGeni` constructor or `createWorkspaceIdResolver` options to replace
+that list, for example to disable file uploads or MCP attachment. The organization
+key must also permit each operation. This is initial onboarding, not a membership
+update: changing the option does not update existing grants or restore revoked access.
+Keep MCP URLs and credentials in the server's `createSession` hook; the browser
+cannot choose them through the proxy.
+An existing onboarding conflict returns the workspace address without retrying
+or changing the grant. The address is not authorization: later `asUser` calls
+still enforce current permissions. Existing isolated users need an explicit
+`updateExternalWorkspaceMember` to gain newly added permissions such as MCP attachment.
+
+The facade also accepts `agent` (identity, capabilities, instructions, renderer)
+and defaults its renderer to `"markdown"` when the server admits agent configuration.
+Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
+and that refusal is cached per facade instance. This avoids a bootstrap request
+and supports older servers that cannot advertise admission. Explicit agent settings
+are never stripped: the 422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for the
+deployment operator. The private default with a user now turns personal Knowledge
+on; pass `memory: false` to keep authoring off.
+Missing organization private-session enablement raises `OpenGeniSetupError`,
+with owner/admin API, SDK and web-app instructions; the proxy preserves that
+actionable error for browser clients.
+
 Framework adapters are thin wrappers over the same web-standard handler (they
 also accept `createChatHandler` or any `(Request) => Promise<Response>`):
 
@@ -1093,6 +1135,9 @@ await client.cancelSession(workspaceId, sessionId, {
   reason: "host record deleted",
   clientEventId: crypto.randomUUID(),
 });
+// approvalId is `approvals[].id` from the latest `session.requiresAction`
+// event (type SessionApprovalRequest: { id, name, arguments }); it is the
+// pending tool call id, not the event id.
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 

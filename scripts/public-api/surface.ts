@@ -989,11 +989,22 @@ export type Finding = {
   message: string;
 };
 
+/** Decides whether a field's move from one named schema to another keeps callers working. */
+type RefCompatibility = (
+  oldRef: string,
+  newRef: string,
+  ios: readonly SchemaIo[],
+  seen?: Set<string>,
+) => boolean;
+
+const REF_TYPE = /^ref\((.+)\)$/;
+
 function shapeFindings(
   name: string,
   ios: readonly SchemaIo[],
   before: Shape,
   after: Shape,
+  refCompatible: RefCompatibility = () => false,
 ): Finding[] {
   const findings: Finding[] = [];
   const input = ios.includes("input");
@@ -1018,7 +1029,16 @@ function shapeFindings(
     if (old.t !== next.t) {
       const widenedInput = input && !output && next.t === "unknown";
       const narrowedOutput = output && !input && old.t === "unknown";
-      if (!widenedInput && !narrowedOutput) push(path, true, `type changed ${old.t} -> ${next.t}`);
+      const oldRef = REF_TYPE.exec(old.t)?.[1];
+      const newRef = REF_TYPE.exec(next.t)?.[1];
+      // A field that now points at a differently named schema is only a break
+      // when that schema's shape breaks callers (e.g. a request union widened
+      // into a new named superset is additive).
+      if (oldRef && newRef && refCompatible(oldRef, newRef, ios)) {
+        push(path, false, `type changed ${old.t} -> ${next.t} (compatible shape)`);
+      } else if (!widenedInput && !narrowedOutput) {
+        push(path, true, `type changed ${old.t} -> ${next.t}`);
+      }
       continue;
     }
     if (old.req !== undefined && next.req !== undefined && old.req !== next.req) {
@@ -1119,6 +1139,20 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
         });
     }
   }
+  const refCompatible: RefCompatibility = (oldRef, newRef, ios, seen = new Set<string>()) => {
+    const key = `${oldRef}->${newRef}`;
+    const oldSchema = before.schemas[oldRef];
+    const newSchema = after.schemas[newRef];
+    if (!oldSchema || !newSchema || seen.has(key)) return false;
+    seen.add(key);
+    return !shapeFindings(
+      newRef,
+      ios,
+      decodeShape(oldSchema.shape),
+      decodeShape(newSchema.shape),
+      (a, b, nested) => refCompatible(a, b, nested, seen),
+    ).some((finding) => finding.breaking);
+  };
   for (const [name, schema] of Object.entries(before.schemas)) {
     const next = after.schemas[name];
     if (!next) {
@@ -1134,7 +1168,15 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
       continue;
     }
     const ios = [...new Set([...schema.io, ...next.io])] as SchemaIo[];
-    findings.push(...shapeFindings(name, ios, decodeShape(schema.shape), decodeShape(next.shape)));
+    findings.push(
+      ...shapeFindings(
+        name,
+        ios,
+        decodeShape(schema.shape),
+        decodeShape(next.shape),
+        refCompatible,
+      ),
+    );
   }
   for (const [entry, names] of Object.entries(before.exports)) {
     const next = after.exports[entry];

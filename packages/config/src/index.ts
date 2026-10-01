@@ -2,6 +2,8 @@ export { managedUserEmailAllowed } from "./managed-user-admission";
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
+  agentConfigDeploymentLimitsFromAllowlist,
+  type AgentConfigDeploymentLimits,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DEFAULT_OPENGENI_DOCUMENTATION_URL,
   currentAgentLearningToolSelection,
@@ -829,6 +831,17 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Agent configuration rollout (packages/contracts/src/agent-config.ts).
+  // Admission: when false the API rejects every `agent` input (and the
+  // mid-session update) with 422 agent_config_not_enabled, and stored
+  // workspace agent defaults are ignored. Enable only after every worker
+  // understands sessions.agent_config (migration 0559). Workers always honor
+  // stored configurations regardless of this switch.
+  agentConfigAdmissionEnabled: EnvBoolean.default(false),
+  // When true, a new top-level session that omits `agent` (and has no
+  // legacy parent) resolves `{ capabilities: "all" }`. Old workers ignoring an
+  // "all" configuration still produce today's full tool set.
+  agentConfigDefaultForNewSessions: EnvBoolean.default(false),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -1654,6 +1667,28 @@ function usableDeploymentSecret(value: string | null | undefined): string | unde
 /** The deployment's Jev key, or undefined when it is missing or a placeholder. */
 export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string | undefined {
   return usableDeploymentSecret(settings.jevApiKey);
+}
+
+/** Deployment half of agent configuration: rollout switches plus hard capability limits. */
+export function agentConfigDeploymentPolicy(
+  settings: Pick<
+    Settings,
+    | "agentConfigAdmissionEnabled"
+    | "agentConfigDefaultForNewSessions"
+    | "webSearchEnabled"
+    | "defaultFirstPartyMcpTools"
+    | "allowedFirstPartyMcpTools"
+  >,
+): AgentConfigDeploymentLimits & { admissionEnabled: boolean; defaultForNewSessions: boolean } {
+  const limits = agentConfigDeploymentLimitsFromAllowlist(
+    resolveFirstPartyMcpToolPolicy(settings).allowed,
+    settings.webSearchEnabled ? {} : { webSearch: "web search is turned off on this server" },
+  );
+  return {
+    ...limits,
+    admissionEnabled: settings.agentConfigAdmissionEnabled === true,
+    defaultForNewSessions: settings.agentConfigDefaultForNewSessions === true,
+  };
 }
 
 /**
@@ -3425,6 +3460,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    agentConfigAdmissionEnabled: optional("OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED"),
+    agentConfigDefaultForNewSessions: optional("OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),

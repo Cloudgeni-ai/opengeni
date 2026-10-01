@@ -86,7 +86,8 @@ describe("unified session tool picker", () => {
         'button[role="switch"][aria-label="Customize connectors"]',
       )!;
       expect(container.querySelector('button[role="switch"][aria-label="Linear"]')).toBeNull();
-      expect(container.querySelector('[aria-label="Linear, off for this session"]')).not.toBeNull();
+      // The read-only state is spoken text, not an aria-label on a plain span.
+      expect(container.textContent).toContain("Linear, off for this session");
       await act(async () => customize.click());
       const linear = container.querySelector<HTMLButtonElement>(
         'button[role="switch"][aria-label="Linear"]',
