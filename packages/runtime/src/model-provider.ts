@@ -10,6 +10,7 @@ import {
 import { buildOpenAIClientFromSettings } from "./model-provider-client";
 import { MultiProviderModelProvider } from "./model-provider-routing";
 
+export { ResponsesStreamingTerminalError } from "./responses-terminal-error";
 export {
   CodexSubscriptionUnavailableError,
   OrganizationGatewayUnavailableError,

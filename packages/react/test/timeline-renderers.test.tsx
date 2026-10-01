@@ -1,6 +1,6 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/sdk";
+import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush, actRun } from "./render-hook";
 import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
@@ -65,6 +65,19 @@ test("account-qualified native and Codemode calls render persisted labels after 
 });
 
 let timelineSequence = 0;
+
+test("repeated empty final renders its notice without a failure label", async () => {
+  const rendered = await renderComponent(
+    <MessageTimeline
+      events={[timelineEvent("turn.completed", { output: "", emptyFinalReply: true })]}
+      status="idle"
+    />,
+  );
+  await flush();
+  expect(rendered.container.textContent).toContain(EMPTY_FINAL_REPLY_NOTICE);
+  expect(rendered.container.textContent).not.toContain("Turn failed");
+  await rendered.unmount();
+});
 
 function timelineEvent(
   type: string,

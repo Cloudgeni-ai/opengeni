@@ -28,8 +28,8 @@ verified active-turn user. Task notes coordinate; linking never merges users.
 Skill removal deletes scoped heads/revisions with exact approval and Learning
 enforcement, preserving conversation context.
 
-Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
-retain catalog floors but grant no capabilities or credentials.
+`mcpApprovalPolicies` requires session-control authority. Frozen policies
+retain catalog floors, granting no capabilities/credentials.
 
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
@@ -51,7 +51,7 @@ retain that turn snapshot, never mutable session state. See
 
 ## 3. Core invariants
 
-Hosted tool-call `status` survives persistence and Codex replay; function/message
+Hosted tool-call `status` survives persistence/Codex replay; function/message
 annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
 [model providers](model-providers.md).
 
@@ -99,23 +99,21 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 Temporal coordinates execution; activities read Postgres obligations, not signals.
 Conversation, goals, queues, usage and provider/tool transcripts stay outside
-workflow history; streams use ordinary events.
+workflow history.
 
-Canonical: `apps/worker/src/workflows/session.ts` and
+Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Control observation is not settlement: unavailable scoped reads and owned
-attempts retain bounded, signal-interruptible waits without marking work idle,
-revoking writers, or dispatching successors. Temporal metadata cannot prove
-physical-writer quiescence.
+Control observation is not settlement: unavailable reads/owned attempts retain
+bounded, interruptible waits without marking idle, revoking writers or dispatching
+successors. Temporal metadata cannot prove physical-writer quiescence.
 
 Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
-effects. Updates form atomic batches; resumed attempts append batches, preserving
-ordered, exactly-once history.
+A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
+attempts append atomic update batches, preserving ordered, exactly-once history.
 
 `wait_for_input` ends execution after tool-batch settlement, preserving trusted
 wait authority and immutable same-turn deadlines. Command results remain durable;
@@ -193,15 +191,19 @@ unless review is configured; human-owned constraints remain. Goals never live
 in `Agent.instructions` or solely workflow memory.
 Generic caps cannot replace lifecycle fixes.
 
+Goal completion isn't chat delivery: one handoff fixes empty finals, then a
+typed notice.
+See [run lifecycle](run-lifecycle.md).
+
 Non-transient preclaim rejection parks accepted work behind a durable admission
 block. Resume/Send/Steer rechecks without granting authority; operational outages
 retain backoff.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
-Reports default to chat; requested or large ones use native documents authored
-via the Documents Skill; goal/artifact domains validate persisted
-requirements/current inspection proof. See [`goals.md`](goals.md).
+Reports default to chat; requested/large ones use native documents and the
+Documents Skill. Goal/artifact domains validate requirements/inspection proof.
+See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 
@@ -352,7 +354,8 @@ parsing, defaults, validation, and derived runtime configuration.
 Catalog membership, selectability, and cost have separate authorities. Deployment
 membership uses `code` or an operator-owned database singleton; workspace policy,
 connection readiness/permissions, organization assignments, and provider health
-determine selectability. Deployment cost policy sets `free`/`credits` independently
+determine selectability; `/v1/config/client` and session create share one
+resolver. Deployment cost policy sets `free`/`credits` independently
 of upstream settlement. Workspace Gateway, OpenRouter, Anthropic API, and Claude
 subscription rows are provider-qualified overlays, separate from deployment
 catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
@@ -379,6 +382,9 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
+Managed updates fence new work and require idle commands, uploads, and every
+owned browser/computer controller. Browserd reports only a private idle boolean;
+unavailable proof defers the update and preserves normal admission.
 Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 

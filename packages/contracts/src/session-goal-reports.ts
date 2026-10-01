@@ -2,11 +2,21 @@ import { z } from "zod";
 
 export const SessionGoalReportRequirement = z
   .object({
-    id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
+    id: z
+      .string()
+      .max(64)
+      .describe(
+        "Stable report requirement identifier, at most 64 ASCII characters; not a title or status.",
+      )
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
     title: z
       .string()
       .trim()
       .min(1)
+      .max(512)
+      .describe(
+        "Short human-readable report title, at most 512 UTF-8 bytes. Keep normal spaces; do not put the report or a progress transcript here.",
+      )
       .refine(
         (value) => new TextEncoder().encode(value).byteLength <= 512,
         "Report title exceeds 512 UTF-8 bytes",

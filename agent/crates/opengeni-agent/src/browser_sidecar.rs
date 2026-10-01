@@ -44,6 +44,8 @@ const MAX_ORIGINS: usize = 64;
 const MAX_ORIGIN_BYTES: usize = 2_048;
 const MIN_TOKEN_BYTES: usize = 32;
 const MAX_TOKEN_BYTES: usize = 2_048;
+const IDLE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_IDLE_RESPONSE_BYTES: usize = 1_024;
 
 #[derive(Debug)]
 struct Sidecar {
@@ -52,6 +54,7 @@ struct Sidecar {
     endpoint: BrowserControlEndpoint,
     scope_generation: String,
     token_digest: blake3::Hash,
+    token_file: PathBuf,
     allowed_origins: Vec<String>,
 }
 
@@ -212,6 +215,7 @@ impl BrowserSidecarManager {
             },
             scope_generation: scope_generation.to_string(),
             token_digest: blake3::hash(admin_token.as_bytes()),
+            token_file,
             allowed_origins: allowed_origins.to_vec(),
         })
     }
@@ -266,6 +270,42 @@ async fn add_allowed_origins(
 
 #[async_trait]
 impl BrowserControlBackend for BrowserSidecarManager {
+    async fn is_idle(&self) -> PlatformResult<bool> {
+        // Hold the generation map across the proof. The supervisor has already
+        // fenced routed work; this also prevents an in-flight ensure replacing
+        // one endpoint between observation and the update decision.
+        tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
+            let mut sidecars = self.sidecars.lock().await;
+            if sidecars.is_empty() {
+                return Ok(true);
+            }
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(IDLE_PROBE_TIMEOUT)
+                .build()
+                .map_err(|_| PlatformError::os("browser controller idle probe unavailable"))?;
+            for sidecar in sidecars.values_mut() {
+                if sidecar
+                    .child
+                    .try_wait()
+                    .map_err(|_| PlatformError::os("browser controller process state unavailable"))?
+                    .is_some()
+                {
+                    // A crashed controller may have left children behind. It
+                    // cannot prove idle; ordinary scoped recovery owns cleanup.
+                    return Err(PlatformError::os("browser controller is no longer running"));
+                }
+                if !sidecar_is_idle(&client, sidecar).await? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .map_err(|_| PlatformError::Timeout("browser controller idle probe timed out".into()))?
+    }
+
     async fn ensure(
         &self,
         req: &v1::BrowserControlEnsureRequest,
@@ -358,6 +398,72 @@ impl BrowserControlBackend for BrowserSidecarManager {
         }
         Ok(sidecar.endpoint.clone())
     }
+}
+
+async fn sidecar_is_idle(client: &reqwest::Client, sidecar: &Sidecar) -> PlatformResult<bool> {
+    // Read the existing owner-only authority instead of keeping another bearer
+    // in the manager's printable state. Refuse mutable authority drift.
+    let file = tokio::fs::File::open(&sidecar.token_file)
+        .await
+        .map_err(|_| PlatformError::os("browser controller authority unavailable"))?;
+    let mut token = String::new();
+    file.take((MAX_TOKEN_BYTES + 2) as u64)
+        .read_to_string(&mut token)
+        .await
+        .map_err(|_| PlatformError::os("browser controller authority unreadable"))?;
+    let token = validate_token(token.trim())?;
+    if blake3::hash(token.as_bytes()) != sidecar.token_digest {
+        return Err(PlatformError::os("browser controller authority changed"));
+    }
+    let mut response = client
+        .get(format!(
+            "http://127.0.0.1:{}/v1/runtime",
+            sidecar.endpoint.port
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| PlatformError::os("browser controller idle probe failed"))?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(PlatformError::os(
+            "browser controller idle proof unavailable",
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| PlatformError::os("browser controller idle proof unreadable"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_IDLE_RESPONSE_BYTES {
+            return Err(PlatformError::os(
+                "browser controller idle proof exceeded its bound",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let proof: RuntimeIdleResponse = serde_json::from_slice(&body)
+        .map_err(|_| PlatformError::os("browser controller idle proof incompatible"))?;
+    if !proof.ok || proof.protocol_version != 1 {
+        return Err(PlatformError::os(
+            "browser controller idle proof incompatible",
+        ));
+    }
+    Ok(proof.data.idle)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeIdleResponse {
+    protocol_version: u32,
+    ok: bool,
+    data: RuntimeIdleState,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeIdleState {
+    idle: bool,
 }
 
 async fn stop_sidecar(mut sidecar: Sidecar) {
@@ -770,6 +876,175 @@ static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn idle_fixture_manager(directory: &Path, port: u16) -> BrowserSidecarManager {
+        use std::os::unix::fs::PermissionsExt as _;
+        let binary = directory.join("idle-browserd");
+        let ready = serde_json::json!({
+            "service": "opengeni-browserd", "status": "ready", "protocolVersion": 1,
+            "computer": true,
+            "runtimeBuildId": expected_runtime_build_id(), "hostname": "127.0.0.1", "port": port,
+        });
+        std::fs::write(&binary, format!(
+            "#!/bin/sh\nprintf '%s\\n' '{ready}'\ntrap 'exit 0' INT\nwhile :; do sleep 1 & wait $!; done\n"
+        )).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        BrowserSidecarManager::with_binary(directory.join("config"), binary).unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn serve_idle_proofs(listener: tokio::net::TcpListener, replies: Vec<(u16, String)>) {
+        use tokio::io::AsyncWriteExt as _;
+        for (status, body) in replies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1_024];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0 && request.len() + count <= 8_192);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /v1/runtime HTTP/1.1\r\n"));
+            assert!(request.contains(&format!("authorization: Bearer {}\r\n", "p".repeat(32))));
+            socket.write_all(format!(
+                "HTTP/1.1 {status} Fixture\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\nlocation: http://127.0.0.1:1/refused\r\n\r\n{body}", body.len()
+            ).as_bytes()).await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    async fn ensure_idle_fixture(manager: &BrowserSidecarManager, scope: &str) {
+        manager
+            .ensure(&v1::BrowserControlEnsureRequest {
+                scope_id: scope.into(),
+                scope_generation: "fixture-generation".into(),
+                admin_token: "p".repeat(32),
+                allowed_origins: vec![],
+            })
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_idle_proof_checks_all_scopes_without_stopping_children() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        let idle = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let busy = r#"{"protocolVersion":1,"ok":true,"data":{"idle":false}}"#;
+        let server = tokio::spawn(serve_idle_proofs(
+            listener,
+            vec![
+                (200, idle.into()),
+                (200, busy.into()),
+                (200, idle.into()),
+                (200, idle.into()),
+            ],
+        ));
+        assert!(
+            manager.is_idle().await.unwrap(),
+            "never-started controller is idle"
+        );
+        ensure_idle_fixture(&manager, "first").await;
+        ensure_idle_fixture(&manager, "second").await;
+        assert!(
+            !manager.is_idle().await.unwrap(),
+            "one idle scope cannot authorize host restart"
+        );
+        assert!(manager.is_idle().await.unwrap());
+        server.await.unwrap();
+        for sidecar in manager.sidecars.lock().await.values_mut() {
+            assert!(
+                sidecar.child.try_wait().unwrap().is_none(),
+                "proof must never stop a controller"
+            );
+        }
+        manager.shutdown().await;
+        assert!(manager.is_idle().await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_idle_proof_refuses_missing_incompatible_or_redirected_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        let replies = vec![
+            (404, "older controller".into()),
+            (302, String::new()),
+            (200, "not JSON".into()),
+            (
+                200,
+                r#"{"protocolVersion":2,"ok":true,"data":{"idle":true}}"#.into(),
+            ),
+            (
+                200,
+                r#"{"protocolVersion":1,"ok":false,"data":{"idle":true}}"#.into(),
+            ),
+            (200, r#"{"protocolVersion":1,"ok":true,"data":{}}"#.into()),
+            (200, "x".repeat(MAX_IDLE_RESPONSE_BYTES + 1)),
+        ];
+        let count = replies.len();
+        let server = tokio::spawn(serve_idle_proofs(listener, replies));
+        ensure_idle_fixture(&manager, "scope").await;
+        for _ in 0..count {
+            let error = manager.is_idle().await.unwrap_err();
+            assert!(!error.to_string().contains(&"p".repeat(32)));
+        }
+        server.await.unwrap();
+        assert!(!format!("{manager:?}").contains(&"p".repeat(32)));
+        let mut sidecars = manager.sidecars.lock().await;
+        let sidecar = sidecars.values_mut().next().unwrap();
+        std::fs::write(&sidecar.token_file, "q".repeat(32)).unwrap();
+        drop(sidecars);
+        assert!(
+            manager.is_idle().await.is_err(),
+            "changed authority is not idle proof"
+        );
+        let mut sidecars = manager.sidecars.lock().await;
+        let sidecar = sidecars.values_mut().next().unwrap();
+        sidecar.child.start_kill().unwrap();
+        sidecar.child.wait().await.unwrap();
+        drop(sidecars);
+        assert!(
+            manager.is_idle().await.is_err(),
+            "crashed sidecar cannot prove child cleanup"
+        );
+        manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_idle_proof_has_one_bounded_host_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        ensure_idle_fixture(&manager, "scope").await;
+        let socket = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let probe = manager.is_idle();
+        tokio::pin!(probe);
+        let response = tokio::select! {
+            result = &mut probe => panic!("probe ended before request: {result:?}"),
+            socket = socket => socket.unwrap(),
+        };
+        let started = std::time::Instant::now();
+        assert!(tokio::time::timeout(Duration::from_secs(7), &mut probe)
+            .await
+            .unwrap()
+            .is_err());
+        assert!(started.elapsed() < Duration::from_secs(7));
+        drop(response);
+        manager.shutdown().await;
+    }
 
     #[test]
     fn authority_inputs_are_bounded_and_storage_keys_hide_scope_names() {
