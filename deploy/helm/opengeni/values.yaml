@@ -1102,6 +1102,14 @@ ingress:
     # while query mode is selected aborts rendering with an operator error.
     enabled: true
     annotations: {}
+  # Exact API routes for the workspace MCP OAuth protocol paths that live at
+  # the issuer origin root (/.well-known/oauth-*, /oauth/*). Rendered for every
+  # ingress host that already routes to the API, only while
+  # config.OPENGENI_MCP_OAUTH_ENABLED is true. Gated deployments that protect
+  # the primary Ingress with auth annotations must repeat them here.
+  mcpOAuthIngress:
+    enabled: true
+    annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
   # (e.g. the preview environment, whose primary Ingress sits behind nginx

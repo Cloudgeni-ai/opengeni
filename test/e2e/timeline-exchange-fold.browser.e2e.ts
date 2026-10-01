@@ -119,7 +119,131 @@ describe("readable timeline browser regression", () => {
     return page;
   }
 
+  for (const width of [320, 390, 1280]) {
+    for (const theme of ["dark", "light"]) {
+      test(`contextual prompt navigation retains the older answer at ${width}px ${theme}`, async () => {
+        const page = await openHarness("history", width, width < 500);
+        const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+        const capture = async (state: string) => {
+          if (!output) return;
+          mkdirSync(output, { recursive: true });
+          await page.screenshot({ path: `${output}/contextual-${width}-${theme}-${state}.png` });
+        };
+        try {
+          if (theme === "light")
+            await page.getByRole("button", { name: "Dark", exact: true }).click();
+          await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            driver.show(driver.indexOf("user.message")[3]!);
+          });
+          await page.waitForTimeout(500);
+          expect(await page.locator("[data-og-prompt]").count()).toBe(3);
+          await page.evaluate(() => {
+            const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            node.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+            const answer = [
+              ...node.querySelectorAll<HTMLElement>("[data-og-wide-table-message]"),
+            ].find((row) => row.textContent?.includes("Week 2:"))!;
+            node.scrollTop +=
+              answer.getBoundingClientRect().top - node.getBoundingClientRect().top - 50;
+          });
+          const back = page.getByRole("button", { name: "Back to your message", exact: true });
+          await back.waitFor();
+          await capture("older-answer");
+          await page.evaluate(() =>
+            window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+          );
+          await page.waitForTimeout(250);
+          expect(await page.locator("[data-og-prompt]").count()).toBe(4);
+          await back.focus();
+          await page.keyboard.press("Enter");
+          const destination = await page.evaluate(() => {
+            const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            const prompt = document.activeElement as HTMLElement;
+            return {
+              text: prompt.textContent,
+              isPrompt: prompt.hasAttribute("data-og-prompt"),
+              top: prompt.getBoundingClientRect().top - node.getBoundingClientRect().top,
+              following: node.dataset.ogBottomFollow,
+              calls: window.exchangeFoldHarness!.questionResolverCalls(),
+            };
+          });
+          expect(destination.text).toContain("Question 2:");
+          expect(destination.isPrompt).toBe(true);
+          expect(Math.abs(destination.top - 12)).toBeLessThanOrEqual(2);
+          expect(destination.following).toBe("false");
+          expect(destination.calls).toBe(0);
+          await back.waitFor({ state: "hidden" });
+          await capture("destination");
+          // A visible associated prompt has no return action, even with later prompts.
+          await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
+            node.scrollTop = 0;
+          });
+          await page.waitForTimeout(250);
+          expect(await back.count()).toBe(0);
+          // A bounded slice without its prompt must not invent a global destination.
+          await page.evaluate(() => {
+            const driver = window.exchangeFoldHarness!;
+            driver.showWindow(
+              driver.indexOf("agent.message.delta", { messageId: "answer-2" })[0]!,
+              driver.indexOf("user.message")[2]!,
+            );
+          });
+          await page.waitForTimeout(300);
+          expect(await page.locator("[data-og-prompt]").count()).toBe(0);
+          expect(await back.count()).toBe(0);
+          expect(
+            await page.evaluate(() => window.exchangeFoldHarness!.questionResolverCalls()),
+          ).toBe(0);
+          await page.locator("[data-og-jump-to-latest]").click();
+          await page.waitForTimeout(500);
+          expect((await sample(page)).following).toBe(true);
+          expect(await page.locator("[data-og-prompt]").count()).toBe(4);
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+          ).toBeLessThanOrEqual(1);
+        } finally {
+          await page.context().close();
+        }
+      }, 30_000);
+    }
+  }
+
   for (const width of [390, 1280]) {
+    test(`a partially visible tall prompt has no return action at ${width}px`, async () => {
+      const page = await openHarness("history-tall", width, width < 500);
+      try {
+        await page.evaluate(() =>
+          window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+        );
+        await page.waitForTimeout(500);
+        const prompt = page.locator("[data-og-prompt]").nth(1);
+        await prompt.getByRole("button", { name: "Show more", exact: true }).click();
+        await page.waitForTimeout(300);
+        const visible = await prompt.evaluate((node) => {
+          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+          scroller.scrollTop +=
+            node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + 40;
+          return node.getBoundingClientRect().bottom - scroller.getBoundingClientRect().top;
+        });
+        expect(visible).toBeGreaterThan(0);
+        const back = page.getByRole("button", { name: "Back to your message", exact: true });
+        await back.waitFor({ state: "hidden" });
+        await prompt.evaluate((node) => {
+          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          scroller.scrollTop +=
+            node.getBoundingClientRect().bottom - scroller.getBoundingClientRect().top + 30;
+        });
+        await back.waitFor();
+        await back.click();
+        expect(await prompt.evaluate((node) => node === document.activeElement)).toBe(true);
+        expect((await sample(page)).following).toBe(false);
+      } finally {
+        await page.context().close();
+      }
+    }, 30_000);
+
     test(`history prepend and settlement preserve the selected reader at ${width}px`, async () => {
       const page = await openHarness("tail", width, width === 390);
       try {
@@ -611,7 +735,7 @@ describe("readable timeline browser regression", () => {
     "legacy-settled",
   ] as const) {
     for (const width of [390, 1280]) {
-      test(`Latest question reaches ${mode} through the production conversation at ${width}px`, async () => {
+      test(`unmounted ${mode} prompt never creates contextual navigation at ${width}px`, async () => {
         const page = await openHarness(`question-${mode}`, width, width === 390);
         try {
           await page.waitForSelector("[data-og-conversation]");
@@ -620,9 +744,9 @@ describe("readable timeline browser regression", () => {
             const queue = page.getByRole("button", { name: /1 queued/ });
             if ((await queue.getAttribute("aria-expanded")) === "true") await queue.click();
           }
-          const latest = page.locator("[data-og-jump-to-question]");
-          await latest.waitFor({ state: "visible" });
-          expect(await latest.count()).toBe(1);
+          await nextPaint(page);
+          expect(await page.locator("[data-og-prompt]").count()).toBe(0);
+          expect(await page.locator("[data-og-jump-to-question]").count()).toBe(0);
           const resolverRequests = () =>
             page.evaluate(() =>
               performance
@@ -633,76 +757,9 @@ describe("readable timeline browser regression", () => {
                 .map((entry) => entry.name),
             );
           expect(await resolverRequests()).toEqual([]);
-          await latest.click();
-          if (mode === "pending") {
-            await page.waitForFunction(
-              () =>
-                (document.activeElement as HTMLElement)?.dataset.queueTurnId ===
-                "newest-queued-turn",
-            );
-            expect(await page.locator("[data-og-timeline-scroller]").innerText()).not.toContain(
-              "Newest queued question",
-            );
-          } else {
-            const label =
-              mode === "withdrawn" ? "Previous valid question" : "Newest queued question";
-            await page.waitForFunction((text) => {
-              const scroller = document.querySelector("[data-og-timeline-scroller]")!;
-              const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>
-                row.textContent?.includes(text),
-              );
-              if (!prompt) return false;
-              const bounds = prompt.getBoundingClientRect();
-              const viewport = scroller.getBoundingClientRect();
-              return bounds.top >= viewport.top && bounds.top < viewport.bottom - 20;
-            }, label);
-            // The target must survive automatic later-page loading and row
-            // settlement, not merely cross the viewport for one animation frame.
-            await page.waitForTimeout(1000);
-            const parked = await page.evaluate((text) => {
-              const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-              const prompt = [...scroller.querySelectorAll("[data-og-prompt]")].find((row) =>
-                row.textContent?.includes(text),
-              );
-              const bounds = prompt?.getBoundingClientRect();
-              const viewport = scroller.getBoundingClientRect();
-              return {
-                visible:
-                  !!bounds && bounds.top >= viewport.top && bounds.top < viewport.bottom - 20,
-                following: scroller.dataset.ogBottomFollow,
-                top: scroller.scrollTop,
-                promptTop: bounds ? bounds.top - viewport.top : null,
-              };
-            }, label);
-            expect(parked).toMatchObject({ visible: true, following: "false" });
-            expect(
-              await page.evaluate(() => document.activeElement?.hasAttribute("data-og-prompt")),
-            ).toBe(true);
-            if (mode === "withdrawn")
-              expect(await page.locator("[data-og-timeline-scroller]").innerText()).not.toContain(
-                "Newest queued question",
-              );
-          }
-          expect(await resolverRequests()).toHaveLength(1);
-          const directory = process.env.TIMELINE_QUESTION_PREVIEW_DIR;
-          if (directory) {
-            mkdirSync(directory, { recursive: true });
-            await page.screenshot({ path: `${directory}/question-${mode}-${width}-dark.png` });
-            await page.getByRole("button", { name: "Dark", exact: true }).click();
-            await nextPaint(page);
-            await page.screenshot({ path: `${directory}/question-${mode}-${width}-light.png` });
-          }
-          if (mode === "started") {
-            const scroller = page.locator("[data-og-timeline-scroller]");
-            const beforeScroll = await scroller.evaluate((node) => node.scrollTop);
-            await scroller.hover();
-            await page.mouse.wheel(0, 250);
-            await page.waitForTimeout(300);
-            expect(await scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(
-              beforeScroll + 100,
-            );
-            expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("false");
-          }
+          expect(
+            await page.evaluate(() => (document.activeElement as HTMLElement)?.dataset.queueTurnId),
+          ).toBeUndefined();
         } finally {
           await page.context().close();
         }
@@ -771,7 +828,7 @@ describe("readable timeline browser regression", () => {
   }
 
   for (const width of [320, 390, 1280]) {
-    test(`history controls keep separate real pointer targets at ${width}px`, async () => {
+    test(`history controls stay clickable while the contextual prompt is visible at ${width}px`, async () => {
       const page = await openHarness("history", width, width < 600);
       try {
         await page.evaluate(() => {
@@ -790,26 +847,21 @@ describe("readable timeline browser regression", () => {
         const start = page.locator("[data-og-jump-to-start]");
         const latest = page.locator("[data-og-jump-to-question]");
         await start.waitFor({ state: "visible" });
-        await latest.waitFor({ state: "visible" });
         await page.waitForTimeout(200);
+        await latest.waitFor({ state: "hidden" });
         const targets = await page.evaluate(() => {
           const startButton = document.querySelector<HTMLElement>("[data-og-jump-to-start]")!;
-          const latestButton = document.querySelector<HTMLElement>("[data-og-jump-to-question]")!;
           const a = startButton.getBoundingClientRect();
-          const b = latestButton.getBoundingClientRect();
           const clickable = (element: HTMLElement, bounds: DOMRect) =>
             element.contains(
               document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
             );
           return {
-            separate:
-              a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top,
             start: clickable(startButton, a),
-            latest: clickable(latestButton, b),
           };
         });
-        expect(targets).toEqual({ separate: true, start: true, latest: true });
-        expect(await latest.count()).toBe(1);
+        expect(targets).toEqual({ start: true });
+        expect(await latest.count()).toBe(0);
         const directory = process.env.TIMELINE_NAVIGATION_PREVIEW_DIR;
         if (directory) {
           mkdirSync(directory, { recursive: true });
@@ -823,9 +875,18 @@ describe("readable timeline browser regression", () => {
         await page.waitForFunction(() =>
           document.querySelector("[data-og-prompt]")?.textContent?.includes("Question 1:"),
         );
+        await page.evaluate(() => {
+          const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const answer = [
+            ...node.querySelectorAll<HTMLElement>("[data-og-wide-table-message]"),
+          ].find((row) => row.textContent?.includes("Week 2:"))!;
+          node.scrollTop +=
+            answer.getBoundingClientRect().top - node.getBoundingClientRect().top - 50;
+        });
+        await latest.waitFor({ state: "visible" });
         await latest.click();
         await page.waitForFunction(() =>
-          document.activeElement?.textContent?.includes("Question 4:"),
+          document.activeElement?.textContent?.includes("Question 2:"),
         );
         expect((await sample(page)).following).toBe(false);
       } finally {
@@ -834,26 +895,31 @@ describe("readable timeline browser regression", () => {
     }, 20_000);
   }
 
-  test("one Latest question button targets the newest user message from an older bounded window", async () => {
+  test("one contextual button targets the associated prompt in an older bounded window", async () => {
     const page = await openHarness("history");
     try {
+      await page.setViewportSize({ width: 390, height: 400 });
       await page.evaluate(() => {
         const driver = window.exchangeFoldHarness!;
         const questions = driver.indexOf("user.message");
         driver.showWindow(questions[1]!, questions[2]!);
       });
+      await page.waitForTimeout(300);
+      await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
+        node.scrollTop = node.scrollHeight;
+      });
       await page.waitForSelector("[data-og-jump-to-question]");
-      expect(await page.getByRole("button", { name: "Latest question", exact: true }).count()).toBe(
-        1,
-      );
+      expect(
+        await page.getByRole("button", { name: "Back to your message", exact: true }).count(),
+      ).toBe(1);
       expect(
         await page.getByRole("button", { name: /Previous question|Next question/ }).count(),
       ).toBe(0);
-      await page.getByRole("button", { name: "Latest question", exact: true }).click();
+      await page.getByRole("button", { name: "Back to your message", exact: true }).click();
       await page.waitForFunction(() => {
         const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
         const prompt = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")].find((item) =>
-          item.textContent?.includes("Question 4:"),
+          item.textContent?.includes("Question 2:"),
         );
         return (
           prompt &&

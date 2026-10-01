@@ -983,12 +983,25 @@ earlier prose and activity in chronological order, not a fold of multiple turns.
 An already expanded or actively read view is preserved through settlement.
 Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
-Expanded outer work headers stay reachable at the top of the timeline (below
-Latest question when shown) until their own details end; nested headers never stick.
+Expanded outer work headers stay reachable at the top of the timeline until
+their own details end; nested headers never stick. The contextual navigation
+pill stays below the sticky-header strip and avoids interactive controls. If
+no horizontal slot fits beside a toolbar, only the pill moves below it; the
+timeline's size and scroll position do not change.
 
-Wire the newest-question resolver when history can be unloaded:
+The single **Back to your message** button returns to the loaded user prompt
+associated with the response or work being read: the latest prompt preceding
+the viewport midpoint. It appears only when that prompt's start is more than
+24 px above the viewport and its entire body and attachments are out of view.
+Clicking synchronously scrolls and focuses that exact
+mounted prompt near the top and leaves tip-follow. Later messages and queued
+prompts do not change the destination while the reader remains in older work.
+An older bounded window uses its own loaded context; a window with no associated
+prompt shows no action. Navigation never replaces the history window or looks up
+the globally newest message. There are no previous/next arrows.
 
-`SessionConversation` includes the readable-turn presentation and this wiring automatically.
+`SessionConversation` includes this behavior automatically. Custom timelines
+need no prompt-navigation callback:
 
 ```tsx
 const events = useSessionEvents(sessionId);
@@ -998,28 +1011,32 @@ const events = useSessionEvents(sessionId);
   turnSummary={{ rolling: true }}
   hasNewer={events.hasNewer}
   onJumpToLatest={events.jumpToLatest}
-  onJumpToLatestQuestion={events.jumpToLatestQuestion}
 />;
 ```
 
-The single **Latest question** button targets the newest durable user message,
-not the viewport-relative question or the newest message in an older loaded page.
-The resolver checks the authoritative queue and normally uses one filtered forensic
+`onJumpToLatest` retains its separate live-bottom behavior. The deprecated
+`MessageTimeline.onJumpToLatestQuestion` prop remains source-compatible but is
+not invoked by contextual navigation.
+
+### Optional global newest-message lookup
+
+The public `useSessionEvents().jumpToLatestQuestion()` hook remains available for
+hosts that deliberately build a **separate** global lookup action. It is not wired
+to `MessageTimeline` or the first-party conversation's contextual button.
+The hook checks the authoritative queue and normally uses one filtered forensic
 lookup plus, if needed, two bounded context reads. It pages past legacy worker
 completions and withdrawn/cancelled-before-start prompts, never substituting an
 arbitrary question from a loaded old page. Queued/legacy admission uses filtered
 lifecycle evidence to locate its real turn start. A distant prompt is retained as
 one projection-only witness in `events.timeline`; `events.events` remains the
 bounded contiguous raw window, so pass `items` as above.
-The optional resolver loads on the first click, not when opening a session.
+The optional resolver loads on its first invocation, not when opening a session.
 Identity and navigation guards also cover that module-loading delay.
 
-`SessionConversation` also opens and focuses the newest pending prompt in
-`SessionChrome`. Custom hosts can provide the same destination without changing
-the existing `Promise<number | null>` timeline callback:
+Custom hosts can provide their own queue destination when invoking this hook:
 
 ```tsx
-onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
+const navigateToNewest = () => events.jumpToLatestQuestion({
   onQueuedQuestion: async (turn, navigation) => {
     await queue.refresh();
     if (!navigation.isCurrent()) return;
@@ -1029,21 +1046,19 @@ onJumpToLatestQuestion={() => events.jumpToLatestQuestion({
       requestId: (previous?.requestId ?? 0) + 1,
     }));
   },
-})}
+});
 // Pass queueFocusTarget to SessionChrome; each new request opens/focuses once.
 ```
 
 A queue destination returns `null`, not an invisible transcript sequence. Without
-`onQueuedQuestion`, a pending prompt produces explicit queue guidance in the
-timeline; transitional queue state can be retried rather than silently no-oping.
+`onQueuedQuestion`, a pending prompt rejects with `LatestQuestionQueuedError`;
+the custom host can show guidance. Transitional queue state can be retried.
 Check `navigation.isCurrent()` after awaits and immediately before queue UI effects:
 an explicit history jump can supersede a queued lookup without changing the session.
 The shared projection predicate supplies execution evidence for older queued turns
 without `turn.started`, including tools, agent/sandbox activity, startup, recovery,
 and capacity events. Compact cursor coverage skips coalesced delta runs.
-Without `onJumpToLatestQuestion`, local navigation is available only at the live history
-window; the component never guesses from an older page. `onJumpToLatest` retains
-its separate bottom-follow behavior. `groupTimeline(items)` retains classic
+`groupTimeline(items)` retains classic
 grouping; `{ readableTurns: true }` selects the new projection. The deprecated
 `foldExchanges` option aliases readable turns, not the removed cross-turn fold. See
 [`docs/design/genie-loading.md`](../../docs/design/genie-loading.md).

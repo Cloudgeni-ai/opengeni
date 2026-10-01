@@ -441,6 +441,17 @@ runtime accepts access tokens only on `/v1/workspaces/:workspaceId/mcp`,
 because it is the issuer and part of every exact resource identifier. See
 [`mcp-surfaces.md`](mcp-surfaces.md) for the client-facing contract.
 
+The metadata and protocol endpoints live at the issuer origin root, outside
+`/v1`: `/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource/...`, `/oauth/register`,
+`/oauth/authorize`, and `/oauth/token`. While the switch is on, the Helm chart
+renders a dedicated `<release>-mcp-oauth` Ingress that routes exactly those
+paths to the API for every ingress host that already routes to the API
+(`ingress.mcpOAuthIngress`); repeat any edge-auth annotations of the primary
+Ingress there. An edge outside this chart must route the same paths to the API.
+If they reach the web application instead, discovery returns HTML and MCP
+clients cannot sign in.
+
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are
 never used expire after one day; successful client use extends retention

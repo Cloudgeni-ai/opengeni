@@ -97,7 +97,6 @@ import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sa
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
-import { useQueuedQuestionFocus } from "@/lib/queued-question-focus";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -355,7 +354,6 @@ export function SessionRoute({
     loadOldest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
-    jumpToLatestQuestion,
     jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
@@ -1173,7 +1171,6 @@ export function SessionRoute({
       loadingOldest={loadingOldest}
       onJumpToStart={loadOldest}
       onJumpToLatest={jumpToLatest}
-      onJumpToLatestQuestion={jumpToLatestQuestion}
       onClearView={clearView}
       onOpenSession={(nextSessionId) =>
         void navigate({
@@ -1619,7 +1616,6 @@ function SessionChatPane(props: {
   loadingOldest: boolean;
   onJumpToStart: () => Promise<boolean>;
   onJumpToLatest: () => Promise<void>;
-  onJumpToLatestQuestion: ReturnType<typeof useSessionEvents>["jumpToLatestQuestion"];
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -1636,18 +1632,6 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
-  const { onQueuedQuestion, queueFocusTarget } = useQueuedQuestionFocus({
-    client: context.client,
-    subjectId: context.accessContext.subjectId,
-    workspaceId: props.session.workspaceId,
-    sessionId: props.session.id,
-    queue: props.queue,
-  });
-  const jumpToQuestion = props.onJumpToLatestQuestion;
-  const jumpToLatestQuestion = useCallback(
-    () => jumpToQuestion({ onQueuedQuestion }),
-    [jumpToQuestion, onQueuedQuestion],
-  );
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
@@ -2789,7 +2773,6 @@ function SessionChatPane(props: {
                   await props.onJumpToStart();
                 }}
                 onJumpToLatest={props.onJumpToLatest}
-                onJumpToLatestQuestion={jumpToLatestQuestion}
                 emptyState={
                   // Clear view hides history, not the retained failure or retry operation.
                   failureRecovery ??
@@ -2941,7 +2924,6 @@ function SessionChatPane(props: {
             }
           />
           <SessionChrome
-            queueFocusTarget={queueFocusTarget}
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
             queue={props.queue}

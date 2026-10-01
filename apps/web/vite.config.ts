@@ -132,18 +132,30 @@ export default defineConfig({
               priority: 16,
             },
             {
+              // mobile-plus calls lazyComposerPanel at module scope. Keep this
+              // eager helper out of reciprocal entry-aware session chunks;
+              // optional panel bodies stay behind their dynamic imports.
+              name: "composer-menu-runtime",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/]composer-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 16,
+            },
+            {
               // Keep Radix, Lucide's eager icon factory, and the two class-name
               // helpers (web `cn` and @opengeni/react `cn` with clsx and
               // tailwind-merge) in one UI runtime. entriesAware route merging
               // can otherwise split Popper scopes, place an icon and its
               // factory across a circular chunk, or fold a tiny universally
               // shared helper into a route-only chunk and drag that route's
-              // code into the initial graph. Button and Input (with cva and
+              // code into the initial graph. Composer menu factories are also
+              // called while lazy routes evaluate; keep their React bindings
+              // and preload registry outside those mutually importing chunks.
+              // Button and Input (with cva and
               // the three icons Button states use) are startup code too; the
               // lazy settings shell as one more consumer otherwise splits
               // them into an extra startup request.
               name: "ui-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|composer-menu|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
