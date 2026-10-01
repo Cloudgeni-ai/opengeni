@@ -21,12 +21,15 @@ export type OrganizationCodexSubscriptions = ReturnType<typeof useOrganizationCo
 export function useOrganizationCodexSubscriptions({
   organizationId,
   client,
+  enabled = true,
 }: {
   organizationId: string;
   client: OpenGeniBrowserClient;
+  /** False for people who can't read the organization's accounts: nothing is read. */
+  enabled?: boolean;
 }) {
   const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<string | null>(null);
@@ -38,6 +41,7 @@ export function useOrganizationCodexSubscriptions({
   const pollAbort = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    if (!enabled) return;
     setLoadError(null);
     try {
       const result = await client.requestJson<OrganizationCodexAccountsResponse>(
@@ -53,17 +57,17 @@ export function useOrganizationCodexSubscriptions({
     } finally {
       if (!cancelled.current) setLoading(false);
     }
-  }, [client, organizationId]);
+  }, [client, organizationId, enabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(true);
+    setLoading(enabled);
     void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
     };
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {

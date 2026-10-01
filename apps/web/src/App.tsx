@@ -21,7 +21,7 @@
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
-//   /workspaces/:id/settings                 → workspace settings (general, access, models, API keys)
+//   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
@@ -49,7 +49,12 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { parseReturnTo, returnToOf, type ReturnToSearch } from "@/lib/return-to";
-import { parseModelsAccount, parseModelsView, type ModelsView } from "@/lib/models-route";
+import {
+  parseModelsAccount,
+  parseModelsView,
+  workspaceModelsRedirect,
+  type ModelsView,
+} from "@/lib/models-route";
 import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import { parseDeveloperView, parseWebhookParam, type DeveloperView } from "@/lib/developer-route";
@@ -583,8 +588,12 @@ const workspaceOrganizationRoute = createRoute({
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
     const invitation =
       section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
+    // Workspaces: the workspace whose page is open. Models: the workspace whose
+    // model page is open, or that a page was opened from.
     const workspace =
-      section === "workspaces" ? parseOrganizationRecordId(search.workspace) : undefined;
+      section === "workspaces" || section === "models"
+        ? parseOrganizationRecordId(search.workspace)
+        : undefined;
     return {
       ...(checkout ? { checkout } : {}),
       ...(section ? { section } : {}),
@@ -870,6 +879,22 @@ function WorkspaceSettings() {
   if (section === "plugins") {
     return <Navigate to="/workspaces/$workspaceId/plugins" params={{ workspaceId }} replace />;
   }
+  // Every model setting lives on Organization > Models; a workspace's Models
+  // URL opens that workspace's page there, keeping the account or form.
+  if (section === "models") {
+    return (
+      <Navigate
+        to="/workspaces/$workspaceId/organization"
+        params={{ workspaceId }}
+        search={workspaceModelsRedirect({
+          workspaceId,
+          account,
+          view: view as ModelsView | undefined,
+        })}
+        replace
+      />
+    );
+  }
   // Agent learning is the Learning page of Knowledge now.
   if (section === "learning") {
     return (
@@ -885,8 +910,6 @@ function WorkspaceSettings() {
     <LazyWorkspaceSettingsRoute
       workspaceId={workspaceId}
       section={section ?? "general"}
-      modelsAccount={account}
-      modelsView={section === "models" ? (view as ModelsView | undefined) : undefined}
       apiKey={key}
       developer={
         section === "developer"
@@ -960,7 +983,7 @@ function Organization() {
       workspaceId={workspaceId}
       checkout={checkout}
       section={page}
-      modelsAccount={account}
+      modelsAccount={page === "models" ? account : undefined}
       modelsView={page === "models" ? parseModelsView(view) : undefined}
       returnTo={returnToOf({ from, fromLabel })}
       organizationView={page === "models" ? undefined : parseOrganizationView(view)}

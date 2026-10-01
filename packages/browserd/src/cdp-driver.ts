@@ -3294,6 +3294,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       code: "KeyA",
       modifiers,
       windowsVirtualKeyCode: 65,
+      // macOS Chromium does not derive native editing commands from CDP's
+      // synthetic Command+A event. Without this, Backspace deletes one character.
+      ...(meta ? { commands: ["selectAll"] } : {}),
     });
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyUp",
@@ -3325,6 +3328,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       modifiers: key.modifiers,
       windowsVirtualKeyCode: key.keyCode,
       ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
+      ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
+        ? { commands: ["selectAll"] }
+        : {}),
     });
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyUp",

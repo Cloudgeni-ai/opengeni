@@ -1,7 +1,25 @@
 import { DeviceAuthorization, type DeviceAuthorizationProps } from "@opengeni/react/connect";
-import { CheckIcon, CopyIcon, ExternalLinkIcon, Loader2Icon } from "lucide-react";
+import {
+  CheckIcon,
+  CircleCheckIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  LoaderCircleIcon,
+} from "lucide-react";
+import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+
+/* ----------------------------------------------------------------------------
+   Signing in to a subscription with a device code (ChatGPT for Codex, xAI for
+   SuperGrok), as one calm step: one instruction, the code with Copy code and
+   Open sign-in page, and one waiting line. The connect pages and onboarding
+   share it, so the step reads the same everywhere.
+   -------------------------------------------------------------------------- */
+
+type Provider = "codex" | "supergrok";
+
+const SIGN_IN_SITE: Record<Provider, string> = { codex: "ChatGPT", supergrok: "xAI" };
 
 /** Native subscription styling over the shared clipboard and URL-validation behavior. */
 export function SubscriptionDeviceCodePanel({
@@ -11,35 +29,23 @@ export function SubscriptionDeviceCodePanel({
   DeviceAuthorizationProps,
   "userCode" | "verificationUri" | "loadClipboard" | "onCopyResult"
 > & {
-  provider: "codex" | "supergrok";
+  provider: Provider;
 }) {
-  const codex = provider === "codex";
+  const site = SIGN_IN_SITE[provider];
   return (
     <DeviceAuthorization
       {...props}
       render={({ copied, copyError, copy, verificationHref }) => (
-        <section
-          aria-label={codex ? "Codex device authorization" : "SuperGrok device authorization"}
-          className={
-            codex
-              ? "grid gap-2 rounded-md border border-border bg-bg p-3"
-              : "grid gap-3 rounded-lg border border-brand/30 bg-brand/5 p-3"
-          }
-        >
-          {codex ? (
-            <p className="text-xs text-fg-muted">
-              Enter this code at the OpenAI page (opened in a new tab). Authorization continues if
-              you navigate away.
-            </p>
-          ) : null}
-          <div className="flex flex-wrap items-center gap-2">
+        <section aria-label={`${site} sign-in code`} className="flex min-w-0 flex-col gap-3">
+          <p className="m-0 text-sm leading-5 text-fg-muted">
+            {`Enter this code on the ${site} page that opened. Opengeni never sees your password.`}
+          </p>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <code
-              {...(codex ? { "data-codex-device-code": "" } : { "data-supergrok-device-code": "" })}
-              className={
-                codex
-                  ? "min-w-0 wrap-anywhere rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest"
-                  : "min-w-0 wrap-anywhere rounded bg-bg px-2 py-1 font-mono text-sm"
-              }
+              {...(provider === "codex"
+                ? { "data-codex-device-code": "" }
+                : { "data-supergrok-device-code": "" })}
+              className="min-w-0 rounded-[10px] bg-surface-2 px-3 py-1 font-mono text-lg leading-7 font-semibold tracking-widest wrap-anywhere text-fg"
             >
               {props.userCode}
             </code>
@@ -49,41 +55,74 @@ export function SubscriptionDeviceCodePanel({
               size="sm"
               aria-label={copied ? "Code copied" : "Copy code"}
               onClick={() => void copy()}
+              className="rounded-[10px] pointer-coarse:h-11"
             >
-              {copied ? (
-                <CheckIcon className="size-3.5" aria-hidden="true" />
-              ) : (
-                <CopyIcon className="size-3.5" aria-hidden="true" />
-              )}
+              {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
               {copied ? "Copied" : "Copy code"}
             </Button>
             {verificationHref ? (
-              <Button asChild size="sm">
+              <Button
+                asChild
+                variant="outline"
+                size="sm"
+                className="rounded-[10px] pointer-coarse:h-11"
+              >
                 <a href={verificationHref} target="_blank" rel="noopener noreferrer">
-                  {codex ? "Open auth page" : "Open xAI"}
-                  <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
+                  Open sign-in page
+                  <ExternalLinkIcon aria-hidden="true" />
                 </a>
               </Button>
             ) : (
-              <span role="alert" className="text-xs text-destructive">
-                Authorization address unavailable.
+              <span role="alert" className="text-xs text-danger">
+                {`The ${site} sign-in page is unavailable. Try again.`}
               </span>
             )}
           </div>
           {copyError ? (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="m-0 text-xs text-danger">
               Couldn't copy the code. Copy it manually instead.
             </p>
           ) : null}
-          <p role="status" className="flex items-center gap-2 text-xs text-fg-subtle">
-            <Loader2Icon
-              className="size-3.5 animate-spin motion-reduce:animate-none"
+          <p role="status" className="m-0 flex min-w-0 items-center gap-2 text-sm text-fg-muted">
+            <LoaderCircleIcon
               aria-hidden="true"
+              className="size-4 shrink-0 text-fg-subtle motion-safe:animate-spin"
             />
-            {codex ? "Waiting for authorization…" : "Waiting for xAI authorization…"}
+            Waiting for you to sign in…
           </p>
         </section>
       )}
     />
+  );
+}
+
+/**
+ * The sign-in part of a connect page: before it starts, one line on what
+ * happens; while it waits, the code step (`panel`); once done, "Connected".
+ */
+export function DeviceSignInStatus({
+  provider,
+  panel,
+  connected,
+}: {
+  provider: Provider;
+  /** The code step while the sign-in waits, else null. */
+  panel: ReactNode;
+  connected: boolean;
+}) {
+  if (connected) {
+    return (
+      <p role="status" className="m-0 flex min-w-0 items-center gap-2 text-sm text-fg-muted">
+        <CircleCheckIcon aria-hidden="true" className="size-4 shrink-0 text-status-idle" />
+        Connected
+      </p>
+    );
+  }
+  if (panel) return <>{panel}</>;
+  const site = SIGN_IN_SITE[provider];
+  return (
+    <p className="m-0 text-sm leading-5 text-fg-muted">
+      {`${site} opens in a new tab and asks for a code, which shows here. Opengeni never sees your password.`}
+    </p>
   );
 }

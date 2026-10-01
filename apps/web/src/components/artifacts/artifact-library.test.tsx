@@ -323,3 +323,90 @@ test("loading, empty, and error states stay explicit with a retry", async () => 
     container.remove();
   }
 });
+
+test("hidden Sites and documents are explained instead of reported as missing", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const props = {
+    workspaceId: "workspace",
+    onFiltersChange: () => {},
+    onRetry: () => {},
+    loading: false,
+    artifactKindsHidden: true,
+  };
+  const access = "You need access to artifacts in this workspace. Ask a workspace admin.";
+  try {
+    // A Sites tab without artifacts:read is a permission gap, never "No sites yet".
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("You can't see sites here.");
+    expect(container.textContent).toContain(access);
+    expect(container.textContent).not.toContain("No sites yet");
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[]}
+        filters={{ ...defaultArtifactFilters, kind: "document" }}
+      />
+    ));
+    expect(container.textContent).toContain("You can't see documents here.");
+    // Files the viewer can read still list, with the hidden kinds named above them.
+    const file: ArtifactCatalogItem = {
+      id: "file",
+      kind: "file",
+      title: "notes.txt",
+      status: "active",
+      createdAt: "2026-09-01T00:00:00Z",
+      updatedAt: "2026-09-02T00:00:00Z",
+    };
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} items={[file]} filters={defaultArtifactFilters} />
+    ));
+    expect(container.textContent).toContain("Sites and documents are hidden");
+    expect(container.textContent).toContain(access);
+    expect(container.textContent).toContain("notes.txt");
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[file]}
+        filters={{ ...defaultArtifactFilters, kind: "file" }}
+      />
+    ));
+    expect(container.textContent).not.toContain(access);
+    // A stale grant never hides what the server returned.
+    const site: ArtifactCatalogItem = { ...file, id: "site", kind: "site", title: "Status board" };
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        items={[site]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("Status board");
+    expect(container.textContent).not.toContain(access);
+    await renderInRouter(root, () => (
+      <ArtifactLibrary {...props} items={[file, site]} filters={defaultArtifactFilters} />
+    ));
+    expect(container.textContent).not.toContain("Sites and documents are hidden");
+    // A viewer who can read artifacts sees no notice.
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        {...props}
+        artifactKindsHidden={false}
+        items={[]}
+        filters={{ ...defaultArtifactFilters, kind: "site" }}
+      />
+    ));
+    expect(container.textContent).toContain("No sites yet.");
+    expect(container.textContent).not.toContain(access);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

@@ -11,6 +11,14 @@ import { latestQuestionClient } from "./fixtures/latest-question-client";
 
 registerDom();
 
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await flush(10);
+  }
+}
+
 test("an outer host resolver overrides conversation download defaults", async () => {
   const client = fakeClient({
     getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
@@ -91,6 +99,46 @@ test("proxy sandbox capability disables default downloads in the complete conver
   }
 });
 
+test("Latest question stays unavailable until initial history is ready", async () => {
+  const fixture = latestQuestionClient("pending");
+  const listEvents = fixture.client.listEvents;
+  let releaseHistory!: () => void;
+  const history = new Promise<void>((resolve) => {
+    releaseHistory = resolve;
+  });
+  fixture.client.listEvents = async (...args) => {
+    if (!args[2]?.includeTypes) await history;
+    return listEvents(...args);
+  };
+  const view = await renderComponent(
+    <SessionConversation
+      client={fixture.client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+    />,
+  );
+  try {
+    await flush(100);
+    expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
+    releaseHistory();
+    await waitFor(
+      () => view.container.querySelector("[data-og-jump-to-question]") !== null,
+      "Latest question did not appear after initial history",
+    );
+    const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
+    expect(latest).not.toBeNull();
+    await actRun(() => latest!.click());
+    await waitFor(
+      () => (document.activeElement as HTMLElement)?.dataset.queueTurnId === fixture.turn.id,
+      "Latest question did not focus the pending prompt",
+    );
+    expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(fixture.turn.id);
+  } finally {
+    releaseHistory();
+    await view.unmount();
+  }
+});
+
 for (const mode of [
   "pending",
   "started",
@@ -104,7 +152,10 @@ for (const mode of [
       <SessionConversation client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
     );
     try {
-      await flush(100);
+      await waitFor(
+        () => view.container.querySelector("[data-og-jump-to-question]") !== null,
+        "Latest question did not become available",
+      );
       if (mode === "pending") {
         const queueButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
           (button) => button.textContent?.includes("1 queued"),
@@ -115,9 +166,16 @@ for (const mode of [
       const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
       expect(latest).not.toBeNull();
       await actRun(() => latest!.click());
-      await flush(120);
+      await waitFor(
+        () => reads.some((read) => read.includeTypes?.includes("user.message")),
+        "Latest question did not read its navigation destination",
+      );
       expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(true);
       if (mode === "pending") {
+        await waitFor(
+          () => (document.activeElement as HTMLElement)?.dataset.queueTurnId === turn.id,
+          "Latest question did not focus the pending prompt",
+        );
         expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(turn.id);
         expect(
           view.container.querySelector('[data-og-session-chrome-panel="queue"]'),
@@ -126,6 +184,15 @@ for (const mode of [
           view.container.querySelector("[data-og-timeline-scroller]")?.textContent,
         ).not.toContain("Newest queued question");
       } else {
+        const destination =
+          mode === "withdrawn" ? "Previous valid question" : "Newest queued question";
+        await waitFor(
+          () =>
+            [...view.container.querySelectorAll("[data-og-prompt]")].some((item) =>
+              item.textContent?.includes(destination),
+            ),
+          "Latest question did not show the requested prompt",
+        );
         const prompts = [...view.container.querySelectorAll("[data-og-prompt]")].map(
           (item) => item.textContent,
         );

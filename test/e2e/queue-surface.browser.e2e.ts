@@ -1172,6 +1172,8 @@ describe("queue surface browser acceptance", () => {
           .analyze();
         expect(menuReport.violations).toEqual([]);
         await page.keyboard.press("Escape");
+        // Radix restores focus after the menu's unmount, on a deferred timer.
+        await trigger.and(page.locator(":focus")).waitFor();
         expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
         expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
         const report = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();

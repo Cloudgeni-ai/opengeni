@@ -639,6 +639,14 @@ returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
 
+If the chat's latest browser was lost or failed, the viewer names it and explains
+why it is unavailable instead of showing the ordinary empty state. It offers the
+existing new-browser controls without reopening the lost controller or selecting
+another chat's browser. Explicitly closed browsers still use the empty state;
+older failures do not replace a newer closed browser. This loss notice also takes
+precedence over `renderEmpty`. Preview the deadline-loss case with
+`browser.html?mode=mock&lost=1` (add `width=360&theme=light` for a narrow light dock).
+
 Native dropdown popups may not appear in page frames. With a controller that
 advertises focused input observations, clicking one opens its choices beside
 the click. Ordinary clicks use a bounded focus probe instead of a full page
@@ -906,6 +914,8 @@ intentional changes should regenerate those snapshots and review the diff.
   paragraphs, user bubbles, and nested or standalone Markdown keep their normal
   width; oversized tables retain table-only horizontal scrolling. No host prop
   or viewport-wide layout override is required.
+  Remeasurement during host rerenders or tail streaming does not temporarily
+  resize the live table or displace an unpinned history reader.
   With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
   an in-session Open action. The callback receives the decoded path unchanged;
   the optional line is positive and 1-based. Invalid sandbox references render

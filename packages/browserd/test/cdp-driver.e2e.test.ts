@@ -20,6 +20,82 @@ import { CdpConnection } from "../src/cdp";
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
 
+e2e(
+  "replaces existing editable text and honors select-all on the browser platform",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-replace-text-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `replace_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      let observation = await driver.start(
+        dataUrl(`<!doctype html>
+        <input aria-label="Input" value="first">
+        <textarea aria-label="Textarea">first</textarea>
+        <div contenteditable role="textbox" aria-label="Rich text">first</div>
+        <output></output>
+        <script>
+          document.addEventListener('input', event => {
+            document.querySelector('output').textContent = 'Received: ' +
+              (event.target.value ?? event.target.textContent);
+          });
+        </script>`),
+      );
+      for (const name of ["Input", "Textarea", "Rich text"]) {
+        const locator = { kind: "role", role: "textbox", name } as const;
+        for (const value of ["replacement", "", "Norwegian æøå 🦊"]) {
+          observation = await driver.dispatch(
+            command(observation, {
+              type: "fill",
+              locator,
+              value,
+            }),
+          );
+          expect(names(observation)).toContain(`Received: ${value}`.trimEnd());
+        }
+        observation = await driver.dispatch(
+          command(observation, {
+            type: "press",
+            locator,
+            key: "Mod+A",
+          }),
+        );
+        observation = await driver.dispatch(
+          command(observation, {
+            type: "type",
+            locator,
+            text: "selected replacement",
+          }),
+        );
+        expect(names(observation)).toContain("Received: selected replacement");
+      }
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
   async () => {
