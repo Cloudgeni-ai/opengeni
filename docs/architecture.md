@@ -360,7 +360,13 @@ workspace-managed `workspace-openrouter/*` remain separate provider and billing
 identities for identical slugs. Claude setup: `apps/api/src/routes/workspace-model-providers.ts`; transport: `packages/runtime/src/anthropic-messages.ts`.
 Accepted turns freeze provider identity, not cost policy. Drain or fence them
 before changing `free`/`credits`. Database `codexModels` overrides membership,
-not credentials; retirement preserves only exact accepted execution.
+not credentials; retirement preserves only exact accepted execution. Workspace
+Codex choices and automatic defaults also require exact upstream membership in
+the live serving accounts' catalogs. `packages/core/src/codex-model-availability.ts`
+rechecks source authority and requires live support on every permitted serving
+account for browser, default, and agent choices. The shared token resolver refreshes
+expired credentials; the short support cache uses workspace, credential, and
+returned token revision.
 
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
