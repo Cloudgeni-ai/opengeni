@@ -1,4 +1,29 @@
-# The Last Click — clearer builder reveal
+# The Last Click — October brand refresh
+
+The October 1 refresh preserves the story, 28.8-second picture timeline, and
+original score. The complete film now sits on a continuous off-white,
+aqua-lower-left / peach-upper-right light field. The independently branded
+`hour` UI remains dark, framed with rounded corners and soft elevation; its
+camera beats and human approval are unchanged. The reveal and integration
+scenes are rebuilt in the light identity. The ending reads “Give your users
+an agent.” and “Your app. Your brand. Your tools.”
+
+Brand provenance: live opengeni.ai HTML/CSS inspected October 1, corroborated by
+`Cloudgeni-ai/opengeni-demos` main at
+`ffd2ebb6c55dbbad5cd68f9c81704901ce4fbd9b`, especially
+`src/videos/web-identity-reveal/Demo.tsx`. The symbol uses the exact live SVG
+geometry; the lockup follows the identity film's mixed-case “Opengeni”. Brand
+copy uses DM Sans with locally bundled Instrument Serif italic (OFL license
+included). Colors are #FBFBF8, #111311, #9FE3D3 and #FFB787. These are separate
+from hour's product tokens; the demos repo's legacy generic brand kit is not
+used. The pending identity v7 soundtrack is not copied or assumed approved.
+
+Local validation can also use `npm install --package-lock=false --workspaces=false`,
+`npm run typecheck`, then `npx --no-install remotion render src/index.ts TheLastClick
+out/the-last-click-october-brand.mp4` and `bash scripts/qa.sh
+out/the-last-click-october-brand.mp4` when the host Bun cannot read the lockfile.
+
+## Story and integration context
 
 The first 18 seconds retain the original customer story in the fictional booking
 app `hour`: Ines asks for appointments to be moved and approves the customer

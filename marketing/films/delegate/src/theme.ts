@@ -28,5 +28,10 @@ export const C = {
 } as const;
 
 export const W = 1920;
+/** October identity; deliberately separate from hour's own product palette. */
+export const B = {
+  bg: "#fbfbf8", ink: "#111311", muted: "#62655f", line: "#e3e5df",
+  aqua: "#9fe3d3", peach: "#ffb787", tint: "#f3f8f6", teal: "#1f7866",
+} as const;
 export const H = 1080;
 export const FPS = 60;

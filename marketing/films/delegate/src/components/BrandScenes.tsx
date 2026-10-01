@@ -1,396 +1,102 @@
 import React from "react";
 import { staticFile } from "remotion";
-import { C } from "../theme";
+import { B } from "../theme";
 import { F } from "../fonts";
-import { clamp01, ease, lerp, prog, springAt } from "../anim";
+import { ease, lerp, prog } from "../anim";
 import { T } from "../timeline";
 import { OpenGeniWordmark } from "./OpenGeniWordmark";
 import { CursorArrow, flopPose } from "./Cursor";
-import { HourGlyph } from "./HourMark";
-import { Check } from "./Icons";
 
-type Tok = [string, "kw" | "fn" | "key" | "str" | "p" | "id"];
+/** Same continuous light field as the new identity film; no scene resets. */
+export const BrandBackdrop: React.FC<{t:number}> = ({t}) => (
+  <div style={{position:"absolute",inset:0,background:B.bg}}>
+    <div style={{position:"absolute",inset:0,opacity:.58 + .35 * prog(t,0,T.end),background:
+      "radial-gradient(ellipse 86% 110% at 100% 0%, #ffb787 0%, #ffb787b3 26%, #ffb78700 74%), radial-gradient(ellipse 86% 110% at 0% 100%, #9fe3d3 0%, #9fe3d3b3 26%, #9fe3d300 74%)"}}/>
+  </div>
+);
 
-/** Selected, current SDK integration surfaces. The authenticated hourTools
- * MCP server, client/provider, tenant mapping, and error handling live outside
- * this excerpt; RECUT.md documents those omissions. */
-export const CODE: Tok[][] = [
-  [["const ", "kw"], ["session", "id"], [" = await ", "kw"], ["og", "id"], [".", "p"], ["createSession", "fn"], ["(", "p"]],
-  [["  workspaceId, { initialMessage: text,", "p"]],
-  [["    mcpServers", "key"], [": [", "p"], ["hourTools", "id"], ["],", "p"]],
-  [["    tools", "key"], [": [{ kind: ", "p"], ['"mcp"', "str"], [", id: ", "p"], ['"hour"', "str"], [" }],", "p"]],
-  [["  });", "p"]],
-  [["// inside hour's UI", "kw"]],
-  [["<", "p"], ["SessionConversation", "fn"], [" sessionId={session.id} />", "p"]],
+const appear = (t:number, at:number) => prog(t,at,at+.36,ease.out);
+const serif: React.CSSProperties = {fontFamily:F.serif,fontWeight:400,fontStyle:"italic",letterSpacing:"-.025em"};
+
+export const BrandScenes: React.FC<{t:number}> = ({t}) => {
+  if(t < T.wipe) return null;
+  return <div style={{position:"absolute",inset:0,color:B.ink,fontFamily:F.brandSans}}>
+    {t < T.ann2+.15 && <Bridge t={t}/>}
+    {t >= T.ann2-.15 && t < T.line1 && <CodeSpread t={t}/>}
+    {t >= T.line1 && <EndCard t={t}/>}
+  </div>;
+};
+
+const Bridge: React.FC<{t:number}> = ({t}) => {
+  const v=appear(t,T.wipe+.2)*(1-prog(t,T.ann2-.22,T.ann2+.14));
+  const reveal=appear(t,T.ann1-.3);
+  return <div style={{position:"absolute",inset:0,opacity:v}}>
+    <div style={{position:"absolute",left:120,top:286,width:830,height:467,borderRadius:24,overflow:"hidden",boxShadow:"0 28px 64px #11131120",border:"1px solid #ffffffb3"}}>
+      <img src={staticFile("stills/hour-result.png")} alt="Result in hour" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+    </div>
+    <div style={{position:"absolute",left:1040,top:285,width:760}}>
+      <div style={{fontSize:50,fontWeight:500,letterSpacing:"-.035em"}}>hour is a booking app.</div>
+      <div style={{marginTop:65,opacity:reveal,transform:`translateY(${(1-reveal)*16}px)`}}>
+        <OpenGeniWordmark height={64} color={B.ink}/>
+        <div style={{marginTop:32,fontSize:68,lineHeight:1.06,...serif}}>powers the<br/>agent inside.</div>
+      </div>
+    </div>
+  </div>;
+};
+
+/** Selected integration surfaces, not a complete setup tutorial. RECUT.md
+ * retains the omitted auth, provider and protected endpoint context. */
+const CODE = [
+  "const session = await og.createSession(",
+  "  workspaceId, { initialMessage: text,",
+  "    mcpServers: [hourTools],",
+  '    tools: [{ kind: "mcp", id: "hour" }],',
+  "  });",
+  "// inside hour's UI",
+  "<SessionConversation sessionId={session.id} />",
 ];
 
-/** Paper-on-ink, like the backend code block on opengeni.ai. */
-const TOK: Record<Tok[1], string> = {
-  kw: "#9e9d95",
-  fn: C.paper,
-  key: C.paperDim,
-  str: C.vermOnInk,
-  p: "#86857d",
-  id: C.paper,
-};
-
-const SIZE = 36;
-const CHAR_W = SIZE * 0.6;
-const LINE_H = 82;
-const ORIGIN = { x: 120, y: 232 };
-const BLOCK_W = 45 * CHAR_W;
-const lineTop = (i: number) => ORIGIN.y + i * LINE_H;
-
-/** One idea at a time: token, line, plain-English callout — and the exact
- * moment from the story that the line produced. */
-const CALLOUTS = [
-  { line: 2, token: "mcpServers + tools", at: T.ann2, until: T.ann3, text: ["Give it your", "app’s actions."], echo: "move" as const },
-  { line: 6, token: "SessionConversation", at: T.ann3, until: T.line1, text: ["Put it inside", "your app."], echo: "approve" as const },
-];
-
-/** Replicas of the story's own UI, drawn exactly as they appeared in "hour". */
-const Echo: React.FC<{ kind: "move" | "approve" | "ask" }> = ({ kind }) => {
-  if (kind === "move") {
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-        <div
-          style={{
-            position: "relative",
-            width: 212,
-            height: 62,
-            borderRadius: 7,
-            background: "linear-gradient(0deg, rgba(126,168,255,0.17), rgba(126,168,255,0.17)), #191c22",
-            border: "1px solid rgba(126,168,255,0.34)",
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: "#7ea8ff" }} />
-          <div style={{ position: "absolute", left: 14, top: 10, fontFamily: F.ui, fontSize: 16, fontWeight: 650, color: C.text }}>Ben Carter</div>
-          <div style={{ position: "absolute", left: 14, top: 34, fontFamily: F.ui, fontSize: 14, color: C.text2 }}>Thu 5:00 · Cut</div>
-        </div>
-        <div style={{ fontFamily: F.ui, fontSize: 18, color: C.paperDim }}>moved by the agent</div>
-      </div>
-    );
-  }
-  if (kind === "approve") {
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-        <div
-          style={{
-            width: 158,
-            height: 54,
-            borderRadius: 10,
-            background: C.accent,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 9,
-            fontFamily: F.ui,
-            fontSize: 19,
-            fontWeight: 700,
-            color: "#08241a",
-          }}
-        >
-          <Check size={18} stroke={3} /> Approve
-        </div>
-        <div style={{ fontFamily: F.ui, fontSize: 18, color: C.paperDim }}>the last click</div>
-      </div>
-    );
-  }
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 12,
-        height: 56,
-        padding: "0 20px 0 16px",
-        borderRadius: 12,
-        background: "#191c22",
-        border: `1px solid ${C.line2}`,
-        fontFamily: F.ui,
-        fontSize: 18,
-        color: C.text,
-        whiteSpace: "nowrap",
-      }}
-    >
-      <HourGlyph size={22} />
-      I'm sick. Move tomorrow's clients…
-    </div>
-  );
-};
-
-export const BrandScenes: React.FC<{ t: number }> = ({ t }) => {
-  if (t < T.wipe) return null;
-  // The page under the product: warm brand ink, lit softly from above, so the
-  // film stays in one world instead of flashing to a different one.
-  const endCut = t >= T.line1;
-  return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        background: `radial-gradient(ellipse 90% 80% at 42% 38%, #292a27 0%, ${C.ink} 55%, #191a18 100%)`,
-      }}
-    >
-      {!endCut && <CodeSpread t={t} />}
-      {t < T.ann2 + 0.18 && <Bridge t={t} />}
-      <EndCard t={t} />
-    </div>
-  );
-};
-
-/** The very same hour result remains in frame as we name the product boundary.
- * This is the missing link between the customer story and the builder reveal. */
-const Bridge: React.FC<{ t: number }> = ({ t }) => {
-  const on = prog(t, T.wipe + 0.2, T.wipe + 0.75, ease.out);
-  const away = prog(t, T.ann2 - 0.33, T.ann2 + 0.14, ease.inOut);
-  const v = on * (1 - away);
-  const brand = prog(t, T.ann1 - 0.25, T.ann1 + 0.35, ease.out);
-  return (
-    <div style={{ position: "absolute", inset: 0, background: C.ink, opacity: v, pointerEvents: "none" }}>
-      <div style={{ position: "absolute", left: 120, top: 192, width: 768, height: 432, overflow: "hidden", boxShadow: "0 34px 90px rgba(0,0,0,0.38)", border: `1px solid ${C.paperDim}` }}>
-        <img src={staticFile("stills/hour-result.png")} alt="Result inside the fictional hour booking app" style={{ display: "block", width: "100%", height: "100%", objectFit: "cover" }} />
-      </div>
-      <div style={{ position: "absolute", left: 990, top: 214, width: 800, fontFamily: F.display, fontWeight: 650, fontSize: 64, letterSpacing: "-0.045em", lineHeight: 1.13, color: C.paper }}>
-        <div>hour is a booking app.</div>
-        <div style={{ marginTop: 44, opacity: brand, transform: `translateY(${(1 - brand) * 16}px)` }}>
-          <div><span style={{ color: C.vermOnInk }}>OpenGeni</span> powers</div>
-          <div>the agent inside.</div>
-        </div>
-      </div>
-      <div style={{ position: "absolute", left: 120, bottom: 156, height: 2, width: 1620, background: C.rule, opacity: 0.3 }} />
-      <div style={{ position: "absolute", left: 120, bottom: 106, fontFamily: F.ui, fontSize: 28, color: C.paperDim }}>Your existing app. A capable agent in it.</div>
-    </div>
-  );
-};
-
-const CodeSpread: React.FC<{ t: number }> = ({ t }) => {
-  const on = prog(t, T.ann2 - 0.1, T.ann2 + 0.4, ease.out);
-  const whole = prog(t, T.whole, T.whole + 0.45, ease.inOut);
-  // A slow push for life; the page never sits dead still.
-  const drift = prog(t, T.ann2, T.line1, (x) => x);
-  const scale = 1 + 0.035 * drift;
-  const active = CALLOUTS.find((c) => t >= c.at - 0.02 && t < c.until) ?? null;
-
-  const lineLevel = (i: number) => {
-    // Before the first callout everything is quiet texture.
-    let lit = 0;
-    for (const c of CALLOUTS) {
-      if (c.line !== i) continue;
-      const k = prog(t, c.at, c.at + 0.32) * (1 - prog(t, c.until - 0.18, c.until + 0.12));
-      lit = Math.max(lit, k);
-    }
-    return Math.max(lit, whole);
-  };
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        transform: `scale(${scale})`,
-        transformOrigin: `${ORIGIN.x + BLOCK_W / 2}px 540px`,
-      }}
-    >
-      <div
-        style={{
-          position: "absolute",
-          left: ORIGIN.x,
-          top: ORIGIN.y - 74,
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          fontFamily: F.mono,
-          fontSize: 18,
-          letterSpacing: "0.14em",
-          color: C.paperDim,
-          opacity: on,
-        }}
-      >
-        <span style={{ width: 9, height: 9, borderRadius: "50%", background: C.verm, display: "inline-block" }} />
-        TWO PIECES · YOUR SERVER AND YOUR APP
-      </div>
-      {CALLOUTS.map((c) => {
-        const k = prog(t, c.at, c.at + 0.3) * (1 - prog(t, c.until - 0.16, c.until));
-        const hold = whole;
-        const v = Math.max(k, hold * 0.55);
-        if (v <= 0) return null;
-        return (
-          <div
-            key={`bar${c.line}`}
-            style={{
-              position: "absolute",
-              left: ORIGIN.x - 36,
-              top: lineTop(c.line) + 4,
-              width: BLOCK_W + 60,
-              height: LINE_H - 8,
-              background: `rgba(246,83,39,${0.13 * v})`,
-              borderLeft: `4px solid rgba(246,83,39,${v})`,
-            }}
-          />
-        );
-      })}
-      {CODE.map((line, i) => {
-        const appear = prog(t, T.ann2 + 0.02 * i, T.ann2 + 0.3 + 0.02 * i, ease.out);
-        const level = lineLevel(i);
-        const opacity = appear * lerp(0.52, 1, level);
-        return (
-          <div
-            key={i}
-            style={{
-              position: "absolute",
-              left: ORIGIN.x,
-              top: lineTop(i),
-              height: LINE_H,
-              display: "flex",
-              alignItems: "center",
-              fontFamily: F.mono,
-              fontSize: SIZE,
-              whiteSpace: "pre",
-              opacity,
-              transform: `translateY(${(1 - appear) * 10}px)`,
-            }}
-          >
-            {line.map(([text, kind], j) => (
-              <span key={j} style={{ color: TOK[kind], fontWeight: kind === "fn" ? 700 : kind === "id" ? 500 : 400 }}>
-                {text}
-              </span>
-            ))}
-          </div>
-        );
-      })}
-      {active && <Callout t={t} c={active} />}
-    </div>
-  );
-};
-
-const Callout: React.FC<{ t: number; c: (typeof CALLOUTS)[number] }> = ({ t, c }) => {
-  const inK = prog(t, c.at + 0.06, c.at + 0.4, ease.out);
-  const outK = c.until === T.line1 ? 0 : prog(t, c.until - 0.2, c.until - 0.02, ease.in);
-  const vis = inK * (1 - outK);
-  const echoK = prog(t, c.at + 0.22, c.at + 0.52, ease.out);
-  const cy = lineTop(c.line) + LINE_H / 2;
-  const top = Math.min(Math.max(cy - 92, 150), 700);
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: ORIGIN.x + BLOCK_W + 64,
-        top,
-        opacity: vis,
-        transform: `translateY(${(1 - inK) * 14 - outK * 8}px)`,
-      }}
-    >
-      <div style={{ fontFamily: F.mono, fontSize: 21, letterSpacing: "0.02em", color: C.vermOnInk, marginBottom: 14 }}>{c.token}</div>
-      {c.text.map((l) => (
-        <div
-          key={l}
-          style={{
-            fontFamily: F.display,
-            fontSize: 60,
-            fontWeight: 640,
-            letterSpacing: "-0.035em",
-            lineHeight: 1.05,
-            color: C.paper,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {l}
-        </div>
-      ))}
-      <div style={{ marginTop: 22, opacity: echoK, transform: `translateY(${(1 - echoK) * 10}px)` }}>
-        <Echo kind={c.echo} />
+const CodeSpread: React.FC<{t:number}> = ({t}) => {
+  const v=appear(t,T.ann2-.1);
+  const ui=t >= T.ann3;
+  const at=ui?T.ann3:T.ann2;
+  const p=appear(t,at);
+  return <div style={{position:"absolute",inset:0,opacity:v}}>
+    <div style={{position:"absolute",left:110,top:222,width:1120,height:630,background:"#ffffffd9",border:`1px solid ${B.line}`,borderRadius:26,boxShadow:"0 26px 65px #11131112",overflow:"hidden"}}>
+      <div style={{height:76,display:"flex",alignItems:"center",padding:"0 38px",borderBottom:`1px solid ${B.line}`,fontFamily:F.mono,fontSize:25,color:B.muted}}>hour / agent.tsx</div>
+      <div style={{padding:"29px 0",fontFamily:F.mono,fontSize:35,lineHeight:"69px",letterSpacing:"-.035em"}}>
+        {CODE.map((line,i)=> {
+          const active=ui?i===6:i===2||i===3;
+          return <div key={i} style={{height:69,padding:"0 36px",whiteSpace:"pre",background:active?"#9fe3d354":"transparent",borderLeft:`4px solid ${active?B.teal:"transparent"}`,color:i===5?B.muted:B.ink,opacity:active?1:.67}}>{line}</div>;
+        })}
       </div>
     </div>
-  );
-};
-
-const EndCard: React.FC<{ t: number }> = ({ t }) => {
-  if (t < T.line1) return null;
-  const l1 = springAt(t, T.line1, 120, 19);
-  const l2 = springAt(t, T.line2, 120, 19);
-  const m = springAt(t, T.mark, 110, 20);
-  const line: React.CSSProperties = {
-    fontFamily: F.display,
-    fontSize: 104,
-    fontWeight: 640,
-    letterSpacing: "-0.035em",
-    lineHeight: 1.04,
-    color: C.paper,
-    whiteSpace: "nowrap",
-  };
-  // A barely perceptible drift, so the last frame is alive rather than a slide.
-  const drift = prog(t, T.line1, T.end, (x) => x);
-  return (
-    <div style={{ position: "absolute", inset: 0, transform: `scale(${1 + 0.014 * drift})`, transformOrigin: "150px 480px" }}>
-      <div
-        style={{
-          position: "absolute",
-          left: 152,
-          top: 196,
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          fontFamily: F.mono,
-          fontSize: 20,
-          letterSpacing: "0.14em",
-          color: C.paperDim,
-          opacity: clamp01(l1 * 1.3),
-        }}
-      >
-        <span style={{ width: 10, height: 10, borderRadius: "50%", background: C.verm, display: "inline-block" }} />
-        AN AGENT IN YOUR PRODUCT
-      </div>
-      <div style={{ position: "absolute", left: 150, top: 262, ...line, opacity: clamp01(l1 * 1.3), transform: `translateY(${(1 - l1) * 26}px)` }}>
-        Your app could do this.
-      </div>
-      <div style={{ position: "absolute", left: 150, top: 262 + 116, ...line, opacity: clamp01(l2 * 1.3), transform: `translateY(${(1 - l2) * 26}px)` }}>
-        Put an agent inside<span style={{ color: C.verm }}>.</span>
-        <RestingCursor t={t} />
-      </div>
-      <div style={{ position: "absolute", left: 152, top: 560, fontFamily: F.ui, fontSize: 33, color: C.paperDim, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 10}px)` }}>
-        Start with a chat. Connect your own tools.
-      </div>
-      <div style={{ position: "absolute", left: 150, right: 150, top: 690, height: 1, background: C.paper, opacity: 0.3 * m, transformOrigin: "left", transform: `scaleX(${m})` }} />
-      <div style={{ position: "absolute", left: 150, top: 736, opacity: clamp01(m * 1.4), transform: `translateY(${(1 - m) * 14}px)` }}>
-        <OpenGeniWordmark height={50} color={C.paper} />
-      </div>
-      <div
-        style={{
-          position: "absolute",
-          right: 150,
-          top: 744,
-          fontFamily: F.mono,
-          fontSize: 28,
-          letterSpacing: "0.02em",
-          color: C.paper,
-          opacity: clamp01(m * 1.4),
-          transform: `translateY(${(1 - m) * 14}px)`,
-        }}
-      >
-        opengeni.ai
-      </div>
-      <div style={{ position: "absolute", left: 150, top: 855, fontFamily: F.ui, fontSize: 36, letterSpacing: "-0.01em", color: C.paperDim, opacity: clamp01(m * 1.4) }}>
-        Apache-2.0 · Managed or self-hosted
+    <div style={{position:"absolute",left:1320,top:344,width:500,opacity:p,transform:`translateY(${(1-p)*12}px)`}}>
+      <div style={{fontSize:62,lineHeight:1.08,letterSpacing:"-.04em",fontWeight:500}}>{ui?"Put it inside":"Give it your"}</div>
+      <div style={{fontSize:76,lineHeight:1.1,...serif}}>{ui?"your app.":"app’s actions."}</div>
+      <div style={{marginTop:46,padding:"21px 24px",background:"#ffffffab",border:`1px solid ${B.line}`,borderRadius:18,fontSize:30,lineHeight:1.35}}>
+        {ui?<><span style={{color:B.teal}}>✓</span> A conversation in hour</>:<><span style={{color:B.teal}}>✓</span> Ben moved to Thu 5:00</>}
       </div>
     </div>
-  );
+  </div>;
 };
 
-/** The protagonist's last beat: it strolls in and lies down after the period.
- * No click — the approval was the last one. */
-const RestingCursor: React.FC<{ t: number }> = ({ t }) => {
-  if (t < T.restIn) return null;
-  const k = prog(t, T.restIn, T.restFlop - 0.02, ease.pointer);
-  const x = lerp(520, 16, k);
-  const y = lerp(420, -12, k);
-  const pose = flopPose(t, T.restFlop);
-  return (
-    <span style={{ position: "relative", display: "inline-block", width: 0, height: 0, verticalAlign: "baseline" }}>
-      <span style={{ position: "absolute", left: x + 6, top: y - 34 }}>
-        <CursorArrow pose={pose} scale={1.6} />
-      </span>
-    </span>
-  );
+const EndCard: React.FC<{t:number}> = ({t}) => {
+  const first=appear(t,T.line1), second=appear(t,T.line2), mark=appear(t,T.mark);
+  return <div style={{position:"absolute",inset:0}}>
+    <div style={{position:"absolute",left:150,top:178,fontSize:116,fontWeight:500,letterSpacing:"-.045em",lineHeight:1.06,opacity:first,transform:`translateY(${(1-first)*20}px)`}}>Give your users</div>
+    <div style={{position:"absolute",left:150,top:302,fontSize:148,lineHeight:1.08,...serif,opacity:second,transform:`translateY(${(1-second)*20}px)`}}>an agent.<RestingCursor t={t}/></div>
+    <div style={{position:"absolute",left:155,top:539,fontSize:44,letterSpacing:"-.025em",opacity:mark}}>Your app. Your brand. Your tools.</div>
+    <div style={{position:"absolute",left:150,top:742,opacity:mark}}><OpenGeniWordmark height={69} color={B.ink}/></div>
+    <div style={{position:"absolute",right:150,top:757,fontSize:40,letterSpacing:"-.02em",opacity:mark}}>opengeni.ai</div>
+    <div style={{position:"absolute",left:155,top:870,fontSize:31,color:B.muted,opacity:mark}}>Apache-2.0 · Managed or self-hosted</div>
+  </div>;
+};
+
+const RestingCursor: React.FC<{t:number}> = ({t}) => {
+  if(t<T.restIn) return null;
+  const k=prog(t,T.restIn,T.restFlop-.02,ease.pointer);
+  return <span style={{position:"relative",display:"inline-block",width:0,height:0,verticalAlign:"baseline"}}>
+    <span style={{position:"absolute",left:lerp(520,24,k),top:lerp(420,-48,k)}}><CursorArrow pose={flopPose(t,T.restFlop)} scale={1.5}/></span>
+  </span>;
 };
