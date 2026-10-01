@@ -42,6 +42,18 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Session routes register optional peers during module evaluation.
+              // Their callbacks are assigned from state objects, not hoisted
+              // declarations. Keep this dependency-free state in a leaf chunk
+              // so entry-aware merging cannot put it behind the registering
+              // route in a circular shared chunk. The terminal/editor/desktop
+              // entry points re-export components and must stay outside it.
+              name: "workbench-peer-state",
+              test: /packages[\\/]react[\\/]src[\\/]lib[\\/]workbench-peers\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Registration runs when lazy routes evaluate. Keep the loader's
               // state and registration entry point together, outside route
               // chunks that can import one another before state initializes.
