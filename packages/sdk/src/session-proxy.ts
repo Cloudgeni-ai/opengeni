@@ -374,7 +374,7 @@ export function createSessionProxyHandler(
             "GET",
             "/v1/config/client",
             undefined,
-            query,
+            { ...query, workspaceId },
             call,
           );
           let artifacts: Awaited<ReturnType<typeof artifactViewerCapability>> | null = null;

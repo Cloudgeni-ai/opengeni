@@ -573,6 +573,23 @@ Use official upstream charts/operators or managed services for production platfo
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. Agent guidance resumes only when the user asks to continue or the agent's own pause blocker clears, never because the user asked a question. See `docs/goals.md`.
 
+Goal completion stops continuations, not answer delivery: `goal_complete`
+evidence is short ledger proof (agent schema: 8192 characters), never the
+deliverable. Send the final answer in the same turn; integrate late child
+results without restarting a completed goal. Empty finals after tools or
+completion get one durable same-turn handoff nudge, never a tool replay,
+history rewrite, run-length cap, or Temporal retry. Input/approval waits and
+maintenance are exempt. A second empty final completes with
+`emptyFinalReply: true` and an informational timeline/SDK notice; it never
+fails or pauses the goal or defers later child-result wakes.
+Completed hosted tools qualify for that handoff across recovery. Structured
+developer/system text is converted to Chat-native text only in the request-local
+view; canonical reminders and history remain unchanged.
+Goal-tool text bounds are explicit in schemas and descriptions: objective and
+criteria 8 KiB UTF-8 each, progress status 8 KiB, rationale 2 KiB, evidence 8192
+characters. Keep human-readable sentences and normal spaces; summarize rather
+than compress words, and never substitute a ledger field for the final reply.
+
 Claude Messages changes: read `docs/model-providers.md#native-claude-messages`
 and `packages/runtime/src/anthropic-messages.ts`. Run the native adapter tests
 (including its Agents SDK tool cycle), model admission tests, and real PostgreSQL

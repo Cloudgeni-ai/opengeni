@@ -555,6 +555,15 @@ describe("createSessionProxyHandler", () => {
     expect(events.headers.get("X-OpenGeni-Has-More")).toBe("true");
   });
 
+  test("client config pins the resolved host workspace even when the browser supplies another", async () => {
+    const { browser, upstream } = setup();
+    await browser.getClientConfig({ workspaceId: OTHER_WORKSPACE_ID });
+    const configRequest = upstream.requests.find(
+      (request) => request.url.pathname === "/v1/config/client",
+    )!;
+    expect(configRequest.url.searchParams.get("workspaceId")).toBe(WORKSPACE_ID);
+  });
+
   test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({

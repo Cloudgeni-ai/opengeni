@@ -67221,6 +67221,14 @@ export async function setSessionGoalStatusWithEvent(
               sequence: session.lastSequence + 1,
               type: input.event.type,
               payload: payload,
+              ...(input.commandActor
+                ? {
+                    turnId: input.commandActor.turnId,
+                    turnGeneration: input.commandActor.executionGeneration,
+                    turnAttemptId: input.commandActor.attemptId,
+                    turnAssociation: "current",
+                  }
+                : {}),
               occurredAt: now,
             },
             "payload",
@@ -86030,6 +86038,7 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
 }
 
 export * from "./feedback";
+export * from "./session-final-reply";
 export * from "./knowledge-entries";
 
 export * from "./knowledge-indexing";

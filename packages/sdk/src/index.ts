@@ -95,6 +95,11 @@ export type {
 } from "@opengeni/contracts/usage-allowances";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type { ToolDisplayMetadata } from "@opengeni/contracts";
+export {
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
+} from "@opengeni/contracts/session-final-reply";
+export type { EmptyFinalReplyCompletion } from "@opengeni/contracts/session-final-reply";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
 export type {
   PluginDiscoveryItem,

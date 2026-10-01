@@ -4627,13 +4627,17 @@ export class OpenGeniClient {
    * reasoning efforts, MCP servers, file-upload limits, and how the client is
    * expected to authenticate. Drives a composer's model picker without prior
    * knowledge of the host setup; safe to call before any auth is established.
+   * Authenticated calls resolve the caller's default workspace, or the exact
+   * `workspaceId` option, using the same selection rules as fresh session create.
    */
-  async getClientConfig(options: OpenGeniRequestOptions = {}): Promise<ClientConfig> {
+  async getClientConfig(
+    options: OpenGeniRequestOptions & { workspaceId?: string } = {},
+  ): Promise<ClientConfig> {
     const config = await this.requestJson<ClientConfig>(
       "GET",
       "/v1/config/client",
       undefined,
-      {},
+      options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId },
       options,
     );
     if (this.apiContractStrict && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {

@@ -37,6 +37,40 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("keeps update idle proof private and includes open browser lifetimes", async () => {
+    await withServer(async ({ server, reference }) => {
+      for (const token of [undefined, viewToken, controlToken]) {
+        expect((await request(server, "/v1/runtime", token ? { token } : {})).status).toBe(401);
+      }
+      expect(
+        (await request(server, "/v1/runtime", { token: adminToken, method: "POST" })).status,
+      ).toBe(405);
+      const idle = async () =>
+        await json(await request(server, "/v1/runtime", { token: adminToken }));
+      expect((await idle()).data).toEqual({ idle: true });
+      expect(
+        (
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      expect((await idle()).data).toEqual({ idle: false });
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
+            method: "POST",
+            token: adminToken,
+            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await idle()).data).toEqual({ idle: true });
+    });
+  });
+
   test.each([
     {
       operation: "listTargets" as const,
