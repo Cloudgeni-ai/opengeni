@@ -1471,12 +1471,69 @@ mod tests {
     fn exec_descendant_fixture() {
         let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
             .expect("descendant fixture pid-file env");
-        std::fs::write(pid_file, std::process::id().to_string())
-            .expect("write descendant fixture pid");
+        publish_descendant_pid(Path::new(&pid_file), |path| {
+            std::fs::write(path, std::process::id().to_string())
+        })
+        .expect("write descendant fixture pid");
         // Bound the fixture itself so a failing containment regression cannot leave
         // permanent test work behind. Production cleanup should terminate it well
         // before this fallback expires.
         std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+
+    fn publish_descendant_pid(
+        pid_file: &Path,
+        write_pid: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        // Each fixture has one writer in its own tempdir. Keep the staging file
+        // on the same filesystem and close it before publishing: readers use
+        // existence as readiness and must never see an empty or partial PID.
+        let staging = pid_file.with_extension("pid.tmp");
+        write_pid(&staging)?;
+        std::fs::rename(staging, pid_file)
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn descendant_pid_publication_hides_incomplete_writes() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("descendant.pid");
+        // Observe the exact empty/partial-write windows without scheduler timing.
+        publish_descendant_pid(&pid_file, |path| {
+            let mut file = std::fs::File::create(path)?;
+            assert_eq!(
+                std::fs::read_to_string(&pid_file).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound,
+                "an empty file must not signal fixture readiness"
+            );
+            file.write_all(b"12")?;
+            assert!(
+                !pid_file.exists(),
+                "a partial PID must not signal readiness"
+            );
+            file.write_all(b"345")
+        })
+        .expect("publish fixture pid");
+        assert_eq!(recorded_pid(&pid_file).await, 12345);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn recorded_pid_rejects_malformed_published_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for contents in ["", "not-a-pid"] {
+            let pid_file = dir.path().join("malformed.pid");
+            std::fs::write(&pid_file, contents).unwrap();
+            let error = tokio::spawn(async move { recorded_pid(&pid_file).await })
+                .await
+                .expect_err("malformed published PID must fail, not be retried");
+            let panic = error.into_panic();
+            let message = panic.downcast_ref::<String>().expect("panic message");
+            assert!(message.contains("descendant pid"), "{message}");
+        }
     }
 
     #[cfg(any(unix, windows))]
