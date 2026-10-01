@@ -234,14 +234,21 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Usage allowance pages and the lazily loaded account-menu and
-              // composer surfaces. Only usage-entry (two lazy boundaries) is
-              // imported by the rail and session graphs; pin everything behind
-              // it so entry-aware merging cannot pull budget or settings code
-              // into a direct session load. The member slider's Radix primitive is
-              // used nowhere else; it must not join the shared UI runtime.
+              // The account-menu usage row and the composer's limit notice load
+              // on every session page (behind usage-entry's lazy boundaries).
+              // Keep them, the member-facing React usage pieces and the SDK
+              // reads apart from the budget pages, which pull settings.
+              name: "usage-surfaces",
+              test: /(?:apps[\\/]web[\\/]src[\\/]components[\\/]usage[\\/]usage-surfaces\.tsx|packages[\\/]react[\\/]src[\\/](?:usage\.ts|usage[\\/]summary\.ts|hooks[\\/]use-usage\.ts|components[\\/]usage-(?:meter|limit-notice)\.tsx)|packages[\\/]sdk[\\/]src[\\/]usage-allowances\.ts)$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Budget pages, Workspace settings > Usage and the member slider
+              // (with its Radix primitive, used nowhere else; it must not join
+              // the shared UI runtime). Only reached from lazy settings routes.
               name: "usage-allowances",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]usage[\\/](?!usage-entry\.)[\w-]+\.tsx?|lib[\\/]usage-allowances\.ts)|packages[\\/]react[\\/]src[\\/](?:usage\.ts|usage[\\/]summary\.ts|hooks[\\/]use-usage\.ts|components[\\/]usage-(?:meter|limit-notice|member-list)\.tsx)|packages[\\/]sdk[\\/]src[\\/]usage-allowances\.ts|@radix-ui(?:\+|[\\/])react-slider(?:@|[\\/]).*)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]usage[\\/](?!usage-entry\.|usage-surfaces\.)[\w-]+\.tsx?|lib[\\/]usage-allowances\.ts)|packages[\\/]react[\\/]src[\\/]components[\\/]usage-member-list\.tsx|@radix-ui(?:\+|[\\/])react-slider(?:@|[\\/]).*)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

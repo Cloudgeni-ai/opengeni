@@ -8,7 +8,7 @@ import { GaugeIcon } from "lucide-react";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { CONSOLE_ALLOWANCE_LABELS } from "@/lib/usage-allowances";
+import { CONSOLE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 
 function useConsoleUsage(workspaceId: string, refreshKey?: unknown) {
   const context = useAppContext();

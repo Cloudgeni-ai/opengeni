@@ -488,15 +488,14 @@ const effectiveBudgets = {
     // Keep the established 1.5 KiB allowance; other caps stay fixed.
     wholeKibEnvelope(2_531_746, 1.5 * kib),
     // Usage allowance UI: the conversation's structured "usage limit reached"
-    // row (host labels/render hook), the shared allowance wording, the composer
-    // notice and account-menu usage row as two lazy boundaries, and the gauge
-    // icon pinned to session-shared-primitives. Budget pages, meters, the
-    // member slider and its Radix primitive stay in the lazy usage-allowances
-    // chunk. Main bb2f7ea7f measures 2,533,099 raw / 714,130 gzip and this
-    // change 2,542,163 / 716,165 across the same 39 files (Bun 1.4 macOS/arm64).
-    // Keep the established 1.5 KiB headroom; file count, initial, per-file,
-    // lazy and CSS caps stay fixed.
-    wholeKibEnvelope(2_542_163, 1.5 * kib),
+    // row (host labels/render hook), the shared allowance wording, and the
+    // composer notice and account-menu usage row as two lazy boundaries; the
+    // gauge icon is pinned to session-shared-primitives. Session-page usage
+    // surfaces and the budget pages/member slider live in two lazy chunks.
+    // Main bb2f7ea7f measures 2,533,099 raw / 714,130 gzip across 39 files; this
+    // change 2,535,494 / 713,906 across 38 (Bun 1.4 macOS/arm64). Keep the
+    // established 1.5 KiB headroom; gzip and every other cap stay fixed.
+    wholeKibEnvelope(2_535_494, 1.5 * kib),
     // Launch sign-up attribution: memory-only first-touch capture at boot and
     // attributed sign-up/social request bodies in the shared API helper. Base
     // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /
@@ -602,8 +601,6 @@ const effectiveBudgets = {
     budgets.directSessionGzip,
     // Usage allowances on main f874217f5: 713,634 gzip (Linux/x64 CI).
     wholeKibEnvelope(713_634, 1.5 * kib),
-    // Usage allowance UI (see the raw envelope): 716,165 gzip on macOS/arm64.
-    wholeKibEnvelope(716_165, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
     // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
     // remain below their existing caps; retain the standard gzip variance allowance.
