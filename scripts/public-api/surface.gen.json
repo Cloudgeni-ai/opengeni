@@ -11525,7 +11525,8 @@
         "$.access": "enum?=[\"\\\"full\\\"\",\"\\\"read\\\"\"]",
         "$.description": "string?",
         "$.expiresAt": "string?",
-        "$.name": "string!"
+        "$.name": "string!",
+        "$.preset": "enum?=[\"\\\"developer_setup\\\"\"]"
       }
     },
     "CreateOrganizationInvitationRequest": {

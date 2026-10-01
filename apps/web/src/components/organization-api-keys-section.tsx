@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { DEVELOPER_SETUP_API_KEY_PRESET } from "@opengeni/contracts";
 import { CheckIcon, CopyIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -12,6 +13,7 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
+import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
@@ -50,6 +52,25 @@ export type OrganizationApiKeysSectionProps = {
 };
 
 const defaultKeyName = "Organization automation";
+
+type KeyAccessChoice = "full" | "read" | "developer_setup";
+const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
+  {
+    value: "full",
+    label: "Full access",
+    description: "Create, configure and run shared workspaces and manage their API keys.",
+  },
+  {
+    value: DEVELOPER_SETUP_API_KEY_PRESET.id,
+    label: DEVELOPER_SETUP_API_KEY_PRESET.label,
+    description: DEVELOPER_SETUP_API_KEY_PRESET.description,
+  },
+  {
+    value: "read",
+    label: "Read only",
+    description: "Read shared workspaces, sessions and files. Can't create or change anything.",
+  },
+];
 
 const COLUMNS: RowListColumn[] = [
   { id: "lastUsed", label: "Last used", width: 116 },
@@ -331,6 +352,7 @@ function CreateApiKeyPage({
 }) {
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
+  const [access, setAccess] = useState<KeyAccessChoice>("full");
   const [nameError, setNameError] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -376,7 +398,7 @@ function CreateApiKeyPage({
         backLabel="Developer"
         onClose={onClose}
         title="Create API key"
-        description="For a server that creates and runs shared workspaces for your product. It can't open Personal workspaces or read secret values."
+        description="For server access to shared workspaces. It can't open Personal workspaces or read secret values."
         submitLabel="Create API key"
         pendingLabel="Creating…"
         onSubmit={async () => {
@@ -389,6 +411,11 @@ function CreateApiKeyPage({
             const created = await onCreate({
               name: trimmed,
               ...(description.trim() ? { description: description.trim() } : {}),
+              ...(access === "developer_setup"
+                ? { preset: DEVELOPER_SETUP_API_KEY_PRESET.id }
+                : access === "read"
+                  ? { access: "read" as const }
+                  : {}),
             });
             if (created === null) return false;
             setToken(created);
@@ -421,6 +448,18 @@ function CreateApiKeyPage({
               maxLength={500}
               placeholder="What will use this key?"
               onChange={(event) => setDescription(event.target.value)}
+            />
+          </Field>
+          <Field
+            label="Access"
+            hint={KEY_ACCESS_CHOICES.find((choice) => choice.value === access)?.description}
+          >
+            <SelectMenu
+              options={KEY_ACCESS_CHOICES}
+              value={access}
+              onValueChange={setAccess}
+              showMetaInTrigger={false}
+              className="w-full"
             />
           </Field>
         </FieldStack>

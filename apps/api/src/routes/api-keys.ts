@@ -2,6 +2,7 @@ import {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  DEVELOPER_SETUP_API_KEY_PRESET,
   Permission,
   type AccessContext,
   type ApiKey,
@@ -61,6 +62,17 @@ export function organizationApiKeyPermissionsForAccess(
   return access === "read"
     ? [...organizationReadApiKeyPermissions]
     : [...organizationApiKeyPermissions];
+}
+
+/** Existing callers retain their expiry; setup keys default to one day. */
+export function organizationApiKeyExpiryDate(
+  request: Pick<CreateOrganizationApiKeyRequest, "preset" | "expiresAt">,
+  now: Date = new Date(),
+): Date | null {
+  if (request.expiresAt !== undefined) return new Date(request.expiresAt);
+  return request.preset === "developer_setup"
+    ? new Date(now.getTime() + DEVELOPER_SETUP_API_KEY_PRESET.defaultExpiryHours * 60 * 60 * 1000)
+    : null;
 }
 
 function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {
@@ -145,8 +157,11 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
           description: body.description ?? null,
           prefix: token.slice(0, 14),
           keyHash: await sha256Hex(token),
-          permissions: organizationApiKeyPermissionsForAccess(body.access),
-          expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+          permissions:
+            body.preset === "developer_setup"
+              ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+              : organizationApiKeyPermissionsForAccess(body.access),
+          expiresAt: organizationApiKeyExpiryDate(body),
           maxActiveKeys: organizationApiKeyLimit(deps),
           rotationSourceApiKeyId: authenticatedApiKeyId(context),
         });
