@@ -11,10 +11,18 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    App: () => App,
    AppService: () => AppService,
    ClientClosedError: () => ClientClosedError,
-@@ -61888,6 +61890,22 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
+@@ -61888,6 +61890,31 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
      }
    }
  }
++async function awaitCommandStartOperation(operation, signal) {
++  signal.throwIfAborted();
++  return await new Promise((resolve, reject) => {
++    const abort = () => reject(signal.reason);
++    signal.addEventListener("abort", abort, { once: true });
++    Promise.resolve().then(operation).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
++  });
++}
 +var CommandStartPreDispatchUnavailableError = class extends Error {
 +  constructor(cause) {
 +    super("Modal command router was not ready before Start dispatch", { cause });
@@ -23,18 +31,19 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
 +  }
 +};
 +var CommandStartOutcomeUnknownError = class extends Error {
-+  constructor(taskId, execId, cause) {
++  constructor(taskId, execId, cause, invocation) {
 +    super("Modal command Start outcome unknown; do not replay this invocation", { cause });
 +    this.name = "CommandStartOutcomeUnknownError";
 +    Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.boundary.v1"), { value: "outcome-unknown" });
 +    this.taskId = taskId;
 +    this.execId = execId;
++    if (invocation) Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.invocation.v1"), { value: Object.freeze(invocation) });
 +  }
 +};
  var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    stub;
    channel;
-@@ -61900,6 +61918,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61900,6 +61927,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    jwtExp;
    jwtRefreshLock = Promise.resolve();
    logger;
@@ -42,7 +51,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    closed = false;
    static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
      let resp;
-@@ -61928,14 +61947,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61928,14 +61956,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "url",
        resp.url
      );
@@ -92,7 +101,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        "grpc.max_receive_message_length": 100 * 1024 * 1024,
        "grpc.max_send_message_length": 100 * 1024 * 1024,
        "grpc-node.flow_control_window": 64 * 1024 * 1024,
-@@ -61944,8 +61996,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61944,8 +62005,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "grpc.keepalive_permit_without_calls": 1
      };
      let channel;
@@ -103,7 +112,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          "Using insecure TLS (skip certificate verification) for task command router"
        );
        channel = (0, import_nice_grpc11.createChannel)(
-@@ -61960,40 +62012,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61960,40 +62021,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
          channelConfig
        );
      }
@@ -148,38 +157,72 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
    }
    close() {
      if (this.closed) {
-@@ -62018,7 +62046,29 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62018,7 +62055,62 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      );
    }
-   async execStart(request) {
+-  async execStart(request) {
++  async execStart(request, options) {
 -    return await this.callUnary(() => this.stub.taskExecStart(request));
 +    // All SDK consumers (including setup, hydration and filesystem helpers)
 +    // cross this boundary. Only local readiness failure proves non-dispatch.
++    const signal = AbortSignal.any([...(options?.signal ? [options.signal] : []), AbortSignal.timeout(15000)]);
++    let dispatched = false;
 +    try {
-+      return await this.callWithAuthRetry(async () => {
++      return await awaitCommandStartOperation(() => this.callWithAuthRetry(async () => {
 +        if (this.closed) throw new ClientClosedError();
++        signal.throwIfAborted();
 +        try {
-+          await (0, import_nice_grpc11.waitForChannelReady)(this.channel, new Date(Date.now() + 5000));
++          await awaitCommandStartOperation(() => (0, import_nice_grpc11.waitForChannelReady)(this.channel, new Date(Date.now() + 5000)), signal);
 +        } catch (error) {
++          signal.throwIfAborted();
 +          if (this.closed) throw new ClientClosedError();
 +          throw new CommandStartPreDispatchUnavailableError(error);
 +        }
 +        if (this.closed) throw new ClientClosedError();
-+        return await this.stub.taskExecStart(request);
-+      });
++        signal.throwIfAborted();
++        dispatched = true;
++        return await this.stub.taskExecStart(request, { timeoutMs: 5000, signal });
++      }), signal);
 +    } catch (error) {
-+      if (error instanceof CommandStartPreDispatchUnavailableError || error instanceof ClientClosedError)
++      if (!dispatched || error instanceof CommandStartPreDispatchUnavailableError)
 +        throw error;
 +      if (error instanceof import_nice_grpc11.ClientError && [import_nice_grpc11.Status.INVALID_ARGUMENT,
 +          import_nice_grpc11.Status.NOT_FOUND, import_nice_grpc11.Status.PERMISSION_DENIED,
 +          import_nice_grpc11.Status.UNAUTHENTICATED, import_nice_grpc11.Status.UNIMPLEMENTED].includes(error.code))
 +        throw error;
-+      throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error);
++      // Observe only the original IDs before a setup helper can unwind. A
++      // successful Poll (even still-running) proves existence, not no effect.
++      try {
++        await this.observeExec(request.taskId, request.execId, signal);
++        return;
++      } catch {
++        throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error, {
++          sandboxId: this.sandboxId, taskId: request.taskId, execId: request.execId,
++          observe: (signal2, timeoutMs) => this.observeExec(request.taskId, request.execId, signal2, timeoutMs)
++        });
++      }
 +    }
    }
++  async observeExec(taskId, execId, owningSignal, timeoutMs = 5000) {
++    const budget = Math.max(1, Math.min(5000, timeoutMs));
++    const signal = AbortSignal.any([...(owningSignal ? [owningSignal] : []), AbortSignal.timeout(budget)]);
++    const deadline = Date.now() + budget;
++    let failure;
++    for (let attempt = 0; attempt < 3; attempt++) {
++      signal.throwIfAborted();
++      if (this.closed) throw new ClientClosedError();
++      try {
++        return await this.stub.taskExecPoll(TaskExecPollRequest.create({ taskId, execId }), { signal, timeoutMs: Math.max(1, Math.min(1000, deadline - Date.now())) });
++      } catch (error) {
++        failure = error;
++        signal.throwIfAborted();
++      }
++    }
++    throw failure;
++  }
    async containerCreate(request) {
      return await this.callUnary(() => this.stub.taskContainerCreate(request));
-@@ -62229,15 +62279,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62229,15 +62321,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        throw err;
      }
    }
@@ -198,7 +241,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
            "task_id",
            this.taskId
          );
-@@ -62250,11 +62300,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62250,11 +62342,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            this.sandboxId,
            this.isV2
          );
@@ -225,7 +268,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        } catch (err) {
          error = err;
        }
-@@ -62265,11 +62328,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62265,11 +62370,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      }
    }
    async callWithAuthRetry(func) {
@@ -239,7 +282,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          return await func();
        }
        throw err;
-@@ -62291,6 +62355,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62291,6 +62397,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      while (true) {
        try {
          const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
@@ -247,7 +290,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
          const request = TaskExecStdioReadRequest.create({
            taskId,
            execId,
-@@ -62312,7 +62377,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62312,7 +62419,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            return;
          } catch (err) {
            if (err instanceof import_nice_grpc11.ClientError && err.code === import_nice_grpc11.Status.UNAUTHENTICATED && !didAuthRetry) {
@@ -256,17 +299,21 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
              didAuthRetry = true;
              continue;
            }
-@@ -64396,7 +64461,16 @@ var Sandbox2 = class _Sandbox {
+@@ -64396,7 +64503,20 @@ var Sandbox2 = class _Sandbox {
        env: envDict,
        secrets: resolvableSecrets
      };
 -    const [taskId, commandRouterClient] = await this.#getCommandRouter();
++    const context = Object.getOwnPropertyDescriptor(this.#client, Symbol.for("opengeni.modal.command-start.context.v1"))?.value;
++    const owningSignal = params?.signal ?? (typeof context === "function" ? context() : void 0);
++    const signal = AbortSignal.any([...(owningSignal ? [owningSignal] : []), AbortSignal.timeout(15000)]);
 +    let taskId, commandRouterClient;
 +    try {
-+      [taskId, commandRouterClient] = await this.#getCommandRouter();
++      [taskId, commandRouterClient] = await awaitCommandStartOperation(() => this.#getCommandRouter(), signal);
 +    } catch (error) {
++      owningSignal?.throwIfAborted();
 +      // Task/router lookups are read-only and precede any Start dispatch.
-+      if (error instanceof import_nice_grpc15.ClientError && [import_nice_grpc15.Status.UNAVAILABLE,
++      if (signal.aborted && error === signal.reason || error instanceof import_nice_grpc15.ClientError && [import_nice_grpc15.Status.UNAVAILABLE,
 +          import_nice_grpc15.Status.DEADLINE_EXCEEDED].includes(error.code))
 +        throw new CommandStartPreDispatchUnavailableError(error);
 +      throw error;
@@ -274,7 +321,16 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
      const execId = (0, import_uuid2.v4)();
      const request = buildTaskExecStartRequestProto(
        taskId,
-@@ -64658,7 +64732,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64405,7 +64525,7 @@ var Sandbox2 = class _Sandbox {
+       execParams,
+       containerId
+     );
+-    await commandRouterClient.execStart(request);
++    await commandRouterClient.execStart(request, { signal });
+     this.#client.logger.debug(
+       "Created ContainerProcess",
+       "exec_id",
+@@ -64658,7 +64778,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -283,7 +339,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..5c3b62fc876a6a6d6d8423bd96220c18
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64778,7 +64852,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64778,7 +64898,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -296,7 +352,16 @@ diff --git a/dist/index.d.cts b/dist/index.d.cts
 index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9b7d410b8 100644
 --- a/dist/index.d.cts
 +++ b/dist/index.d.cts
-@@ -7848,6 +7848,12 @@ type SandboxTerminateParams = {
+@@ -7825,6 +7825,8 @@ type SandboxExecParams = {
+ type SandboxExecParams = {
++    /** Cancel Start and exact-ID observation; cancellation is not no-effect proof. */
++    signal?: AbortSignal;
+     /** Specifies text or binary encoding for input and output streams. */
+     mode?: StreamMode;
+     /** Whether to pipe or ignore standard output. */
+     stdout?: StdioBehavior;
+     /** Whether to pipe or ignore standard error. */
+@@ -7848,6 +7850,12 @@ type SandboxTerminateParams = {
  };
  /** Optional parameters for {@link Sandbox#snapshotFilesystem Sandbox.snapshotFilesystem()}. */
  type SandboxSnapshotFilesystemParams = {
@@ -309,7 +374,7 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9
      /**
       * Overall budget for the snapshot call, in milliseconds. Defaults to
       * 55000. If it elapses before a snapshot completes, the call is cancelled
-@@ -7873,6 +7879,12 @@ type SandboxReloadVolumesParams = {
+@@ -7873,6 +7881,12 @@ type SandboxReloadVolumesParams = {
  };
  /** Optional parameters for {@link Sandbox#snapshotDirectory Sandbox.snapshotDirectory()}. */
  type SandboxSnapshotDirectoryParams = {
@@ -322,7 +387,7 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9
      /**
       * Overall budget for the snapshot call, in milliseconds. Defaults to
       * 55000. If it elapses before a snapshot completes, the call is cancelled
-@@ -8301,4 +8313,15 @@ declare class ClientClosedError extends Error {
+@@ -8301,4 +8315,15 @@ declare class ClientClosedError extends Error {
 
  declare function checkForRenamedParams(params: any, renames: Record<string, string>): void;
 
@@ -342,7 +407,16 @@ diff --git a/dist/index.d.ts b/dist/index.d.ts
 index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9b7d410b8 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
-@@ -7848,6 +7848,12 @@ type SandboxTerminateParams = {
+@@ -7825,6 +7825,8 @@ type SandboxExecParams = {
+ type SandboxExecParams = {
++    /** Cancel Start and exact-ID observation; cancellation is not no-effect proof. */
++    signal?: AbortSignal;
+     /** Specifies text or binary encoding for input and output streams. */
+     mode?: StreamMode;
+     /** Whether to pipe or ignore standard output. */
+     stdout?: StdioBehavior;
+     /** Whether to pipe or ignore standard error. */
+@@ -7848,6 +7850,12 @@ type SandboxTerminateParams = {
  };
  /** Optional parameters for {@link Sandbox#snapshotFilesystem Sandbox.snapshotFilesystem()}. */
  type SandboxSnapshotFilesystemParams = {
@@ -355,7 +429,7 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9
      /**
       * Overall budget for the snapshot call, in milliseconds. Defaults to
       * 55000. If it elapses before a snapshot completes, the call is cancelled
-@@ -7873,6 +7879,12 @@ type SandboxReloadVolumesParams = {
+@@ -7873,6 +7881,12 @@ type SandboxReloadVolumesParams = {
  };
  /** Optional parameters for {@link Sandbox#snapshotDirectory Sandbox.snapshotDirectory()}. */
  type SandboxSnapshotDirectoryParams = {
@@ -368,7 +442,7 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..fb12115f5effddb82fb9d72df46443c9
      /**
       * Overall budget for the snapshot call, in milliseconds. Defaults to
       * 55000. If it elapses before a snapshot completes, the call is cancelled
-@@ -8301,4 +8313,15 @@ declare class ClientClosedError extends Error {
+@@ -8301,4 +8315,15 @@ declare class ClientClosedError extends Error {
 
  declare function checkForRenamedParams(params: any, renames: Record<string, string>): void;
 
@@ -395,10 +469,18 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
 
  // node_modules/@bufbuild/protobuf/dist/esm/wire/varint.js
  function varint64read() {
-@@ -61816,6 +61816,22 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
+@@ -61816,6 +61816,31 @@ async function callWithRetriesOnTransientErrors(func, baseDelayMs = 10, delayFac
      }
    }
  }
++async function awaitCommandStartOperation(operation, signal) {
++  signal.throwIfAborted();
++  return await new Promise((resolve, reject) => {
++    const abort = () => reject(signal.reason);
++    signal.addEventListener("abort", abort, { once: true });
++    Promise.resolve().then(operation).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
++  });
++}
 +var CommandStartPreDispatchUnavailableError = class extends Error {
 +  constructor(cause) {
 +    super("Modal command router was not ready before Start dispatch", { cause });
@@ -407,18 +489,19 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
 +  }
 +};
 +var CommandStartOutcomeUnknownError = class extends Error {
-+  constructor(taskId, execId, cause) {
++  constructor(taskId, execId, cause, invocation) {
 +    super("Modal command Start outcome unknown; do not replay this invocation", { cause });
 +    this.name = "CommandStartOutcomeUnknownError";
 +    Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.boundary.v1"), { value: "outcome-unknown" });
 +    this.taskId = taskId;
 +    this.execId = execId;
++    if (invocation) Object.defineProperty(this, Symbol.for("opengeni.modal.command-start.invocation.v1"), { value: Object.freeze(invocation) });
 +  }
 +};
  var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    stub;
    channel;
-@@ -61828,6 +61844,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61828,6 +61853,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
    jwtExp;
    jwtRefreshLock = Promise.resolve();
    logger;
@@ -426,7 +509,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
    closed = false;
    static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
      let resp;
-@@ -61856,14 +61873,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61856,14 +61882,47 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "url",
        resp.url
      );
@@ -476,7 +559,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        "grpc.max_receive_message_length": 100 * 1024 * 1024,
        "grpc.max_send_message_length": 100 * 1024 * 1024,
        "grpc-node.flow_control_window": 64 * 1024 * 1024,
-@@ -61872,8 +61922,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61872,8 +61931,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        "grpc.keepalive_permit_without_calls": 1
      };
      let channel;
@@ -487,7 +570,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          "Using insecure TLS (skip certificate verification) for task command router"
        );
        channel = createChannel2(
-@@ -61888,40 +61938,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61888,40 +61947,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
          channelConfig
        );
      }
@@ -532,37 +615,71 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
    }
    close() {
      if (this.closed) {
-@@ -61946,7 +61972,28 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -61946,7 +61981,61 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      );
    }
-   async execStart(request) {
+-  async execStart(request) {
++  async execStart(request, options) {
 -    return await this.callUnary(() => this.stub.taskExecStart(request));
 +    // All SDK consumers (including setup, hydration and filesystem helpers)
 +    // cross this boundary. Only local readiness failure proves non-dispatch.
++    const signal = AbortSignal.any([...(options?.signal ? [options.signal] : []), AbortSignal.timeout(15000)]);
++    let dispatched = false;
 +    try {
-+      return await this.callWithAuthRetry(async () => {
++      return await awaitCommandStartOperation(() => this.callWithAuthRetry(async () => {
 +        if (this.closed) throw new ClientClosedError();
++        signal.throwIfAborted();
 +        try {
-+          await waitForChannelReady(this.channel, new Date(Date.now() + 5000));
++          await awaitCommandStartOperation(() => waitForChannelReady(this.channel, new Date(Date.now() + 5000)), signal);
 +        } catch (error) {
++          signal.throwIfAborted();
 +          if (this.closed) throw new ClientClosedError();
 +          throw new CommandStartPreDispatchUnavailableError(error);
 +        }
 +        if (this.closed) throw new ClientClosedError();
-+        return await this.stub.taskExecStart(request);
-+      });
++        signal.throwIfAborted();
++        dispatched = true;
++        return await this.stub.taskExecStart(request, { timeoutMs: 5000, signal });
++      }), signal);
 +    } catch (error) {
-+      if (error instanceof CommandStartPreDispatchUnavailableError || error instanceof ClientClosedError)
++      if (!dispatched || error instanceof CommandStartPreDispatchUnavailableError)
 +        throw error;
 +      if (error instanceof ClientError10 && [Status10.INVALID_ARGUMENT, Status10.NOT_FOUND,
 +          Status10.PERMISSION_DENIED, Status10.UNAUTHENTICATED, Status10.UNIMPLEMENTED].includes(error.code))
 +        throw error;
-+      throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error);
++      // Observe only the original IDs before a setup helper can unwind. A
++      // successful Poll (even still-running) proves existence, not no effect.
++      try {
++        await this.observeExec(request.taskId, request.execId, signal);
++        return;
++      } catch {
++        throw new CommandStartOutcomeUnknownError(request.taskId, request.execId, error, {
++          sandboxId: this.sandboxId, taskId: request.taskId, execId: request.execId,
++          observe: (signal2, timeoutMs) => this.observeExec(request.taskId, request.execId, signal2, timeoutMs)
++        });
++      }
 +    }
    }
++  async observeExec(taskId, execId, owningSignal, timeoutMs = 5000) {
++    const budget = Math.max(1, Math.min(5000, timeoutMs));
++    const signal = AbortSignal.any([...(owningSignal ? [owningSignal] : []), AbortSignal.timeout(budget)]);
++    const deadline = Date.now() + budget;
++    let failure;
++    for (let attempt = 0; attempt < 3; attempt++) {
++      signal.throwIfAborted();
++      if (this.closed) throw new ClientClosedError();
++      try {
++        return await this.stub.taskExecPoll(TaskExecPollRequest.create({ taskId, execId }), { signal, timeoutMs: Math.max(1, Math.min(1000, deadline - Date.now())) });
++      } catch (error) {
++        failure = error;
++        signal.throwIfAborted();
++      }
++    }
++    throw failure;
++  }
    async containerCreate(request) {
      return await this.callUnary(() => this.stub.taskContainerCreate(request));
-@@ -62157,15 +62204,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62157,15 +62246,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
        throw err;
      }
    }
@@ -581,7 +698,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
            "task_id",
            this.taskId
          );
-@@ -62178,11 +62225,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62178,11 +62267,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            this.sandboxId,
            this.isV2
          );
@@ -608,7 +725,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        } catch (err) {
          error = err;
        }
-@@ -62193,11 +62253,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62193,11 +62295,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      }
    }
    async callWithAuthRetry(func) {
@@ -622,7 +739,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          return await func();
        }
        throw err;
-@@ -62219,6 +62280,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62219,6 +62322,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
      while (true) {
        try {
          const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
@@ -630,7 +747,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
          const request = TaskExecStdioReadRequest.create({
            taskId,
            execId,
-@@ -62240,7 +62302,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+@@ -62240,7 +62344,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
            return;
          } catch (err) {
            if (err instanceof ClientError10 && err.code === Status10.UNAUTHENTICATED && !didAuthRetry) {
@@ -639,24 +756,37 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
              didAuthRetry = true;
              continue;
            }
-@@ -64324,7 +64386,15 @@ var Sandbox2 = class _Sandbox {
+@@ -64324,7 +64428,19 @@ var Sandbox2 = class _Sandbox {
        env: envDict,
        secrets: resolvableSecrets
      };
 -    const [taskId, commandRouterClient] = await this.#getCommandRouter();
++    const context = Object.getOwnPropertyDescriptor(this.#client, Symbol.for("opengeni.modal.command-start.context.v1"))?.value;
++    const owningSignal = params?.signal ?? (typeof context === "function" ? context() : void 0);
++    const signal = AbortSignal.any([...(owningSignal ? [owningSignal] : []), AbortSignal.timeout(15000)]);
 +    let taskId, commandRouterClient;
 +    try {
-+      [taskId, commandRouterClient] = await this.#getCommandRouter();
++      [taskId, commandRouterClient] = await awaitCommandStartOperation(() => this.#getCommandRouter(), signal);
 +    } catch (error) {
++      owningSignal?.throwIfAborted();
 +      // Task/router lookups are read-only and precede any Start dispatch.
-+      if (error instanceof ClientError14 && [Status14.UNAVAILABLE, Status14.DEADLINE_EXCEEDED].includes(error.code))
++      if (signal.aborted && error === signal.reason || error instanceof ClientError14 && [Status14.UNAVAILABLE, Status14.DEADLINE_EXCEEDED].includes(error.code))
 +        throw new CommandStartPreDispatchUnavailableError(error);
 +      throw error;
 +    }
      const execId = uuidv42();
      const request = buildTaskExecStartRequestProto(
        taskId,
-@@ -64586,7 +64656,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64333,7 +64449,7 @@ var Sandbox = class _Sandbox {
+       execParams,
+       containerId
+     );
+-    await commandRouterClient.execStart(request);
++    await commandRouterClient.execStart(request, { signal });
+     this.#client.logger.debug(
+       "Created ContainerProcess",
+       "exec_id",
+@@ -64586,7 +64702,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -665,7 +795,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64706,7 +64776,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64706,7 +64822,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -674,7 +804,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..75587e3ed91025a8ebe195e534d45718
        wireTtlSeconds,
        params
      );
-@@ -64915,6 +64985,8 @@ function encodeIfString(chunk) {
+@@ -64915,6 +65031,8 @@ function encodeIfString(chunk) {
  }
  export {
    AlreadyExistsError,
