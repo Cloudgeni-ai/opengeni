@@ -484,9 +484,9 @@ const effectiveBudgets = {
     budgets.directSessionRaw,
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
-    // 2,583,609 raw on Bun 1.4 Linux/x64 against 2,570,442 for main 311a30b01.
-    // Web vitals and the connect journey stay lazy. Keep 1.5 KiB headroom.
-    wholeKibEnvelope(2_583_609, 1.5 * kib),
+    // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
+    // presence header). Web vitals stay lazy. Keep 1.5 KiB headroom.
+    wholeKibEnvelope(2_583_361, 1.5 * kib),
     // Usage allowances UI (composer limit notice, conversation refusal row)
     // with #3053's final-reply notice: 2,536,098 raw on Bun 1.4 macOS/arm64.
     wholeKibEnvelope(2_536_098, 1.5 * kib),
@@ -633,9 +633,9 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
-    // Browser failure signals: 729,731 gzip on Bun 1.4 Linux/x64 against
-    // 724,595 for main 311a30b01. Keep the established 1.5 KiB allowance.
-    wholeKibEnvelope(729_731, 1.5 * kib),
+    // Browser failure signals: 727,806 gzip on Bun 1.4 Linux/x64 rebased on
+    // main aa5661dec. Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(727_806, 1.5 * kib),
     // Runtime robustness on main f874217f5: the empty-final-reply notice and
     // per-model availability in the session timeline measure 711,698 gzip
     // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
