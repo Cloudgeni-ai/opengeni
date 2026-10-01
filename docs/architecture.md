@@ -382,6 +382,9 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
 Browser shutdown: [native lifecycle](../agent/README.md#distribution).
+Managed updates fence new work and require idle commands, uploads, and every
+owned browser/computer controller. Browserd reports only a private idle boolean;
+unavailable proof defers the update and preserves normal admission.
 Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
