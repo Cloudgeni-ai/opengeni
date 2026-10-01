@@ -173,6 +173,60 @@ export function hasModalCommandStartOutcomeUnknownBoundary(error: unknown): bool
   return false;
 }
 
+/** Physical cleanup needs proven absence, not a bounded search that happened
+ * not to reach an uncertain writer. Inaccessible or truncated graphs are not
+ * no-effect evidence and must keep the physical sandbox alive. */
+export function modalCommandStartCleanupIsSafe(error: unknown): boolean {
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: error, depth: 0 }];
+  const seen = new WeakSet<object>();
+  let inspected = 0;
+  while (pending.length) {
+    if (++inspected > 64) return false;
+    const { value, depth } = pending.shift()!;
+    if (!value || (typeof value !== "object" && typeof value !== "function")) continue;
+    if (seen.has(value)) continue;
+    if (depth > 8) return false;
+    seen.add(value);
+    try {
+      if (
+        value instanceof ProviderCommandStartOutcomeUnknownError ||
+        hasModalCommandStartBoundary(value, "outcome-unknown") ||
+        [boundaryBrand, "cause", "error", "errors"].some((key) =>
+          modalCommandStartHasOwnAccessor(value, key),
+        )
+      )
+        return false;
+      const nested = [
+        modalCommandStartOwnData(value, "cause"),
+        modalCommandStartOwnData(value, "error"),
+      ].filter((child) => child !== undefined && child !== null);
+      const errors = modalCommandStartOwnData(value, "errors");
+      if (errors !== undefined) {
+        if (!Array.isArray(errors)) return false;
+        const length = modalCommandStartOwnData(errors, "length");
+        if (typeof length !== "number" || !Number.isSafeInteger(length) || length > 32)
+          return false;
+        for (let index = 0; index < length; index++) {
+          const property = Object.getOwnPropertyDescriptor(errors, String(index));
+          if (
+            !property ||
+            !("value" in property) ||
+            !property.value ||
+            (typeof property.value !== "object" && typeof property.value !== "function")
+          )
+            return false;
+          nested.push(property.value);
+        }
+      }
+      if (depth === 8 && nested.length) return false;
+      for (const child of nested) pending.push({ value: child, depth: depth + 1 });
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function installModalCommandStartRetention(session: object): void {
   // All SDK setup helpers converge below these surfaces. Intercept the shared
   // direct runner too so newly added SDK helpers inherit the durable boundary.

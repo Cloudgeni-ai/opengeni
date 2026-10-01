@@ -63,6 +63,7 @@ async function routerFixture(
   hangingWait = false,
   hangingRead = false,
   hangingWrite = false,
+  waitDelayMs = 0,
 ) {
   const server = new Server();
   const starts: Array<{ taskId: string; execId: string; commandArgs: string[] }> = [];
@@ -133,7 +134,8 @@ async function routerFixture(
         waits.push(call.request);
         startedWait();
         if (hangingWait) return;
-        callback(null, { code: 0 });
+        if (waitDelayMs) setTimeout(() => callback(null, { code: 0 }), waitDelayMs);
+        else callback(null, { code: 0 });
       },
       write(call: any, callback: any) {
         writes.push(call.request);
@@ -491,9 +493,14 @@ test("owning cancellation during read-only router lookup prevents a late Start",
   }
 });
 
-test("both distributions cancel the adopted hanging Wait inside the original setup continuation", async () => {
-  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
-    const f = await routerFixture(true, false, "running", false, true);
+test("both distributions cancel hanging setup Wait after lost or received Start acknowledgement", async () => {
+  for (const { sdk, ambiguous } of [
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: true },
+    { sdk: cjs, ambiguous: true },
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: false },
+    { sdk: cjs, ambiguous: false },
+  ]) {
+    const f = await routerFixture(ambiguous, false, "running", false, true);
     const { sandbox, session } = sdkSession(f.url, sdk);
     installModalCommandStartRetention(session);
     const controller = new AbortController();
@@ -518,7 +525,7 @@ test("both distributions cancel the adopted hanging Wait inside the original set
         execId: f.starts[0]!.execId,
       });
       expect(f.starts).toHaveLength(1);
-      expect(f.polls).toHaveLength(1);
+      expect(f.polls).toHaveLength(ambiguous ? 1 : 0);
       expect(f.waits).toHaveLength(1);
       expect(f.waits[0]!.execId).toBe(f.starts[0]!.execId);
     } finally {
@@ -579,9 +586,14 @@ test("both distributions bound adopted stdio continuation and preserve exact inv
   }
 }, 10_000);
 
-test("both distributions cancel setup blocked on adopted stderr without false EOF or a new Start", async () => {
-  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
-    const f = await routerFixture(true, false, "running", false, false, true);
+test("both distributions cancel setup stderr after lost or received ACK without false EOF or a new Start", async () => {
+  for (const { sdk, ambiguous } of [
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: true },
+    { sdk: cjs, ambiguous: true },
+    { sdk: { Sandbox } as typeof import("modal"), ambiguous: false },
+    { sdk: cjs, ambiguous: false },
+  ]) {
+    const f = await routerFixture(ambiguous, false, "running", false, false, true);
     const { sandbox, session } = sdkSession(f.url, sdk);
     installModalCommandStartRetention(session);
     const controller = new AbortController();
@@ -605,6 +617,7 @@ test("both distributions cancel setup blocked on adopted stderr without false EO
         execId: f.starts[0]!.execId,
       });
       expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(ambiguous ? 1 : 0);
       expect(f.waits).toHaveLength(0);
       expect(f.reads.every((read) => read.execId === f.starts[0]!.execId)).toBe(true);
     } finally {
@@ -613,6 +626,123 @@ test("both distributions cancel setup blocked on adopted stderr without false EO
       f.server.forceShutdown();
     }
   }
+});
+
+test("both distributions bound caller-owned acknowledged Wait, stdio and stdin by the original deadline", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    for (const operation of ["wait", "read", "write"] as const) {
+      const f = await routerFixture(
+        false,
+        false,
+        "running",
+        false,
+        operation === "wait",
+        operation === "read",
+        operation === "write",
+      );
+      const { sandbox } = sdkSession(f.url, sdk);
+      const controller = new AbortController();
+      try {
+        const process = await withModalCommandStartSignal(controller.signal, () =>
+          sandbox.exec(["original-acknowledged"], { timeoutMs: 1000, pty: true }),
+        );
+        const started = Date.now();
+        const failure = await (
+          operation === "wait"
+            ? process.wait()
+            : operation === "read"
+              ? process.stderr.readText()
+              : process.stdin.writeText("only once")
+        ).catch((error) => error);
+        expect(Date.now() - started).toBeLessThan(1500);
+        expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(true);
+        expect(getModalCommandStartInvocation(failure)).toMatchObject({
+          taskId: f.starts[0]!.taskId,
+          execId: f.starts[0]!.execId,
+          pty: true,
+        });
+        expect(f.starts).toHaveLength(1);
+        expect(f.polls).toHaveLength(0);
+        if (operation === "write") expect(f.writes).toHaveLength(1);
+      } finally {
+        sandbox.detach();
+        f.server.forceShutdown();
+      }
+    }
+  }
+}, 10_000);
+
+test("normally acknowledged owned commands keep the ordinary RPC allowance, not lost-ACK probe bounds", async () => {
+  for (const sdk of [{ Sandbox } as typeof import("modal"), cjs]) {
+    const f = await routerFixture(false, false, "running", false, false, false, false, 3500);
+    const { sandbox } = sdkSession(f.url, sdk);
+    try {
+      const controller = new AbortController();
+      const process = await withModalCommandStartSignal(controller.signal, () =>
+        sandbox.exec(["ordinary-longer-wait"], { timeoutMs: 5000 }),
+      );
+      expect(await process.wait()).toBe(0);
+      expect(f.starts).toHaveLength(1);
+      expect(f.polls).toHaveLength(0);
+      expect(f.waits).toHaveLength(1);
+    } finally {
+      sandbox.detach();
+      f.server.forceShutdown();
+    }
+  }
+}, 10_000);
+
+test("failed create never physically closes a sandbox on incomplete error-graph inspection", async () => {
+  let getters = 0;
+  let deep: unknown = new ModalCommandStartOutcomeUnknownError(
+    "original-task",
+    "original-exec",
+    null,
+  );
+  for (let depth = 0; depth < 9; depth++) deep = new Error("wrapper", { cause: deep });
+  const sparse = [new Error("ordinary")];
+  sparse.length = 2;
+  const accessor = Object.defineProperty(new Error("unreadable"), "cause", {
+    get() {
+      getters++;
+      return deep;
+    },
+  });
+  const oversized = new AggregateError(Array.from({ length: 33 }, () => new Error("ordinary")));
+  for (const failure of [deep, new AggregateError(sparse), accessor, oversized]) {
+    let physicalCloses = 0;
+    let transportCloses = 0;
+    const result = await releaseModalCreateFailure(
+      {
+        close: async () => {
+          physicalCloses++;
+        },
+      },
+      {
+        close: () => {
+          transportCloses++;
+        },
+      },
+      failure,
+    ).catch((error) => error);
+    expect(result).toBe(failure);
+    expect(physicalCloses).toBe(0);
+    expect(transportCloses).toBe(1);
+  }
+  expect(getters).toBe(0);
+  let ordinaryCloses = 0;
+  const ordinary = new Error("ordinary complete graph", { cause: new Error("leaf") });
+  const result = await releaseModalCreateFailure(
+    {
+      close: async () => {
+        ordinaryCloses++;
+      },
+    },
+    { close: () => {} },
+    ordinary,
+  ).catch((error) => error);
+  expect(result).toBe(ordinary);
+  expect(ordinaryCloses).toBe(1);
 });
 
 test("both distributions send adopted stdin once and retain uncertainty on deadline", async () => {

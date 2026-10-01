@@ -17,7 +17,7 @@ import {
 import { materializeEnvironment, readOptionalString } from "@openai/agents-core/sandbox/internal";
 import { ModalClient, Sandbox, type Image, type CloudBucketMount } from "modal";
 import { createModalProviderCreateBoundary, type ModalCreateIntent } from "./modal-create-boundary";
-import { hasModalCommandStartOutcomeUnknownBoundary } from "./modal-command-start-errors";
+import { modalCommandStartCleanupIsSafe } from "./modal-command-start-errors";
 
 export type ModalCreateLifecycle = {
   beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
@@ -32,7 +32,7 @@ export async function releaseModalCreateFailure(
   error: unknown,
 ): Promise<never> {
   try {
-    if (session && !hasModalCommandStartOutcomeUnknownBoundary(error)) {
+    if (session && modalCommandStartCleanupIsSafe(error)) {
       try {
         await session.close();
       } catch (cleanupError) {
