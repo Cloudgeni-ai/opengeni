@@ -382,7 +382,7 @@ Browser shutdown: [native lifecycle](../agent/README.md#distribution).
 Mac updates preserve signed bundles; writes check ACLs
 ([native writer](../agent/TRANSACTIONAL-WRITES.md)).
 
-The machine owns files, Git authentication, environment, and durable credentials.
+The machine owns files, Git authentication, environment, and [renewable credentials](connected-machines.md).
 OpenGeni neither clones repositories nor installs durable control-plane credentials;
 authorized child processes receive only transient, exact-attempt Codemode authority.
 

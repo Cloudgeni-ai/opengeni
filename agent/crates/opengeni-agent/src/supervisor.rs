@@ -737,10 +737,9 @@ impl<P: Platform + 'static> Supervisor<P> {
         } = match connect {
             Ok(connection) => connection,
             Err(e @ SupervisorError::Authentication(_)) => {
-                // A CLEAR auth denial (not a panic): log it loudly so the operator
-                // knows a re-enroll may be needed, then treat it as a (slow) retry —
-                // a re-enroll can rotate the bearer in place and the next attempt
-                // re-presents it.
+                // Renewal runs independently and the file watcher adopts fresh
+                // credentials. Explicit reconnect is recovery only when the
+                // existing grant/key cannot authorize automatic renewal.
                 let reconnect_command = rejected_bearer_reconnect_command(
                     link.api_url.as_deref(),
                     &link.creds.workspace_id,
@@ -748,7 +747,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 error!(
                     connection_id = %link.connection_id,
                     error = %e,
-                    "control plane rejected the enrollment bearer; run `{reconnect_command}` to replace the rejected credential (the agent will keep retrying in the meantime)"
+                    "control plane rejected the enrollment bearer; automatic renewal and reconnect will retry. If renewal cannot authorize the existing grant, reconnect explicitly with `{reconnect_command}`"
                 );
                 return ConnectionOutcome::Disconnected(e.to_string());
             }

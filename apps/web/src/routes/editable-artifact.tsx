@@ -2,7 +2,12 @@ import { ArtifactSessionPage } from "@/components/session/artifact-session-page"
 import { editableArtifactKernelRuntime as documentRuntime } from "@opengeni/artifact-kernel-wasm-document";
 import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/artifact-kernel-wasm-presentation";
 import { editableArtifactKernelRuntime as spreadsheetRuntime } from "@opengeni/artifact-kernel-wasm-spreadsheet";
-import { EditableArtifactView, type OpenedEditableArtifact } from "@opengeni/react/artifacts";
+import {
+  EditableArtifactView,
+  artifactLoadErrorView,
+  type ArtifactLoadErrorView,
+  type OpenedEditableArtifact,
+} from "@opengeni/react/artifacts";
 import type { AccessContext, Workspace } from "@opengeni/sdk";
 // Vite turns this public SDK Worker entry into a deployment-owned module URL.
 // oxlint-disable-next-line import/default
@@ -10,6 +15,7 @@ import artifactWorkerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&ur
 
 import { apiBaseUrl, authHeadersForAccessKey, getStoredAccessKey } from "@/api";
 import { useAppContext } from "@/context";
+import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import {
   createConsoleEditableArtifactReplicaId,
   createConsoleEditableArtifactAuthority,
@@ -64,6 +70,15 @@ function EditableArtifactContent({
           context.accessContext,
         ])}
         showHeader={!embedded}
+        describeError={(error): ArtifactLoadErrorView =>
+          isArtifactReadDenied(error, context.accessContext, workspaceId)
+            ? {
+                title: "You can't open this artifact",
+                message: ARTIFACT_ACCESS_REQUIRED,
+                retryable: false,
+              }
+            : artifactLoadErrorView(error, "editable")
+        }
         open={() =>
           loadArtifact({
             workspaceId,

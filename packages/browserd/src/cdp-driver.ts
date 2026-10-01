@@ -3294,6 +3294,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       code: "KeyA",
       modifiers,
       windowsVirtualKeyCode: 65,
+      // macOS Chromium does not derive native editing commands from CDP's
+      // synthetic Command+A event. Without this, Backspace deletes one character.
+      ...(meta ? { commands: ["selectAll"] } : {}),
     });
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyUp",
@@ -3325,6 +3328,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       modifiers: key.modifiers,
       windowsVirtualKeyCode: key.keyCode,
       ...(key.text ? { text: key.text, unmodifiedText: key.text } : {}),
+      ...(/Macintosh|Mac OS/u.test(this.userAgent) && key.modifiers === 4 && key.code === "KeyA"
+        ? { commands: ["selectAll"] }
+        : {}),
     });
     await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
       type: "keyUp",
@@ -3341,37 +3347,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     toBackendNodeId: number | null,
   ): Promise<void> {
     const from = await this.actionPoint(state, fromBackendNodeId, true);
-    const to = await this.actionPoint(state, toBackendNodeId, false);
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: from.x,
-      y: from.y,
-    });
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: from.x,
-      y: from.y,
-      button: "left",
-      buttons: 1,
-      clickCount: 1,
-    });
-    for (let step = 1; step <= 10; step += 1) {
-      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-        type: "mouseMoved",
-        x: from.x + ((to.x - from.x) * step) / 10,
-        y: from.y + ((to.y - from.y) * step) / 10,
-        button: "left",
-        buttons: 1,
-      });
-    }
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: to.x,
-      y: to.y,
-      button: "left",
-      buttons: 0,
-      clickCount: 1,
-    });
+    await this.dragPoints(
+      state,
+      from,
+      () => this.actionPoint(state, toBackendNodeId, false),
+      "left",
+    );
   }
 
   private async dispatchPointerAction(
@@ -3478,7 +3459,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async dragPoints(
     state: TargetState,
     from: { x: number; y: number },
-    to: { x: number; y: number },
+    destination: { x: number; y: number } | (() => Promise<{ x: number; y: number }>),
     button: "left" | "right" | "middle",
   ): Promise<void> {
     await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
@@ -3494,23 +3475,50 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       buttons: mouseButtonMask(button),
       clickCount: 1,
     });
-    for (let step = 1; step <= 10; step += 1) {
+    let point = from;
+    try {
+      if (typeof destination === "function") {
+        // Start the drag before revealing the destination: scrolling it into
+        // view can move the source away from its measured coordinates.
+        point = { x: from.x + (from.x >= 8 ? -8 : 8), y: from.y };
+        await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          ...point,
+          button,
+          buttons: mouseButtonMask(button),
+        });
+      }
+      const to = typeof destination === "function" ? await destination() : destination;
+      const start = point;
+      for (let step = 1; step <= 10; step += 1) {
+        point = {
+          x: start.x + ((to.x - start.x) * step) / 10,
+          y: start.y + ((to.y - start.y) * step) / 10,
+        };
+        await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          ...point,
+          button,
+          buttons: mouseButtonMask(button),
+        });
+      }
+      // The final step may only enter a small target. A second move delivers
+      // dragover, allowing the page to accept the drop before mouse release.
       await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
-        x: from.x + ((to.x - from.x) * step) / 10,
-        y: from.y + ((to.y - from.y) * step) / 10,
+        ...point,
         button,
         buttons: mouseButtonMask(button),
       });
+    } finally {
+      await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        ...point,
+        button,
+        buttons: 0,
+        clickCount: 1,
+      });
     }
-    await this.sendActionTarget(state, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: to.x,
-      y: to.y,
-      button,
-      buttons: 0,
-      clickCount: 1,
-    });
   }
 
   private async navigate(state: TargetState, url: string): Promise<void> {

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { clickSelfClosingPopup } from "./self-closing-popup";
 
 let browser: Browser, web: StartedProcess, baseUrl: string;
 const evidence = new URL("../../.agent/evidence/claude-subscription/", import.meta.url).pathname;
@@ -219,10 +220,7 @@ for (const theme of ["dark", "light"] as const) {
           await page.getByRole("alert").waitFor();
           expect(await page.getByLabel("Claude authorization code").isVisible()).toBe(true);
           await page.getByLabel("Claude authorization code").fill("fixture-code#fixture-state");
-          await Promise.all([
-            popup.waitForEvent("close"),
-            popup.getByRole("button", { name: "Close window", exact: true }).click(),
-          ]);
+          await clickSelfClosingPopup(popup, page);
           await accessible(page);
           await page.screenshot({
             path: `${evidence}/${scope}-${width}-${theme}-signin.png`,
@@ -301,10 +299,7 @@ for (const theme of ["dark", "light"] as const) {
                 ).length,
             ),
           ).toBe(0);
-          await Promise.all([
-            retryPopup.waitForEvent("close"),
-            retryPopup.getByRole("button", { name: "Close window", exact: true }).click(),
-          ]);
+          await clickSelfClosingPopup(retryPopup, page);
           const cancelPopupPromise = context.waitForEvent("page");
           await page.getByRole("button", { name: "Sign in to Claude", exact: true }).click();
           const cancelPopup = await cancelPopupPromise;
@@ -322,10 +317,7 @@ for (const theme of ["dark", "light"] as const) {
           ).toBe(0);
           expect(cancelPopup.isClosed()).toBe(false);
           expect(await cancelPopup.evaluate(() => window.opener === null)).toBe(true);
-          await Promise.all([
-            cancelPopup.waitForEvent("close"),
-            cancelPopup.getByRole("button", { name: "Close window", exact: true }).click(),
-          ]);
+          await clickSelfClosingPopup(cancelPopup, page);
           expect(errors).toEqual([]);
         } finally {
           await context.close();

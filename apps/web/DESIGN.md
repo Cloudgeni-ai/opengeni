@@ -116,7 +116,7 @@ page footer, or a menu.
 
 - Primary: the page header's create or connect action ("New schedule", "Create API key", "Invite
   people"); a section's add action when the header has none for it ("Connect account" on
-  Settings > Models); the action in an empty state ("Connect account", "Create schedule", "Start
+  Organization > Models); the action in an empty state ("Connect account", "Create schedule", "Start
   your first session"); the confirm of a non-destructive dialog or form page ("Create schedule",
   "Save"); the unblocking action in a notice, banner or menu ("Connect a model", "Open Models",
   "Reconnect", "Reload now").
@@ -385,6 +385,28 @@ Learned on Settings > Models, 27 Sep 2026.
   value or none.
 - **One row per provider.** A provider with several connection modes is one row; its page lists
   the modes as outcomes ("Pay with your ChatGPT plan", "Pay per use with an API key").
+- **Every model setting in one place: Organization > Models.** Decided 1 Oct 2026. The page is
+  three parts: **Accounts** (one list of everything that pays: credits, the organization's
+  accounts tagged by where they're available, "Everyone in Acme" or "Selected workspaces", and
+  each workspace's own accounts tagged "Design preview only"), **Workspaces** (one row per
+  workspace with its default model and payer plus its Allowed models, "GPT-6 Astra · Codex · All
+  models", and the person's own Personal workspace last), then the organization-wide Codex and
+  SuperGrok settings. A workspace row opens that workspace's model page (`?workspace=`): Default
+  model (with who pays and the one can't-run warning), Allowed models, the accounts it uses
+  (muted "Not in use" with the reason when one is set aside), its Codex and SuperGrok settings and
+  the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
+- **Connect is for the organization.** Connect account makes an organization account and asks
+  which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An
+  account owned by one workspace is offered only to owners and admins, and only where it is
+  genuinely needed, with the reason in place: Codex Apps, usage limit resets, an API key in a
+  Personal workspace. Nobody else adds accounts; someone who can change a workspace's own account
+  may still sign it in again or replace its key.
+- **Who sees Models.** Organization owners and admins: everything. Workspace admins: the
+  workspaces they administer plus their own Personal workspace and, read-only, the accounts those
+  use, with "Only organization owners and admins can add accounts." Members: only their own
+  Personal workspace (its default model and Allowed models) and, read-only, the accounts it can
+  use, with the same line. A key or service without a membership gets no Models page; a direct
+  link says "Only admins manage models. Ask an admin to add one."
 - **Toolbar pieces stay in the toolbar.** `ToolbarSearch` always sits inside a `Toolbar`. A `Select`
   in a narrow `SettingRow` gets a fixed width so the column doesn't jump between values.
 
@@ -493,7 +515,9 @@ headings. Inside a section, pages fall into at most two groups set apart by spac
 second level of labels: Workspace = its settings and dashboards, then its runtime (Variable sets,
 Sandbox environments, Machines); Organization = the organization and its people (General, People,
 Workspaces, Organization identity), then what it provides, pays for and protects (Models,
-Integrations, Billing & usage, Developer, Security & data). Sections are split by one hairline.
+Integrations, Billing & usage, Developer, Security & data). Models is an Organization page only:
+every model setting, each workspace's included, lives there (section 7), and a workspace's old
+Models URL opens that workspace's page in it. Sections are split by one hairline.
 There are no per-section switchers. Workspace, organization and personal settings all draw this
 same rail, so the scope of every page is visible and nothing jumps to a second rail. Switching
 workspace or organization in the picker keeps the same kind of page;
@@ -514,7 +538,9 @@ back link, title and rows start where the section header does. Page actions use 
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
 knowledge entry. Use `FormPage` from `components/ui/form-dialog.tsx`: a back link, a 20/600
 title, one 640px column of fields, server errors inside the form, and a sticky footer with Cancel
-(ghost) and one primary. A second step after submit (an API key shown once) happens on the same
+(ghost) and one primary (below 640px wide the footer follows the last field instead, so it never
+covers the form). A step that waits (a sign-in code) hides the footer: the step holds its own
+actions. A second step after submit (an API key shown once) happens on the same
 page. After a create, go to the new object's page.
 
 **A small centered modal is still right** for:
