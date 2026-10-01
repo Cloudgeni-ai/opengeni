@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   Client,
+  Metadata,
   Server,
   ServerCredentials,
   credentials,
@@ -49,6 +50,7 @@ const definition = (method: string, input: string, output: string, streaming = f
 async function routerFixture(ambiguous = true, allowPathValidation = false) {
   const server = new Server();
   const starts: Array<{ taskId: string; execId: string; commandArgs: string[] }> = [];
+  const closes: unknown[] = [];
   server.addService(
     {
       start: definition("TaskExecStart", "Start", "Empty"),
@@ -56,6 +58,7 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
       poll: definition("TaskExecPoll", "Identity", "Poll"),
       wait: definition("TaskExecWait", "Identity", "Poll"),
       write: definition("TaskExecStdinWrite", "Write", "Empty"),
+      close: definition("TestClose", "Identity", "Empty"),
     } as ServiceDefinition,
     {
       start(call: any, callback: any) {
@@ -86,6 +89,14 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
       write(_call: any, callback: any) {
         callback(null, {});
       },
+      close(call: any, callback: any) {
+        closes.push(call.request);
+        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        callback({
+          code: status.UNAVAILABLE,
+          details: "sandbox close acknowledgement unavailable",
+        });
+      },
     },
   );
   const port = await new Promise<number>((resolve, reject) =>
@@ -93,7 +104,7 @@ async function routerFixture(ambiguous = true, allowPathValidation = false) {
       error ? reject(error) : resolve(boundPort),
     ),
   );
-  return { server, starts, url: `https://127.0.0.1:${port}` };
+  return { server, starts, closes, url: `https://127.0.0.1:${port}` };
 }
 
 function sdkSession(url: string, sdkModule: typeof import("modal") = { Sandbox } as never) {
@@ -227,6 +238,73 @@ test("SDK-internal reprovision/setup/materialization paths never replay server-o
       }
     }
   } finally {
+    f.server.forceShutdown();
+  }
+});
+
+test("dual manifest and close failure preserves genuine Start uncertainty in both installed helper distributions", async () => {
+  const extensionEntry = import.meta.resolve("@openai/agents-extensions/sandbox/modal");
+  const esm = await import(new URL("../shared/session.mjs", extensionEntry).href);
+  const common = createRequire(extensionEntry)("../shared/session.js");
+  const f = await routerFixture();
+  const closeClient = new Client(new URL(f.url).host, credentials.createInsecure(), {
+    "grpc.enable_retries": 0,
+  });
+  const closeWire = definition("TestClose", "Identity", "Empty");
+  const metadata = new Metadata();
+  metadata.set("authorization", "Bearer test-token");
+  try {
+    for (const [sdk, close] of [
+      [{ Sandbox } as typeof import("modal"), esm.closeRemoteSessionOnManifestError],
+      [cjs, common.closeRemoteSessionOnManifestError],
+    ] as const) {
+      const { sandbox, session } = sdkSession(f.url, sdk);
+      const beforeStarts = f.starts.length;
+      const beforeCloses = f.closes.length;
+      try {
+        const manifestError = await session
+          .applyManifest(new Manifest({ root: "/workspace", entries: { setup: { type: "dir" } } }))
+          .catch((error) => error);
+        expect(isModalCommandStartOutcomeUnknownError(manifestError)).toBe(true);
+        let closeError: unknown;
+        const error = await close(
+          "Modal",
+          {
+            close: async () => {
+              try {
+                await new Promise<void>((resolve, reject) =>
+                  closeClient.makeUnaryRequest(
+                    closeWire.path,
+                    closeWire.requestSerialize,
+                    closeWire.responseDeserialize,
+                    { taskId: "task-setup", execId: "" },
+                    metadata,
+                    (failure) => (failure ? reject(failure) : resolve()),
+                  ),
+                );
+              } catch (failure) {
+                closeError = failure;
+                throw failure;
+              }
+            },
+          },
+          manifestError,
+        ).catch((failure: unknown) => failure);
+        expect(error.cause).toBeInstanceOf(AggregateError);
+        expect(error.cause.errors).toHaveLength(2);
+        expect(error.cause.errors[0]).toBe(manifestError);
+        expect(error.cause.errors[1]).toBe(closeError);
+        expect(closeError).toMatchObject({ code: status.UNAVAILABLE });
+        expect(isModalCommandStartOutcomeUnknownError(error)).toBe(true);
+        expect(isModalTaskExecStartPreDispatchUnavailableError(error)).toBe(false);
+        expect(f.starts.length - beforeStarts).toBe(1);
+        expect(f.closes.length - beforeCloses).toBe(1);
+      } finally {
+        sandbox.detach();
+      }
+    }
+  } finally {
+    closeClient.close();
     f.server.forceShutdown();
   }
 });
