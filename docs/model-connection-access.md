@@ -65,7 +65,9 @@ model and Allowed models, each opening that workspace's model page, which lists
 the accounts the workspace uses ("Shared by <organization>" when the viewer
 can't read the policy, "Only you" for a private SuperGrok account). Owners and
 admins see everything; a workspace admin who isn't one sees the workspaces they
-administer and, read-only, the accounts those use; members have no Models page. Organization owners and admins connect organization accounts:
+administer and, read-only, the accounts those use; a member sees only their own
+Personal workspace and, read-only, the accounts it can use. Only organization
+owners and admins add accounts; they connect organization accounts:
 the connect step asks which workspaces can use it, every workspace by default
 or "Only selected workspaces" (shared workspaces plus one all-or-nothing
 "Personal workspaces" choice, shown off with its reason for organization API
@@ -76,8 +78,9 @@ workspace is not a choice on that step, because it would read the same as
 "Only selected workspaces" with that workspace ticked; it is offered only where
 it is needed, explained there: Codex Apps (they need an account owned by the
 workspace), redeeming Codex usage limit resets, an API key in a Personal
-workspace (organization keys can't reach one) or for a team with its own key,
-and for workspace admins who can't connect for everyone. They also see the organization's accounts
+workspace (organization keys can't reach one) or for a team with its own key.
+Anyone else who can change a workspace's own account may sign it in again or
+replace its key, but not add one. Owners and admins also see the organization's accounts
 that don't reach this workspace, muted with the reason. Each account's own
 page carries "Available in" and "Models it can serve"
 (`apps/web/src/components/connection-access-settings.tsx`), edited on a form

@@ -312,6 +312,31 @@ export function WorkspaceModelsPage({
   const orgStepReplaces = (provider: string) =>
     (GATEWAYS as readonly string[]).includes(provider) &&
     orgGateways[provider as GatewayId].connected;
+  // Someone who can't add accounts may still sign this workspace's own
+  // account in again, or replace its key.
+  const reconnecting = (provider: string): boolean => {
+    if (!canManageConnections) return false;
+    if (provider === "codex") {
+      return (
+        Boolean(codex.pending) ||
+        codex.accounts.some((each) => each.source !== "organization" && each.status !== "active")
+      );
+    }
+    if (provider === "supergrok") {
+      return (
+        Boolean(grok.pending) ||
+        (!grok.inherited && grok.accounts.some((each) => each.status !== "active"))
+      );
+    }
+    return (GATEWAYS as readonly string[]).includes(provider)
+      ? gateways[provider as GatewayId].connected
+      : false;
+  };
+  const listLabel = workspacePage
+    ? personal
+      ? "Your Personal workspace"
+      : workspaceName
+    : "Models";
   let page: ReactNode;
   if (organizationPage && !organizationAdmin) {
     page = (
@@ -338,11 +363,28 @@ export function WorkspaceModelsPage({
         <DetailPageHeader title="Claude subscriptions are not enabled" />
       </DetailPage>
     );
+  } else if (
+    (view === "connect" || view === "connect-workspace" || (step && !step.organization)) &&
+    !organizationAdmin &&
+    !(step && reconnecting(step.provider))
+  ) {
+    // Only owners and admins add accounts. Anyone else who can change this
+    // workspace's own accounts may still sign one in again or replace its key.
+    page = (
+      <DetailPage
+        back={{ label: listLabel, onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader title="Only organization owners and admins can add accounts" />
+        <p className="mt-2 text-sm text-fg-muted">
+          {`Ask an owner or admin of ${organizationName} to connect a subscription or an API key.`}
+        </p>
+      </DetailPage>
+    );
   } else if (view === "connect" || view === "connect-workspace") {
     // Owners and admins connect for the organization and choose the
-    // workspaces on the next step. People who can only connect for this
-    // workspace get that, with who can connect for everyone.
-    page = organizationAdmin ? (
+    // workspaces on the next step.
+    page = (
       <ConnectPickerPage
         target="organization"
         title="Connect account"
@@ -354,32 +396,6 @@ export function WorkspaceModelsPage({
         onClose={backToList}
         onPick={(provider) => nav.openView(`connect-org:${provider}`)}
         onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider, true))}
-      />
-    ) : (
-      <ConnectPickerPage
-        target="workspace"
-        title="Connect account"
-        subtitle={workspaceOnlySubtitle({ workspaceName, organizationName, personal })}
-        codexAvailable={canManageConnections}
-        codexNote={
-          codex.source?.organizationAvailable
-            ? `Replaces ${possessive(organizationName)} Codex accounts in ${personal ? "this workspace" : workspaceName}`
-            : undefined
-        }
-        grok={
-          !canManageConnections
-            ? "hidden"
-            : grok.unavailable
-              ? "not_enabled"
-              : personal
-                ? "not_in_personal"
-                : "available"
-        }
-        gateways={gateways}
-        personal={personal}
-        onClose={backToList}
-        onPick={(provider) => nav.openView(`connect:${provider}`)}
-        onOpenConnected={(provider) => nav.openAccount(accountKey("gateway", provider))}
       />
     );
   } else if (
@@ -574,7 +590,11 @@ export function WorkspaceModelsPage({
             <OrganizationResetsNote
               count={codex.overviewMap[key.id]?.resetCredits.availableCount ?? null}
               workspaceName={personal ? "your Personal workspace" : workspaceName}
-              onConnect={canManageConnections ? () => nav.openView("connect:codex") : undefined}
+              onConnect={
+                organizationAdmin && canManageConnections
+                  ? () => nav.openView("connect:codex")
+                  : undefined
+              }
             />
           ) : undefined
         }
@@ -599,7 +619,7 @@ export function WorkspaceModelsPage({
         state={orgGateways[key.id]}
         labels={labels}
         footnote={
-          canManageConnections ? (
+          organizationAdmin && canManageConnections ? (
             <WorkspaceKeyFootnote
               title={orgGateways[key.id].config.title}
               workspaceName={workspaceName}
@@ -676,7 +696,8 @@ export function WorkspaceModelsPage({
       (organizationAdmin && orgCodex.loading) ||
       (!organizationAdmin && catalog.loading) ||
       GATEWAYS.some((id) => !gateways[id].hidden && !gateways[id].settled);
-    const canConnect = organizationAdmin || canManageConnections;
+    // Only owners and admins add accounts.
+    const canConnect = organizationAdmin;
     page = (
       <DetailPage
         back={{ label: "Models", onClick: () => nav.openWorkspace(undefined) }}
@@ -700,11 +721,7 @@ export function WorkspaceModelsPage({
                 grokFromOrganization: grok.inherited,
               })
             }
-            whoCanConnect={
-              canConnect ? null : (
-                <WhoCanConnect organizationName={organizationName} personal={personal} />
-              )
-            }
+            whoCanConnect={canConnect ? null : <WhoCanConnect />}
             onEditAllowed={() => nav.openView("allowed-models")}
             onConnect={() => nav.openView("connect")}
             accountsNote={
@@ -764,7 +781,9 @@ export function WorkspaceModelsPage({
                       codex={codex}
                       places={codexPlaces}
                       onConnectForWorkspace={
-                        canManageConnections ? () => nav.openView("connect:codex") : undefined
+                        organizationAdmin && canManageConnections
+                          ? () => nav.openView("connect:codex")
+                          : undefined
                       }
                       providerSwitch={
                         <CodexProviderSwitchRow
@@ -789,9 +808,7 @@ export function WorkspaceModelsPage({
   }
 
   return (
-    <ModelsListLabelProvider
-      value={workspacePage ? (personal ? "Your Personal workspace" : workspaceName) : "Models"}
-    >
+    <ModelsListLabelProvider value={listLabel}>
       <div ref={root} className="min-w-0">
         {page}
       </div>
@@ -911,20 +928,6 @@ export function payerPhrase(
   }
 }
 
-function workspaceOnlySubtitle({
-  workspaceName,
-  organizationName,
-  personal,
-}: {
-  workspaceName: string;
-  organizationName: string;
-  personal: boolean;
-}): string {
-  return personal
-    ? `Only you use what you connect here. Owners and admins of ${organizationName} connect accounts for everyone.`
-    : `Choose what pays for models in ${workspaceName}. Only owners and admins of ${organizationName} can connect for everyone.`;
-}
-
 /** What an account owned by this workspace is, on its connect step, for owners and admins. */
 function workspaceOwnedNote(
   provider: string,
@@ -991,21 +994,11 @@ function WorkspaceKeyFootnote({
 }
 
 /** For people who can't add accounts: who can, in one calm line. */
-function WhoCanConnect({
-  organizationName,
-  personal,
-}: {
-  organizationName: string;
-  personal: boolean;
-}) {
+function WhoCanConnect() {
   return (
-    <div className="flex min-w-0 flex-col gap-3 pt-2 pb-3">
-      <p className="m-0 text-sm leading-5 text-fg-muted">
-        {personal
-          ? `Only owners and admins of ${organizationName} can add accounts for everyone.`
-          : `Only owners and admins of ${organizationName}, and admins of this workspace, can add accounts. Ask one of them to connect a subscription or an API key.`}
-      </p>
-    </div>
+    <p className="m-0 pt-2 pb-3 text-sm leading-5 text-fg-muted">
+      Only organization owners and admins can add accounts.
+    </p>
   );
 }
 

@@ -18,11 +18,12 @@ import { useNavigate } from "@tanstack/react-router";
    - Owners and admins: every account and every workspace's model rules.
    - A workspace admin who isn't one: the workspaces they administer, and the
      accounts those workspaces use, read-only.
-   - Everyone else never gets here from the rail; the route says who manages
-     models instead (org-settings.tsx).
+   - A member: only their own Personal workspace, whose default model and
+     Allowed models only they set, and the accounts it can use, read-only.
+   - A key or service without a membership never gets here; the route says
+     who manages models instead (org-settings.tsx).
 
-   Everyone who sees the page also sees their own Personal workspace, whose
-   default model only they set.
+   Only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
 export function OrganizationModelsSection({

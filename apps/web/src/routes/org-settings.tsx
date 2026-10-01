@@ -229,7 +229,7 @@ export function OrgSettingsRoute({
     [accessibleWorkspaceIds, accountId, client, context, navigate, singleUser, workspaceId],
   );
 
-  // Members choose models in the composer; Models is for the people who manage them.
+  // Models is for signed-in people in this organization; a key or service gets a plain refusal.
   const modelsRefused = requestedSection === "models" && !visibleSections.has("models");
   const subPage =
     (section === "models" && Boolean(modelsAccount || modelsView || workspace)) ||

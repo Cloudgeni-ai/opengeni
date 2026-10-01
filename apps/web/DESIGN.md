@@ -397,13 +397,16 @@ Learned on Settings > Models, 27 Sep 2026.
   the Codex Apps row. Pages opened from it go back to it, named ("← Design preview").
 - **Connect is for the organization.** Connect account makes an organization account and asks
   which workspaces use it: all (new ones too) or selected ones, which is its "Available in". An
-  account owned by one workspace is offered only where it is genuinely needed, with the reason in
-  place: Codex Apps, usage limit resets, an API key in a Personal workspace, and workspace admins
-  who aren't organization admins (their workspace page connects for that workspace only).
+  account owned by one workspace is offered only to owners and admins, and only where it is
+  genuinely needed, with the reason in place: Codex Apps, usage limit resets, an API key in a
+  Personal workspace. Nobody else adds accounts; someone who can change a workspace's own account
+  may still sign it in again or replace its key.
 - **Who sees Models.** Organization owners and admins: everything. Workspace admins: the
-  workspaces they administer and, read-only, the accounts those use, with "Only organization owners
-  and admins can add accounts." Members have no Models page (the composer's model picker shows who
-  pays); a direct link says "Only admins manage models. Ask an admin to add one."
+  workspaces they administer plus their own Personal workspace and, read-only, the accounts those
+  use, with "Only organization owners and admins can add accounts." Members: only their own
+  Personal workspace (its default model and Allowed models) and, read-only, the accounts it can
+  use, with the same line. A key or service without a membership gets no Models page; a direct
+  link says "Only admins manage models. Ask an admin to add one."
 - **Toolbar pieces stay in the toolbar.** `ToolbarSearch` always sits inside a `Toolbar`. A `Select`
   in a narrow `SettingRow` gets a fixed width so the column doesn't jump between values.
 

@@ -370,7 +370,9 @@ export function OrganizationModelsList({
         description={
           administrator
             ? "Subscriptions, API keys and credits that pay for models. Each account is available in all workspaces or the ones you choose."
-            : "Subscriptions, API keys and credits that pay for models in the workspaces you administer."
+            : workspaces.some((workspace) => !workspace.personal)
+              ? "Subscriptions, API keys and credits that pay for models in your workspaces."
+              : "Subscriptions, API keys and credits that pay for models in your Personal workspace."
         }
         action={administrator && !empty ? connect : null}
       >

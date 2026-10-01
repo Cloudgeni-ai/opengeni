@@ -65,8 +65,13 @@ describe("organization settings access", () => {
     );
   });
 
-  test("members see only what they can use: identity (read-only) and security", () => {
-    expect(visible("member", ["account:read"])).toEqual(["identity", "security"]);
+  test("members see only what they can use: identity (read-only), Models and security", () => {
+    // Models shows a member their own Personal workspace's default and allowed models.
+    expect(visible("member", ["account:read"])).toEqual(["identity", "models", "security"]);
+  });
+
+  test("a session without an organization membership gets no Models page", () => {
+    expect(visible(undefined, ["account:read"])).toEqual(["identity", "security"]);
   });
 
   test("a workspace admin also sees Models, for the workspaces they administer", () => {
@@ -89,14 +94,22 @@ describe("organization settings access", () => {
     ).toEqual(["ws-team"]);
     // A Personal workspace grant (no workspace:admin) is not administering one.
     expect(
-      visible("member", ["account:read"], managed, [
-        {
-          workspaceId: "ws-me",
-          accountId: "acme",
-          permissions: ["workspace:read", "connections:write"],
-        },
-      ]),
-    ).toEqual(["identity", "security"]);
+      organizationSettingsAccess({
+        accessContext: context(
+          "member",
+          ["account:read"],
+          [
+            {
+              workspaceId: "ws-me",
+              accountId: "acme",
+              permissions: ["workspace:read", "connections:write"],
+            },
+          ],
+        ),
+        clientConfig: managed as never,
+        accountId: "acme",
+      }).administeredWorkspaceIds,
+    ).toEqual([]);
   });
 
   test("the single local user administers without a People page", () => {

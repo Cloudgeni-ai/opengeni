@@ -86,9 +86,13 @@ export function organizationSettingsAccess(input: {
     visible.add("integrations");
   }
   // Every model setting lives on Organization > Models: owners and admins manage
-  // all of it, workspace admins the workspaces they administer. Members choose
-  // models in the composer, where each shows who pays.
-  if (administrator || (organizationAdministratorSession && administeredWorkspaceIds.length > 0)) {
+  // all of it, workspace admins the workspaces they administer, and every
+  // signed-in member their own Personal workspace (each membership has one).
+  if (
+    administrator ||
+    (organizationAdministratorSession && administeredWorkspaceIds.length > 0) ||
+    (managedHumanSession && !singleUser && actorRole !== null)
+  ) {
     visible.add("models");
   }
   visible.add("identity");

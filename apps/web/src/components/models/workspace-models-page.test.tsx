@@ -321,6 +321,11 @@ beforeEach(() => {
     activeAccountId: null,
     settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: null },
   }));
+  client.listOrganizationSuperGrokAccounts.mockImplementation(async () => ({
+    accounts: [],
+    activeAccountId: null,
+    settings: { rotationEnabled: false, rotationStrategy: "sharded", activeCredentialId: null },
+  }));
   client.requestJson.mockImplementation(async () => ({}));
   client.listConnections.mockImplementation(async () => []);
   context.clientConfig.claudeSubscriptionEnabled = false;
@@ -329,6 +334,24 @@ beforeEach(() => {
 const ACCOUNTS_SECTION = "Subscriptions, API keys and credits that pay for models here.";
 
 let organizationAdmin = false;
+
+/** An organization owner or admin whose organization shares no Codex accounts yet. */
+function asOrganizationAdmin(): void {
+  organizationAdmin = true;
+  client.requestJson.mockImplementation(async (method: string, path: string) =>
+    method === "GET" && path === "/v1/organizations/organization-a/codex/accounts"
+      ? {
+          accounts: [],
+          activeAccountId: null,
+          settings: {
+            rotationEnabled: false,
+            rotationStrategy: "sharded",
+            activeCredentialId: null,
+          },
+        }
+      : {},
+  );
+}
 let personalWorkspace = false;
 let organizationWorkspaces: ModelsWorkspace[] = [];
 
@@ -446,7 +469,11 @@ describe("Codex rows", () => {
       expect(client.listCodexAccounts).toHaveBeenCalledTimes(2);
       expect(view.container.textContent).not.toContain("Couldn't load Codex accounts.");
       expect(view.container.textContent).toContain("No accounts connected");
-      expect(button(view.container, "Connect account")).toBeDefined();
+      // Only organization owners and admins add accounts, even for a workspace admin.
+      expect(button(view.container, "Connect account")).toBeUndefined();
+      expect(view.container.textContent).toContain(
+        "Only organization owners and admins can add accounts.",
+      );
     } finally {
       await cleanup(view);
     }
@@ -571,12 +598,15 @@ describe("Models list", () => {
 
   test("Connect account shows SuperGrok disabled when this server has it off", async () => {
     const { OpenGeniApiError } = await import("@opengeni/sdk/browser");
-    client.listSuperGrokAccounts.mockImplementation(async () => {
+    const off = async () => {
       throw new OpenGeniApiError(
         404,
         JSON.stringify({ error: "SuperGrok subscriptions are not enabled" }),
       );
-    });
+    };
+    client.listSuperGrokAccounts.mockImplementation(off);
+    client.listOrganizationSuperGrokAccounts.mockImplementation(off);
+    asOrganizationAdmin();
     const view = await render();
     try {
       await act(async () => navigateTo({ view: "connect" }));
@@ -592,6 +622,7 @@ describe("Models list", () => {
   });
 
   test("Connect account lists providers as rows that open their own step", async () => {
+    asOrganizationAdmin();
     const view = await render();
     try {
       await act(async () => button(view.container, /Connect account/)!.click());
@@ -874,6 +905,8 @@ describe("Connect Codex", () => {
         accounts: [],
         source: { ...source, mode, effectiveSource: "organization", workspaceAvailable: false },
       };
+      // An account owned by this workspace is connected by an owner or admin, in context.
+      asOrganizationAdmin();
       const view = await render();
       try {
         await act(async () => navigateTo({ view: "connect:codex" }));
@@ -1160,19 +1193,36 @@ describe("One Models page for the organization and the workspace", () => {
     }
   });
 
-  test("a Personal workspace can't hold its own SuperGrok account", async () => {
+  test("a member's Personal workspace says who adds accounts, and Connect URLs refuse", async () => {
     personalWorkspace = true;
     const view = await render();
     try {
-      await act(async () => navigateTo({ view: "connect" }));
-      await flush();
-      const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
-        (candidate) => candidate.textContent?.includes("SuperGrok"),
-      )!;
-      expect(row.textContent).toContain(
-        "Only owners and admins can add it for Personal workspaces",
+      expect(button(view.container, "Connect account")).toBeUndefined();
+      expect(view.container.textContent).toContain(
+        "Only organization owners and admins can add accounts.",
       );
-      expect(row.querySelector("[data-row-action]")).toBeNull();
+      for (const target of ["connect", "connect:supergrok", "connect:openrouter"] as const) {
+        await act(async () => navigateTo({ view: target }));
+        await flush();
+        expect(view.container.querySelector("h1")?.textContent).toBe(
+          "Only organization owners and admins can add accounts",
+        );
+      }
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("a workspace admin can still sign this workspace's account in again", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [codexAccount({ status: "needs_relogin" })],
+    };
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
     } finally {
       await cleanup(view);
     }
@@ -1183,9 +1233,7 @@ describe("One Models page for the organization and the workspace", () => {
     try {
       const text = view.container.textContent ?? "";
       expect(button(view.container, "Connect account")).toBeUndefined();
-      expect(text).toContain(
-        "Only owners and admins of Acme, and admins of this workspace, can add accounts.",
-      );
+      expect(text).toContain("Only organization owners and admins can add accounts.");
       expect(client.requestJson).not.toHaveBeenCalledWith(
         "GET",
         "/v1/organizations/organization-a/codex/accounts",
