@@ -254,6 +254,7 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "rigs:use",
   "enrollments:read",
   "artifacts:read",
+  "artifacts:publish",
 ]);
 
 export type WorkspaceAccessLevel = "viewer" | "member" | "admin";

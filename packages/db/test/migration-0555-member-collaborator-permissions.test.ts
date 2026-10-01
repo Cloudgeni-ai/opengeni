@@ -18,13 +18,15 @@ const rollout = [
   "0557_member_collaborator_permissions_backfill.sql",
 ] as const;
 // Everything a Viewer has that the post-0516 Member lacked, plus the caller's
-// own desktop consent and the read-only Connected Machine list.
+// own desktop consent, the read-only Connected Machine list, and artifact
+// creation/publishing for every member.
 const added = [
   "stream:view",
   "stream:acknowledge",
   "rigs:use",
   "enrollments:read",
   "artifacts:read",
+  "artifacts:publish",
 ];
 // Admin-class or shared-work powers a named Member must never receive.
 const withheld = [
@@ -36,7 +38,6 @@ const withheld = [
   "rigs:manage",
   "enrollments:manage",
   "variable-sets:manage",
-  "artifacts:publish",
   "terminal:attach",
   "files:write",
   "stream:control",

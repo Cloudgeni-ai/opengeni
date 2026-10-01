@@ -53,6 +53,13 @@ page that the viewer cannot read says the viewer needs artifact access rather
 than suggesting the item was removed. The API's 403/404 semantics are
 unchanged; the console decides from a 403 or from the viewer's loaded grant.
 
+Creating, publishing, rolling back, archiving, and restoring need
+`artifacts:publish`, which the named Member and Admin roles hold (migration
+0555). These actions apply to any artifact in the workspace, not only the
+caller's own, and are reversible: archive keeps the source and full version
+history, restore republishes an archived Site, and rollback restores an earlier
+version without discarding the current one.
+
 ## Presentation and version semantics
 
 The workspace library opens as a preview gallery: cards with a thumbnail, the

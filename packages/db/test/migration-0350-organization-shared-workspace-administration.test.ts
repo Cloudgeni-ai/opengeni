@@ -266,7 +266,7 @@ describe("migration 0350 organization shared-workspace administration", () => {
       expect(rolePermissions("admin")).toContain(permission);
     }
     expect(rolePermissions("member")).toContain("artifacts:read");
-    expect(rolePermissions("member")).not.toContain("artifacts:publish");
+    expect(rolePermissions("member")).toContain("artifacts:publish");
     for (const definition of overview.roles) {
       expect(definition.permissions).toContain("workspace:read");
       expect(definition.permissions).not.toContain("secrets:read");

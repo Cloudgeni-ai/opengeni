@@ -6,7 +6,10 @@
 -- live desktop), and rigs:use (pick a Sandbox Environment). It also gains
 -- stream:acknowledge (record the caller's own consent, without which
 -- stream:view cannot open a desktop) and enrollments:read (see the Connected
--- Machines available to the workspace). Admin-class powers stay Admin-only.
+-- Machines available to the workspace). Every member may also create and
+-- publish artifacts (artifacts:publish); publish, rollback and archive act on
+-- any artifact in the workspace and stay reversible through restore and the
+-- retained version history. Admin-class powers stay Admin-only.
 -- Install the new named preset and a DB-boundary guard before the
 -- independently committed backfill. Old writers may overlap the rollout; only
 -- the exact pre-0516 or post-0516 named Member set is normalized, regardless
@@ -73,7 +76,7 @@ AS $body$
       "scheduled_tasks:run", "github:use", "connections:read", "variable-sets:list",
       "variable-sets:read", "variable-sets:write", "variable-sets:attach",
       "variable-sets:use", "secrets:list", "secrets:write", "goals:manage",
-      "rigs:use", "enrollments:read", "artifacts:read"
+      "rigs:use", "enrollments:read", "artifacts:read", "artifacts:publish"
     ]'::jsonb
     WHEN 'admin' THEN '[
       "workspace:read", "workspace:admin", "members:manage", "sessions:create",
@@ -135,7 +138,7 @@ BEGIN
       "scheduled_tasks:run", "github:use", "connections:read", "variable-sets:list",
       "variable-sets:read", "variable-sets:write", "variable-sets:attach",
       "variable-sets:use", "secrets:list", "secrets:write", "goals:manage",
-      "rigs:use", "enrollments:read", "artifacts:read"
+      "rigs:use", "enrollments:read", "artifacts:read", "artifacts:publish"
     ]'::jsonb;
     NEW.updated_at := pg_catalog.clock_timestamp();
   END IF;

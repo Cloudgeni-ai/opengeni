@@ -1040,11 +1040,15 @@ The named Member role is a superset of Viewer plus ordinary collaborator
 capabilities, and holds no administrative power. Migration 0516 added
 `connections:read`; migration 0555 adds Viewer's `artifacts:read`,
 `stream:view`, and `rigs:use`, plus `stream:acknowledge` (the caller's own
-desktop-stream consent) and `enrollments:read` (read-only Connected Machine
-listing). Workspace administration, member and API-key management, shared
+desktop-stream consent), `enrollments:read` (read-only Connected Machine
+listing), and `artifacts:publish`, so every member can create and publish
+Sites and editable artifacts. Publish, rollback, and archive/restore act on any
+artifact in the workspace, not only the caller's own; they are reversible,
+because archive keeps the source and every version, restore brings an archived
+Site back, and rollback restores an earlier version without discarding the
+current one. Workspace administration, member and API-key management, shared
 connection, GitHub App, Sandbox Environment and machine administration, terminal
-attach, sandbox file writes, inline MCP servers, and human Site
-publish/rollback/archive (`artifacts:publish`) stay Admin-only. Each such
+attach, sandbox file writes, and inline MCP servers stay Admin-only. Each such
 rollout normalizes only rows whose permissions exactly equal an older named
 Member set (any JSONB order), through a writer trigger for overlapping old
 binaries plus a batched backfill; custom sets are never rewritten.

@@ -24,8 +24,8 @@ describe("workspace member permission groups", () => {
   test("member contains artifacts:read", () => {
     const member = workspaceAccessLevels.find((level) => level.role === "member")!;
     expect(member.permissions).toContain("artifacts:read");
-    // Human Site publish, rollback, and archive stay a separate product decision.
-    expect(member.permissions).not.toContain("artifacts:publish");
+    // Everyone in the workspace may create and publish artifacts.
+    expect(member.permissions).toContain("artifacts:publish");
   });
 
   test("member is a superset of viewer without administrative powers", () => {

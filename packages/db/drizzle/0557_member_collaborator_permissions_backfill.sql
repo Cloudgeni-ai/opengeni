@@ -56,7 +56,7 @@ WITH candidates AS MATERIALIZED (
     "scheduled_tasks:run", "github:use", "connections:read", "variable-sets:list",
     "variable-sets:read", "variable-sets:write", "variable-sets:attach",
     "variable-sets:use", "secrets:list", "secrets:write", "goals:manage",
-    "rigs:use", "enrollments:read", "artifacts:read"
+    "rigs:use", "enrollments:read", "artifacts:read", "artifacts:publish"
   ]'::jsonb,
       updated_at = pg_catalog.clock_timestamp()
   FROM candidates
