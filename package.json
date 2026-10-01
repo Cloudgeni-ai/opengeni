@@ -120,6 +120,8 @@
     "build:packages": "bun scripts/build-publishable-packages.ts",
     "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
     "test:publish-consumer": "bun scripts/test-publish-consumer.ts",
+    "test:registry-dependency-exports": "bun scripts/test-registry-dependency-exports.ts",
+    "test:effective-dependency-exports": "bun scripts/test-effective-dependency-exports.ts",
     "test:artifact-kernel-wasm-consumer": "bun scripts/test-artifact-kernel-wasm-package-consumers.ts",
     "artifact-runtime:assemble": "bun scripts/assemble-artifact-runtime-installation.ts",
     "artifact-runtime:container-inputs": "bun scripts/assemble-artifact-runtime-container-inputs.ts",
