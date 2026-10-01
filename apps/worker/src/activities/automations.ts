@@ -241,6 +241,7 @@ export function createAutomationActivities(
           workspaceId: input.workspaceId,
           initialMessage: accepted.initialMessage,
           surface: "automation",
+          metrics: service.observability,
           resources: template.resources,
           skills: SessionSkills.parse(template.skills),
           bundledSkillIds: template.bundledSkillIds,

@@ -38,6 +38,9 @@ import {
   agentConfigMayResolve,
   applySessionAgentConfigWriteThrough,
   resolveSessionAgentConfigForCreate,
+  recordSessionCreated,
+  recordUserMessageAccepted,
+  type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -195,6 +198,15 @@ export function scheduledTaskGeneratedSessionCreateIdempotencyKey(producerKey: s
  * alone, with no Intl call and so no host ICU or tzdata build to make the two
  * texts differ.
  */
+/** A scheduler-generated run session: a service-created root session. */
+function recordScheduledSessionCreated(observability: ProductUsageMetricsSink | undefined): void {
+  recordSessionCreated(observability, {
+    surface: "scheduled",
+    createdByKind: "service",
+    parentSessionId: null,
+  });
+}
+
 export function scheduledTaskSessionTitle(taskName: string): string {
   return normalizeAutomaticSessionTitle(taskName) ?? "Scheduled run";
 }
@@ -334,6 +346,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           try {
             return await recoverBoundScheduledTaskDispatch({
               db,
+              observability: baseService.observability,
               bus,
               settings,
               wakeSessionWorkflow,
@@ -1364,6 +1377,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               }
               session = created.session;
               sessionCreated = created.created;
+              if (sessionCreated) recordScheduledSessionCreated(baseService.observability);
               if (!sessionCreated) {
                 await bindScheduledTaskRunSessionInTransaction(dispatchDb, {
                   accountId: task.accountId,
@@ -1648,6 +1662,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 run: { ...run, status: "skipped" as const, error },
               };
             }
+            if (scheduledUpdate.added) {
+              recordUserMessageAccepted(baseService.observability, { surface: "scheduled" });
+            }
             if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {
               if (deferPublications) {
                 deferredEvents.push({
@@ -1790,6 +1807,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
                 run: { ...run, status: "skipped" as const, error },
               };
+            }
+            if (bundled.added) {
+              recordUserMessageAccepted(baseService.observability, { surface: "scheduled" });
             }
             if (bundled.added && bundled.events.length > 0) {
               if (deferPublications) {
@@ -2202,6 +2222,7 @@ async function seedScheduledGeneratedSessionRoute(input: {
 
 async function recoverBoundScheduledTaskDispatch(input: {
   db: Database;
+  observability?: ProductUsageMetricsSink | undefined;
   bus: ControlActivityServices["bus"];
   settings: ControlActivityServices["settings"];
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
@@ -2374,6 +2395,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     });
     if (created.denied) throw new SessionSpawnDeniedDbError(created.denial);
     session = created.session;
+    if (created.created) recordScheduledSessionCreated(input.observability);
     if (!created.created) {
       await bindScheduledTaskRunSessionInTransaction(input.db, {
         accountId: task.accountId,
@@ -2668,6 +2690,9 @@ async function recoverBoundScheduledTaskDispatch(input: {
     scheduledUpdate.reason === "session_not_idle"
   ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
+  }
+  if (scheduledUpdate.added) {
+    recordUserMessageAccepted(input.observability, { surface: "scheduled" });
   }
   if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {
     await publishDurableSessionEvents(

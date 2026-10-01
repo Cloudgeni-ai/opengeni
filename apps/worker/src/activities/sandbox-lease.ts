@@ -41,6 +41,8 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  countActiveUsers,
+  readCreditGrantTotals,
   readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
@@ -150,7 +152,9 @@ import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-re
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
+  recordActiveUserGauges,
   recordCreditBalanceGauges,
+  recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
   recordOpenSandboxKubernetesInventoryGauges,
@@ -2521,6 +2525,24 @@ async function refreshQueueLeaseAndCreditGauges(
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        recordActiveUserGauges(observability, await countActiveUsers(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: active-user gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        recordCreditGrantGauges(observability, await readCreditGrantTotals(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: credit-grant gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
