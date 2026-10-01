@@ -149,6 +149,7 @@ BEGIN
   IF NEW.imported_archive_import_id IS NOT NULL
     AND (TG_OP = 'INSERT' OR OLD.imported_archive_import_id IS NULL) THEN
     IF EXISTS (SELECT 1 FROM session_turns WHERE workspace_id = NEW.workspace_id AND session_id = NEW.id)
+      OR EXISTS (SELECT 1 FROM session_turn_attempts WHERE workspace_id = NEW.workspace_id AND session_id = NEW.id)
       OR EXISTS (SELECT 1 FROM session_history_items WHERE workspace_id = NEW.workspace_id AND session_id = NEW.id)
       OR EXISTS (SELECT 1 FROM session_goals WHERE workspace_id = NEW.workspace_id AND session_id = NEW.id)
       OR EXISTS (SELECT 1 FROM session_workflow_wake_outbox WHERE workspace_id = NEW.workspace_id AND session_id = NEW.id)
@@ -181,6 +182,8 @@ $$;
 REVOKE ALL ON FUNCTION refuse_imported_archive_execution() FROM PUBLIC;
 CREATE TRIGGER session_turns_imported_archive_guard
   BEFORE INSERT OR UPDATE ON session_turns FOR EACH ROW EXECUTE FUNCTION refuse_imported_archive_execution();
+CREATE TRIGGER session_turn_attempts_imported_archive_guard
+  BEFORE INSERT OR UPDATE ON session_turn_attempts FOR EACH ROW EXECUTE FUNCTION refuse_imported_archive_execution();
 CREATE TRIGGER session_history_items_imported_archive_guard
   BEFORE INSERT OR UPDATE ON session_history_items FOR EACH ROW EXECUTE FUNCTION refuse_imported_archive_execution();
 CREATE TRIGGER session_goals_imported_archive_guard

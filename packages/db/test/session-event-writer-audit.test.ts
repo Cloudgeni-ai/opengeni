@@ -529,9 +529,13 @@ function expectArchivedImportBoundary(source: string): void {
   );
   expect(migration).toContain("sessions_imported_archive_inert_check");
   expect(migration).toContain("MESSAGE = 'SESSION_IMPORTED_READ_ONLY'");
-  // Attempts require a real turn; the import boundary refuses those roots.
+  // Turn and attempt guards cover updates as well as fresh admission: the
+  // historical attempt-binding guard alone only covers inserts.
   expect(migration).toContain("CREATE TRIGGER session_turns_imported_archive_guard");
   expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turns");
+  expect(migration).toContain("CREATE TRIGGER session_turn_attempts_imported_archive_guard");
+  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turn_attempts");
+  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_turn_attempts");
   expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_history_items");
 }
 

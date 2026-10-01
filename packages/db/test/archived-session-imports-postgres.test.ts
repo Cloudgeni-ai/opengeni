@@ -9,6 +9,8 @@ import {
   appendSessionEvents,
   bootstrapWorkspace,
   createDb,
+  createSession,
+  claimSessionWorkForAttempt,
   createFileUpload,
   createOrganizationApiKey,
   completeFileUpload,
@@ -494,6 +496,7 @@ describe("archived import PostgreSQL persistence", () => {
     ).rejects.toMatchObject({ code: "SESSION_IMPORT_CONFLICT" });
     for (const table of [
       "session_turns",
+      "session_turn_attempts",
       "session_history_items",
       "session_goals",
       "session_workflow_wake_outbox",
@@ -749,6 +752,59 @@ describe("archived import PostgreSQL persistence", () => {
     const [counts] =
       await shared.admin`select (select count(*)::int from session_turns where session_id=${imported.session.id}) as turns, (select count(*)::int from session_history_items where session_id=${imported.session.id}) as history, (select count(*)::int from session_workflow_wake_outbox where session_id=${imported.session.id}) as wakes`;
     expect(counts).toEqual({ turns: 0, history: 0, wakes: 0 });
+  });
+
+  test("old application writers cannot reassign an existing attempt to an imported archive", async () => {
+    if (!client || !shared) return;
+    const scope = await fixture();
+    const imported = await importArchivedSession(client.db, {
+      ...scope,
+      payload: { importId: "no-attempt", title: "Inert", createdAt: "2019-01-01T00:00:00Z" },
+    });
+    const live = await createSession(client.db, {
+      ...scope,
+      initialMessage: "Live attempt",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(client.db, {
+      ...scope,
+      sessionId: live.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: live.id,
+      workflowId: `session-${live.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `activity-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    let rejection: unknown;
+    try {
+      await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.subjectId, (tx) =>
+        tx
+          .update(schema.sessionTurnAttempts)
+          .set({ sessionId: imported.session.id })
+          .where(eq(schema.sessionTurnAttempts.id, attemptId)),
+      );
+    } catch (error) {
+      rejection = error;
+    }
+    expect(nestedPostgresSqlState(rejection)).toBe("OG002");
+    const [attempt] =
+      await shared.admin`select session_id from session_turn_attempts where id=${attemptId}`;
+    expect(attempt!.session_id).toBe(live.id);
+    const [archive] = await shared.admin`select count(*)::int as attempts
+      from session_turn_attempts where session_id=${imported.session.id}`;
+    expect(archive!.attempts).toBe(0);
   });
 
   test("invalid and cross-workspace file references roll back creates and batches", async () => {
