@@ -1261,10 +1261,13 @@ export function ProviderConnectionPage({
   onBack,
   onConnect,
   onEditAccess,
+  footnote,
 }: {
   state: ProviderConnection;
   /** The workspace's or organization's name. */
   scopeName?: string | undefined;
+  /** A last quiet section, such as where else a key can be connected. */
+  footnote?: ReactNode;
   onBack?: (() => void) | undefined;
   onConnect: () => void;
   onEditAccess?: (() => void) | undefined;
@@ -1413,6 +1416,7 @@ export function ProviderConnectionPage({
             </SettingRowGroup>
           </DetailSection>
         ) : null}
+        {footnote ? <DetailSection>{footnote}</DetailSection> : null}
       </DetailPageBody>
       <ReplaceKeyDialog state={state} open={replacing} onOpenChange={setReplacing} />
       <ProviderDisconnectDialog

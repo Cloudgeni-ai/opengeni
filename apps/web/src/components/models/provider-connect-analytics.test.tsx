@@ -98,7 +98,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   );
   expect(clickedAction(submitButton())).toBe("connect_supergrok");
 
-  // "Open xAI again" reopens the same sign-in; it is not another connect.
+  // While the code waits, the step holds its own actions: no second connect
+  // button that could be counted again.
   await act(async () =>
     root.render(
       <SuperGrokConnectPage
@@ -108,7 +109,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
       />,
     ),
   );
-  expect(submitButton().hasAttribute("data-analytics-action")).toBe(false);
+  expect(container.querySelector('button[type="submit"]')).toBeNull();
+  expect(container.querySelector("[data-analytics-action]")).toBeNull();
 });
 
 test("Claude credentials use distinct accessible forms and explain subscription expiry", async () => {

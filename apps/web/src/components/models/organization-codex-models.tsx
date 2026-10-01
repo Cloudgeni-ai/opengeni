@@ -1,5 +1,5 @@
 import type { CodexAccount, ModelConnectionAccessResponse } from "@opengeni/sdk";
-import { CheckIcon, CircleCheckIcon, LoaderCircleIcon, PencilIcon, UnplugIcon } from "lucide-react";
+import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { CodexDeviceCodePanel, codexAccountName, planLabel } from "@/components/codex-connection";
@@ -16,6 +16,7 @@ import {
   type ModelsScopeLabels,
 } from "@/components/models/models-ui";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { Button } from "@/components/ui/button";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
@@ -66,12 +67,15 @@ export function OrgCodexAccountPage({
   accountId,
   places,
   usage,
+  resets,
 }: {
   codex: OrganizationCodexSubscriptions;
   accountId: string;
   places: OrgCodexPlaces;
   /** This account's usage, while the workspace the page is open in uses it. */
   usage?: ReactNode;
+  /** Its usage limit resets, which only an account owned by a workspace can redeem. */
+  resets?: ReactNode;
 }) {
   const account = codex.accounts.find((candidate) => candidate.id === accountId) ?? null;
   const back = { label: "Models", onClick: places.backToList };
@@ -95,7 +99,15 @@ export function OrgCodexAccountPage({
       </DetailPage>
     );
   }
-  return <OrgCodexAccountDetail codex={codex} account={account} places={places} usage={usage} />;
+  return (
+    <OrgCodexAccountDetail
+      codex={codex}
+      account={account}
+      places={places}
+      usage={usage}
+      resets={resets}
+    />
+  );
 }
 
 function OrgCodexAccountDetail({
@@ -103,11 +115,13 @@ function OrgCodexAccountDetail({
   account,
   places,
   usage,
+  resets,
 }: {
   codex: OrganizationCodexSubscriptions;
   account: CodexAccount;
   places: OrgCodexPlaces;
   usage: ReactNode;
+  resets: ReactNode;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -204,6 +218,7 @@ function OrgCodexAccountDetail({
             />
           </SettingRowGroup>
         </DetailSection>
+        {resets ? <DetailSection title="Usage limit resets">{resets}</DetailSection> : null}
         {usage ? null : (
           <DetailSection>
             <p className="text-xs leading-4.5 text-fg-muted">
@@ -299,15 +314,14 @@ export function OrgCodexConnectPage({
       title="Connect Codex"
       description={`Sign in with the ChatGPT account whose plan pays for work across ${places.organizationName}.`}
       onClose={onClose}
-      submitLabel={signingIn ? "Open ChatGPT again" : "Sign in with ChatGPT"}
+      submitLabel="Sign in with ChatGPT"
       pendingLabel="Opening ChatGPT…"
+      // While the code waits, the step holds its own actions.
+      footer={signingIn || connected ? false : undefined}
       submitDisabled={codex.busy || connected || Boolean(blockedReason)}
       disabledReason={blockedReason ?? undefined}
       onSubmit={async () => {
-        if (signingIn && codex.pending) {
-          window.open(codex.pending.verificationUri, "_blank", "noopener,noreferrer");
-          return false;
-        }
+        if (signingIn) return false;
         await codex.connect({
           onConnected: (accountId) =>
             void (async () => {
@@ -323,37 +337,18 @@ export function OrgCodexConnectPage({
     >
       <FieldStack>
         {fields}
-        <p className="text-sm text-fg-muted">
-          ChatGPT opens in a new tab and asks for a code, which shows here. Opengeni never sees your
-          password.
-        </p>
-        {codex.pending ? (
-          <CodexDeviceCodePanel
-            userCode={codex.pending.userCode}
-            verificationUri={codex.pending.verificationUri}
-          />
-        ) : null}
-        {signingIn || connected ? (
-          <p
-            role="status"
-            className="flex min-w-0 items-center gap-2 rounded-[10px] bg-surface-2 px-3 py-2.5 text-sm text-fg-muted"
-          >
-            {connected ? (
-              <>
-                <CircleCheckIcon aria-hidden="true" className="size-4 shrink-0 text-status-idle" />
-                Connected
-              </>
-            ) : (
-              <>
-                <LoaderCircleIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-fg-subtle motion-safe:animate-spin"
-                />
-                Waiting for you to sign in…
-              </>
-            )}
-          </p>
-        ) : null}
+        <DeviceSignInStatus
+          provider="codex"
+          connected={connected}
+          panel={
+            codex.pending ? (
+              <CodexDeviceCodePanel
+                userCode={codex.pending.userCode}
+                verificationUri={codex.pending.verificationUri}
+              />
+            ) : null
+          }
+        />
       </FieldStack>
     </ModelsFormPage>
   );

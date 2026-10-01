@@ -624,14 +624,17 @@ describe("organization onboarding UI", () => {
         "/v1/organizations/organization-a/codex/connect/start",
         {},
       );
-      expect(container.textContent).toContain("Waiting for authorization");
-      expect(container.textContent).toContain("Settings → Security");
-      expect(container.textContent).toContain("workspace admin");
+      // One calm step: the code, its two actions and one waiting line. The
+      // ChatGPT setting that can block it shows only once it takes long.
+      expect(container.textContent).toContain("Enter this code on the ChatGPT page that opened.");
+      expect(container.textContent?.split("Waiting for you to sign in").length).toBe(2);
+      expect(container.textContent).toContain("Open sign-in page");
+      expect(container.textContent).not.toContain("Still waiting?");
       expect(
         container.querySelector<HTMLAnchorElement>(
           'a[href="https://chatgpt.com/#settings/Security"]',
         ),
-      ).not.toBeNull();
+      ).toBeNull();
       expect(
         Array.from(container.querySelectorAll("button")).find(
           (button) => button.textContent?.trim() === "Skip for now",
@@ -643,7 +646,7 @@ describe("organization onboarding UI", () => {
           .find((button) => button.textContent?.trim() === "Cancel")!
           .click(),
       );
-      expect(container.textContent).not.toContain("Waiting for authorization");
+      expect(container.textContent).not.toContain("Waiting for you to sign in");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(onComplete).not.toHaveBeenCalled();
       expect(codexConnectPoll).not.toHaveBeenCalled();

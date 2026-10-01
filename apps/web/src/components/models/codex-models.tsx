@@ -1,13 +1,5 @@
 import type { CodexAccount } from "@opengeni/sdk";
-import {
-  BuildingIcon,
-  CheckIcon,
-  CircleCheckIcon,
-  CopyIcon,
-  LoaderCircleIcon,
-  PencilIcon,
-  UnplugIcon,
-} from "lucide-react";
+import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -40,6 +32,7 @@ import {
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import type { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { copyText } from "@/components/ui/copy-field";
@@ -55,7 +48,12 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { formatAbsoluteTime, RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingDangerRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import {
+  SettingDangerRow,
+  SettingNavRow,
+  SettingRow,
+  SettingRowGroup,
+} from "@/components/ui/setting-row";
 import { StatusBadge, type ProductStatus } from "@/components/ui/status-badge";
 import { Switch } from "@/components/ui/switch";
 import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
@@ -533,6 +531,7 @@ export function CodexSettingRows({
   places,
   providerSwitch,
   organizationSharing = null,
+  onConnectForWorkspace,
 }: {
   codex: CodexSubscriptions;
   places: CodexPlaces;
@@ -540,6 +539,8 @@ export function CodexSettingRows({
   providerSwitch: ReactNode;
   /** How the organization's accounts share work, for the people who manage them. */
   organizationSharing?: ReactNode;
+  /** Opens Connect Codex for an account owned by this workspace (Codex Apps needs one). */
+  onConnectForWorkspace?: (() => void) | undefined;
 }) {
   const [turningOff, setTurningOff] = useState(false);
   const { accounts } = codex;
@@ -593,6 +594,7 @@ export function CodexSettingRows({
             }
           />
         ) : null}
+        <CodexAppsRow codex={codex} places={places} onConnectForWorkspace={onConnectForWorkspace} />
         {providerSwitch}
         {codex.canManage ? (
           <SettingDangerRow
@@ -623,6 +625,71 @@ export function CodexSettingRows({
         }}
       />
     </>
+  );
+}
+
+/**
+ * Codex Apps: agents use the ChatGPT apps of one account, which must be owned
+ * by this workspace (an organization account can't be designated). The row
+ * says which account does it, or how to turn it on: from one of this
+ * workspace's accounts, or by connecting one for this workspace.
+ */
+function CodexAppsRow({
+  codex,
+  places,
+  onConnectForWorkspace,
+}: {
+  codex: CodexSubscriptions;
+  places: CodexPlaces;
+  onConnectForWorkspace?: (() => void) | undefined;
+}) {
+  const apps = codex.data?.apps;
+  if (!apps?.available || !codex.canManage) return null;
+  const own = codex.accounts.filter((account) => account.source !== "organization");
+  const designated = apps.credentialId
+    ? (own.find((account) => account.id === apps.credentialId) ?? null)
+    : null;
+  const description =
+    "Let agents use the ChatGPT apps connected to one account. It must be an account owned by this workspace.";
+  if (designated) {
+    return (
+      <SettingNavRow
+        label="Codex Apps"
+        description={description}
+        value={codexAccountName(designated)}
+        onOpen={() => places.openAccount(designated.id)}
+      />
+    );
+  }
+  if (apps.credentialId) {
+    return <SettingRow label="Codex Apps" description={`${description} On.`} />;
+  }
+  if (own.length > 0) {
+    const only = own.length === 1 ? own[0]! : null;
+    return only ? (
+      <SettingNavRow
+        label="Codex Apps"
+        description={`${description} Turn it on from ${codexAccountName(only)}.`}
+        value="Off"
+        onOpen={() => places.openAccount(only.id)}
+      />
+    ) : (
+      <SettingRow
+        label="Codex Apps"
+        description={`${description} Turn it on from one of this workspace's accounts above.`}
+      />
+    );
+  }
+  return (
+    <SettingRow
+      label="Codex Apps"
+      description="Let agents use the ChatGPT apps connected to an account. Codex Apps need a ChatGPT account owned by this workspace."
+      control={
+        onConnectForWorkspace ? (
+          <RowButton onClick={onConnectForWorkspace}>Connect for this workspace</RowButton>
+        ) : null
+      }
+    />
   );
 }
 
@@ -1081,23 +1148,6 @@ export function CodexAccessPage({
    Connect.
    -------------------------------------------------------------------------- */
 
-function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
-  return (
-    <li className="flex min-w-0 gap-3">
-      <span
-        aria-hidden="true"
-        className="grid size-6 shrink-0 place-items-center rounded-full border border-border bg-surface-2 text-xs font-medium text-fg-muted"
-      >
-        {number}
-      </span>
-      <div className="min-w-0 flex-1 pt-0.5">
-        <p className="text-sm font-medium text-fg">{title}</p>
-        {children}
-      </div>
-    </li>
-  );
-}
-
 export function CodexConnectPage({
   codex,
   places,
@@ -1135,8 +1185,10 @@ export function CodexConnectPage({
       title="Connect Codex"
       description="Sign in with the ChatGPT account whose plan should pay for new work."
       onClose={onClose}
-      submitLabel={signingIn ? "Open ChatGPT again" : "Sign in with ChatGPT"}
+      submitLabel="Sign in with ChatGPT"
       pendingLabel="Opening ChatGPT…"
+      // While the code waits, the step holds its own actions.
+      footer={signingIn || connected ? false : undefined}
       submitDisabled={!codex.canManage || codex.busy || connected || Boolean(blockedReason)}
       disabledReason={
         codex.canManage
@@ -1145,10 +1197,7 @@ export function CodexConnectPage({
       }
       footerStart={footerStart}
       onSubmit={async () => {
-        if (signingIn && codex.pending) {
-          window.open(codex.pending.verificationUri, "_blank", "noopener,noreferrer");
-          return false;
-        }
+        if (signingIn) return false;
         if (askSource && !useFor) {
           setUseError("Choose which subscriptions new work should use.");
           return false;
@@ -1191,51 +1240,18 @@ export function CodexConnectPage({
             />
           </ChoiceCards>
         ) : null}
-        <ol className="m-0 flex min-w-0 list-none flex-col gap-5 p-0">
-          <Step number={1} title="Sign in with ChatGPT">
-            <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
-              ChatGPT opens in a new tab. Opengeni never sees your password.
-            </p>
-          </Step>
-          <Step number={2} title="Enter the code when ChatGPT asks for it">
-            {codex.pending ? (
-              <div className="mt-2">
-                <CodexDeviceCodePanel
-                  userCode={codex.pending.userCode}
-                  verificationUri={codex.pending.verificationUri}
-                />
-              </div>
-            ) : (
-              <p className="mt-0.5 text-xs leading-4.5 text-fg-muted">
-                The code shows here once you start.
-              </p>
-            )}
-          </Step>
-        </ol>
-        {signingIn || connected ? (
-          <p
-            role="status"
-            className="flex min-w-0 items-center gap-2 rounded-[10px] bg-surface-2 px-3 py-2.5 text-sm text-fg-muted"
-          >
-            {connected ? (
-              <>
-                <CircleCheckIcon aria-hidden="true" className="size-4 shrink-0 text-status-idle" />
-                Connected
-              </>
-            ) : (
-              <>
-                <LoaderCircleIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-fg-subtle motion-safe:animate-spin"
-                />
-                <span className="min-w-0">
-                  Waiting for you to sign in. You can leave this page; it keeps going for 15
-                  minutes.
-                </span>
-              </>
-            )}
-          </p>
-        ) : null}
+        <DeviceSignInStatus
+          provider="codex"
+          connected={connected}
+          panel={
+            codex.pending ? (
+              <CodexDeviceCodePanel
+                userCode={codex.pending.userCode}
+                verificationUri={codex.pending.verificationUri}
+              />
+            ) : null
+          }
+        />
       </FieldStack>
     </ModelsFormPage>
   );

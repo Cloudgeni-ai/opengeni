@@ -66,8 +66,13 @@ or "Only selected workspaces" (shared workspaces plus one all-or-nothing
 "Personal workspaces" choice, shown off with its reason for organization API
 keys), and saves that as the account's "Available in" right after connecting
 (`apps/web/src/components/models/connect-audience.tsx`; the connect routes
-take no policy, so it is a second request). Owning the account by the
-workspace instead is under Advanced. They also see the organization's accounts
+take no policy, so it is a second request). Owning an account by one
+workspace is not a choice on that step, because it would read the same as
+"Only selected workspaces" with that workspace ticked; it is offered only where
+it is needed, explained there: Codex Apps (they need an account owned by the
+workspace), redeeming Codex usage limit resets, an API key in a Personal
+workspace (organization keys can't reach one) or for a team with its own key,
+and for workspace admins who can't connect for everyone. They also see the organization's accounts
 that don't reach this workspace, muted with the reason. Each account's own
 page carries "Available in" and "Models it can serve"
 (`apps/web/src/components/connection-access-settings.tsx`), edited on a form

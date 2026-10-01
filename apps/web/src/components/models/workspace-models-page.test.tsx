@@ -1045,8 +1045,10 @@ describe("One Models page for the organization and the workspace", () => {
         view.container.querySelector<HTMLElement>('[data-slot=choice-card][data-state="checked"]')
           ?.textContent,
       ).toContain("All workspaces in Acme");
-      // Owning it by this workspace is tucked under Advanced.
-      expect(text).toContain("Advanced");
+      // Owning it by this workspace is not a choice here: it would read the
+      // same as "Only selected workspaces" with this one ticked.
+      expect(text).not.toContain("Advanced");
+      expect(text).not.toContain("Connect for Design preview only");
     } finally {
       await cleanup(view);
     }
@@ -1068,7 +1070,8 @@ describe("One Models page for the organization and the workspace", () => {
       expect(text).toContain("Design preview (this workspace)");
       expect(text).toContain("Platform");
       expect(text).toContain("Personal workspaces");
-      expect(text).toContain("It's all of them or none.");
+      // The label says it; no description restating it.
+      expect(text).not.toContain("It's all of them or none.");
       // Admins only ever see shared workspaces here, never someone's Personal one.
       expect(client.getOrganizationAdministrationOverview).toHaveBeenCalledWith("organization-a");
     } finally {
@@ -1139,17 +1142,17 @@ describe("One Models page for the organization and the workspace", () => {
   });
 
   test("a Personal workspace can't hold its own SuperGrok account", async () => {
-    organizationAdmin = true;
     personalWorkspace = true;
-    routeOrganizationReads();
     const view = await render();
     try {
-      await act(async () => navigateTo({ view: "connect-workspace" }));
+      await act(async () => navigateTo({ view: "connect" }));
       await flush();
       const row = [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find(
         (candidate) => candidate.textContent?.includes("SuperGrok"),
       )!;
-      expect(row.textContent).toContain("Connect it for everyone instead");
+      expect(row.textContent).toContain(
+        "Only owners and admins can add it for Personal workspaces",
+      );
       expect(row.querySelector("[data-row-action]")).toBeNull();
     } finally {
       await cleanup(view);
@@ -1182,6 +1185,82 @@ describe("One Models page for the organization and the workspace", () => {
       await flush();
       expect(view.container.querySelector("h1")?.textContent).toBe(
         "Only organization owners and admins can open this",
+      );
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("owners and admins never get a separate connect-for-this-workspace page", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    const view = await render();
+    try {
+      // An old link to the workspace-only picker opens Connect account.
+      await act(async () => navigateTo({ view: "connect-workspace" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect account");
+      expect(view.container.textContent).toContain(
+        "Connect it once for Acme, then choose which workspaces can use it.",
+      );
+      // Reached in context (Codex Apps, resets), the workspace's own Connect
+      // Codex says what the account will be.
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("This account will belong to Design preview only.");
+      expect(text).toContain("Codex Apps");
+      expect(text).not.toContain("Which workspaces can use it");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Codex Apps says it needs an account owned by this workspace, with the way to connect one", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    accounts = {
+      ...accounts,
+      accounts: [codexAccount({ id: "org-1", label: "Company plan", source: "organization" })],
+      activeAccountId: "org-1",
+      source: { ...source, effectiveSource: "organization", workspaceAvailable: false },
+      apps: {
+        available: true,
+        credentialId: null,
+        version: 1,
+        designatedAt: null,
+        canDisable: true,
+      },
+    };
+    const view = await render();
+    try {
+      expect(view.container.textContent).toContain(
+        "Codex Apps need a ChatGPT account owned by this workspace.",
+      );
+      await act(async () => button(view.container, "Connect for this workspace")!.click());
+      await flush();
+      expect(lastNavigation?.search).toMatchObject({ view: "connect:codex" });
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("in a Personal workspace an organization key step points to a key for that workspace", async () => {
+    organizationAdmin = true;
+    personalWorkspace = true;
+    routeOrganizationReads();
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:openrouter" }));
+      await flush();
+      expect(view.container.textContent).toContain("To use a key in your Personal workspace,");
+      await act(async () =>
+        button(view.container, "connect it for your Personal workspace")!.click(),
+      );
+      await flush();
+      expect(lastNavigation?.search).toMatchObject({ view: "connect:openrouter" });
+      expect(view.container.textContent).toContain(
+        "This key will belong to your Personal workspace, so only you use it.",
       );
     } finally {
       await cleanup(view);

@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
+import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -403,47 +404,39 @@ export function ModelAccessOnboardingPanel({
   );
 
   const connectOptions = pending ? (
-    <div className="grid gap-4 py-3" role="status">
-      <div>
-        <h3 className="text-sm font-medium">
-          Connect {pending.kind === "codex" ? "Codex" : "SuperGrok"}
-        </h3>
-        <p className="mt-1 text-sm leading-relaxed text-fg-muted">
-          Enter this code on the {pending.kind === "codex" ? "OpenAI" : "xAI"} page we opened in a
-          new tab. This screen updates when you’re connected.
-        </p>
-      </div>
-      <p className="rounded-md bg-bg px-4 py-4 text-center font-mono text-2xl tracking-[0.18em] select-all">
-        {pending.userCode}
-      </p>
-      <Button asChild type="button">
-        <a href={pending.verificationUri} target="_blank" rel="noreferrer">
-          Open authorization <ArrowUpRightIcon className="size-4" />
-        </a>
-      </Button>
-      {pending.kind === "codex" ? (
-        <p className="text-xs leading-relaxed text-fg-muted">
-          Device code login must be turned on in ChatGPT under Settings → Security. On Business or
-          Enterprise plans, a workspace admin has to allow it.{" "}
-          <a
-            className="font-medium text-fg underline underline-offset-2"
-            href={CHATGPT_SECURITY_SETTINGS_URL}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open ChatGPT security settings
-          </a>
-        </p>
-      ) : null}
-      <p className="flex items-center justify-center gap-2 text-xs text-fg-subtle">
-        <Loader2Icon className="size-3 animate-spin motion-reduce:animate-none" /> Waiting for
-        authorization
-      </p>
+    <div className="grid gap-4 py-3">
+      <h3 className="m-0 text-sm font-medium text-fg">
+        Connect {pending.kind === "codex" ? "Codex" : "SuperGrok"}
+      </h3>
+      <SubscriptionDeviceCodePanel
+        provider={pending.kind}
+        userCode={pending.userCode}
+        verificationUri={pending.verificationUri}
+        onCopyResult={(copied) =>
+          copied
+            ? toast.success("Code copied")
+            : toast.error("Couldn't copy the code", { description: "Copy it manually instead." })
+        }
+      />
       {pendingSlow ? (
         <Notice tone="waiting" title="Still waiting?">
-          {pending.kind === "codex"
-            ? "Check that you entered the code exactly as shown and approved access. If ChatGPT says device code login is disabled, turn it on under Settings → Security (or ask your workspace admin), then cancel and try again."
-            : "Check that you entered the code exactly as shown and approved access on the xAI page. If the code expired, cancel and try again."}
+          {pending.kind === "codex" ? (
+            <>
+              Check that you entered the code exactly as shown. If ChatGPT says device code login is
+              off, turn it on in ChatGPT under Settings, Security (on Business and Enterprise plans
+              a ChatGPT admin allows it), then cancel and try again.{" "}
+              <a
+                className="font-medium text-fg underline underline-offset-2"
+                href={CHATGPT_SECURITY_SETTINGS_URL}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open ChatGPT security settings
+              </a>
+            </>
+          ) : (
+            "Check that you entered the code exactly as shown and approved access on the xAI page. If the code expired, cancel and try again."
+          )}
         </Notice>
       ) : null}
       <Button type="button" variant="ghost" onClick={stopDeviceLogin}>

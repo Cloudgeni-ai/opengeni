@@ -1,5 +1,5 @@
 import type { SuperGrokAccount } from "@opengeni/sdk";
-import { CheckIcon, CircleCheckIcon, LoaderCircleIcon, PencilIcon, UnplugIcon } from "lucide-react";
+import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -17,6 +17,7 @@ import {
 } from "@/components/models/models-ui";
 import { reachesWorkspace } from "@/components/models/organization-codex-models";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
+import { DeviceSignInStatus } from "@/components/subscription-device-code-panel";
 import {
   SuperGrokDeviceCodePanel,
   superGrokAccountName,
@@ -673,9 +674,11 @@ export function SuperGrokConnectPage({
       title="Connect SuperGrok"
       description="Sign in with the xAI account whose SuperGrok plan should pay for Grok models."
       onClose={onClose}
-      submitLabel={signingIn ? "Open xAI again" : "Sign in with xAI"}
+      submitLabel="Sign in with xAI"
       pendingLabel="Opening xAI…"
-      submitAnalyticsAction={signingIn ? null : "connect_supergrok"}
+      submitAnalyticsAction="connect_supergrok"
+      // While the code waits, the step holds its own actions.
+      footer={signingIn || connected ? false : undefined}
       submitDisabled={!grok.canManage || grok.busy || connected || Boolean(blockedReason)}
       disabledReason={
         grok.canManage
@@ -684,10 +687,7 @@ export function SuperGrokConnectPage({
       }
       footerStart={footerStart}
       onSubmit={async () => {
-        if (signingIn && grok.pending) {
-          window.open(grok.pending.verificationUri, "_blank", "noopener,noreferrer");
-          return false;
-        }
+        if (signingIn) return false;
         await grok.connect(scope, {
           onConnected: (accountId) =>
             void (async () => {
@@ -722,38 +722,18 @@ export function SuperGrokConnectPage({
             />
           </ChoiceCards>
         ) : null}
-        {grok.pending ? (
-          <SuperGrokDeviceCodePanel
-            userCode={grok.pending.userCode}
-            verificationUri={grok.pending.verificationUri}
-          />
-        ) : (
-          <p className="text-sm text-fg-muted">
-            xAI opens in a new tab and asks for a code, which shows here. Opengeni never sees your
-            password.
-          </p>
-        )}
-        {signingIn || connected ? (
-          <p
-            role="status"
-            className="flex min-w-0 items-center gap-2 rounded-[10px] bg-surface-2 px-3 py-2.5 text-sm text-fg-muted"
-          >
-            {connected ? (
-              <>
-                <CircleCheckIcon aria-hidden="true" className="size-4 shrink-0 text-status-idle" />
-                Connected
-              </>
-            ) : (
-              <>
-                <LoaderCircleIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-fg-subtle motion-safe:animate-spin"
-                />
-                Waiting for you to sign in…
-              </>
-            )}
-          </p>
-        ) : null}
+        <DeviceSignInStatus
+          provider="supergrok"
+          connected={connected}
+          panel={
+            grok.pending ? (
+              <SuperGrokDeviceCodePanel
+                userCode={grok.pending.userCode}
+                verificationUri={grok.pending.verificationUri}
+              />
+            ) : null
+          }
+        />
       </FieldStack>
     </ModelsFormPage>
   );

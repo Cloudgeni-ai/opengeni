@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 
 import type { ConnectionAccessKind } from "@/components/connection-access-settings";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { Disclosure } from "@/components/ui/disclosure";
 import { CheckboxField } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -20,16 +19,16 @@ import { Skeleton } from "@/components/ui/skeleton";
    person's Personal workspace. Organization API keys never reach Personal
    workspaces, so for them that choice is shown off, with the reason.
 
-   Owning the account by this workspace instead is under Advanced: it is only
-   needed for separate billing or keys for one team, Codex Apps, or redeeming
-   Codex usage limit resets.
+   Owning an account by one workspace is not a choice here: to a person it
+   reads the same as "Only selected workspaces" with that one ticked. It stays
+   where it is genuinely needed, explained there: Codex Apps, redeeming Codex
+   usage limit resets, an API key in a Personal workspace, and workspace admins
+   who can't connect for everyone.
    -------------------------------------------------------------------------- */
 
 export type ConnectAudience =
   | { kind: "everyone" }
-  | { kind: "selected"; workspaceIds: string[]; personalWorkspaces: boolean }
-  /** Owned by this workspace, not the organization (Advanced). */
-  | { kind: "workspace" };
+  | { kind: "selected"; workspaceIds: string[]; personalWorkspaces: boolean };
 
 export const EVERYONE: ConnectAudience = { kind: "everyone" };
 
@@ -40,6 +39,9 @@ export function personalWorkspacesSupported(kind: ConnectionAccessKind): boolean
 
 /** Why an organization API key can't be offered to Personal workspaces. */
 export const PERSONAL_KEYS_REASON = "Organization API keys can't be used in Personal workspaces.";
+
+/** The same reason, short, under the "Personal workspaces" choice it turns off. */
+const PERSONAL_KEYS_SHORT_REASON = "Organization API keys can't be used there.";
 
 /** The organization's shared workspaces, for the "Only selected workspaces" list. */
 export function useOrganizationWorkspaces(
@@ -136,7 +138,6 @@ export function ConnectAudienceFields({
   workspaces,
   value,
   onChange,
-  workspaceOwned,
   disabled = false,
 }: {
   kind: ConnectionAccessKind;
@@ -146,15 +147,9 @@ export function ConnectAudienceFields({
   workspaces: { id: string; name: string }[] | null;
   value: ConnectAudience;
   onChange: (next: ConnectAudience) => void;
-  /**
-   * The Advanced choice to own the account by this workspace instead. Null
-   * hides it (the viewer can't connect here, or the provider can't).
-   */
-  workspaceOwned: { description: string } | null;
   disabled?: boolean;
 }) {
   const personalSupported = personalWorkspacesSupported(kind);
-  const choice = value.kind === "workspace" ? "workspace" : value.kind;
   const selected = value.kind === "selected" ? value : null;
   const everyoneDescription = personalSupported
     ? "Every workspace, including new ones and everyone's Personal workspace."
@@ -166,7 +161,7 @@ export function ConnectAudienceFields({
       <ChoiceCards
         label="Which workspaces can use it"
         description={`Owners and admins of ${organizationName} can see and change it on its account page.`}
-        value={choice === "workspace" ? "" : choice}
+        value={value.kind}
         disabled={disabled}
         onValueChange={(next) =>
           onChange(
@@ -218,39 +213,12 @@ export function ConnectAudienceFields({
           )}
           <CheckboxField
             label="Personal workspaces"
-            description={
-              personalSupported
-                ? "Everyone's private Personal workspace, yours too. It's all of them or none."
-                : PERSONAL_KEYS_REASON
-            }
+            {...(personalSupported ? {} : { description: PERSONAL_KEYS_SHORT_REASON })}
             disabled={disabled || !personalSupported}
             checked={personalSupported && selected.personalWorkspaces}
             onCheckedChange={(checked) => onChange({ ...selected, personalWorkspaces: checked })}
           />
         </fieldset>
-      ) : null}
-      {workspaceOwned ? (
-        <Disclosure
-          title="Advanced"
-          summary={
-            value.kind === "workspace"
-              ? `Owned by ${here.personal ? "your Personal workspace" : here.name}`
-              : "Who owns the account"
-          }
-          defaultOpen={value.kind === "workspace"}
-        >
-          <CheckboxField
-            label={
-              here.personal
-                ? "Connect for your Personal workspace only"
-                : `Connect for ${here.name} only`
-            }
-            description={workspaceOwned.description}
-            disabled={disabled}
-            checked={value.kind === "workspace"}
-            onCheckedChange={(checked) => onChange(checked ? { kind: "workspace" } : EVERYONE)}
-          />
-        </Disclosure>
       ) : null}
     </div>
   );

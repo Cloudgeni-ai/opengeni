@@ -327,7 +327,6 @@ export function ConnectionAccessFormPage({
             {data.personalWorkspacesSupported ? (
               <CheckboxField
                 label="Personal workspaces"
-                description="Everyone's private Personal workspace, yours too. It's all of them or none."
                 disabled={disabled}
                 checked={draft.allowPersonalWorkspaces}
                 onCheckedChange={(checked) =>

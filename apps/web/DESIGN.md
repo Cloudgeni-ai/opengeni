@@ -523,7 +523,9 @@ back link, title and rows start where the section header does. Page actions use 
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
 knowledge entry. Use `FormPage` from `components/ui/form-dialog.tsx`: a back link, a 20/600
 title, one 640px column of fields, server errors inside the form, and a sticky footer with Cancel
-(ghost) and one primary. A second step after submit (an API key shown once) happens on the same
+(ghost) and one primary (below 640px wide the footer follows the last field instead, so it never
+covers the form). A step that waits (a sign-in code) hides the footer: the step holds its own
+actions. A second step after submit (an API key shown once) happens on the same
 page. After a create, go to the new object's page.
 
 **A small centered modal is still right** for:
