@@ -196,7 +196,9 @@ export type SessionProxyHandlerOptions = {
   /**
    * Let the browser choose model, reasoning effort, and latency per message
    * or draft (still limited by the workspace model catalog). When false those
-   * fields are removed; hide the composer's model picker to match. Defaults to true.
+   * browser fields are removed. Draft save/submit instead use the server-owned
+   * composer draft's policy (initially the session defaults); hide the composer's
+   * model picker to match. Defaults to true.
    */
   modelSelection?: boolean | undefined;
   /** SSE heartbeat interval. Defaults to 15 seconds. */
@@ -586,6 +588,19 @@ export function createSessionProxyHandler(
       const route = `${method} ${op.join("/")}`;
       const body = method === "GET" ? undefined : await readJsonBody(request, maxBodyBytes, true);
       const sanitize = (value: unknown) => sanitizeMessage(value, modelSelection);
+      const draftPolicy = async (message: Record<string, unknown>) => {
+        if (modelSelection) return message;
+        // Draft requests require explicit policy fields. Use this actor's durable
+        // draft, not browser choices or mutable config defaults: submit repeats
+        // the saved policy as an integrity fence, including after draft rotation.
+        const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+        return {
+          ...message,
+          model: draft.model,
+          reasoningEffort: draft.reasoningEffort,
+          latencyMode: draft.latencyMode,
+        };
+      };
       const forward = async (path: string, payload: Record<string, unknown> | Response) =>
         payload instanceof Response
           ? payload
@@ -644,12 +659,20 @@ export function createSessionProxyHandler(
         case "GET composer-draft":
           return await read(`${session}/composer-draft`);
         case "PUT composer-draft":
-          return json(await client.requestJson("PUT", `${session}/composer-draft`, sanitize(body)));
-        case "POST composer-draft/submit":
+          return json(
+            await client.requestJson(
+              "PUT",
+              `${session}/composer-draft`,
+              await draftPolicy(sanitize(body)),
+            ),
+          );
+        case "POST composer-draft/submit": {
+          const message = await forwardMessage(body, { sessionId, delivery: "submit" });
           return await forward(
             `${session}/composer-draft/submit`,
-            await forwardMessage(body, { sessionId, delivery: "submit" }),
+            message instanceof Response ? message : await draftPolicy(message),
           );
+        }
         case "POST control": {
           if (body?.action !== "pause" && body?.action !== "resume") {
             reject(403, "control_not_allowed", "Only pause and resume are available.");
