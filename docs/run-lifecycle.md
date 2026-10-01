@@ -2363,7 +2363,16 @@ readers cannot parse the new discriminator. After old active locators have
 settled or passed the existing evidence-backed drain, remove the legacy live
 reader; historical records remain immutable and do not authorize execution.
 
-SDK-internal setup/readiness commands still use their original live SDK observer
+Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
+`/bin/true` invocation with no shell, user environment or command admission.
+The existing 60-second budget covers channel readiness and exit observation.
+Only typed local pre-dispatch failure retries Start. A transport failure after
+dispatch instead observes the same UUID, retrying transient reads without another
+Start. Budget expiry and attempt cancellation abort the native RPCs; success
+requires zero exit and EOF on both streams. Definitive rejection and nonzero
+exit remain failures. This applies to both new boxes and warm reattachment.
+
+Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range
 (1–2147483647), so a setup process cannot collide with a retained command. Only
 the same adapter can read those aliases; they cannot be bound as durable commands
