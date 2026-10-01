@@ -1,0 +1,36 @@
+---
+title: "Developer plugin"
+description: "Give your coding agent the OpenGeni SDK setup and product integration skills."
+icon: "puzzle-piece"
+---
+
+The **OpenGeni Developer** plugin gives your coding agent two skills:
+
+- `opengeni-setup` sets up SDK access.
+- `opengeni-client` integrates OpenGeni into your product.
+
+It contains no MCP server, hooks, or UI. Installing it does not configure
+credentials or give the coding agent API access. These skills are for the agent
+building your product, not the agent your customers use.
+
+## Install
+
+| Coding agent | Installation |
+| --- | --- |
+| Claude Code | Add the `Cloudgeni-ai/opengeni` marketplace, then install `opengeni-developer@opengeni-developer-plugins`. |
+| Codex | Add the `Cloudgeni-ai/opengeni` marketplace, then install `opengeni-developer@opengeni-developer-plugins`. `/plugins` and the supported desktop plugin directory also work. |
+| Cursor | In **Customize → From GitHub Repository**, import `https://github.com/Cloudgeni-ai/opengeni`, then install **OpenGeni Developer**. |
+| ChatGPT | Use the supported desktop repo/local marketplace flow. Skills-only plugins are supported; availability depends on your surface and workspace permissions. |
+
+[Copy the install commands, including local-checkout instructions](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/developer-plugin.md).
+The guide also records the official formats verified on October 1, 2026.
+This plugin has not been published to the universal public directory.
+
+## Use
+
+Ask your coding agent to set up OpenGeni SDK access, or to embed OpenGeni in your
+product. In Claude Code, invoke `/opengeni-developer:opengeni-setup` or
+`/opengeni-developer:opengeni-client` explicitly.
+
+Continue with [Embed with your coding agent](/embed-with-a-coding-agent) or
+[For AI agents](/reference/for-ai-agents).

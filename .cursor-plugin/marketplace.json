@@ -1,0 +1,12 @@
+{
+  "name": "opengeni-developer-plugins",
+  "owner": { "name": "Cloudgeni" },
+  "metadata": { "description": "OpenGeni SDK setup and product integration skills." },
+  "plugins": [
+    {
+      "name": "opengeni-developer",
+      "source": "./",
+      "description": "Set up OpenGeni SDK access and embed OpenGeni in your product."
+    }
+  ]
+}
