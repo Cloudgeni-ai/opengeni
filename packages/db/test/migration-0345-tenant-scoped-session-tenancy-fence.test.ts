@@ -62,6 +62,7 @@ const directHotMutatorInventory = [
   "fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,uuid)",
   "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
+  "opengeni_private.browser_deadline_checkpoint(jsonb,boolean,boolean)",
   "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",
   "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
   "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",

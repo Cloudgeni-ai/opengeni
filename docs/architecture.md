@@ -1504,11 +1504,15 @@ The worker awaits completion and routes rejection through
 `sandbox_deadline_rotation` before `turn.completed`.
 
 BrowserSession/ComputerSession holders remain durable despite old heartbeats.
-Only finite-provider handoff deadlines override them: the reaper marks exact
-controllers `lost`, deterministically fails prepared operations, marks dispatched
-operations `outcome_unknown`, and preserves bindings for cleanup. The bounded
-deadline batch selects interaction-held leases, including already-draining ones;
-unrelated overdue leases cannot starve it. Lease-free Connected Machine/device
+Before Modal expiry, checkpoint-capable managed browsers suspend through existing
+encrypted profile authority. A private claim binds lease epoch, instance and
+controller; no originating-user grant is borrowed. The existing reaper tick starts
+bounded capture children on `-browser-checkpoint-v1`; ordinary draining starts
+independently. Cleanup follows committed suspension; retries reuse its receipt.
+Normal authorized resume restores the checkpoint. At physical expiry, unsupported
+or unsaved controllers become `lost`; dispatched operations become `outcome_unknown`.
+The bounded deadline batch includes interaction-held and draining leases.
+Lease-free Connected Machine/device
 transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
 fences before mutation visibility. Healthy interactions have no independent age
 limit. Existing browser/computer control, including suspension, retains its provider across
