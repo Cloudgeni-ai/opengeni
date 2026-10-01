@@ -33724,7 +33724,8 @@ function metadataWithAgentLearningCreateIdentity(
 
 const SESSION_CREATE_AGENT_CONFIG_METADATA_KEY = "_opengeni_session_create_agent_config_v1";
 
-function metadataWithAgentConfigCreateIdentity(
+/** Canonical creation metadata shared with strict generated-session admission. */
+export function metadataWithAgentConfigCreateIdentity(
   metadata: Record<string, unknown>,
   config: ResolvedAgentConfig | null | undefined,
 ): Record<string, unknown> {
