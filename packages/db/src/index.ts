@@ -11,7 +11,11 @@ export {
   readSessionFileAttachments,
   type SessionAttachmentReadAccess,
 } from "./session-file-attachments";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import {
+  parseAcceptedMcpAccountBindings,
+  sessionCreateConnectionSelectionFailure,
+} from "./mcp-account-bindings";
+export { SessionCreateConnectionSelectionUnavailableError } from "./mcp-account-bindings";
 import {
   childTerminalResultFinalAnswer,
   childTerminalResultFinalAnswerSequences,
@@ -20578,11 +20582,13 @@ export class SessionVariableSetSelectionUnavailableError extends Error {
   }
 }
 
-async function translateSessionVariableSetSelectionCreateError(
+async function translateSessionCreateError(
   db: Database,
   input: SessionCreateInput,
   error: unknown,
 ): Promise<never> {
+  const connectionFailure = sessionCreateConnectionSelectionFailure(error);
+  if (connectionFailure) throw connectionFailure;
   if (!isSessionVariableSetSelectionFkViolation(error) || !input.subjectId) throw error;
 
   // The failed create transaction, including its session row and projection
@@ -34360,7 +34366,7 @@ export async function createSession(db: Database, input: SessionCreateInput): Pr
         ),
     );
   } catch (error) {
-    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+    return await translateSessionCreateError(db, input, error);
   }
   if (result.denied) {
     // Throw only after withRlsContext's outer transaction commits the denial.
@@ -34397,7 +34403,7 @@ export async function createSessionWithIdempotencyKeyResult(
         ),
     );
   } catch (error) {
-    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+    return await translateSessionCreateError(db, input, error);
   }
 }
 

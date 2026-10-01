@@ -18,7 +18,10 @@ import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { listSessionDiscoverySummaries } from "@opengeni/db";
+import {
+  listSessionDiscoverySummaries,
+  SessionCreateConnectionSelectionUnavailableError,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
@@ -1010,6 +1013,40 @@ describe("first-party MCP tool visibility policy", () => {
     });
     expect(unauthorized.structuredContent?.error?.code).toBe("session_create_forbidden");
     expect(JSON.stringify(unauthorized)).not.toContain("private-");
+  });
+
+  test("session_create exposes a known connection refusal without suggesting blind retry or reflecting its cause", async () => {
+    const routeDeps = deps();
+    const failure = new SessionCreateConnectionSelectionUnavailableError(
+      new Error("private-connection-query-and-credential"),
+    );
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          throw failure;
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const server = buildOpenGeniMcpServer(routeDeps, {
+      ...grant(["sessions:create"], ["session_create"]),
+      principalKind: "human_session",
+      metadata: { firstPartyMcpTools: ["session_create"] },
+    });
+    const result = await callRegisteredTool(server, "session_create", {
+      initialMessage: "private-task",
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_create_connection_selection_unavailable",
+          message: failure.message,
+          retryable: false,
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private-");
   });
 
   test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {

@@ -187,6 +187,7 @@ import {
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
   SessionVariableSetSelectionUnavailableError,
+  SessionCreateConnectionSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
@@ -5714,6 +5715,9 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionCreateConnectionSelectionUnavailableError) {
+    return c.json({ code: error.code, message: error.message, retryable: false }, 409);
+  }
   if (error instanceof SessionTenancyManagedHumanRequiredError) {
     return c.json(
       {
