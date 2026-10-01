@@ -289,13 +289,19 @@ export function ComputerViewer({
       : null;
   const rfbStream =
     frames.attachment?.stream.kind === "direct_rfb" ? frames.attachment.stream : null;
+  const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
+  // RFB has one combined input switch; partial native input stays view-only.
+  const rfbInputEnabled =
+    !machineLocked &&
+    computer.session?.capabilities?.pointerInput === true &&
+    computer.session?.capabilities?.keyboardInput === true;
   const rfbCapability = useMemo<DesktopStreamCapability | null>(() => {
     if (!rfbStream || !frames.attachment) return null;
     const bounds = computer.selectedTarget?.bounds;
     return {
       transport: "vnc-ws",
       client: "novnc",
-      mode: "interactive",
+      mode: rfbInputEnabled ? "interactive" : "read-only",
       url: rfbStream.url,
       token: null,
       expiresAt: frames.attachment.expiresAt,
@@ -307,8 +313,7 @@ export function ComputerViewer({
       sharedSessionIds: [],
       reason: null,
     };
-  }, [computer.selectedTarget?.bounds, frames.attachment, rfbStream]);
-  const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
+  }, [computer.selectedTarget?.bounds, frames.attachment, rfbInputEnabled, rfbStream]);
   const currentIds = useMemo(() => new Set(relevant.map((session) => session.id)), [relevant]);
 
   useEffect(() => {
@@ -452,7 +457,8 @@ export function ComputerViewer({
 
   const copyFromRfb = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
-      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return;
+      if (!rfbInputEnabled || !rfbStream || computer.session?.capabilities?.clipboard !== true)
+        return;
       event.preventDefault();
       event.stopPropagation();
       void perform({ type: "clipboard", operation: "copy" }, null)
@@ -464,12 +470,13 @@ export function ComputerViewer({
         })
         .catch((cause) => notifyError(cause, "Could not copy from the desktop."));
     },
-    [computer, notifyError, perform, rfbStream],
+    [computer, notifyError, perform, rfbInputEnabled, rfbStream],
   );
 
   const pasteIntoRfb = useCallback(
     (text: string): boolean => {
-      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return false;
+      if (!rfbInputEnabled || !rfbStream || computer.session?.capabilities?.clipboard !== true)
+        return false;
       // Keep paste on the canonical ComputerSession action path. RFB
       // ClientCutText synchronization varies by server and can acknowledge a
       // local paste without ever updating the remote graphical seat. These two
@@ -484,7 +491,7 @@ export function ComputerViewer({
       })().catch((cause) => notifyError(cause, "Could not paste into the desktop."));
       return true;
     },
-    [computer, notifyError, perform, rfbStream],
+    [computer, notifyError, perform, rfbInputEnabled, rfbStream],
   );
 
   const hideGenericCreate = suppressGenericCreate && liveRelevant.length === 0;
@@ -623,13 +630,18 @@ export function ComputerViewer({
               <div className="relative min-h-0 flex-1 bg-black" onCopyCapture={copyFromRfb}>
                 <DesktopViewer
                   capability={rfbCapability}
-                  interactive
+                  interactive={rfbInputEnabled}
                   showControlToggle={false}
                   webSocketProtocols={rfbStream.protocols}
                   onPasteText={pasteIntoRfb}
                   targetPlatform={computer.session?.platform ?? null}
                   className="h-full"
                 />
+                {!rfbInputEnabled ? (
+                  <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-white/80 backdrop-blur">
+                    View only · direct input unavailable
+                  </div>
+                ) : null}
               </div>
             ) : (
               <ComputerViewport
@@ -647,6 +659,8 @@ export function ComputerViewer({
                 connectionError={frames.error ?? computer.error}
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
+                pointerInput={computer.session?.capabilities?.pointerInput === true}
+                keyboardInput={computer.session?.capabilities?.keyboardInput === true}
                 clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
@@ -1010,6 +1024,8 @@ function ComputerViewport(props: {
   connectionError: Error | null;
   mutating: boolean;
   backgroundActions: boolean;
+  pointerInput: boolean;
+  keyboardInput: boolean;
   clipboardEnabled: boolean;
   onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
   onReadClipboard: () => Promise<ComputerClipboard>;
@@ -1057,6 +1073,8 @@ function ComputerViewport(props: {
     !streamFailed &&
     !props.machineLocked &&
     (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
+  const pointerInputEnabled = rawInputEnabled && props.pointerInput;
+  const keyboardInputEnabled = rawInputEnabled && props.keyboardInput;
 
   const clearBufferedInput = useCallback(() => {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
@@ -1159,11 +1177,11 @@ function ComputerViewport(props: {
   }, [clearBufferedInput, paintQueuedFrames, props.frame]);
 
   useLayoutEffect(() => {
-    if (!rawInputEnabled) {
+    if (!rawInputEnabled || !props.pointerInput || !props.keyboardInput) {
       actionQueueEpochRef.current += 1;
       clearBufferedInput();
     }
-  }, [clearBufferedInput, rawInputEnabled]);
+  }, [clearBufferedInput, props.keyboardInput, props.pointerInput, rawInputEnabled]);
 
   const enqueue = useCallback(
     (
@@ -1248,6 +1266,8 @@ function ComputerViewport(props: {
     if (!frame || props.mutating || !rawInputEnabled || event.button !== 0) return;
     // Preserve the keyboard sink's focus through the canvas pointer default action.
     event.preventDefault();
+    if (keyboardInputEnabled) inputRef.current?.focus({ preventScroll: true });
+    if (!pointerInputEnabled) return;
     flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
@@ -1257,11 +1277,10 @@ function ComputerViewport(props: {
       frame,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    inputRef.current?.focus({ preventScroll: true });
   };
 
   const pointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!rawInputEnabled) return;
+    if (!pointerInputEnabled) return;
     const start = pointerStartRef.current;
     pointerStartRef.current = null;
     if (!start || start.pointerId !== event.pointerId) return;
@@ -1326,7 +1345,7 @@ function ComputerViewport(props: {
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
-    if (!rawInputEnabled) return;
+    if (!pointerInputEnabled) return;
     const frame = paintedFrameRef.current;
     if (!frame) return;
     flushPendingWheel();
@@ -1349,7 +1368,7 @@ function ComputerViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
-    if (!rawInputEnabled) return;
+    if (!pointerInputEnabled) return;
     const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
@@ -1377,7 +1396,7 @@ function ComputerViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!rawInputEnabled) return;
+    if (!keyboardInputEnabled) return;
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
@@ -1398,7 +1417,7 @@ function ComputerViewport(props: {
   };
 
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!props.clipboardEnabled || !rawInputEnabled) return;
+    if (!props.clipboardEnabled || !keyboardInputEnabled) return;
     event.preventDefault();
     flushPendingWheel();
     flushPendingText();
@@ -1415,7 +1434,7 @@ function ComputerViewport(props: {
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!props.clipboardEnabled || !rawInputEnabled) return;
+    if (!props.clipboardEnabled || !keyboardInputEnabled) return;
     event.preventDefault();
     flushPendingWheel();
     flushPendingText();
@@ -1432,7 +1451,7 @@ function ComputerViewport(props: {
   };
 
   const input = (value: string) => {
-    if (!value || !rawInputEnabled) return;
+    if (!value || !keyboardInputEnabled) return;
     flushPendingWheel();
     flushPendingClick();
     const pending = pendingTextRef.current;
@@ -1462,7 +1481,7 @@ function ComputerViewport(props: {
         className={cn(
           "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           !showCanvas && "invisible",
-          !rawInputEnabled && "cursor-default",
+          !pointerInputEnabled && "cursor-default",
         )}
         onPointerDown={pointerDown}
         onPointerUp={pointerUp}
@@ -1485,7 +1504,7 @@ function ComputerViewport(props: {
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
-        disabled={!rawInputEnabled}
+        disabled={!keyboardInputEnabled}
       />
       {!showCanvas ? (
         <ComputerViewportFallback
@@ -1502,10 +1521,14 @@ function ComputerViewport(props: {
           <LoaderCircleIcon className="size-3 animate-spin" /> Acting
         </div>
       ) : null}
-      {showCanvas && !rawInputEnabled ? (
+      {showCanvas && (!rawInputEnabled || (!props.pointerInput && !props.keyboardInput)) ? (
         <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
-          <span>Background view · use native controls</span>
-          {props.target ? (
+          <span>
+            {props.pointerInput || props.keyboardInput
+              ? "Background view · use native controls"
+              : "View only · mouse and keyboard unavailable"}
+          </span>
+          {props.target && (props.pointerInput || props.keyboardInput) ? (
             <button
               type="button"
               disabled={props.mutating}

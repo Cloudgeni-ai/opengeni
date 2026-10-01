@@ -1516,6 +1516,96 @@ describe("ComputerViewer", () => {
 });
 
 describe("ComputerViewer input reliability", () => {
+  test("keeps an RFB desktop view-only when native input is unavailable", async () => {
+    const priorWebSocket = globalThis.WebSocket;
+    // noVNC owns its socket; keep this component check on a disconnected fixture.
+    globalThis.WebSocket = class extends EventTarget {
+      static CONNECTING = 0;
+      static CLOSED = 3;
+      readyState = 0;
+      binaryType = "arraybuffer";
+      close() {
+        this.readyState = 3;
+      }
+    } as unknown as typeof WebSocket;
+    const currentSession = computerSession();
+    currentSession.capabilities!.keyboardInput = false;
+    const currentTarget = target();
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+      getComputerSession: async () => currentSession,
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeComputerTarget: async () => observation(currentTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        rfbAttachment(request.targetId),
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    try {
+      await flush(40);
+      const desktop = rendered.container.querySelector("[data-opengeni-desktop]");
+      expect(desktop).not.toBeNull();
+      expect(desktop!.getAttribute("data-in-control")).toBeNull();
+    } finally {
+      await rendered.unmount();
+      globalThis.WebSocket = priorWebSocket;
+    }
+  });
+
+  test.each([
+    { pointerInput: false, keyboardInput: true },
+    { pointerInput: true, keyboardInput: false },
+    { pointerInput: false, keyboardInput: false },
+  ])("honors mouse and keyboard availability independently (%p)", async (capabilities) => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture(undefined, undefined, { capabilities });
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      expect(fixture.canvas.className).not.toContain("invisible");
+      expect(fixture.keyboard.disabled).toBe(!capabilities.keyboardInput);
+      await actRun(() => {
+        for (const type of ["pointerdown", "pointerup", "contextmenu"]) {
+          fixture.canvas.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: 20,
+              clientY: 20,
+              button: 0,
+            }),
+          );
+        }
+        fixture.canvas.dispatchEvent(computerWheel(100));
+        fixture.keyboard.value = "permitted text";
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      });
+      await flush(350);
+      expect(fixture.actions.some(({ action }) => action.type === "pointer")).toBe(
+        capabilities.pointerInput,
+      );
+      expect(fixture.actions.some(({ action }) => action.type === "keyboard")).toBe(
+        capabilities.keyboardInput,
+      );
+      if (!capabilities.pointerInput && !capabilities.keyboardInput) {
+        expect(fixture.actions).toEqual([]);
+        expect(fixture.rendered.container.textContent).toContain("View only");
+        expect(fixture.rendered.container.textContent).not.toContain("Control directly");
+      }
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("retains keyboard focus after a canvas click and types after that click", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
@@ -1818,14 +1908,17 @@ function computerWheel(deltaY: number): WheelEvent {
 async function renderComputerInputFixture(
   actInComputer?: (request: ComputerActionRequest) => Promise<ComputerActionReceipt>,
   readComputerClipboard?: () => Promise<ComputerClipboard>,
+  options: { capabilities?: Partial<NonNullable<ComputerSession["capabilities"]>> } = {},
 ) {
   const currentTarget = target();
+  const currentSession = computerSession();
+  Object.assign(currentSession.capabilities!, options.capabilities);
   const secondTarget = { ...target("window-2"), title: "Second desktop", focused: false };
   const actions: ComputerActionRequest[] = [];
   const sockets: FakeComputerSocket[] = [];
   const client = fakeClient({
-    listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
-    getComputerSession: async () => computerSession(),
+    listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+    getComputerSession: async () => currentSession,
     listComputerTargets: async () => ({
       computerSessionId: COMPUTER_SESSION_ID,
       controllerGeneration: "controller-1",
