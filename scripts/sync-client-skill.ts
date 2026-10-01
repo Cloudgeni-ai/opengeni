@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const source = join(root, ".agents/skills/opengeni-client");
-const destination = join(root, "packages/runtime/src/bundled_default_skills/opengeni-client");
+/** Exact generated copies: the runtime bundle and the coding-agent plugin, whose
+ * installers (Claude Code, Codex) copy plugin files and do not follow symlinks
+ * out of the plugin directory. */
+const destinations = [
+  join(root, "packages/runtime/src/bundled_default_skills/opengeni-client"),
+  join(root, "plugins/opengeni/skills/build-with-opengeni/opengeni-client"),
+];
 
 async function files(directory: string): Promise<Map<string, string>> {
   const result = new Map<string, string>();
@@ -23,33 +29,38 @@ async function files(directory: string): Promise<Map<string, string>> {
   return result;
 }
 
-/** The repository guide is the sole authored copy. Runtime assets are exact copies. */
+/** The repository guide is the sole authored copy. Runtime and plugin assets are exact copies. */
 export async function checkClientSkill(): Promise<void> {
   const expected = await files(source);
-  let actual: Map<string, string>;
-  try {
-    actual = await files(destination);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    throw new Error("Bundled client Skill is missing; run bun run sync:client-skill", {
-      cause: error,
-    });
+  for (const destination of destinations) {
+    const label = relative(root, destination);
+    let actual: Map<string, string>;
+    try {
+      actual = await files(destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      throw new Error(`Client Skill copy ${label} is missing; run bun run sync:client-skill`, {
+        cause: error,
+      });
+    }
+    if (
+      expected.size !== actual.size ||
+      [...expected].some(([path, text]) => actual.get(path) !== text)
+    )
+      throw new Error(`Client Skill copy ${label} is stale; run bun run sync:client-skill`);
   }
-  if (
-    expected.size !== actual.size ||
-    [...expected].some(([path, text]) => actual.get(path) !== text)
-  )
-    throw new Error("Bundled client Skill is stale; run bun run sync:client-skill");
 }
 
 export async function syncClientSkill(): Promise<void> {
   const expected = await files(source);
-  // Only this generated directory is replaced, including obsolete references.
-  await rm(destination, { recursive: true, force: true });
-  for (const [path, text] of expected) {
-    const target = join(destination, path);
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, text);
+  for (const destination of destinations) {
+    // Only these generated directories are replaced, including obsolete references.
+    await rm(destination, { recursive: true, force: true });
+    for (const [path, text] of expected) {
+      const target = join(destination, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, text);
+    }
   }
 }
 

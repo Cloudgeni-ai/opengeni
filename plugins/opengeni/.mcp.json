@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "opengeni": {
+      "type": "http",
+      "url": "${user_config.base_url}/v1/workspaces/${user_config.workspace_id}/mcp"
+    }
+  }
+}

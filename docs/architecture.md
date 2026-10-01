@@ -1144,9 +1144,10 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
   `deploy/stacks/` wraps external dependencies.
 - `docs/` contains current topic docs and point-in-time records; its canonical
   index is [`README.md`](README.md).
-- `docs-site/` is the public documentation site (Mintlify; published at
-  docs.opengeni.ai from `main`, subdirectory `/docs-site`). It is product-facing
-  and links to `docs/` for engineering detail rather than restating it.
+- `docs-site/` is the public Mintlify documentation site (docs.opengeni.ai,
+  built from `main`). It is product-facing and links to `docs/` for
+  engineering detail rather than restating it.
+- `plugins/opengeni/`: coding-agent plugin (`.claude-plugin/marketplace.json`).
 - `scripts/` owns development, static checks, release mechanics, deployment
   helpers, and operator-only utilities.
 - `test/` contains integration, end-to-end, and live suites; package-local

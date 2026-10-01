@@ -1,0 +1,95 @@
+---
+title: "Use OpenGeni from your coding agent"
+description: "Connect Claude Code, Codex, or Cursor to an OpenGeni workspace to offload long-running work and to build products on OpenGeni."
+icon: "terminal"
+---
+
+Your local coding agent can hand work to OpenGeni: it starts a session in your workspace with a self-contained brief, gives you the session link, checks progress, and brings back the result. The work runs in OpenGeni's cloud sandbox with your workspace's repositories, connections, and model settings, so your laptop can close.
+
+The OpenGeni plugin bundles three things:
+
+- The **workspace MCP server**, `https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp`, which your agent signs in to with your OpenGeni account.
+- The **offload-to-opengeni** Skill, which teaches the agent when and how to delegate.
+- The **build-with-opengeni** Skill, which guides the agent through [integrating OpenGeni into your product](/guides/integrate-your-product).
+
+<Note>
+  Workspace MCP sign-in must be enabled on the deployment. If
+  `https://<your OpenGeni URL>/.well-known/oauth-authorization-server` does not return JSON, ask
+  your administrator to enable it. Self-hosted operators: see [workspace MCP
+  OAuth](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#workspace-mcp-oauth).
+</Note>
+
+## Find your workspace ID
+
+Open the workspace you want your coding agent to use. Its ID is the UUID after `/workspaces/` in the address bar. Sessions your agent starts run in that workspace and use its credits or connected model subscription.
+
+## Set up your agent
+
+<Tabs>
+  <Tab title="Claude Code">
+    Install the plugin from the OpenGeni repository:
+
+    ```bash
+    claude plugin marketplace add Cloudgeni-ai/opengeni --sparse .claude-plugin plugins
+    claude plugin install opengeni@opengeni --config workspace_id=<workspace ID>
+    ```
+
+    For a deployment other than OpenGeni Cloud, also pass `--config base_url=https://<your OpenGeni URL>`. Inside Claude Code, `/plugin marketplace add Cloudgeni-ai/opengeni` and `/plugin install opengeni@opengeni` do the same and ask for both values.
+
+    Start Claude Code, run `/mcp`, select `plugin:opengeni:opengeni`, and sign in. On a machine without a browser, run `claude mcp login --no-browser plugin:opengeni:opengeni` and paste the redirect URL back.
+
+  </Tab>
+  <Tab title="Codex">
+    Add the server; Codex detects OAuth and opens the sign-in page:
+
+    ```bash
+    codex mcp add opengeni --url https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp
+    ```
+
+    Run `codex mcp login opengeni` to sign in again later. For the Skills, install the plugin with `codex plugin marketplace add Cloudgeni-ai/opengeni` and `codex plugin add opengeni@opengeni`, or copy the folders in [`plugins/opengeni/skills`](https://github.com/Cloudgeni-ai/opengeni/tree/main/plugins/opengeni/skills) into `~/.agents/skills/`. Keep the `codex mcp add` server either way: it replaces the plugin's placeholder.
+
+  </Tab>
+  <Tab title="Cursor">
+    Add the server to `~/.cursor/mcp.json`, or `.cursor/mcp.json` for one project:
+
+    ```json
+    {
+      "mcpServers": {
+        "opengeni": {
+          "url": "https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp"
+        }
+      }
+    }
+    ```
+
+    Sign in from Cursor Settings → MCP. Copy the folders in [`plugins/opengeni/skills`](https://github.com/Cloudgeni-ai/opengeni/tree/main/plugins/opengeni/skills) into `~/.cursor/skills/`.
+
+  </Tab>
+</Tabs>
+
+Before you connect, sign in to OpenGeni in your default browser: the sign-in opens an OpenGeni consent page there and needs that session. Choose the organization and the same workspace as in the URL, and approve.
+
+## Offload work
+
+Ask in plain words, for example:
+
+- "Run the flaky-test investigation on OpenGeni in the background and give me the link."
+- "Have OpenGeni upgrade the SDK on branch `chore/sdk-7` and open a draft pull request."
+- "What is the status of the OpenGeni session you started?"
+
+The agent writes a brief with the goal, repository and branch, constraints, acceptance criteria, and exactly what it may deliver. OpenGeni clones from your Git host, so push the branch first; the agent asks before pushing. If the workspace cannot see the repository, the agent gives you a link to connect GitHub.
+
+Approvals and questions from the OpenGeni agent appear in the session; open the link to answer them. Follow-ups go to the same session, so it keeps its context and sandbox.
+
+## How access works
+
+- You sign in with your own OpenGeni account. The agent gets a short-lived token scoped to the workspace MCP endpoint, limited to what you can do in that workspace. It cannot call the REST API, and it never sees a password or API key.
+- The token is refreshed automatically. Disconnect by signing out of the server in your client (`/mcp` in Claude Code, `codex mcp logout opengeni`).
+- Tools that need a separate human approval are not exposed over MCP; use the OpenGeni app for those.
+- The Skill tells the agent never to put secrets in a session brief. Store credentials in OpenGeni and refer to them by name.
+
+## Build with OpenGeni
+
+The build-with-opengeni Skill covers the product integration path: an organization API key on your server, a session proxy that acts as each signed-in user, and the embedded conversation UI. Ask your agent to "add an OpenGeni assistant to this app" and it starts from a hello world that proves the connection. See [Integrate your product](/guides/integrate-your-product) for the same path in prose.
+
+For the endpoint contract and the other MCP surfaces, see [MCP surfaces](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/mcp-surfaces.md).

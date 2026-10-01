@@ -32,6 +32,18 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
+Local coding agents (Claude Code, Codex, Cursor) use this endpoint through the
+[`plugins/opengeni`](../plugins/opengeni/README.md) plugin: OAuth sign-in as the
+current human, tools named `opengeni__<tool>`, `docs__<tool>`, and
+`files__<tool>`, and the `offload-to-opengeni` Skill for session delegation.
+The endpoint rejects workspace API keys (`current-human tool access required`);
+an organization API key reaches it only as the verified organization service
+on a shared workspace. The public metadata and protocol paths
+(`/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource/...`, and `/oauth/*`) are served by the
+API at the issuer origin, so ingress must route them to the API rather than the
+web application.
+
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
 For lossless scheduled-task model edits, use
