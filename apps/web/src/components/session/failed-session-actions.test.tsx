@@ -44,7 +44,12 @@ test("compact row offers one ghost Retry without duplicate controls or guidance"
   expect(container.querySelector("button")!.textContent).toBe("Retry");
   expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
   expect(container.querySelector("svg")).not.toBeNull();
-  expect(container.querySelector("details")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped because of an unexpected error.",
+  );
   expect(container.textContent).not.toMatch(/Choose another model|composer|preserved|Try again/);
   expect(container.querySelector('[data-testid="failed-session-banner"]')!.className).not.toMatch(
     /bg-|border|rounded/,
@@ -675,7 +680,13 @@ test("unknown provider evidence never invents expiry, reset or connection classi
       actions={actions}
     />,
   );
-  expect(container.textContent).toBe("Connection failed.Retry");
+  const row = container.querySelector('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "The session stopped because of an unexpected error.",
+  );
+  expect(row.querySelector("details p")!.textContent).toBe("Connection failed.");
+  expect(row.querySelector("details")!.open).toBe(false);
+  expect(row.querySelector("button")!.textContent).toBe("Retry");
   expect(container.textContent).not.toMatch(/Codex|expired|reset|reconnect/i);
 });
 

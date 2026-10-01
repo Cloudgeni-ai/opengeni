@@ -2756,8 +2756,13 @@ the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
 projection carries it only as one of those four literals. Every
 billing, access, limit and quota class points at the model picker ("Choose
 another model below.") while the session still has the failed model selected. A bare leading HTTP status is
-classified only for 401, 402, 403 and 429; any other status keeps its recorded
-wording. Retry stays hidden only for rejected credentials, and only while the
+classified only for 401, 402, 403 and 429. Otherwise unknown uncoded failures
+show a generic unexpected-error headline with complete recorded Details;
+Modal task-router transport failures show an execution connection headline
+without claiming command failure, provider loss or safe replay. A typed Codex
+empty rejection gets a concise Codex headline; its account/plan diagnostic
+remains in Details. Structural sandbox failures retain their existing copy
+and recovery blockers. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
 after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
@@ -2768,7 +2773,8 @@ model, or picking another model, with matching links. The connect remedy names
 ChatGPT or SuperGrok only when the deployment enables that subscription, and
 otherwise reads "connect a model provider". Every other model keeps the generic
 daily-limit wording.
-Failures with any other worker code keep their authored wording.
+Failures with any other worker code keep their authored wording. This banner
+projection does not change the shared React timeline's separate presentation.
 
 A genuinely new `user.message` can still transition failed → queued and start a
 new turn from stored history. This is a different intent from Try again, and

@@ -20,7 +20,11 @@ test("only explicit model availability evidence suggests another model", () => {
     "Connection failed.",
     "An unknown response was received.",
   ]) {
-    expect(failedSessionCopy({ ...summary, reason })).toEqual({ reason, unavailableModel: false });
+    expect(failedSessionCopy({ ...summary, reason })).toEqual({
+      reason: "The session stopped because of an unexpected error.",
+      unavailableModel: false,
+      detail: reason,
+    });
   }
 });
 test("unusable picker does not receive unavailable-model guidance", () => {
@@ -28,11 +32,14 @@ test("unusable picker does not receive unavailable-model guidance", () => {
     "This model isn’t available.",
   );
 });
-test("long recorded errors are bounded without inventing a recovery diagnosis", () => {
-  const result = failedSessionCopy({ ...summary, reason: "Connection interrupted. ".repeat(100) });
+test("unknown errors have a plain headline and complete recorded details", () => {
+  const recorded = "Connection interrupted. ".repeat(100);
+  const result = failedSessionCopy({ ...summary, reason: recorded });
   expect(result.reason.length).toBeLessThanOrEqual(160);
-  expect(result.reason.endsWith("…")).toBe(true);
-  expect(failedSessionCopy({ ...summary, reason: null }).reason).toBe("This session failed.");
+  expect(result.detail).toBe(recorded);
+  expect(failedSessionCopy({ ...summary, reason: null }).reason).toBe(
+    "The session stopped because of an unexpected error.",
+  );
 });
 
 const openAiKey =
@@ -104,7 +111,7 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
   expect(failedSessionCopy({ ...summary, reason: "429 Too Many Requests" }).reason).toBe(
     "The model provider is rate limiting requests. Try again in a minute.",
   );
-  // Other statuses say nothing about the cause, so the recorded text stays.
+  // Other statuses say nothing about the cause: keep the evidence in Details.
   for (const reason of [
     "400 Invalid 'input[12].name': string too long. See https://platform.openai.com/docs",
     "404 Not Found",
@@ -112,8 +119,9 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
     "413 Payload Too Large",
   ]) {
     expect(failedSessionCopy({ ...summary, reason, recordedDetail: reason })).toEqual({
-      reason,
+      reason: "The session stopped because of an unexpected error.",
       unavailableModel: false,
+      detail: reason,
     });
   }
 });
@@ -253,7 +261,11 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
       reason: "Connection interrupted.",
       recordedDetail: "Connection interrupted.",
     }),
-  ).toEqual({ reason: "Connection interrupted.", unavailableModel: false });
+  ).toEqual({
+    reason: "The session stopped because of an unexpected error.",
+    unavailableModel: false,
+    detail: "Connection interrupted.",
+  });
 });
 
 test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", () => {
@@ -284,5 +296,31 @@ test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", 
   expect(rejected.length).toBeGreaterThan(160);
   expect(
     failedSessionCopy({ ...summary, reason: rejected, failureCode: "codex_request_rejected" }),
-  ).toEqual({ reason: rejected, unavailableModel: false });
+  ).toEqual({
+    reason: "Codex rejected this request without explaining why. Try again when you're ready.",
+    unavailableModel: false,
+    detail: rejected,
+  });
+});
+
+test("Modal transport headline makes no command-outcome or retry claim", () => {
+  const detail =
+    "Failed to run function tools: ClientError: /modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: Name resolution failed for target dns:task-fixture.w.modal.host:443";
+  const failure = { ...summary, reason: detail, recordedDetail: detail };
+  const before = JSON.stringify(failure);
+  expect(failedSessionCopy(failure)).toEqual({
+    reason: "OpenGeni lost contact with the execution environment.",
+    unavailableModel: false,
+    detail,
+  });
+  expect(JSON.stringify(failure)).toBe(before);
+});
+
+test("unknown failure headline preserves diagnostic whitespace behind Details", () => {
+  const detail = "Upstream failure\n  exact diagnostic\n";
+  expect(failedSessionCopy({ ...summary, reason: detail })).toEqual({
+    reason: "The session stopped because of an unexpected error.",
+    unavailableModel: false,
+    detail,
+  });
 });

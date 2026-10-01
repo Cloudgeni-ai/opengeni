@@ -17,6 +17,32 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
+/** Preserve documented spend proof, without retaining an arbitrary error body. */
+function anthropicSpendLimitCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
+  const value = error as Json;
+  if (
+    value.type === "rate_limit_error" &&
+    value.details?.error_code === "enforced_spend_limit_reached"
+  )
+    return "enforced_spend_limit_reached";
+  if (
+    value.type === "invalid_request_error" &&
+    typeof value.message === "string" &&
+    /^You have reached your specified (?:workspace )?API usage limits\b/.test(value.message)
+  )
+    return "enforced_spend_limit_reached";
+  return undefined;
+}
+
+function anthropicHttpSpendLimitCode(detail: string): string | undefined {
+  try {
+    return anthropicSpendLimitCode(JSON.parse(detail)?.error);
+  } catch {
+    return undefined;
+  }
+}
+
 function object(value: unknown): Json {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new AnthropicProtocolError("Expected an object in the Claude protocol");
@@ -533,7 +559,11 @@ export class AnthropicMessagesModel implements Model {
         headers: response.headers.has("retry-after")
           ? { "retry-after": response.headers.get("retry-after")! }
           : {},
-        code: contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
+        code: contextExceeded
+          ? "context_length_exceeded"
+          : response.status === 400 || response.status === 429
+            ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
+            : "anthropic_http_error",
       });
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
@@ -566,22 +596,36 @@ export class AnthropicMessagesModel implements Model {
         const statuses: Record<string, number> = {
           invalid_request_error: 400,
           authentication_error: 401,
+          billing_error: 402,
           permission_error: 403,
           not_found_error: 404,
+          conflict_error: 409,
           request_too_large: 413,
           rate_limit_error: 429,
           api_error: 500,
+          timeout_error: 504,
           overloaded_error: 529,
         };
-        const status = typeof kind === "string" ? (statuses[kind] ?? 502) : 502;
-        throw Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
-          status,
-          code: status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
-          request_id: response.headers.get("request-id"),
-          headers: response.headers.has("retry-after")
-            ? { "retry-after": response.headers.get("retry-after")! }
-            : {},
-        });
+        // A new error type is not evidence of a server failure. Never invent
+        // a retryable status for an unknown terminal; completed tools stay saved.
+        const status = typeof kind === "string" ? statuses[kind] : undefined;
+        const spendCode =
+          status === 400 || status === 429 ? anthropicSpendLimitCode(event.error) : undefined;
+        throw Object.assign(
+          new Error(
+            status === undefined
+              ? "Claude returned an unrecognized stream error. Automatic retries stopped."
+              : `Claude stream failed (HTTP ${status})`,
+          ),
+          {
+            ...(status !== undefined ? { status } : {}),
+            code: spendCode ?? (status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error"),
+            request_id: response.headers.get("request-id"),
+            headers: response.headers.has("retry-after")
+              ? { "retry-after": response.headers.get("retry-after")! }
+              : {},
+          },
+        );
       }
       switch (event.type) {
         case "message_start":

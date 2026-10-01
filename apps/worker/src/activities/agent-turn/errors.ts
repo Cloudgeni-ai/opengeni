@@ -225,6 +225,13 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
       value.error && typeof value.error === "object"
         ? (value.error as Record<string, unknown>)
         : null;
+    const milliseconds = Number(
+      headerValue(value.headers, "retry-after-ms") ??
+        headerValue(value.responseHeaders, "retry-after-ms") ??
+        headerValue(body?.headers, "retry-after-ms") ??
+        undefined,
+    );
+    if (Number.isFinite(milliseconds) && milliseconds > 0) return Math.ceil(milliseconds);
     const directSeconds = Number(
       value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
     );
@@ -868,7 +875,7 @@ function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
   }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
         value,
       ) || /\bthis request was blocked by our safety systems\b/i.test(value),
   );
@@ -1337,8 +1344,9 @@ function baseAgentRunFailurePayload(
   }
   if (
     status === 429 ||
-    code === "rate_limit_exceeded" ||
-    /(?:too many requests|rate.?limit|\b429\b)/i.test(message)
+    ((status === undefined || !Number.isFinite(status)) &&
+      (code === "rate_limit_exceeded" ||
+        /(?:too many requests|rate.?limit|\b429\b)/i.test(message)))
   ) {
     return {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",

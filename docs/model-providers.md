@@ -5,6 +5,11 @@ serves it. This document is the canonical integration contract for model
 definitions, provider credentials, billing attribution, workspace availability,
 and per-turn execution identity.
 
+The dated [provider failure audit](design/provider-failure-audit-2026-10-01.md)
+maps official error contracts to current classifiers, messages, tests and
+remaining model/sandbox coverage gaps. It is evidence for the audited source,
+not certification of every custom endpoint or a deployment receipt.
+
 The point-in-time decision record and evidence are in
 [`design/model-provider-architecture-2026-07-18.md`](design/model-provider-architecture-2026-07-18.md).
 
@@ -1316,6 +1321,12 @@ preserved. Initial system/developer history items join the top-level system fiel
 in order; later system items keep their conversation position. Tool names unsupported on the wire receive stable reversible names.
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and OpenGeni's text compaction remain available.
+
+Native Claude HTTP and SSE errors retain status and bounded retry/request
+metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
+become terminal quota; ordinary throttling remains recoverable. An unrecognized
+SSE error type has no synthetic HTTP status and grants no automatic recovery.
+Arbitrary provider error bodies remain excluded from this adapter's diagnostics.
 
 Claude subscription connections require `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true`;
 the deployment default is off. Anthropic API-key connections are independent of
