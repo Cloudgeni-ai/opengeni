@@ -41,8 +41,8 @@ export async function loadWorkspaceCodexModelAvailability(
     getRotation: getCodexRotationSettings,
     loadCredential: loadCodexCredentialForRun,
     fetchModels: fetchCodexModels,
-    getToken: (db, settings, workspaceId, credentialId) =>
-      buildCodexTokenResolver(db, settings, workspaceId, credentialId).getToken(),
+    getToken: (targetDb, targetSettings, targetWorkspaceId, credentialId) =>
+      buildCodexTokenResolver(targetDb, targetSettings, targetWorkspaceId, credentialId).getToken(),
   },
 ): Promise<Record<string, ModelAvailabilityObservation>> {
   if (!settings.codexSubscriptionEnabled) return {};

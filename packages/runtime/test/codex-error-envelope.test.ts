@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import OpenAI from "openai";
+import OpenAI, { BadRequestError } from "openai";
 import {
   codexRequestStorage,
   codexSubscriptionFetch,
@@ -33,9 +33,9 @@ test("unsupported-model detail survives the real OpenAI SDK and preserves the re
     () =>
       client.responses
         .create({ model: "gpt-6.1-sol", input: "Hello", stream: true })
-        .catch((error: unknown) => error),
+        .catch((caught: unknown) => caught),
   );
-  expect(error).toBeInstanceOf(OpenAI.BadRequestError);
+  expect(error).toBeInstanceOf(BadRequestError);
   expect(error).toMatchObject({ status: 400, error: { message: detail } });
   expect((error as Error).message).toContain(detail);
   expect((error as Error).message).not.toContain("no body");

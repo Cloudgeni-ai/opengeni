@@ -286,10 +286,10 @@ describe("Codex status readiness semantics", () => {
       () => resolver.mockRestore(),
       () => probe.mockRestore(),
     );
-    const healthy = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
+    const healthyResponse = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
       headers: { authorization: await bearer(WS_A, ["workspace:read"]) },
     });
-    expect(await healthy.json()).toMatchObject({
+    expect(await healthyResponse.json()).toMatchObject({
       valid: true,
       models: [expect.objectContaining({ id: "codex/gpt-6-sol", label: "GPT-6 Sol" })],
     });
