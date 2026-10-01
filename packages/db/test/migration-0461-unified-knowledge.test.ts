@@ -48,6 +48,7 @@ import {
 } from "../src/knowledge-entries";
 import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
+import { allowanceMigrationTail } from "./allowance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
 const forwardMigrations = [
@@ -63,6 +64,8 @@ const forwardMigrations = [
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
   "0515_autonomous_learning_defaults.sql",
+  // Compile against Knowledge only after this fixture's real 0461 cutover.
+  ...allowanceMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

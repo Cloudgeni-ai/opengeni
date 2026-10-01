@@ -76,7 +76,11 @@ import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import {
+  ApiHttpError,
+  allowanceExhaustedHttpError,
+  workspaceControlBusyHttpError,
+} from "./http/api-error";
 import {
   isRequestBodyValidationError,
   requestBodyValidationHttpError,
@@ -228,6 +232,7 @@ import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
+import { registerUsageAllowanceRoutes } from "./routes/usage-allowances";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
 import { registerWorkspaceLearningRoutes } from "./routes/workspace-learning";
 import { registerCompanyProfileRoutes } from "./routes/company-profile";
@@ -1556,6 +1561,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerInstallRoutes(app, routeDeps);
   registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerUsageAllowanceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceLearningRoutes(app, routeDeps);
@@ -1632,7 +1638,8 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (workspaceControlBusyHttpError(rawError) ??
+        : (allowanceExhaustedHttpError(rawError) ??
+          workspaceControlBusyHttpError(rawError) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
@@ -1705,6 +1712,32 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
   // the route performs its own organization API-key authorization.
   if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
+  // Organization budget authority is independent of ordinary workspace
+  // membership; these routes apply their own exact account/workspace gate.
+  if (
+    (["GET", "PUT", "DELETE"].includes(method) &&
+      /^\/v1\/workspaces\/[^/]+\/allowance$/.test(pathname)) ||
+    (method === "GET" && /^\/v1\/workspaces\/[^/]+\/allowance\/state$/.test(pathname)) ||
+    (method === "POST" && /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/.test(pathname))
+  )
+    return true;
+  // Allowance tenant mirrors resolve the workspace by exact organization-local
+  // external identity before applying the ordinary workspace authorization.
+  if (
+    (["GET", "PUT", "DELETE"].includes(method) &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/.test(pathname)) ||
+    (method === "GET" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/.test(pathname)) ||
+    (method === "POST" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/.test(pathname)) ||
+    (method === "GET" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage(?:\/me)?$/.test(pathname)) ||
+    (method === "PUT" &&
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/(?:[^/]+|external\/[^/]+\/[^/]+)\/allowance$/.test(
+        pathname,
+      ))
+  )
+    return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
   if (
     method === "GET" &&
@@ -2502,6 +2535,64 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/external$/,
     label: "/v1/workspaces/external",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/grants$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance/grants",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/allowance\/state$/,
+    label: "/v1/workspaces/external/:source/:externalId/allowance/state",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage\/me$/,
+    label: "/v1/workspaces/external/:source/:externalId/usage/me",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/usage$/,
+    label: "/v1/workspaces/external/:source/:externalId/usage",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/external\/[^/]+\/[^/]+\/allowance$/,
+    label:
+      "/v1/workspaces/external/:source/:externalId/members/external/:memberSource/:memberExternalId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external\/[^/]+\/[^/]+\/members\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/external/:source/:externalId/members/:subjectId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance\/grants$/,
+    label: "/v1/workspaces/:workspaceId/allowance/grants",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/:workspaceId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/allowance\/state$/,
+    label: "/v1/workspaces/:workspaceId/allowance/state",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/usage\/me$/,
+    label: "/v1/workspaces/:workspaceId/usage/me",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/usage$/,
+    label: "/v1/workspaces/:workspaceId/usage",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/members\/external\/[^/]+\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/:workspaceId/members/external/:source/:externalId/allowance",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/members\/[^/]+\/allowance$/,
+    label: "/v1/workspaces/:workspaceId/members/:subjectId/allowance",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks$/,

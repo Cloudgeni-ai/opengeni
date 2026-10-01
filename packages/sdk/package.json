@@ -22,6 +22,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./allowance-refusal": {
+      "types": "./src/allowance-refusal.ts",
+      "default": "./src/allowance-refusal.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

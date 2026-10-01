@@ -262,6 +262,20 @@ The Vercel and OpenAI adapters send the latest user message and import earlier t
 
 ## Request cost and verification
 
+For per-seat included usage, equal splits, administrator sliders, custom
+shares, top-ups, or monthly team budgets, use
+[usage allowances](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/usage-allowances.md).
+These are ceilings on actual OpenGeni credit debits, in integer USD micros
+(1 USD = 1,000,000), not prepaid reservations or provider-cost estimates.
+An admitted call can overshoot; concurrent calls can overshoot together.
+Workspace budget changes and grants require organization authority, member
+splits require administration, and no allowance write is available to agents.
+Deployments activate policy writes only after all allowance-aware consumers
+are upgraded; disabling write admission never bypasses an existing ceiling.
+Use the session proxy's own-usage read and render `fraction` for a browser
+meter; the standard response still includes amounts, so a product that must
+hide them needs its own authenticated server projection.
+
 The chat facade's replies and Vercel/OpenAI formatters do not define a first-class monetary cost field. Model-picker billing categories do not establish per-request price.
 
 The separate `getBillingUsage` accounting read requires billing authority and returns a bounded usage list. It does not guarantee complete per-turn accounting. Distinguish charged OpenGeni credits from estimated provider expense and externally billed usage; zero OpenGeni charge is not proof of zero upstream cost. A turn can include multiple model responses.

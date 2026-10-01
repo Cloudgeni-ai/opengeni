@@ -106,6 +106,8 @@ import {
   createSession,
   createSessionWithIdempotencyKeyResult,
   canonicalSessionCommandHash,
+  frozenInitiatorForCommandActor,
+  getComposerDraftInTransaction,
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
@@ -126,6 +128,7 @@ import {
   getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
+  getSessionTurnInitiatingHumanSubjectId,
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
@@ -144,6 +147,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
+  type FrozenTurnInitiator,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
   AgentCommandAuthorityError,
@@ -403,6 +407,21 @@ export type FrozenCreationInitiator = {
   actor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
 };
 
+/** Attribution is immutable accepted-work data, never the current request principal. */
+export function initiatingHumanForAllowance(
+  frozen: Pick<FrozenTurnInitiator, "initiator" | "initiatingHumanSubjectId">,
+): string | null {
+  const subjectId =
+    frozen.initiatingHumanSubjectId === undefined
+      ? frozen.initiator.kind === "subject"
+        ? frozen.initiator.subjectId
+        : null
+      : frozen.initiatingHumanSubjectId;
+  // Older accepted API-key turns used the subject initiator kind. They are
+  // still service-funded work, not a human member's allowance.
+  return subjectId?.startsWith("api_key:") ? null : subjectId;
+}
+
 function serviceInitiatorForGrant(grant: AccessGrant): {
   initiator: ServiceTurnInitiator;
   context: ServiceTurnInitiatorContext;
@@ -481,6 +500,20 @@ export function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationIni
   }
   if (serviceInitiator) {
     return serviceInitiator;
+  }
+  if (
+    grant.principalKind === "service" ||
+    grant.principalKind === "api_key" ||
+    grant.principalKind === "configured_key"
+  ) {
+    return {
+      initiator: {
+        kind: "service",
+        subjectId: grant.subjectId,
+        ...(grant.subjectLabel ? { label: grant.subjectLabel } : {}),
+      },
+      context: {},
+    };
   }
   return {
     initiator: {
@@ -2139,13 +2172,26 @@ export async function retryFailedSession(
     latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
     latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
   });
-  await requireLimit(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    action: "agent_run:create",
-    quantity: 1,
-    model,
-  });
+  await requireLimit(
+    { ...deps, settings },
+    {
+      accountId: grant.accountId,
+      workspaceId,
+      initiatingHumanSubjectId: turn
+        ? initiatingHumanForAllowance({
+            initiator: turn.initiator,
+            initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+              deps.db,
+              workspaceId,
+              turn.id,
+            ),
+          })
+        : null,
+      action: "agent_run:create",
+      quantity: 1,
+      model,
+    },
+  );
   const result = await runIdempotentPersistenceTransaction(
     {
       stage: "session.retry",
@@ -3312,9 +3358,28 @@ async function createSessionForRequestInFileScope(
     });
   }
   if (payload.startMode !== "realtime") {
+    const frozenCreationInitiator = await withWorkspaceSessionActivityRls(
+      db,
+      workspaceId,
+      (scopedDb) =>
+        frozenInitiatorForCommandActor(
+          scopedDb,
+          workspaceId,
+          creationInitiator.actor ??
+            (creationInitiator.initiator?.kind === "service"
+              ? {
+                  type: "service",
+                  subjectId: creationInitiator.initiator.subjectId,
+                  ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
+                }
+              : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
+          grant.subjectLabel,
+        ),
+    );
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
+      initiatingHumanSubjectId: initiatingHumanForAllowance(frozenCreationInitiator),
       action: "agent_run:create",
       quantity: 1,
       model,
@@ -3661,7 +3726,11 @@ async function acceptSessionUserMessageInFileScope(
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
 
-  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
+  const promptInitiator = creationInitiatorForGrant(grant);
+  const delegatedServiceInitiator =
+    promptInitiator.initiator?.kind === "service"
+      ? { initiator: promptInitiator.initiator, context: promptInitiator.context ?? {} }
+      : null;
   const delivery = input.delivery ?? "send";
   const source = delegatedServiceInitiator || input.origin === "operator" ? "api" : "user";
   const commandActor: SessionCommandActor = delegatedServiceInitiator
@@ -3673,7 +3742,7 @@ async function acceptSessionUserMessageInFileScope(
           : {}),
         context: delegatedServiceInitiator.context,
       }
-    : { type: "human", subjectId: grant.subjectId };
+    : (promptInitiator.actor ?? { type: "human", subjectId: grant.subjectId });
   await requireSessionAuthorization(deps, grant, {
     sessionId,
     operation: delivery === "steer" ? "session.steer" : "session.append",
@@ -3811,9 +3880,46 @@ async function acceptSessionUserMessageInFileScope(
       sessionId,
       input.annotations ?? [],
     );
+    const admissionActor = commandActor;
+    let frozenAdmissionInitiator = await withWorkspaceSessionActivityRls(
+      db,
+      workspaceId,
+      (scopedDb) =>
+        frozenInitiatorForCommandActor(scopedDb, workspaceId, admissionActor, grant.subjectLabel),
+    );
+    // Re-submitting a checked-out queue edit retains the original turn's
+    // causal human, just as the locked prompt transaction does.
+    if (delivery === "send" && input.expectedDraftRevision != null) {
+      const draft = await withWorkspaceSubjectSessionActivityRls(
+        db,
+        workspaceId,
+        grant.subjectId,
+        async (scopedDb) =>
+          await getComposerDraftInTransaction(scopedDb, {
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          }),
+      );
+      if (draft?.revision === input.expectedDraftRevision && draft.sourceTurnId) {
+        const sourceTurn = await getSessionTurn(db, workspaceId, draft.sourceTurnId);
+        if (sourceTurn?.sessionId === sessionId) {
+          frozenAdmissionInitiator = {
+            initiator: sourceTurn.initiator,
+            context: sourceTurn.initiatorContext,
+            initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+              db,
+              workspaceId,
+              sourceTurn.id,
+            ),
+          };
+        }
+      }
+    }
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
+      initiatingHumanSubjectId: initiatingHumanForAllowance(frozenAdmissionInitiator),
       action: "agent_run:create",
       quantity: 1,
       model: effectiveModel,

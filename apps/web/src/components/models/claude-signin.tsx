@@ -162,8 +162,8 @@ export function ClaudeSignInPage({
         {!legacy ? (
           <>
             <p className="text-sm text-fg-muted">
-              Sign in on Claude’s page and approve access. Then paste the authorization code here.
-              No terminal command is needed.
+              Sign in on Claude’s page and approve access. Copy the authorization code, close that
+              window, and paste it here. No terminal command is needed.
             </p>
             {attempt ? (
               <>

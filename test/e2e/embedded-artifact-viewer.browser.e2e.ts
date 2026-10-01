@@ -55,14 +55,19 @@ describe("embedded artifact viewer", () => {
     }
   });
 
-  async function open(width: number, theme: "dark" | "light"): Promise<Page> {
-    const page = await browser.newPage({ viewport: { width, height: width < 768 ? 844 : 900 } });
+  async function open(
+    width: number,
+    theme: "dark" | "light",
+    query = "",
+    height = width < 768 ? 844 : 900,
+  ): Promise<Page> {
+    const page = await browser.newPage({ viewport: { width, height } });
     page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
     page.on("console", (message) => {
       if (message.type() === "error" && !message.location().url.endsWith("/favicon.ico"))
         errors.push(`console: ${message.text()}`);
     });
-    await page.goto(`${baseUrl}/artifact-viewer.html?theme=${theme}`);
+    await page.goto(`${baseUrl}/artifact-viewer.html?theme=${theme}${query}`);
     await page.getByText("Open the dashboard").waitFor();
     return page;
   }
@@ -151,4 +156,129 @@ describe("embedded artifact viewer", () => {
       await page.close();
     }
   }, 60_000);
+
+  // Rects of everything a floating pill must not cover: compact controls (links,
+  // buttons, their icons and labels) and the text of full-width row controls
+  // such as the active turn's "Working" header. Plain prose is allowed.
+  async function coveredControls(page: Page, pillSelector: string) {
+    return await page.evaluate((selector) => {
+      const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const view = scroller.getBoundingClientRect();
+      const pill = document.querySelector<HTMLElement>(selector)!.getBoundingClientRect();
+      const hits = (rect: DOMRect) =>
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.right > pill.left &&
+        rect.left < pill.right &&
+        rect.bottom > pill.top &&
+        rect.top < pill.bottom &&
+        rect.bottom > view.top &&
+        rect.top < view.bottom;
+      const covered: string[] = [];
+      for (const control of scroller.querySelectorAll<HTMLElement>(
+        'a[href], button, [role="button"], input, select, textarea',
+      )) {
+        const wide = control.getBoundingClientRect().width >= view.width * 0.8;
+        // A full-width row draws only its icons and label glyphs.
+        const parts: DOMRect[] = [];
+        if (!wide) parts.push(control.getBoundingClientRect());
+        else {
+          for (const icon of control.querySelectorAll("svg, img"))
+            parts.push(icon.getBoundingClientRect());
+          const walker = document.createTreeWalker(control, NodeFilter.SHOW_TEXT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (!node.textContent?.trim()) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            parts.push(...range.getClientRects());
+          }
+        }
+        for (const part of parts) {
+          if (hits(part)) {
+            covered.push((control.textContent ?? control.tagName).trim().slice(0, 40));
+            break;
+          }
+        }
+      }
+      return covered;
+    }, pillSelector);
+  }
+
+  /** The last reading once it is empty, or after five seconds. */
+  async function settled(read: () => Promise<string[]>): Promise<string[]> {
+    const deadline = Date.now() + 5_000;
+    let value = await read();
+    while (value.length > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      value = await read();
+    }
+    return value;
+  }
+
+  async function scrollerGeometry(page: Page) {
+    return await page.evaluate(() => {
+      const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      return { clientHeight: scroller.clientHeight, scrollTop: Math.round(scroller.scrollTop) };
+    });
+  }
+
+  for (const width of [1440, 390]) {
+    test(`Jump to latest slides clear of the Working row at ${width}px`, async () => {
+      const page = await open(width, "light", "&long");
+      try {
+        await page.locator("[data-og-work-header]").first().waitFor();
+        await page.waitForTimeout(600);
+        // Opening an artifact from the reply hands the reader the scroll; back
+        // in the conversation, Jump to latest shows while the active turn's
+        // Working row still sits at the tip, under the pill's resting spot.
+        await page.getByText("Open the dashboard").click();
+        await page.getByRole("button", { name: width < 768 ? "Back" : "Close" }).click();
+        const pill = page.locator("[data-og-jump-to-latest]");
+        await pill.waitFor();
+        const before = await scrollerGeometry(page);
+        expect(await settled(() => coveredControls(page, "[data-og-jump-to-latest]"))).toEqual([]);
+        await page.waitForTimeout(300);
+        await capture(page, `jump-pill-${width}-light`);
+        // Only the pill moved: the scroller kept its size and the reader's place.
+        expect(await scrollerGeometry(page)).toEqual(before);
+        await pill.click();
+        await pill.waitFor({ state: "detached" });
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+
+    test(`Latest question slides clear of an inline Site card's controls at ${width}px`, async () => {
+      // Short enough that the card's toolbar can scroll up to the pill.
+      const page = await open(width, "light", "&long", 560);
+      try {
+        await page.locator("[data-og-work-header]").first().waitFor();
+        await page.waitForTimeout(600);
+        const pillTop = width < 768 ? 56 : 44;
+        // Scroll the Site card's toolbar under the pill's resting spot; the
+        // question above it leaves the viewport, so the pill appears.
+        await page.evaluate((top) => {
+          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+          const reload = [...scroller.querySelectorAll<HTMLElement>("button")].find(
+            (button) => button.getAttribute("aria-label") === "Reload Site",
+          )!;
+          const target = reload.getBoundingClientRect();
+          const view = scroller.getBoundingClientRect();
+          scroller.scrollTop += target.top + target.height / 2 - (view.top + top + 16);
+          scroller.dispatchEvent(new Event("scroll"));
+        }, pillTop);
+        const pill = page.locator("[data-og-jump-to-question]");
+        await pill.waitFor();
+        const before = await scrollerGeometry(page);
+        expect(await settled(() => coveredControls(page, "[data-og-question-nav] > div"))).toEqual(
+          [],
+        );
+        await page.waitForTimeout(300);
+        await capture(page, `question-pill-${width}-light`);
+        expect(await scrollerGeometry(page)).toEqual(before);
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+  }
 });

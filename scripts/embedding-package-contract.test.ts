@@ -42,8 +42,11 @@ test("new public subpaths retain source entries and rewrite to JS/declarations a
   const root = join(import.meta.dir, "..");
   for (const [directory, subpaths] of [
     ["packages/connect", ["."]],
-    ["packages/contracts", ["./browser-storage"]],
-    ["packages/sdk", ["./site", "./browser", "./session-proxy"]],
+    ["packages/contracts", ["./browser-storage", "./allowance-refusal", "./usage-allowances"]],
+    [
+      "packages/sdk",
+      ["./site", "./browser", "./allowance-refusal", "./workspace-integrations", "./session-proxy"],
+    ],
     ["packages/react", ["./connect", "./sites", "./connect.css"]],
   ] as const) {
     const manifest = JSON.parse(readFileSync(join(root, directory, "package.json"), "utf8"));

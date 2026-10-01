@@ -12,6 +12,10 @@ import {
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
 import {
+  allowanceExhaustedMessage,
+  parseAllowanceExhaustedRefusal,
+} from "@opengeni/sdk/allowance-refusal";
+import {
   CREDIT_EXHAUSTION_MESSAGE,
   presentFailure,
   isCreditExhaustion,
@@ -147,6 +151,31 @@ export function buildTimeline(
   options: { partialStart?: boolean } = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
+  const allowanceNotices = new Set<string>();
+  const allowanceNotice = (event: SessionEvent, turnId: string | null) => {
+    const refusal = parseAllowanceExhaustedRefusal(event.payload);
+    if (!refusal) return null;
+    const text = allowanceExhaustedMessage(refusal);
+    const key = JSON.stringify([
+      turnId,
+      event.turnAttemptId,
+      startupRecoveryRevisionByTurn.get(turnId ?? "") ?? 0,
+      refusal.scope,
+      refusal.subjectId,
+      refusal.resetsAt,
+    ]);
+    if (!allowanceNotices.has(key)) {
+      allowanceNotices.add(key);
+      items.push({
+        kind: "notice",
+        id: `${event.id}-allowance`,
+        tone: "failed",
+        text,
+        occurredAt: event.occurredAt,
+      });
+    }
+    return text;
+  };
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
   // A bounded replay can begin halfway through a message (including inside an
@@ -1202,6 +1231,11 @@ export function buildTimeline(
         break;
       }
 
+      case "usage.exhausted": {
+        allowanceNotice(event, turnId);
+        break;
+      }
+
       case "turn.completed": {
         // A standalone manual compaction uses the turn ledger for fencing and
         // recovery, but it is maintenance rather than a conversational turn.
@@ -1220,6 +1254,16 @@ export function buildTimeline(
         // Rendering it as a clean "complete" turn is a lie that leaves the
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
+        const allowance = parseAllowanceExhaustedRefusal(payload);
+        if (allowance) {
+          finalizeOpen(turnId, "complete", event.occurredAt);
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          const text = allowanceExhaustedMessage(allowance);
+          items.push(turnEndItem(event, "failed", text));
+          allowanceNotice(event, turnId);
+          break;
+        }
         if (isCreditExhaustionPayload(payload)) {
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
@@ -1329,16 +1373,21 @@ export function buildTimeline(
         // Credit death can hide behind fields `failureMessage` doesn't read
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
-        const failureText = isCreditExhaustionPayload(payload)
-          ? CREDIT_EXHAUSTION_MESSAGE
-          : failureMessage(payload);
+        const allowance = parseAllowanceExhaustedRefusal(payload);
+        const failureText = allowance
+          ? allowanceExhaustedMessage(allowance)
+          : isCreditExhaustionPayload(payload)
+            ? CREDIT_EXHAUSTION_MESSAGE
+            : failureMessage(payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
-        if (!hadActivity) {
+        if (allowance) {
+          allowanceNotice(event, turnId);
+        } else if (!hadActivity) {
           items.push({
             kind: "notice",
             id: event.id,
@@ -1702,6 +1751,7 @@ export function stripOpaqueCitationTokens(text: string): string {
 
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
+  if (payload.code === "allowance_exhausted") return false;
   return isCreditExhaustion({
     error: typeof payload.error === "string" ? payload.error : null,
     detail: typeof payload.detail === "string" ? payload.detail : null,

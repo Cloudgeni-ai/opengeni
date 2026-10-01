@@ -4,6 +4,8 @@ import { defineConfig } from "tsup";
 // stay external so consumers can deduplicate their schema and hashing runtimes.
 export default defineConfig({
   entry: [
+    "src/allowance-refusal.ts",
+    "src/usage-allowances.ts",
     "src/mcp-endpoint.ts",
     "src/index.ts",
     "src/connect.ts",

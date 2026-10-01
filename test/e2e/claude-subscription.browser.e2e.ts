@@ -173,12 +173,15 @@ for (const theme of ["dark", "light"] as const) {
         await context.route("https://claude.com/**", (route) =>
           route.fulfill({
             contentType: "text/html",
-            body: "<!doctype html><title>Claude sign-in fixture</title><p>Approve access in Claude</p>",
+            body: '<!doctype html><title>Claude sign-in fixture</title><p>Approve access in Claude</p><button onclick="window.close()">Close window</button>',
           }),
         );
         const page = await context.newPage();
         const errors: string[] = [];
         page.on("pageerror", (error) => errors.push(error.message));
+        page.on("console", (message) => {
+          if (message.type() === "error") errors.push(message.text());
+        });
         try {
           await page.goto(`${baseUrl}/test/claude-subscription.html?scope=${scope}`);
           await page
@@ -198,6 +201,7 @@ for (const theme of ["dark", "light"] as const) {
           await start.click();
           const popup = await popupPromise;
           await popup.waitForURL("https://claude.com/**");
+          await popup.getByText("Approve access in Claude", { exact: true }).waitFor();
           expect(new URL(popup.url()).origin).toBe("https://claude.com");
           expect(await popup.evaluate(() => window.opener === null)).toBe(true);
           await page.getByLabel("Claude authorization code").waitFor();
@@ -215,6 +219,10 @@ for (const theme of ["dark", "light"] as const) {
           await page.getByRole("alert").waitFor();
           expect(await page.getByLabel("Claude authorization code").isVisible()).toBe(true);
           await page.getByLabel("Claude authorization code").fill("fixture-code#fixture-state");
+          await Promise.all([
+            popup.waitForEvent("close"),
+            popup.getByRole("button", { name: "Close window", exact: true }).click(),
+          ]);
           await accessible(page);
           await page.screenshot({
             path: `${evidence}/${scope}-${width}-${theme}-signin.png`,
@@ -274,9 +282,14 @@ for (const theme of ["dark", "light"] as const) {
               exact: true,
             })
             .waitFor();
+          const retryPopupPromise = context.waitForEvent("page");
           await page.getByRole("button", { name: "Sign in to Claude", exact: true }).click();
+          const retryPopup = await retryPopupPromise;
+          await retryPopup.getByText("Approve access in Claude", { exact: true }).waitFor();
           await page.getByLabel("Claude authorization code").waitFor();
           await page.getByRole("button", { name: "Start again", exact: true }).click();
+          expect(retryPopup.isClosed()).toBe(false);
+          expect(await retryPopup.evaluate(() => window.opener === null)).toBe(true);
           expect(
             await page.getByRole("button", { name: "Sign in to Claude", exact: true }).isEnabled(),
           ).toBe(true);
@@ -288,6 +301,31 @@ for (const theme of ["dark", "light"] as const) {
                 ).length,
             ),
           ).toBe(0);
+          await Promise.all([
+            retryPopup.waitForEvent("close"),
+            retryPopup.getByRole("button", { name: "Close window", exact: true }).click(),
+          ]);
+          const cancelPopupPromise = context.waitForEvent("page");
+          await page.getByRole("button", { name: "Sign in to Claude", exact: true }).click();
+          const cancelPopup = await cancelPopupPromise;
+          await cancelPopup.getByText("Approve access in Claude", { exact: true }).waitFor();
+          await page.getByRole("button", { name: "Cancel", exact: true }).click();
+          await page.getByRole("button", { name: "Claude subscription", exact: false }).waitFor();
+          expect(await page.getByLabel("Claude authorization code").count()).toBe(0);
+          expect(
+            await page.evaluate(
+              () =>
+                Object.keys(sessionStorage).filter((key) =>
+                  key.startsWith("opengeni.claude-signin:"),
+                ).length,
+            ),
+          ).toBe(0);
+          expect(cancelPopup.isClosed()).toBe(false);
+          expect(await cancelPopup.evaluate(() => window.opener === null)).toBe(true);
+          await Promise.all([
+            cancelPopup.waitForEvent("close"),
+            cancelPopup.getByRole("button", { name: "Close window", exact: true }).click(),
+          ]);
           expect(errors).toEqual([]);
         } finally {
           await context.close();

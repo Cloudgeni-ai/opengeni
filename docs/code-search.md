@@ -50,9 +50,9 @@ switched on per deployment or workspace to measure it.
    small files are cut into declaration-sized tiles, so every function and handler in them is judged.
    Other files get windows around their keyword and symbol hits. In the same round, Jev answers a
    "must change together" question for up to 60 functions of the three most relevant files, each shown by
-   its signature and the calls it makes. A chosen function is packed right after each sub-question's best
-   passage: it catches sibling code that a literal relevance check scores low, such as another handler
-   that mutates the same state.
+   its signature and the calls it makes. A chosen function catches sibling code that a literal relevance
+   check scores low, such as another handler that mutates the same state. It is packed after the passages
+   that passed the relevance bar, so it never pushes a verified passage out of the budget.
 5. **Leads.** The tool follows up to six definitions named in the best passages,
    one level deep, and checks up to three call sites of each.
 6. **Pack.** Passages that pass are packed within a token budget:

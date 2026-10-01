@@ -2,6 +2,7 @@ import { acquireBlankTestDatabase, type SharedTestDatabase } from "@opengeni/tes
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { allowanceMigrationTail } from "./allowance-migration-tail";
 
 /** Historical migration proofs run against the last schema that owned Memory.
  * Current-runtime denial and conversion are exercised by migration-0461 and
@@ -17,9 +18,13 @@ export async function acquirePreKnowledgeTestDatabase(
     // These later migrations require the post-0461 Knowledge/file policies.
     await admin`INSERT INTO schema_migrations(name) VALUES
       ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql')`;
+    for (const name of allowanceMigrationTail)
+      await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     await migrate(blank.databaseUrl);
     await admin`DELETE FROM schema_migrations WHERE name IN
       ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql')`;
+    for (const name of allowanceMigrationTail)
+      await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");
     await provisionRoles(blank.databaseUrl, {

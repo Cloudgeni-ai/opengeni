@@ -11,6 +11,7 @@ import type {
   TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
+  checkWorkspaceAllowance,
   countActiveApiKeysForWorkspace,
   countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
@@ -48,6 +49,8 @@ export function documentEmbeddingCostMicros(settings: Settings, inputBytes: numb
 export type LimitCheckInput = {
   accountId: string;
   workspaceId?: string;
+  /** Frozen causal human, never the API key or service admitting the work. */
+  initiatingHumanSubjectId?: string | null;
   action: LimitAction;
   quantity?: number;
   // The turn's model id, when the action represents an agent turn. The model's
@@ -84,9 +87,13 @@ export async function requireLimit(deps: LimitDependencies, input: LimitCheckInp
   if (decision.allowed) {
     return;
   }
-  throw new HTTPException(decision.code === "insufficient_credits" ? 402 : 429, {
-    message: decision.message,
-  });
+  throw new HTTPException(
+    decision.code === "insufficient_credits" || decision.code === "allowance_exhausted" ? 402 : 429,
+    {
+      message: decision.message,
+      cause: decision,
+    },
+  );
 }
 
 export async function checkLimit(
@@ -112,6 +119,14 @@ export async function checkLimit(
   const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {
     return creditDecision;
+  }
+  if (!fundedWithoutCredits && isCostlyAction(input.action) && input.workspaceId) {
+    const refusal = await checkWorkspaceAllowance(deps.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.initiatingHumanSubjectId ?? null,
+    });
+    if (refusal) return { allowed: false, ...refusal };
   }
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return { allowed: true };

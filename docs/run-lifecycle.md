@@ -9,6 +9,30 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
+Workspace/member [usage allowances](usage-allowances.md) reuse edge admission,
+claimed-turn admission, and the post-response budget valve. Credit debits and
+allowance counters commit together; descendants and service-created continuations
+retain the accepted turn's initiating human. Pure-service work has no member
+ceiling. Externally funded work with no credit debit consumes no allowance.
+An exhausted allowance emits typed scope/reset details, completes the segment
+with the existing `budget_exhausted` marker, keeps the session usable, and pauses
+an active goal with reason `allowance` in the settlement transaction. No
+pre-call reservation or event-scan admission is introduced.
+
+The model producer's pre-wire barrier waits for the preceding response's credit
+settlement and frozen-human allowance check, then rechecks admission before
+dispatch. Consumer event iteration alone cannot fence the SDK's next request.
+Delegated Send/Steer checks target allowance after exact receipt replay and before
+fresh acceptance or interruption, under the existing command locks.
+
+A paid compaction commits its summary/checkpoint and cost before admission is
+rechecked for the frozen turn's workspace and initiating human. An exhausted
+allowance stops before another title or inference request; retained compaction
+truth is not replayed or discarded. Goal-continuation admission resolves the
+same latest-finished causal row under the session/goal locks as materialization,
+so a newer-started turn cannot lend a different member's allowance to the
+continuation.
+
 Workspace control revisions never move backwards. Migration 0505 repairs heads
 behind retained control events by advancing only the revision, preserving pause
 state, timers and event history. Fresh browser streams start at that head; old

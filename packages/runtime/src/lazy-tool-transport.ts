@@ -12,7 +12,11 @@ import {
 } from "@openai/agents";
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
-import { notifyModelRequestCapture } from "./model-request-capture";
+import {
+  beforeModelRequest,
+  modelResponseSettlement,
+  notifyModelRequestCapture,
+} from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -829,6 +833,7 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    await beforeModelRequest();
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
@@ -842,6 +847,7 @@ class LazyToolModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    await beforeModelRequest();
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
@@ -851,19 +857,21 @@ class LazyToolModel implements Model {
           await this.runtime.ensurePrepared();
         }
       }
-      if (this.runtime.transport === "generic_dispatch" && event.type === "response_done") {
-        yield {
-          ...event,
-          response: {
-            ...event.response,
-            output: event.response.output.flatMap((item) =>
-              transformGenericDispatchCall(item, this.runtime),
-            ) as typeof event.response.output,
-          },
-        } as StreamEvent;
-      } else {
-        yield event;
-      }
+      const delivered =
+        this.runtime.transport === "generic_dispatch" && event.type === "response_done"
+          ? ({
+              ...event,
+              response: {
+                ...event.response,
+                output: event.response.output.flatMap((item) =>
+                  transformGenericDispatchCall(item, this.runtime),
+                ) as typeof event.response.output,
+              },
+            } as StreamEvent)
+          : event;
+      const settlement = modelResponseSettlement(delivered);
+      void settlement?.catch(() => undefined);
+      yield delivered;
     }
   }
 

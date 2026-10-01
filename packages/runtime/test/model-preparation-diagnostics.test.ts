@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { getOrCreateTrace, OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
+import type { ModelRequest } from "@openai/agents";
+import { BadRequestError } from "openai";
 import {
   markModelPreparationFirstSandboxOperation,
   recordModelPreparationMeasurement,
@@ -9,6 +12,26 @@ import {
   withModelTransportStartedObserver,
 } from "../src/model-preparation-diagnostics";
 import { instrumentedModelFetch } from "../src/model-provider-client";
+import { ModelRequestCaptureModel, withModelCallLifecycle } from "../src/model-request-capture";
+import { ReplayableJsonOpenAI } from "../src/replayable-json-body";
+
+// Runtime receives admission errors from its host; it must preserve their
+// identity and fields without depending on a worker/core error class.
+class UsageAllowanceExceededError extends Error {
+  readonly code = "allowance_exhausted";
+  readonly refusal = {
+    code: "allowance_exhausted",
+    scope: "member",
+    subjectId: "human:test",
+    resetsAt: "2026-10-01T00:00:00.000Z",
+    message: "Member allowance exhausted before provider dispatch",
+  };
+
+  constructor() {
+    super("Member allowance exhausted before provider dispatch");
+    this.name = "UsageAllowanceExceededError";
+  }
+}
 
 describe("model preparation diagnostics", () => {
   test("splits SDK work around the first sandbox operation without an overlapping parent", () => {
@@ -164,5 +187,175 @@ describe("model preparation diagnostics", () => {
         }),
     );
     expect(order).toEqual(["durable-checkpoint", "wire"]);
+  });
+
+  for (const protocol of ["responses", "chat"] as const) {
+    for (const streamed of [false, true]) {
+      test(`preserves typed allowance refusal between model entry and ${protocol} fetch without SDK retries (${streamed ? "streamed" : "non-streamed"})`, async () => {
+        const refusal = new UsageAllowanceExceededError();
+        let admissionChecks = 0;
+        let sdkFetchCalls = 0;
+        let wireCalls = 0;
+        let checkpointCalls = 0;
+        const transport = instrumentedModelFetch("provider-test", (async () => {
+          wireCalls += 1;
+          throw new Error("refused request must not reach the wire");
+        }) as typeof fetch);
+        const client = new ReplayableJsonOpenAI({
+          apiKey: "test-key",
+          maxRetries: 2,
+          fetch: (async (input, init) => {
+            sdkFetchCalls += 1;
+            return transport(input, init);
+          }) as typeof fetch,
+        });
+        const model = new ModelRequestCaptureModel(
+          protocol === "responses"
+            ? new OpenAIResponsesModel(client, "test-model")
+            : new OpenAIChatCompletionsModel(client, "test-model"),
+        );
+        const request: ModelRequest = {
+          input: "test",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        };
+        let caught: unknown;
+        await withModelCallLifecycle(
+          {
+            beforeModelRequest: async () => {
+              admissionChecks += 1;
+              // Model entry was admitted; capacity exhausts during SDK
+              // preparation, before the transport's second admission check.
+              if (admissionChecks > 1) throw refusal;
+            },
+          },
+          () =>
+            withModelTransportStartedObserver(
+              () => {
+                checkpointCalls += 1;
+              },
+              async () => {
+                try {
+                  if (streamed) {
+                    for await (const _event of model.getStreamedResponse(request)) {
+                      throw new Error("refused request must not produce model events");
+                    }
+                  } else {
+                    await getOrCreateTrace(() => model.getResponse(request));
+                  }
+                } catch (error) {
+                  caught = error;
+                }
+              },
+            ),
+        );
+        expect(caught).toBe(refusal);
+        expect(caught).toBeInstanceOf(UsageAllowanceExceededError);
+        expect(admissionChecks).toBe(2);
+        expect(sdkFetchCalls).toBe(1);
+        expect(wireCalls).toBe(0);
+        expect(checkpointCalls).toBe(0);
+      });
+    }
+  }
+
+  test("isolates a transport refusal from a concurrent request sharing the SDK client", async () => {
+    const refusal = new UsageAllowanceExceededError();
+    let wireCalls = 0;
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "test-key",
+      maxRetries: 2,
+      fetch: instrumentedModelFetch("provider-test", (async () => {
+        wireCalls += 1;
+        return Response.json({ id: "allowed-response" });
+      }) as typeof fetch),
+    });
+    const [denied, allowed] = await Promise.allSettled([
+      withModelCallLifecycle(
+        {
+          beforeModelRequest: async () => {
+            await Promise.resolve();
+            throw refusal;
+          },
+        },
+        () => client.responses.create({ model: "test-model", input: "denied" }),
+      ),
+      withModelCallLifecycle({ beforeModelRequest: async () => {} }, () =>
+        client.responses.create({ model: "test-model", input: "allowed" }),
+      ),
+    ]);
+    expect(denied.status).toBe("rejected");
+    if (denied.status === "rejected") expect(denied.reason).toBe(refusal);
+    expect(allowed.status).toBe("fulfilled");
+    if (allowed.status === "fulfilled") expect(allowed.value.id).toBe("allowed-response");
+    expect(wireCalls).toBe(1);
+    // A later request through the same client must not retain the refusal.
+    expect((await client.responses.create({ model: "test-model", input: "later" })).id).toBe(
+      "allowed-response",
+    );
+    expect(wireCalls).toBe(2);
+  });
+
+  test("preserves a failed durable checkpoint without SDK retries or wire work", async () => {
+    const failure = new Error("durable checkpoint unavailable");
+    let checkpointCalls = 0;
+    let wireCalls = 0;
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "test-key",
+      maxRetries: 2,
+      fetch: instrumentedModelFetch("provider-test", (async () => {
+        wireCalls += 1;
+        return Response.json({});
+      }) as typeof fetch),
+    });
+    await expect(
+      withModelTransportStartedObserver(
+        () => {
+          checkpointCalls += 1;
+          throw failure;
+        },
+        async () => await client.responses.create({ model: "test-model", input: "test" }),
+      ),
+    ).rejects.toBe(failure);
+    expect(checkpointCalls).toBe(1);
+    expect(wireCalls).toBe(0);
+  });
+
+  test("does not reinterpret a provider response with refusal-shaped fields", async () => {
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "test-key",
+      maxRetries: 2,
+      fetch: instrumentedModelFetch("provider-test", (async () =>
+        Response.json(
+          { error: { code: "allowance_exhausted", message: "provider error" } },
+          { status: 400, headers: { "x-should-retry": "false" } },
+        )) as typeof fetch),
+    });
+    await expect(
+      Promise.resolve(client.responses.create({ model: "test-model", input: "test" })),
+    ).rejects.toBeInstanceOf(BadRequestError);
+  });
+
+  test("native transports still throw the exact admission error", async () => {
+    const refusal = new UsageAllowanceExceededError();
+    let wireCalls = 0;
+    const transport = instrumentedModelFetch("provider-test", (async () => {
+      wireCalls += 1;
+      return Response.json({});
+    }) as typeof fetch);
+    await expect(
+      withModelCallLifecycle(
+        {
+          beforeModelRequest: async () => {
+            throw refusal;
+          },
+        },
+        () => transport("https://api.openai.com/v1/responses", { method: "POST", body: "{}" }),
+      ),
+    ).rejects.toBe(refusal);
+    expect(wireCalls).toBe(0);
   });
 });
