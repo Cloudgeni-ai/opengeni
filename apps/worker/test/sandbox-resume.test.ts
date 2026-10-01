@@ -940,6 +940,83 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     }
   }, 60_000);
 
+  test("(2ab) owning attempt cancellation aborts native Modal readiness before returning a warm session", async () => {
+    if (!available) return;
+    const settings = testSettings({ ...settingsFor(true), sandboxBackend: "modal" });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const instanceId = "sb-readiness-cancellation";
+    const leaseEpoch = 7;
+    const holderId = sandboxLeaseHolderIdForAttempt("cancelled-modal-readiness");
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: instanceId } },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warm', 0,
+        0, 0, ${instanceId}, 'modal', ${leaseEpoch},
+        'modal', ${JSON.stringify(resumeState)}::jsonb, now() + interval '60 seconds'
+      )`;
+    const cancellation = new AbortController();
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let probeAborted = false;
+    const pending = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        cancellationSignal: cancellation.signal,
+        establishAttachedSandbox: async () => ({
+          client: {},
+          instanceId,
+          backendId: "modal",
+          sessionState: resumeState.sessionState,
+          session: {
+            verifyExecReadiness: (signal: AbortSignal) =>
+              new Promise<number>((_resolve, reject) => {
+                const abort = () => {
+                  probeAborted = true;
+                  reject(signal.reason);
+                };
+                signal.addEventListener("abort", abort, { once: true });
+                if (signal.aborted) abort();
+                enter();
+              }),
+            execCommand: async () => {
+              throw new Error("SDK readiness must not execute");
+            },
+          },
+        }),
+      },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "modal" },
+      "turn",
+      holderId,
+    );
+    const result = pending.catch((caught) => caught);
+    try {
+      await entered;
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      cancellation.abort(new Error("TURN_ATTEMPT_FINALIZED_DURING_READINESS"));
+      expect((await result).message).toContain("TURN_ATTEMPT_FINALIZED_DURING_READINESS");
+      expect(probeAborted).toBe(true);
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(0);
+      expect(await readRow(workspaceId, groupId)).toMatchObject({
+        liveness: "draining",
+        lease_epoch: leaseEpoch,
+        instance_id: instanceId,
+      });
+    } finally {
+      cancellation.abort();
+      await result;
+    }
+  }, 60_000);
+
   test("(2b) concurrent observers of one missing warm instance elect exactly one replacement owner", async () => {
     if (!available) return;
     const settings = settingsFor(true);

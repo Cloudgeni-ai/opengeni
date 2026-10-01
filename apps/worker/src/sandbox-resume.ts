@@ -445,9 +445,10 @@ export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
   identity: { sandboxGroupId?: string | null } = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await verifySandboxExecReadiness(established, timeoutMs);
+    await verifySandboxExecReadiness(established, timeoutMs, signal);
   } catch (error) {
     if (error instanceof SandboxExecReadinessError && error.code === "exec_probe_timeout") {
       throw new SandboxExecReadinessTimeoutError(established.backendId, timeoutMs, {
@@ -1917,9 +1918,14 @@ async function resumeBoxForTurnOnce(
           sandboxGroupId: ids.sandboxGroupId,
         });
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
@@ -2117,9 +2123,14 @@ async function resumeBoxForTurnOnce(
       if (services.verifyAttachedSandboxReadiness) {
         await services.verifyAttachedSandboxReadiness(established);
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       providerRenewalTarget = {
         backend: ids.backend,
