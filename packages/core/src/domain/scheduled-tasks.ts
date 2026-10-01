@@ -764,8 +764,46 @@ export async function triggerScheduledTaskForGrant(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
-    await workflowClient.triggerScheduledTask(input);
+    const actor = creationInitiatorForGrant(grant).actor ?? null;
+    const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
+    // A caller cannot supply or clear the trusted ceiling. Ownerless and
+    // same-human schedules can be triggered by a different credential than
+    // their creator; restrict that accepted run, not the durable task.
+    const { credentialRestriction: _untrustedRestriction, ...trigger } = input;
+    await workflowClient.triggerScheduledTask({
+      ...trigger,
+      ...(restriction ? { credentialRestriction: restriction } : {}),
+    });
   });
+}
+
+async function scheduledTaskCredentialRestrictionForGrant(
+  db: Database,
+  grant: AccessGrant,
+  actor: Extract<SessionCommandActor, { type: "agent_attempt" }> | null,
+): Promise<"developer_setup" | undefined> {
+  if (isDeveloperSetupGrant(grant)) return "developer_setup";
+  if (!actor) return undefined;
+  const session = await getSession(db, grant.workspaceId, actor.sessionId);
+  const turn = await getSessionTurnForAttempt(
+    db,
+    grant.workspaceId,
+    actor.sessionId,
+    actor.attemptId,
+  );
+  if (!session || !turn || turn.id !== actor.turnId) {
+    throw new HTTPException(403, { message: "the calling agent attempt is not available" });
+  }
+  const policies = [
+    readTurnExecutionPolicyV1(turn.metadata),
+    readTurnExecutionPolicyV1(session.metadata),
+  ];
+  return policies.some(
+    (policy) =>
+      policy.kind === "valid" && policy.policy.credentialRestriction === "developer_setup",
+  )
+    ? "developer_setup"
+    : undefined;
 }
 
 export async function validateScheduledTaskTarget(input: {

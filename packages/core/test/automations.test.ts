@@ -109,4 +109,87 @@ describe("signed JSON automation adapter", () => {
     expect(accepted.initialMessage).toContain("untrusted event data");
     expect(accepted.initialMessage).toContain("repo:abc");
   });
+
+  test("an adapter cannot strip the immutable trigger restriction or replace it with event metadata", () => {
+    const restrictedTrigger = {
+      ...trigger,
+      sessionTemplate: {
+        ...trigger.sessionTemplate,
+        credentialRestriction: "developer_setup" as const,
+      },
+    };
+    const event = signedJsonAutomationAdapter.normalize({
+      rawBody: new TextEncoder().encode(
+        JSON.stringify({ type: "build.failed", data: { credentialRestriction: "none" } }),
+      ),
+      headers: new Headers(),
+      sourceConfiguration: {},
+    });
+    const render = signedJsonAutomationAdapter.render({
+      event,
+      trigger: restrictedTrigger,
+      source,
+    });
+    delete render.sessionTemplate.credentialRestriction;
+    const accepted = buildAutomationAcceptedExecution({
+      accountId: source.accountId,
+      workspaceId: source.workspaceId,
+      source,
+      trigger: restrictedTrigger,
+      eventId: "55555555-5555-4555-8555-555555555555",
+      event,
+      render,
+    });
+    expect(accepted.sessionTemplate.credentialRestriction).toBe("developer_setup");
+    expect(accepted.sessionTemplate.firstPartyMcpPermissions).toEqual([]);
+  });
+
+  test("render-only metadata or marker forgery does not taint an ordinary trigger", () => {
+    const event = signedJsonAutomationAdapter.normalize({
+      rawBody: new TextEncoder().encode(JSON.stringify({ type: "build.failed", data: {} })),
+      headers: new Headers(),
+      sourceConfiguration: {},
+    });
+    const render = signedJsonAutomationAdapter.render({ event, trigger, source });
+    render.sessionTemplate.credentialRestriction = "developer_setup";
+    render.sessionTemplate.metadata = { credentialRestriction: "developer_setup" };
+    event.credentialRestriction = "developer_setup";
+    const accepted = buildAutomationAcceptedExecution({
+      accountId: source.accountId,
+      workspaceId: source.workspaceId,
+      source,
+      trigger,
+      eventId: "55555555-5555-4555-8555-555555555555",
+      event,
+      render,
+    });
+    expect(accepted.sessionTemplate).not.toHaveProperty("credentialRestriction");
+  });
+
+  test("trusted manual caller restriction freezes only accepted execution, not the native trigger", () => {
+    const event = signedJsonAutomationAdapter.normalize({
+      rawBody: new TextEncoder().encode(JSON.stringify({ type: "build.failed", data: {} })),
+      headers: new Headers(),
+      sourceConfiguration: {},
+    });
+    const render = signedJsonAutomationAdapter.render({ event, trigger, source });
+    const input = {
+      accountId: source.accountId,
+      workspaceId: source.workspaceId,
+      source,
+      trigger,
+      eventId: "55555555-5555-4555-8555-555555555555",
+      event,
+      render,
+      credentialRestriction: "developer_setup" as const,
+    };
+    const accepted = buildAutomationAcceptedExecution(input);
+    expect(accepted.sessionTemplate).toEqual({
+      ...trigger.sessionTemplate,
+      credentialRestriction: "developer_setup",
+    });
+    expect(trigger.sessionTemplate).not.toHaveProperty("credentialRestriction");
+    render.sessionTemplate.firstPartyMcpPermissions = ["api_keys:manage"];
+    expect(() => buildAutomationAcceptedExecution(input)).toThrow("setup");
+  });
 });

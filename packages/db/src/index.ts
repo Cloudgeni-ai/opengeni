@@ -493,6 +493,7 @@ import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import { getLiveSessionAttemptTurn } from "./live-session-attempt";
 import {
   contextForCausalTurn,
+  contextWithFrozenCredentialRestrictions,
   creatorColumns,
   frozenInitiatorForCommandActor,
   frozenScheduledOccurrenceInitiator,
@@ -72853,6 +72854,29 @@ export async function claimSessionWorkForAttempt(
                 true
               )
             `);
+          }
+          // Private producer lineage survives source-turn cleanup and every
+          // coalesced message, including a later restricted sender. A frozen
+          // goal/schedule model policy cannot remove this inherited ceiling.
+          const initialCredentialPolicy = readTurnExecutionPolicyV1(session.metadata);
+          internalInitiator.context = contextWithFrozenCredentialRestrictions(
+            internalInitiator.context,
+            [
+              ...delivered.updates.map((update) => update.lineage),
+              initialCredentialPolicy.kind === "valid" &&
+              initialCredentialPolicy.policy.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : undefined,
+            ],
+          );
+          if (
+            internalInitiator.context.credentialRestriction === "developer_setup" &&
+            frozenTurnExecutionPolicy
+          ) {
+            frozenTurnExecutionPolicy = {
+              ...frozenTurnExecutionPolicy,
+              credentialRestriction: "developer_setup",
+            };
           }
           await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
           const [internalTurn] = await tx
