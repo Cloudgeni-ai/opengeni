@@ -716,6 +716,8 @@ the error into retry permission. A checkpoint database outage carries the same
 marker through the exact-identity DB-only recovery lane. Normal Pause/Steer and
 attempt-loss fences still win stale settlement; retained physical writers and
 capture/quiescence proofs keep their independent lifecycle.
+The existing blocked-admission wire kind also parks older workflow workers
+during a rolling deployment; no synthetic physical admission is created.
 
 An observation deadline, NOT_FOUND, provider/lease loss, or one original command
 exiting cannot prove that the rest of the unwound helper completed, so none

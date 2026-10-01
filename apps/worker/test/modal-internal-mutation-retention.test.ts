@@ -335,7 +335,8 @@ test.each(["exited", "lost"] as const)(
     });
     expect(await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).toMatchObject(
       {
-        kind: "sandbox-setup-outcome-unknown",
+        kind: "admission-blocked",
+        reason: "sandbox_setup_outcome_unknown",
         ref: { turnId: fixture.claim.turn.id, attemptId: fixture.attemptId },
       },
     );

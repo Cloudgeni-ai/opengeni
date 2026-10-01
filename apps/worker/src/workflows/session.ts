@@ -772,14 +772,6 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       await waitForProviderCapacity(peek.ref);
       continue;
     }
-    if (peek.kind === "sandbox-setup-outcome-unknown") {
-      // Do not spend another worker slot or reconstruct an unwound SDK setup
-      // coroutine. Command exit, NOT_FOUND, expiry and ordinary queue wakes are
-      // not proof that the remaining setup completed. Accepted control signals
-      // still own their normal close-race fence.
-      if (signalVersion !== closeSignalVersion) continue;
-      return;
-    }
     if (peek.kind === "sandbox-lifecycle-wait") {
       // The recovering turn carries an exact group/epoch marker. Do not reserve
       // another turn-worker slot while the same draining lease still owns that
