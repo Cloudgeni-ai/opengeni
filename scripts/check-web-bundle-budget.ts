@@ -482,6 +482,13 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Usage allowances UI (composer limit notice, conversation refusal row)
+    // with #3053's final-reply notice: 2,536,098 raw on Bun 1.4 macOS/arm64.
+    wholeKibEnvelope(2_536_098, 1.5 * kib),
+    // Runtime robustness (empty-final-reply notice, per-model availability) on
+    // main with usage allowances and the pill dodge: 2,533,812 raw on Bun 1.4
+    // macOS/arm64 with the notice grouped into session-shared-primitives.
+    wholeKibEnvelope(2_533_812, 1.5 * kib),
     // Main after #3071 (organization Models page) and #3039: Linux/x64 CI
     // measures 2,533,407 raw, 31 bytes over the previous envelope. Record the
     // measurement with the established 1.5 KiB allowance; other caps unchanged.
@@ -594,6 +601,10 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Runtime robustness on main f874217f5: the empty-final-reply notice and
+    // per-model availability in the session timeline measure 711,698 gzip
+    // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(711_698, 1.5 * kib),
     // Usage allowances on main f874217f5: 713,634 gzip (Linux/x64 CI).
     wholeKibEnvelope(713_634, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64

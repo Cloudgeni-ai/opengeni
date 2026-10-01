@@ -118,6 +118,10 @@
       "types": "./src/session-titles.ts",
       "default": "./src/session-titles.ts"
     },
+    "./session-final-reply": {
+      "types": "./src/session-final-reply.ts",
+      "default": "./src/session-final-reply.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"

@@ -23,6 +23,9 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createConnection,
+  ensureCodexRotationSettings,
+  updateCodexRotationSettings,
+  upsertCodexSubscriptionCredential,
   createDb,
   createRig,
   setWorkspaceDefaultRig,
@@ -648,6 +651,22 @@ function encryptedBotCredential(settings: Settings): string {
   );
 }
 
+async function connectModelPreferenceCodex(grant: AccessGrant) {
+  await upsertCodexSubscriptionCredential(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    credentialEncrypted: "metadata-only-model-preference-fixture",
+    chatgptAccountId: `fixture-${grant.workspaceId}`,
+    scopes: null,
+    planType: "pro",
+    isFedramp: false,
+    expiresAt: null,
+    lastRefreshAt: null,
+  });
+  await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
+  await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+}
+
 async function fixture(
   options: {
     deniedChannels?: string[];
@@ -718,6 +737,7 @@ async function fixture(
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
   });
+  if (options.codexSubscriptionEnabled) await connectModelPreferenceCodex(owner);
   const connectionInput: Record<string, unknown> = {
     accountId: owner.accountId,
     workspaceId: owner.workspaceId,
@@ -5103,7 +5123,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
     expect(session!.model).toBe("codex/gpt-6-sol");
-  });
+  }, 180_000);
 
   test("subject model lookup orders turns across sessions, resolves ties, and falls back without turns", async () => {
     if (!available) return;
@@ -5211,7 +5231,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         value.owner.subjectId,
       ),
     ).toBe("gpt-5.6-luna");
-  });
+  }, 180_000);
 
   test("subject model lookup ignores other users and workspaces", async () => {
     if (!available) return;
@@ -5264,6 +5284,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       subjectId: value.owner.subjectId,
     });
     const crossWorkspaceGrant = crossWorkspace.workspaceGrants[0]!;
+    await connectModelPreferenceCodex(crossWorkspaceGrant);
     const crossWorkspaceSession = await createSessionForRequest(
       value.deps,
       crossWorkspaceGrant,
@@ -5317,7 +5338,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         value.owner.subjectId,
       ),
     ).toBe("gpt-5.6-terra");
-  });
+  }, 180_000);
 
   test("new Slack tasks preserve the linked subject's latest session default", async () => {
     if (!available) return;

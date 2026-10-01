@@ -11,6 +11,7 @@ export type WorkspaceSettingsSection =
   | "general"
   | "access"
   | "models"
+  | "usage"
   | "api-keys"
   | "developer"
   | "learning";
@@ -25,6 +26,7 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
   "general",
   "access",
   "models",
+  "usage",
   "api-keys",
   "developer",
   "learning",

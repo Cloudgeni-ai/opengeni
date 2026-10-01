@@ -87,6 +87,7 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
+import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sandbox-switcher";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
@@ -2675,6 +2676,7 @@ function SessionChatPane(props: {
             >
               <MessageTimeline
                 resolveLink={consoleLinkResolver}
+                allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                 trailingState={
                   <>
                     {/* Recovery follows the failed request, only in the latest history window.
@@ -2929,6 +2931,7 @@ function SessionChatPane(props: {
           />
           <ConsoleComposer
             workspaceId={props.session.workspaceId}
+            usageRefreshKey={props.session.status}
             composer={composer}
             attachments={attachments}
             effectiveControl={composer.effectiveControl}

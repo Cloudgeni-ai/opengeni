@@ -2630,34 +2630,49 @@ function registerGoalTools(
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
 ): void {
-  const boundedGoalToolString = (maxBytes: number, field: string) =>
+  const boundedGoalToolString = (maxBytes: number, field: string, purpose: string) =>
     z4
       .string()
       .min(1)
+      .max(maxBytes)
+      .describe(
+        `${purpose} At most ${maxBytes} UTF-8 bytes (ASCII characters count as one byte). Use normal spaces and sentences; summarize if needed, never squeeze words together. This is a ledger field, not the final answer.`,
+      )
       .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
         message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
       });
-  const goalText = boundedGoalToolString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+  const goalText = boundedGoalToolString(
+    SESSION_GOAL_TEXT_MAX_BYTES,
+    "goal text",
+    "The human-readable standing objective, not a progress report.",
+  );
   const successCriteriaSchema = boundedGoalToolString(
     SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
     "goal success criteria",
+    "Human-readable conditions that prove the full objective is achieved.",
   );
-  const goalRationale = boundedGoalToolString(SESSION_GOAL_RATIONALE_MAX_BYTES, "goal rationale");
+  const goalRationale = boundedGoalToolString(
+    SESSION_GOAL_RATIONALE_MAX_BYTES,
+    "goal rationale",
+    "A short human-readable explanation of the goal change or blocker and what must happen next.",
+  );
   const progressNoteSchema = boundedGoalToolString(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
+    "A short human-readable status of concrete progress toward the unchanged goal. Keep only useful milestones; do not pack a deliverable, command transcript, or continuation instructions here.",
   );
-  const inputWaitReasonSchema = boundedGoalToolString(2 * 1024, "session input wait reason").refine(
-    (value) => value.trim().length > 0,
-    {
-      message: "session input wait reason must not be blank",
-    },
-  );
+  const inputWaitReasonSchema = boundedGoalToolString(
+    2 * 1024,
+    "session input wait reason",
+    "One short human-readable sentence explaining the dependency being awaited.",
+  ).refine((value) => value.trim().length > 0, {
+    message: "session input wait reason must not be blank",
+  });
   server.registerTool(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none, or replace a completed goal with a new one. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal when this session has none, or replace a completed goal with a new one. text is the human-readable objective and successCriteria states its completion conditions; each allows 8192 UTF-8 bytes. Keep normal spaces; summarize, never compress words or put the deliverable in ledger text. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -2729,7 +2744,7 @@ function registerGoalTools(
     "goal_update",
     {
       description:
-        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision and a concise rationale. Updating a goal grants no additional authority and cannot change root constraints. Use goal_progress for an execution-progress audit fact rather than a goal rewrite.",
+        "Maintain your operational goal as user direction or meaningful new evidence clarifies the intended outcome. text and successCriteria each allow 8192 UTF-8 bytes; rationale allows 2048 UTF-8 bytes for a short human-readable explanation. Use normal spaces and summarize instead of squeezing words. Changes apply directly unless the user explicitly configured review_changes; refinement, adaptation, and replacement are audit classifications, not approval gates under the default policy. Use the exact expected objective revision. Updating a goal grants no additional authority and cannot change root constraints. Progress notes belong in goal_progress (8192 UTF-8 bytes), not a semantic goal rewrite; deliver the answer in your final reply.",
       inputSchema: {
         text: goalText.optional(),
         successCriteria: successCriteriaSchema.nullable().optional(),
@@ -2787,7 +2802,7 @@ function registerGoalTools(
     "goal_progress",
     {
       description:
-        "Record concrete progress toward the unchanged active goal. Optionally append reportRequirements for secondary user-facing reports discovered during other work; existing requirement IDs and titles cannot be changed or removed. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
+        "Record concrete progress toward the unchanged active goal. progressNote is a short human-readable status with useful milestones, at most 8192 UTF-8 bytes. Use normal spaces and sentences; summarize instead of compressing words. It is not the deliverable, a raw command transcript, or instructions for the next turn; the final answer still belongs in chat. Optionally append reportRequirements for secondary user-facing reports discovered during other work; existing requirement IDs and titles cannot be changed or removed. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
       inputSchema: {
         progressNote: progressNoteSchema,
         idempotencyKey: z4.string().uuid(),
@@ -2829,7 +2844,7 @@ function registerGoalTools(
         "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
       inputSchema: {
         reason: inputWaitReasonSchema.describe(
-          "Shown directly to the user. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
+          "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
         ),
         timeoutSeconds: z4
           .number()
@@ -2884,9 +2899,15 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed with concrete evidence. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared. Successful completion returns report artifact references and prevents further continuation turns.",
+        "Mark the session goal as completed with a short concrete proof for the goal ledger (evidence: at most 8192 characters). Evidence is not the deliverable and is not shown as your final chat reply; do not squeeze a report into it or remove spaces to fit. After this tool succeeds, reply to the user with the requested deliverable, or its summary and retained artifact link. Completion stops automatic goal continuations, not the current turn or its final reply. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared.",
       inputSchema: {
-        evidence: z4.string().min(1),
+        evidence: z4
+          .string()
+          .min(1)
+          .max(8192)
+          .describe(
+            "Short ledger proof, at most 8192 characters; not the final answer. Keep normal spaces. Deliver the answer in your final user-facing reply.",
+          ),
         reportDeliveries: SessionGoalReportDeliveries.optional(),
       },
     },
@@ -2946,6 +2967,8 @@ function registerGoalTools(
           ...delivery,
           artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
         })),
+        handoff:
+          "Now reply to the user with the requested deliverable, or its summary and retained artifact link. The evidence is only ledger proof; this receipt does not deliver your final answer.",
       });
     },
   );
@@ -2954,7 +2977,7 @@ function registerGoalTools(
     "goal_pause",
     {
       description:
-        "Pause the session goal with an evidence-based rationale when no meaningful authorized progress remains. Investigate recoverable failures and try plausible safe alternatives that could materially help; no fixed turn or retry count is required, and a definitive missing permission or required human decision can justify pausing immediately. State the blocker and what must change to resume. Work already in flight or a meaningful timed recheck uses the available waiting mechanism instead. Tool approvals remain human-only. No further continuation turns are synthesized until the goal is resumed or replaced.",
+        "Pause the session goal with an evidence-based rationale when no meaningful authorized progress remains. rationale is a short human-readable blocker explanation, at most 2048 UTF-8 bytes; keep normal spaces and summarize instead of compressing words. Investigate recoverable failures and try plausible safe alternatives that could materially help; no fixed turn or retry count is required, and a definitive missing permission or required human decision can justify pausing immediately. State the blocker and what must change to resume. Work already in flight or a meaningful timed recheck uses the available waiting mechanism instead. Tool approvals remain human-only. No further continuation turns are synthesized until the goal is resumed or replaced.",
       inputSchema: { rationale: goalRationale },
     },
     async ({ rationale }) => {

@@ -200,7 +200,11 @@ import {
   resolveWorkspaceCatalogSettings,
   workspaceCustomModelReference,
 } from "../model-catalog";
-import { resolveDefaultSessionModel } from "../default-session-model";
+import {
+  resolveDefaultSessionModel,
+  resolveCallerWorkspaceModelSelections,
+  admissibleWorkspaceModel,
+} from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   resolveSessionToolPolicy,
@@ -2860,6 +2864,21 @@ async function createSessionForRequestInFileScope(
   // vet that effective value, not just explicit ones (a restricted workspace's
   // inherited/default-model session would otherwise be born blocked).
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+  // Direct creation is a fresh model selection. Child inheritance and keyed
+  // repair preserve the existing accepted-model/authority rules.
+  if (retainedKeyedShellModel === null && !parentSession) {
+    const selections = await resolveCallerWorkspaceModelSelections(db, settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: personalResourceSubjectId ?? grant.subjectId,
+      ...(xaiProviderAccountAuthoritySnapshot
+        ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
+        : {}),
+    });
+    if (!admissibleWorkspaceModel(selections, model)) {
+      throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+    }
+  }
   const inheritedReasoningEffort =
     parentCallingTurn?.reasoningEffort ??
     parentSession?.reasoningEffort ??

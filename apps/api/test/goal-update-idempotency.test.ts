@@ -165,6 +165,19 @@ describe("goal_update idempotency", () => {
       replay: false,
     });
     expect(first.operationId).toBeTruthy();
+    const readableProgress =
+      "The verified milestone retains normal spaces and clear prose. ".repeat(100);
+    expect(Buffer.byteLength(readableProgress, "utf8")).toBeGreaterThan(4096);
+    await callMcpTool(firstMcp, "goal_progress", {
+      progressNote: readableProgress,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const progressEvent = (
+      await listSessionEvents(client.db, baseGrant.workspaceId, session.id)
+    ).find((event) => event.type === "goal.progress");
+    expect((progressEvent?.payload as { progressNote?: unknown } | undefined)?.progressNote).toBe(
+      readableProgress,
+    );
 
     const recovered = await recoverSessionDispatch(client.db, baseGrant.workspaceId, {
       sessionId: session.id,
@@ -243,7 +256,8 @@ describe("goal_update idempotency", () => {
     const liveGoalUpdates = bus.published.flat().filter((event) => event.type === "goal.updated");
     expect(durableGoalUpdates).toHaveLength(2);
     expect(liveGoalUpdates).toHaveLength(2);
-    expect(bus.published).toHaveLength(2);
+    expect(bus.published.flat().filter((event) => event.type === "goal.progress")).toHaveLength(1);
+    expect(bus.published).toHaveLength(3);
   });
 });
 
