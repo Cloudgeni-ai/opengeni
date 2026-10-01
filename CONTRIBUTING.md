@@ -63,6 +63,10 @@ bun run test:e2e
   an unchanged PR starts another run of the same source; it does not incorporate
   fixes from a newer base. Keep current-main integration evidence separate from
   exact-head CI evidence.
+- Workflow steps introduced after a frozen source must follow its declared
+  capabilities. The registry export regression runs when the selected source
+  declares that guard; incomplete guard sources and failing tests still fail.
+  Stable publication continues to require the full effective export guard.
 - Before retrying a failed check, inspect its failing leaf and checkout SHA.
   If the candidate contains a real defect already fixed on `main`, apply the
   necessary scoped correction to the candidate and run review and CI on that new

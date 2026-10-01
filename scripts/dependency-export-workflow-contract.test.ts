@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -98,4 +98,81 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
         .some((step) => step.run?.includes("scripts/dependency-export-workflow-contract.test.ts")),
     ).toBe(true);
   });
+
+  for (const scenario of [
+    { name: "older frozen source", declared: false, files: 0, failing: false, succeeds: true },
+    { name: "complete current guard", declared: true, files: 3, failing: false, succeeds: true },
+    {
+      name: "declared guard missing all tests",
+      declared: true,
+      files: 0,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "declared guard missing a test",
+      declared: true,
+      files: 2,
+      failing: false,
+      succeeds: false,
+    },
+    {
+      name: "tests without the declared guard",
+      declared: false,
+      files: 3,
+      failing: false,
+      succeeds: false,
+    },
+    { name: "failing guard regression", declared: true, files: 3, failing: true, succeeds: false },
+  ] as const) {
+    test(`exact-source CI handles ${scenario.name}`, async () => {
+      const run = (await workflowSteps("ci.yml"))
+        .flat()
+        .find((step) => step.name === "Registry dependency export guard regression")?.run;
+      expect(run).toBeDefined();
+      const fixture = await mkdtemp(join(tmpdir(), "opengeni-frozen-guard-ci-"));
+      try {
+        await writeFile(
+          join(fixture, "package.json"),
+          JSON.stringify({
+            scripts: scenario.declared ? { "test:effective-dependency-exports": "fixture" } : {},
+          }),
+        );
+        await mkdir(join(fixture, "scripts"));
+        const paths = [
+          "test-registry-dependency-exports.test.ts",
+          "test-effective-dependency-exports.test.ts",
+          "dependency-export-workflow-contract.test.ts",
+        ];
+        for (const path of paths.slice(0, scenario.files)) {
+          await writeFile(
+            join(fixture, "scripts", path),
+            `import { test, expect } from "bun:test";
+            test("synthetic export guard", () => expect(${!scenario.failing}).toBe(true));`,
+          );
+        }
+        const child = Bun.spawn(["bash", "-e", "-c", run!], {
+          cwd: fixture,
+          env: { PATH: process.env.PATH! },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [output, errors, status] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(status === 0).toBe(scenario.succeeds);
+        if (!scenario.declared && scenario.files === 0) {
+          expect(output).toContain("not part of this selected source revision");
+        } else if (!scenario.declared || scenario.files !== 3) {
+          expect(errors).toContain("Registry export guard source is incomplete");
+        } else {
+          expect(errors).toContain(scenario.failing ? "3 fail" : "3 pass");
+        }
+      } finally {
+        await rm(fixture, { recursive: true, force: true });
+      }
+    });
+  }
 });

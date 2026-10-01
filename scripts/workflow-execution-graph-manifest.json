@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "6af530fe2177486a6660a4fa5384fdca3b686584865df91324f25bc30c49e6b1"
+      "sha256": "8c4a8c403580afb6e8b4ba89bb3920e10017e9d91409512dbcfdc8e6892bb3c6"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -713,7 +713,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Registry dependency export guard regression",
-      "sha256": "ab247cd4f72383efbfae8b89f434f58df96167b4df33ec6fa9744e1c10e49177"
+      "sha256": "a0e64345c77569cd605197ff9d3ef1b28ff5a4b511a5aaf5b2bca0497799c7d9"
     },
     {
       "workflow": ".github/workflows/ci.yml",
