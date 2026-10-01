@@ -21,10 +21,10 @@ add OpenGeni to an existing product, use `SKILL.md` instead.
   created under Organization settings, Developer.
 - The OpenGeni URL when it is not OpenGeni Cloud (`https://app.opengeni.ai`).
 
-Put the IDs from the user's request into `.env` yourself. For the key, create
-`.env` with an empty `OPENGENI_API_KEY=` and ask the user to paste the key there,
-unless they already put it in `.env` or the environment. Never ask for the key
-in chat, and never print, log, or commit it.
+Put the IDs from the user's request into `.env` yourself. If the request
+already contains the key, write it into `.env` without repeating it. Otherwise
+leave `OPENGENI_API_KEY=` empty and ask the user to paste the key into `.env`
+themselves; never ask for it in chat. Never print, log, or commit the key.
 
 ## 1. Create the project
 

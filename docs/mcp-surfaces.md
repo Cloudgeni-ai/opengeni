@@ -32,8 +32,10 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
-Local coding agents (Claude Code, Codex, Cursor) use this endpoint through the
-[`plugins/opengeni`](../plugins/opengeni/README.md) plugin: OAuth sign-in as the
+Local coding agents (Claude Code, Codex, Cursor, VS Code, Devin Desktop, Zed,
+Gemini CLI, and other MCP OAuth clients) use this endpoint through the
+[`plugins/opengeni`](../plugins/opengeni/README.md) plugin or its documented
+per-client setup: OAuth sign-in as the
 current human, tools named `opengeni__<tool>`, `docs__<tool>`, and
 `files__<tool>`, and the `offload-to-opengeni` Skill for session delegation.
 The endpoint rejects workspace API keys (`current-human tool access required`);

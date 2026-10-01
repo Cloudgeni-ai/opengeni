@@ -37,12 +37,16 @@ Match on the `opengeni__<tool>` suffix.
 | `opengeni__project_list` | Projects to file the session into. |
 
 If no `opengeni__` tools are available, or a call fails with an authentication
-error, stop and tell the user to connect: in Claude Code run `/mcp`, select the
-`opengeni` server, and sign in; in Codex run `codex mcp login opengeni`; in
-Cursor open Settings → MCP and sign in. The user must already be signed in to
-OpenGeni in their default browser; the consent page then asks for a workspace:
-pick the same workspace as in the configured URL. Never work around
-authentication with API keys, cookies, or other credentials.
+error, stop and tell the user to sign in to the `opengeni` MCP server: in Claude
+Code run `/mcp`, select the server, and sign in; in Codex run
+`codex mcp login opengeni`; in Gemini CLI run `/mcp auth opengeni`; in Devin
+run `devin mcp login opengeni`; in the Cursor CLI run
+`agent mcp login opengeni`; in Cursor, VS Code, or Zed use the sign-in prompt
+the editor shows for the server. If the server is not configured at all, point
+them to https://docs.opengeni.ai/guides/coding-agents. The user must already be
+signed in to OpenGeni in their default browser; the consent page then asks for
+a workspace: pick the same workspace as in the configured URL. Never work
+around authentication with API keys, cookies, or other credentials.
 
 ## 1. Decide whether to offload
 

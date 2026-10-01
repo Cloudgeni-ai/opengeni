@@ -191,4 +191,22 @@ describe("coding-agent plugin", () => {
     expect(server).toContain('sandboxBackend: "none"');
     expect(server).toContain('http.listen(port, "127.0.0.1"');
   });
+
+  test("agent setup snippets parse and point at the real Skill folders", () => {
+    const pages = {
+      readme: readFileSync(join(pluginRoot, "README.md"), "utf8"),
+      docs: readFileSync(join(root, "docs-site/guides/coding-agents.mdx"), "utf8"),
+    };
+    for (const [page, text] of Object.entries(pages)) {
+      const blocks = [...text.matchAll(/^( *)```json\n([\s\S]*?)^\1```$/gmu)];
+      expect(`${page}:${blocks.length > 4}`).toBe(`${page}:true`);
+      for (const [, , body] of blocks) expect(() => JSON.parse(body!)).not.toThrow();
+      const skillPaths = [...text.matchAll(/\.agents\/skills\/([a-z-]+)\/SKILL\.md/gu)];
+      expect([...new Set(skillPaths.map((match) => match[1]))].sort()).toEqual(skillNames);
+      expect(text).toContain("sparse-checkout set plugins/opengeni/skills");
+      for (const client of ["Cursor", "VS Code", "Devin", "Zed", "Gemini CLI", "mcp-remote"]) {
+        expect(`${page}:${text.includes(client)}`).toBe(`${page}:true`);
+      }
+    }
+  });
 });

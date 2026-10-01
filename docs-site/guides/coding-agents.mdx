@@ -1,6 +1,6 @@
 ---
 title: "Use OpenGeni from your coding agent"
-description: "Connect Claude Code, Codex, or Cursor to an OpenGeni workspace to offload long-running work and to build products on OpenGeni."
+description: "Connect Claude Code, Codex, Cursor, VS Code, Devin Desktop, Zed, Gemini CLI, or any MCP client to an OpenGeni workspace to offload long-running work and to build apps on OpenGeni."
 icon: "terminal"
 ---
 
@@ -10,7 +10,9 @@ The OpenGeni plugin bundles three things:
 
 - The **workspace MCP server**, `https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp`, which your agent signs in to with your OpenGeni account.
 - The **offload-to-opengeni** Skill, which teaches the agent when and how to delegate.
-- The **build-with-opengeni** Skill, which guides the agent through [integrating OpenGeni into your product](/guides/integrate-your-product).
+- The **build-with-opengeni** Skill, which guides the agent through [integrating OpenGeni into your product](/guides/integrate-your-product) and can create a small local chat app for you.
+
+Claude Code and Codex install it as a plugin. Every other agent uses the same MCP server and the same Skill folders, which are plain Markdown.
 
 <Note>
   Workspace MCP sign-in must be enabled on the deployment. If
@@ -22,6 +24,8 @@ The OpenGeni plugin bundles three things:
 ## Find your workspace ID
 
 Open the workspace you want your coding agent to use. Its ID is the UUID after `/workspaces/` in the address bar. Sessions your agent starts run in that workspace and use its credits or connected model subscription.
+
+Your MCP URL is `https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp`. The examples below write it as `<MCP URL>`.
 
 ## Set up your agent
 
@@ -43,10 +47,10 @@ Open the workspace you want your coding agent to use. Its ID is the UUID after `
     Add the server; Codex detects OAuth and opens the sign-in page:
 
     ```bash
-    codex mcp add opengeni --url https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp
+    codex mcp add opengeni --url <MCP URL>
     ```
 
-    Run `codex mcp login opengeni` to sign in again later. For the Skills, install the plugin with `codex plugin marketplace add Cloudgeni-ai/opengeni` and `codex plugin add opengeni@opengeni`, or copy the folders in [`plugins/opengeni/skills`](https://github.com/Cloudgeni-ai/opengeni/tree/main/plugins/opengeni/skills) into `~/.agents/skills/`. Keep the `codex mcp add` server either way: it replaces the plugin's placeholder.
+    Run `codex mcp login opengeni` to sign in again later. For the Skills, install the plugin with `codex plugin marketplace add Cloudgeni-ai/opengeni` and `codex plugin add opengeni@opengeni`, or [add them to your repository](#add-the-skills-to-any-agent). Keep the `codex mcp add` server either way: it replaces the plugin's placeholder.
 
   </Tab>
   <Tab title="Cursor">
@@ -55,19 +59,128 @@ Open the workspace you want your coding agent to use. Its ID is the UUID after `
     ```json
     {
       "mcpServers": {
-        "opengeni": {
-          "url": "https://<your OpenGeni URL>/v1/workspaces/<workspace ID>/mcp"
-        }
+        "opengeni": { "url": "<MCP URL>" }
       }
     }
     ```
 
-    Sign in from Cursor Settings → MCP. Copy the folders in [`plugins/opengeni/skills`](https://github.com/Cloudgeni-ai/opengeni/tree/main/plugins/opengeni/skills) into `~/.cursor/skills/`.
+    Cursor asks you to sign in when the server first connects. In the Cursor CLI, run `agent mcp login opengeni`. Cursor reads Skills from `.agents/skills/` or `.cursor/skills/`; [add them](#add-the-skills-to-any-agent).
+
+  </Tab>
+  <Tab title="VS Code">
+    With GitHub Copilot in agent mode, add the server to your user profile:
+
+    ```bash
+    code --add-mcp '{"name":"opengeni","type":"http","url":"<MCP URL>"}'
+    ```
+
+    For one project, add it to `.vscode/mcp.json` instead:
+
+    ```json
+    {
+      "servers": {
+        "opengeni": { "type": "http", "url": "<MCP URL>" }
+      }
+    }
+    ```
+
+    VS Code opens the sign-in page in your browser on the first connection. Copilot reads Skills from `.agents/skills/` or `.github/skills/`; [add them](#add-the-skills-to-any-agent).
+
+  </Tab>
+  <Tab title="Devin Desktop">
+    Devin Desktop is the new name of Windsurf. Add the server and sign in:
+
+    ```bash
+    devin mcp add -s user opengeni <MCP URL>
+    devin mcp login opengeni
+    ```
+
+    Or add it to `~/.config/devin/mcp_config.json`, or `.devin/mcp_config.json` for one project:
+
+    ```json
+    {
+      "mcpServers": {
+        "opengeni": { "url": "<MCP URL>", "transport": "http" }
+      }
+    }
+    ```
+
+    When the sign-in expires, the server shows **Needs auth** with an **Authenticate** button. Older Windsurf releases use `~/.codeium/windsurf/mcp_config.json` with `serverUrl` in place of `url`. Devin reads Skills from `.agents/skills/`; [add them](#add-the-skills-to-any-agent).
+
+  </Tab>
+  <Tab title="Zed">
+    Open Settings → AI → MCP Servers → Add Remote Server, or add it to your `settings.json`:
+
+    ```json
+    {
+      "context_servers": {
+        "opengeni": { "url": "<MCP URL>" }
+      }
+    }
+    ```
+
+    Zed asks you to sign in with OpenGeni when the server first connects. Zed reads Skills only from `.agents/skills/` and `~/.agents/skills/`; [add them](#add-the-skills-to-any-agent).
+
+  </Tab>
+  <Tab title="Gemini CLI">
+    Add the server for all projects:
+
+    ```bash
+    gemini mcp add --transport http -s user opengeni <MCP URL>
+    ```
+
+    Or set it in `~/.gemini/settings.json`, or `.gemini/settings.json` for one project:
+
+    ```json
+    {
+      "mcpServers": {
+        "opengeni": { "httpUrl": "<MCP URL>" }
+      }
+    }
+    ```
+
+    Gemini CLI opens the sign-in page on first use; run `/mcp auth opengeni` to sign in again. It needs a browser on the same machine. Gemini CLI reads Skills from `.agents/skills/` or `.gemini/skills/`; [add them](#add-the-skills-to-any-agent).
+
+  </Tab>
+  <Tab title="Other clients">
+    Any client that supports remote MCP servers over Streamable HTTP with MCP OAuth works: use `<MCP URL>` with no headers or API key and let the client sign in. OpenGeni supports dynamic client registration for public clients, PKCE, and the `mcp:access` scope.
+
+    For a client that only runs local (stdio) servers, use the [`mcp-remote`](https://github.com/geelen/mcp-remote) bridge, which signs in through your browser:
+
+    ```json
+    {
+      "mcpServers": {
+        "opengeni": { "command": "npx", "args": ["-y", "mcp-remote", "<MCP URL>"] }
+      }
+    }
+    ```
 
   </Tab>
 </Tabs>
 
 Before you connect, sign in to OpenGeni in your default browser: the sign-in opens an OpenGeni consent page there and needs that session. Choose the organization and the same workspace as in the URL, and approve.
+
+These setups follow each tool's documentation as of October 2026. OpenGeni sign-in has been tested end to end with Claude Code and Codex; the other clients rely on their documented MCP OAuth support and have not yet been tested against OpenGeni. If your version differs, add a remote HTTP MCP server with OAuth the way its documentation describes.
+
+## Add the Skills to any agent
+
+Codex, Cursor, VS Code, Devin Desktop, Zed, and Gemini CLI all read Skills from `.agents/skills/` in your repository, or from `~/.agents/skills/` for every project. Copy both Skills there:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Cloudgeni-ai/opengeni.git /tmp/opengeni-skills
+git -C /tmp/opengeni-skills sparse-checkout set plugins/opengeni/skills
+mkdir -p .agents/skills && cp -R /tmp/opengeni-skills/plugins/opengeni/skills/. .agents/skills/
+```
+
+If your agent has no Skills support, point its instructions file (`AGENTS.md`, `GEMINI.md`, `.github/copilot-instructions.md`, or a Cursor rule) at the folders:
+
+```markdown
+## OpenGeni
+- To run work in the cloud, in the background, or "on OpenGeni", or to check an
+  OpenGeni session, read and follow `.agents/skills/offload-to-opengeni/SKILL.md`.
+- To add OpenGeni agents to an app, or to create a local OpenGeni chat app, read
+  and follow `.agents/skills/build-with-opengeni/SKILL.md`.
+```
 
 ## Offload work
 
@@ -84,12 +197,21 @@ Approvals and questions from the OpenGeni agent appear in the session; open the 
 ## How access works
 
 - You sign in with your own OpenGeni account. The agent gets a short-lived token scoped to the workspace MCP endpoint, limited to what you can do in that workspace. It cannot call the REST API, and it never sees a password or API key.
-- The token is refreshed automatically. Disconnect by signing out of the server in your client (`/mcp` in Claude Code, `codex mcp logout opengeni`).
+- The token is refreshed automatically. Disconnect by signing out of the server in your client (for example `/mcp` in Claude Code or `codex mcp logout opengeni`).
 - Tools that need a separate human approval are not exposed over MCP; use the OpenGeni app for those.
 - The Skill tells the agent never to put secrets in a session brief. Store credentials in OpenGeni and refer to them by name.
 
 ## Build with OpenGeni
 
-The build-with-opengeni Skill covers the product integration path: an organization API key on your server, a session proxy that acts as each signed-in user, and the embedded conversation UI. Ask your agent to "add an OpenGeni assistant to this app" and it starts from a hello world that proves the connection. See [Integrate your product](/guides/integrate-your-product) for the same path in prose.
+The build-with-opengeni Skill covers the product integration path: an organization API key on your server, a session proxy that acts as each signed-in user, and the embedded conversation UI. See [Integrate your product](/guides/integrate-your-product) for the same path in prose.
+
+To see it working first, ask your agent for a small local app:
+
+```text
+Use the build-with-opengeni skill to create a small local web app with an Opengeni agent chat.
+Put OPENGENI_API_KEY in .env. Send sessions to workspace <workspace ID> in organization <organization ID>.
+```
+
+The agent builds a Vite + React page with the OpenGeni chat and a small Node server that keeps your organization API key, and runs it at `http://127.0.0.1:5173`. Paste the key into `.env` yourself when the agent asks. Every chat you start there appears as a session in that workspace in the OpenGeni app, with the same messages. The app accepts only local connections, because everyone who can reach it chats as one demo user.
 
 For the endpoint contract and the other MCP surfaces, see [MCP surfaces](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/mcp-surfaces.md).
