@@ -165,6 +165,7 @@ beforeAll(async () => {
       settings: testSettings({
         productAccessMode: "managed",
         delegationSecret,
+        environmentsEncryptionKey: Buffer.from(environmentsEncryptionKey).toString("base64"),
       }),
     } as ApiRouteDeps,
     {
@@ -180,6 +181,7 @@ beforeAll(async () => {
           ![
             "https://127.0.0.1/openapi.json",
             "https://127.0.0.1/reconciliation-openapi.json",
+            "https://127.0.0.1/approval-openapi.json",
           ].includes(String(sourceRequest))
         ) {
           return new Response(null, { status: 404 });
@@ -708,6 +710,144 @@ describe("API Integration routes", () => {
     });
   }, 60_000);
 
+  test("previews and installs an inline OpenAPI document by stable source key", async () => {
+    if (!available || !client) return;
+    const fetchesBefore = sourceFetches;
+    const document = JSON.stringify(openApiDocument());
+    const source = { kind: "openapi_document", sourceKey: "inventory-inline", document };
+    const previewResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({ source }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json();
+    expect(sourceFetches).toBe(fetchesBefore);
+    expect(preview.source).toEqual({
+      kind: "openapi_document",
+      sourceKey: "inventory-inline",
+      documentSha256: new Bun.CryptoHasher("sha256").update(document).digest("hex"),
+    });
+    expect(JSON.stringify(preview)).not.toContain('"paths"');
+    expect(preview).toMatchObject({ sourceUrl: null, providerDomain: "127.0.0.1" });
+
+    const installed = await request("/integrations/install", {
+      method: "POST",
+      body: JSON.stringify({
+        source,
+        expectedRevisionId: preview.revisionId,
+        expectedContentSha256: preview.contentSha256,
+      }),
+    });
+    expect(installed.status).toBe(201);
+    const install = await installed.json();
+    expect(install.capabilityId).toBe(preview.capabilityId);
+
+    // A revised document under the same key keeps the same Integration identity.
+    const revised = openApiDocument();
+    (revised.info as Record<string, unknown>).version = "2.0.0";
+    const revisedPreview = await (
+      await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source: { ...source, document: JSON.stringify(revised) } }),
+      })
+    ).json();
+    expect(revisedPreview.capabilityId).toBe(preview.capabilityId);
+    expect(revisedPreview.revisionId).not.toBe(preview.revisionId);
+
+    const relative = openApiDocument();
+    relative.servers = [{ url: "/v1/" }];
+    const relativeResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        source: {
+          kind: "openapi_document",
+          sourceKey: "relative",
+          document: JSON.stringify(relative),
+        },
+      }),
+    });
+    expect(relativeResponse.status).toBe(422);
+    expect(await relativeResponse.text()).toContain("absolute servers[].url");
+
+    const removed = await request(
+      `/integrations/${encodeURIComponent(install.capabilityId)}/instances/${encodeURIComponent(install.instanceKey)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: install.installationVersion,
+          expectedInstanceVersion: install.instanceVersion,
+        }),
+      },
+    );
+    expect(removed.status).toBe(200);
+  }, 60_000);
+
+  test("installers can auto-approve selected write tools for unattended runs", async () => {
+    if (!available || !client) return;
+    const source = { kind: "openapi", url: "https://127.0.0.1/approval-openapi.json" };
+    const preview = await (
+      await request("/integrations/preview", { method: "POST", body: JSON.stringify({ source }) })
+    ).json();
+    const install = (body: Record<string, unknown>) =>
+      request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify({
+          source,
+          expectedRevisionId: preview.revisionId,
+          expectedContentSha256: preview.contentSha256,
+          ...body,
+        }),
+      });
+    const listed = async () =>
+      (
+        (await (await request("/integrations")).json()) as {
+          integrations: Array<{ capabilityId: string; approvalRequiredToolCount: number }>;
+        }
+      ).integrations.find((item) => item.capabilityId === preview.capabilityId);
+
+    const unselected = await install({
+      allowedTools: ["inventory_listitems"],
+      autoApprovedTools: ["inventory_createitem"],
+    });
+    expect(unselected.status).toBe(422);
+    expect(await unselected.text()).toContain("autoApprovedTools must name selected");
+
+    const created = await install({});
+    expect(created.status).toBe(201);
+    const installed = await created.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(1);
+
+    const exempted = await install({
+      instanceKey: installed.instanceKey,
+      expectedInstanceVersion: installed.instanceVersion,
+      autoApprovedTools: ["inventory_createitem"],
+    });
+    expect(exempted.status).toBe(200);
+    const updated = await exempted.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(0);
+
+    // Declarative: omitting the field restores approval for every write tool.
+    const restored = await install({
+      instanceKey: installed.instanceKey,
+      expectedInstanceVersion: updated.instanceVersion,
+    });
+    expect(restored.status).toBe(200);
+    const final = await restored.json();
+    expect((await listed())?.approvalRequiredToolCount).toBe(1);
+
+    const removed = await request(
+      `/integrations/${encodeURIComponent(preview.capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: final.installationVersion,
+          expectedInstanceVersion: final.instanceVersion,
+        }),
+      },
+    );
+    expect(removed.status).toBe(200);
+  }, 60_000);
+
   test("preserves discovered auth placement and derives Personal ownership from the Connection", async () => {
     if (!available || !client) return;
     const connection = await createConnection(client.db, {
@@ -838,6 +978,37 @@ describe("API Integration routes", () => {
       }),
     });
     expect(removed.status).toBe(200);
+  }, 60_000);
+
+  test("warns when the selected Connection does not place the credential the description declares", async () => {
+    if (!available || !client) return;
+    const source = { kind: "openapi", url: "https://127.0.0.1/secured-openapi.json" };
+    const preview = async (credential: Record<string, unknown>) => {
+      const connection = await createConnection(client!.db, {
+        accountId,
+        workspaceId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: encryptEnvironmentValue(
+          environmentsEncryptionKey,
+          JSON.stringify(credential),
+        ),
+        createdBySubjectId: subjectId,
+      });
+      const response = await request("/integrations/preview", {
+        method: "POST",
+        body: JSON.stringify({ source, connectionId: connection.id }),
+      });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { warnings: string[] }).warnings;
+    };
+
+    const header = await preview({ headers: { Authorization: "Token synthetic" } });
+    expect(header.join("\n")).toContain('expects the credential in query "api_key"');
+    expect(header.join("\n")).not.toContain("synthetic");
+    expect(
+      await preview({ placements: [{ carrier: "query", name: "api_key", value: "synthetic" }] }),
+    ).toEqual([]);
   }, 60_000);
 
   test("controls generic Integration facets through the public lifecycle", async () => {

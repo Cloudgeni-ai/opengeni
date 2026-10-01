@@ -597,6 +597,19 @@ export { PierreDiff } from "./components/pierre-diff";
 // Opt in to the optional `@pierre/diffs` peer with `enablePierreDiffs()` from
 // `@opengeni/react/diffs`; the root entry never names the peer.
 export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-loader";
+// Bundler-visible optional workbench imports live only on opt-in subpaths.
+export {
+  registerSandboxTerminal,
+  registerCodeEditor,
+  registerDesktopViewer,
+} from "./lib/workbench-peers";
+export type {
+  WorkbenchPeerLoader,
+  SandboxTerminalPeers,
+  CodeEditorPeers,
+  CodeEditorLanguage,
+  CodeEditorLanguages,
+} from "./lib/workbench-peers";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";

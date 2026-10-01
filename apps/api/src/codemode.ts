@@ -78,13 +78,19 @@ export async function codemodeSessionRequest(
   grant: AccessGrant,
   request: Request,
   path: string,
+  resolveProxySettings?: (
+    session: Session,
+  ) => Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
 ): Promise<Request> {
   siteSessionPath(path, grant.workspaceId, request.method);
   const { authority } = await requireActiveCodemodeCatalog(deps, grant);
   const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
-  const permissions = codemodeSessionProxyPermissions(deps.settings, session);
+  const permissions = codemodeSessionProxyPermissions(
+    resolveProxySettings?.(session) ?? deps.settings,
+    session,
+  );
   const token = await signDelegatedAccessToken(secret, {
     ...authority,
     permissions,

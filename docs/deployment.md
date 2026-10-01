@@ -441,6 +441,17 @@ runtime accepts access tokens only on `/v1/workspaces/:workspaceId/mcp`,
 because it is the issuer and part of every exact resource identifier. See
 [`mcp-surfaces.md`](mcp-surfaces.md) for the client-facing contract.
 
+The metadata and protocol endpoints live at the issuer origin root, outside
+`/v1`: `/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource/...`, `/oauth/register`,
+`/oauth/authorize`, and `/oauth/token`. While the switch is on, the Helm chart
+renders a dedicated `<release>-mcp-oauth` Ingress that routes exactly those
+paths to the API for every ingress host that already routes to the API
+(`ingress.mcpOAuthIngress`); repeat any edge-auth annotations of the primary
+Ingress there. An edge outside this chart must route the same paths to the API.
+If they reach the web application instead, discovery returns HTML and MCP
+clients cannot sign in.
+
 Dynamic client registration is durably limited to 20 registrations per source
 and 600 registrations globally per ten-minute window. Registrations that are
 never used expire after one day; successful client use extends retention
@@ -1320,6 +1331,24 @@ exist, never restart a pre-contract image; turning the switch off does not
 remove, drain, or disable those durable refs. Upgraded readers, child
 inheritance, and workers consume them regardless of their local switch value;
 the switch gates only new external admission and static configuration.
+
+Agent configuration (`sessions.agent_config`, rolling migration
+`0559_session_agent_config.sql`) has two switches, both `false` in config and
+Helm. Deploy the 0559-aware API, control worker, and turn worker everywhere
+with both off: every session keeps a NULL configuration and byte-identical
+legacy behavior, and an old worker reading a new row ignores the column. Then
+set `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true` to admit `agent` on session
+create, `PUT .../sessions/:id/agent`, MCP `session_create`, scheduled-task
+`agentConfig.agent`, automation templates, and workspace
+`settings.sessionAgentDefaults`; with it off each of those is a 422 whose
+`details.code` is `agent_config_not_enabled`, and stored workspace defaults are
+ignored. `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS=true` additionally
+resolves omitted-`agent` top-level sessions to `{ capabilities: "all" }`; an old
+worker ignoring an `"all"` configuration still runs today's full tool set.
+Turning either switch off later changes only new admissions: stored
+configurations stay authoritative for their sessions, and a scheduled task
+whose stored `agent` is no longer admissible is refused (skipped) rather than
+run without it. See `packages/contracts/src/agent-config.ts`.
 
 Migration 0303 is intentionally rolling and applies while the switch remains
 `false`; applying the ordinary migration chain does not activate an

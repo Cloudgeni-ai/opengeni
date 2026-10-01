@@ -120,7 +120,7 @@ alone, they wake only explicit waits. Notices cannot block other inbox input.
 Batching preserves causal authority; messages/Steer inherit the sender’s human
 independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 
-`runAgentTurn` is non-retryable and attempt-fenced. Retry settlement, never unknown
+`runAgentTurn` is non-retryable, attempt-fenced. Retry settlement, never unknown
 effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
 fences; pre-dispatch proof alone permits recovery.
 Accepted-policy [compatibility/recovery](run-lifecycle.md).
@@ -376,20 +376,20 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
+Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay legacy
+([design](design/agent-configuration.md)).
+
 ### 3.8 A Connected Machine is first-class primary compute
 
-Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
-Browser shutdown: [native lifecycle](../agent/README.md#distribution).
-Managed updates fence new work until commands, uploads and owned browser/computer
-controllers are idle; missing proof defers the update.
-Mac updates preserve signed bundles; writes check ACLs
-([native writer](../agent/TRANSACTIONAL-WRITES.md)).
+Connected Machines (`selfhosted`) run agents without sandboxes. [Native updates](../agent/README.md#distribution)
+fence admission and require idle commands, uploads and owned browser/computer controllers;
+unavailable proof defers updates. Mac updates preserve signed bundles and
+[write ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
-The machine owns files, Git authentication, environment, and [renewable credentials](connected-machines.md).
+Machines own files, Git authentication, environment and [credential renewal](connected-machines.md).
 OpenGeni neither clones repositories nor installs durable control-plane credentials;
-authorized child processes receive only transient, exact-attempt Codemode authority.
-
-Sandboxless attachment rebuilds native capabilities through [same-turn recovery](run-lifecycle.md), without replaying completed tools.
+children receive transient, exact-attempt Codemode authority.
+[Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
 
 Machine paths are host-native and session-specific, not universal `/workspace`
 aliases. Unavailability produces a typed operation outcome; text-only reasoning
@@ -593,8 +593,7 @@ Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 ## 4. System architecture
 
-OpenGeni separates durable control from live transport and separates control
-plane processes from the place where user code runs.
+OpenGeni separates durable control, live transport, and user-code execution.
 
 ```mermaid
 flowchart LR
@@ -644,8 +643,8 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 ### 4.1 Request and event path
 
-1. A client calls `apps/api`. Middleware establishes the deployment perimeter,
-   observability context, authentication, workspace, and permissioned grant.
+1. `apps/api` middleware establishes deployment perimeter, observability context,
+   authentication, workspace, and permissioned grant.
 2. HTTP routes adapt the request into `@opengeni/core` domain operations.
 3. The domain operation validates the request and commits authoritative rows,
    events, queue/control state, audit facts, and workflow-wake intent in
@@ -667,8 +666,8 @@ and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 ### 4.2 Control path versus data path
 
-The API, Postgres, Temporal, and worker form the durable control plane. NATS
-session fanout is a live projection of that control state. Connected Machine
+API, Postgres, Temporal, and worker own durable control; NATS session fanout
+projects that state. Connected Machine
 commands also cross NATS, but authorization and durable ownership are decided
 before transport. Direct browser data planes are established only from a
 short-lived API-authorized grant and never become an independent source of
@@ -690,8 +689,7 @@ the public transport surface is in [`../packages/sdk/README.md`](../packages/sdk
 
 ### 4.3 Dependency direction
 
-At a high level, dependencies flow inward from process adapters toward stable
-contracts and domain boundaries:
+Process adapters depend on contracts and domain boundaries:
 
 ```text
 contracts / config / network
@@ -705,14 +703,14 @@ apps/api and apps/worker
 contracts → sdk → react → apps/web
 ```
 
-The client closure remains server-free. `apps/web` consumes the SDK and React
-packages; it does not own session or authorization semantics. Advanced hosts
-may embed API/core/worker packages, but the same domain and persistence
-boundaries still apply.
+Server-free clients: `apps/web` consumes SDK/React, never owning session/authorization
+semantics. Embedded API/core/worker hosts preserve these boundaries.
 
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
-Workspace management route classification lives in `apps/web/src/lib/workspace-management-location.ts`. The workspace route loads `components/settings/workspace-settings-shell.tsx` lazily only for management destinations, so session navigation does not import the settings interface.
+Workspace management: `apps/web/src/lib/workspace-management-location.ts`; lazy settings
+shell: `components/settings/workspace-settings-shell.tsx`, loaded only for management
+destinations.
 
 ---
 
@@ -944,7 +942,7 @@ Repository `.agents/skills` holds maintainer and integration guidance. Runtime s
 ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
 `opengeni-client`, `opengeni-help`, `opengeni-visualize`, and `document-parsing`,
 unless explicitly overridden. `.agents/skills/opengeni-client` is canonical;
-`scripts/sync-client-skill.ts` generates bundled assets with drift tests.
+`scripts/sync-client-skill.ts` generates bundled and docs-site copies with drift tests.
 Every deployment can read it without installation or sandbox setup.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
@@ -1388,6 +1386,9 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
+React root stays optional-peer-free; workbench subpaths register peer loaders
+(`packages/react/src/lib/workbench-peers.ts`, `scripts/react-root-package-contract.test.ts`).
+
 `ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share console/embed
 connection inventory and OAuth setup. Presentation filters never authorize
 acquisition. Session-targeted setup preserves exact personal consent/tool
@@ -1721,7 +1722,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Knowledge retrieval, source preparation, or review | `packages/db/src/knowledge-entries.ts`, `packages/core/src/domain/knowledge*.ts`, `apps/api/src/routes/knowledge.ts` | [`knowledge.md`](knowledge.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
-| Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
+| Knowledge, Skills, instructions, organization identity, or Agent learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts`, `packages/runtime/src/agent-instructions/` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |

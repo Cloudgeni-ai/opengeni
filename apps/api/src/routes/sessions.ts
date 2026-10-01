@@ -82,6 +82,8 @@ import {
   UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
@@ -305,9 +307,11 @@ import {
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
+  updateSessionAgent,
   updateSessionTitle,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
+  workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
   relayConfigFromSettings,
@@ -822,7 +826,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
+      ...page.pinned,
+      ...page.sessions,
+    ]);
     const commandActivity = await backgroundCommandActivityForSessions(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -847,6 +854,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
+        policy.effectiveToolsContext,
       );
     };
     if (pageView) {
@@ -1990,9 +1998,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.param("sessionId"),
       ...lineage.ancestors.map((session) => session.id),
     ];
+    const lineageSessions = [...lineage.ancestors];
     const collect = (nodes: LineageNode[]) => {
       for (const node of nodes) {
         sessionIds.push(node.session.id);
+        lineageSessions.push(node.session as Session);
         collect(node.children);
       }
     };
@@ -2008,7 +2018,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         session: { ...node.session, hasSchedules: targets.has(node.session.id) },
         children: decorateNodes(node.children),
       }));
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
+    const policy = await loadEffectivePolicyContext(
+      deps,
+      workspaceId,
+      grant.subjectId,
+      lineageSessions,
+    );
     return c.json({
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
@@ -2017,6 +2032,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           { ...session, hasSchedules: targets.has(session.id) },
           policy.workspaceServerIds,
           policy.workspaceDefaultServerIds,
+          policy.effectiveToolsContext,
         ),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
@@ -2349,6 +2365,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     try {
       const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Replace the session's agent configuration (capabilities, identity,
+  // instructions alias, renderer). Shares the tool-policy version CAS and
+  // applies from the next attempt.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/agent", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      UpdateSessionAgentRequest,
+      await c.req.json().catch(() => null),
+    );
+    try {
+      const session = await updateSessionAgent(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
@@ -4877,6 +4922,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/mcp-credentials/rotate" && verb === "POST")
     return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -5722,6 +5768,24 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
       409,
     );
   }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof AgentConfigError
+  ) {
+    // Typed agent-configuration failure: the specific code is details.code.
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.cause.code,
+          ...(error.cause.capability ? { capability: error.cause.capability } : {}),
+        },
+      },
+      422,
+    );
+  }
   if (error instanceof HTTPException && error.status === 422) {
     return c.json(
       {
@@ -5789,18 +5853,21 @@ function commandConflictResponse(c: Context, error: unknown): Response {
 type EffectivePolicyContext = {
   workspaceServerIds: string[];
   workspaceDefaultServerIds: string[];
+  effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
 };
 
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,
+  sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
     workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
     workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
   ]);
-  return { workspaceServerIds, workspaceDefaultServerIds };
+  return { workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext };
 }
 
 async function withEffectivePolicy(
@@ -5809,11 +5876,12 @@ async function withEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId);
+  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId, [session]);
   return sessionWithEffectiveToolPolicy(
     session,
     policy.workspaceServerIds,
     policy.workspaceDefaultServerIds,
+    policy.effectiveToolsContext,
   );
 }
 
@@ -5824,6 +5892,7 @@ function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): 
       node.session as Session,
       policy.workspaceServerIds,
       policy.workspaceDefaultServerIds,
+      policy.effectiveToolsContext,
     ),
     children: mapLineageNodes(node.children, policy),
   }));

@@ -60,8 +60,9 @@ describe("embedded artifact viewer", () => {
     theme: "dark" | "light",
     query = "",
     height = width < 768 ? 844 : 900,
+    hasTouch = false,
   ): Promise<Page> {
-    const page = await browser.newPage({ viewport: { width, height } });
+    const page = await browser.newPage({ viewport: { width, height }, hasTouch });
     page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
     page.on("console", (message) => {
       if (message.type() === "error" && !message.location().url.endsWith("/favicon.ico"))
@@ -232,7 +233,9 @@ describe("embedded artifact viewer", () => {
         // in the conversation, Jump to latest shows while the active turn's
         // Working row still sits at the tip, under the pill's resting spot.
         await page.getByText("Open the dashboard").click();
-        await page.getByRole("button", { name: width < 768 ? "Back" : "Close" }).click();
+        await page
+          .getByRole("button", { name: width < 768 ? "Back" : "Close", exact: true })
+          .click();
         const pill = page.locator("[data-og-jump-to-latest]");
         await pill.waitFor();
         const before = await scrollerGeometry(page);
@@ -248,9 +251,9 @@ describe("embedded artifact viewer", () => {
       }
     }, 60_000);
 
-    test(`Latest question slides clear of an inline Site card's controls at ${width}px`, async () => {
+    test(`Back to your message slides clear of an inline Site card's controls at ${width}px`, async () => {
       // Short enough that the card's toolbar can scroll up to the pill.
-      const page = await open(width, "light", "&long", 560);
+      const page = await open(width, "light", "&long", 560, width < 768);
       try {
         await page.locator("[data-og-work-header]").first().waitFor();
         await page.waitForTimeout(600);
@@ -276,6 +279,21 @@ describe("embedded artifact viewer", () => {
         await page.waitForTimeout(300);
         await capture(page, `question-pill-${width}-light`);
         expect(await scrollerGeometry(page)).toEqual(before);
+        // No sideways slot fits the longer label: only the overlay moves below
+        // the toolbar, preserving the reserved sticky-header strip and scroll.
+        expect(
+          await page
+            .locator("[data-og-question-nav]")
+            .evaluate((node) => parseFloat(getComputedStyle(node).marginTop)),
+        ).toBeGreaterThan(0);
+        if (width < 768) expect((await pill.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+        await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
+          node.scrollTop += 120;
+        });
+        await page.waitForFunction(() => {
+          const node = document.querySelector("[data-og-question-nav]");
+          return node && parseFloat(getComputedStyle(node).marginTop) === 0;
+        });
       } finally {
         await page.close();
       }

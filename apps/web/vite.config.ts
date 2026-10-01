@@ -42,6 +42,18 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Session routes register optional peers during module evaluation.
+              // Their callbacks are assigned from state objects, not hoisted
+              // declarations. Keep this dependency-free state in a leaf chunk
+              // so entry-aware merging cannot put it behind the registering
+              // route in a circular shared chunk. The terminal/editor/desktop
+              // entry points re-export components and must stay outside it.
+              name: "workbench-peer-state",
+              test: /packages[\\/]react[\\/]src[\\/]lib[\\/]workbench-peers\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Registration runs when lazy routes evaluate. Keep the loader's
               // state and registration entry point together, outside route
               // chunks that can import one another before state initializes.
@@ -120,18 +132,30 @@ export default defineConfig({
               priority: 16,
             },
             {
+              // mobile-plus calls lazyComposerPanel at module scope. Keep this
+              // eager helper out of reciprocal entry-aware session chunks;
+              // optional panel bodies stay behind their dynamic imports.
+              name: "composer-menu-runtime",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/]composer-menu\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 16,
+            },
+            {
               // Keep Radix, Lucide's eager icon factory, and the two class-name
               // helpers (web `cn` and @opengeni/react `cn` with clsx and
               // tailwind-merge) in one UI runtime. entriesAware route merging
               // can otherwise split Popper scopes, place an icon and its
               // factory across a circular chunk, or fold a tiny universally
               // shared helper into a route-only chunk and drag that route's
-              // code into the initial graph. Button and Input (with cva and
+              // code into the initial graph. Composer menu factories are also
+              // called while lazy routes evaluate; keep their React bindings
+              // and preload registry outside those mutually importing chunks.
+              // Button and Input (with cva and
               // the three icons Button states use) are startup code too; the
               // lazy settings shell as one more consumer otherwise splits
               // them into an extra startup request.
               name: "ui-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|composer-menu|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
@@ -172,8 +196,22 @@ export default defineConfig({
               // lazy routes happen to import part of it (a new import of the
               // error helpers or a toast was enough to add a startup file).
               // The icons are the ones the load-error state and toasts draw.
+              // Session creation resolves the agent's capabilities, so their
+              // helpers are startup code too.
               name: "startup-context",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|single-flight|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
+              // The SDK's error and wire-type runtime, and the attribution and
+              // analytics helpers beside them, load at startup for every route.
+              // Entry-aware splitting otherwise cuts this one unit in two as
+              // soon as a lazy route imports only part of it (an extra startup
+              // request for a few kilobytes). Vite's preload helper joins them
+              // for the same reason.
+              name: "startup-sdk-runtime",
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer)\.ts|vite[\\/]preload-helper\.js)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -205,10 +243,13 @@ export default defineConfig({
               // merging cannot use an icon or label helper to pull the full
               // session workbench into startup. The personal-workspace badge and
               // session title contract must not carry settings-only dependencies.
-              name: "session-shared-primitives",
+              // CalendarClock is also a session header/rail glyph. Keep it
+              // here so management revision UI cannot share its route chunk
+              // and make management controls static session dependencies.
               // The usage-limit gauge and allowance wording are drawn by the
               // conversation's refusal row and by the lazy usage pages.
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              name: "session-shared-primitives",
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -290,8 +331,11 @@ export default defineConfig({
               // Design-system primitives used only by settings and other lazy
               // management routes. Keep them in one lazy unit so entry-aware
               // merging cannot fold them into chunks a direct session imports.
+              // Diff/revision history imports ErrorMessage; leaving either
+              // unpinned co-locates it with shared session glyphs and drags this
+              // entire group plus management Radix controls into sessions.
               name: "management-ui-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:access-list|choice-cards|collapsible|content-layout|copy-field|destructive-confirm|detail-page|detail-sheet|diff-view|disabled-reason|disclosure|error-message|field|flush-form-page|form-dialog|list-row|page-actions|page-header|relative-time|revision-history|role-select|secret-field|section|segmented-control|select|select-menu|setting-row|settings-nav|sheet|status-badge|switch|usage-meter)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 19,
             },

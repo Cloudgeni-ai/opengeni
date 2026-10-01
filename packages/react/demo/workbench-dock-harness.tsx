@@ -4,6 +4,7 @@ import { Markdown, OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import "./workbench-peers";
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();

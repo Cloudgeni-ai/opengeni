@@ -91,9 +91,9 @@ composable; a deviation can still reuse individual hooks or components.
   idempotent replay.
 - Loads product-owned Skills and passes the selected definitions inline in
   `CreateSessionRequest.skills` for each product-created session.
-- Sends explicit minimal `tools` and `firstPartyMcpTools` selections. Omission
-  inherits workspace/deployment defaults; an explicit empty array suppresses
-  that category.
+- Sends an explicit `agent` (capabilities and identity) and `tools` selection.
+  Omitted `agent` inherits the workspace defaults; an explicit empty `tools`
+  array suppresses workspace connectors.
 - Calls `OpenGeniClient` and returns product-shaped responses.
 - Mounts `createSessionProxyHandler` for the React conversation (a custom route
   uses `proxySessionEventStream`); never forwards arbitrary paths under the key.
@@ -148,8 +148,9 @@ matching contracts:
 
 | Information | Contract | Lifetime | Visible in timeline |
 | --- | --- | --- | --- |
-| Stable workspace persona | workspace `agentInstructions` | every session in workspace | No |
-| Agent role/persona refinement | session `instructions` | one session | No, but session metadata is org-visible |
+| Who the agent is | `agent.identity`, or the workspace's `sessionAgentDefaults.identity` | one session, or new sessions in the workspace | No |
+| Stable workspace rules | workspace instructions | every session in workspace | No |
+| Agent role refinement | session `instructions` (= `agent.instructions`) | one session | No, but session metadata is org-visible |
 | Current route/selection/viewport snapshot | `modelContext` | one accepted message | No in the standard timeline; yes in full audit data |
 | What the user said | message text / `initialMessage` | durable conversation | Yes |
 

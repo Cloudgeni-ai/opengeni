@@ -315,6 +315,97 @@ describe("automation dispatch activity", () => {
   });
 });
 
+describe("automation agent configuration", () => {
+  function agentRun(agent: unknown): AutomationRunExecution {
+    return {
+      ...run,
+      acceptedExecution: {
+        ...run.acceptedExecution,
+        sessionTemplate: {
+          ...run.acceptedExecution.sessionTemplate,
+          firstPartyMcpTools: ["wait_for_input", "goal_set", "knowledge_search"],
+          tools: [{ kind: "mcp", id: "acme" }],
+          ...(agent === undefined ? {} : { agent }),
+        } as never,
+      },
+    };
+  }
+
+  async function dispatch(
+    execution: AutomationRunExecution,
+    admission: boolean,
+  ): Promise<{ createInput: Record<string, unknown> | null; settle: ReturnType<typeof mock> }> {
+    let createInput: Record<string, unknown> | null = null;
+    const settle = mock(async () => undefined);
+    const readWorkspace = mock(async () => ({ settings: {} }) as never);
+    const activity = createAutomationActivities(
+      async () => ({
+        ...(await services()()),
+        settings: testSettings({ sandboxBackend: "none", agentConfigAdmissionEnabled: admission }),
+      }),
+      {
+        claim: async () => execution,
+        settle,
+        admit: async () => null,
+        assertModelPolicy: async () => undefined,
+        assertAuthority: async () => undefined,
+        recordUsage: async () => undefined,
+        readWorkspace,
+        createSession: (async (input) => {
+          createInput = input as unknown as Record<string, unknown>;
+          return {
+            session: { id: sessionId, createdBy: {}, createdByContext: {} },
+            outcome: "created",
+            replay: false,
+            changed: true,
+          } as never;
+        }) as never,
+      },
+    );
+    await activity.dispatchAutomationRun({ accountId, workspaceId, runId });
+    if (
+      !admission &&
+      (execution.acceptedExecution.sessionTemplate as { agent?: unknown }).agent === undefined
+    ) {
+      expect(readWorkspace).not.toHaveBeenCalled();
+    }
+    return { createInput, settle };
+  }
+
+  test("an omitted template agent keeps the exact legacy session input", async () => {
+    const { createInput } = await dispatch(agentRun(undefined), false);
+    expect(createInput).not.toHaveProperty("agentConfig");
+    expect(createInput).toMatchObject({
+      firstPartyMcpTools: ["wait_for_input", "goal_set", "knowledge_search"],
+      tools: [{ kind: "mcp", id: "acme" }],
+      instructions: "Complete only this automation.",
+    });
+  });
+
+  test("a template agent resolves and narrows the template's own tools", async () => {
+    const { createInput } = await dispatch(
+      agentRun({ capabilities: { from: "none", goals: true }, identity: "Ops bot" }),
+      true,
+    );
+    expect(createInput).toMatchObject({
+      agentConfig: { from: "none", identity: "Ops bot", source: "request" },
+      firstPartyMcpTools: ["wait_for_input", "goal_set"],
+      tools: [{ kind: "mcp", id: "acme" }],
+    });
+  });
+
+  test("a stored template agent with admission off fails the run instead of dropping it", async () => {
+    const { createInput, settle } = await dispatch(agentRun({ capabilities: "none" }), false);
+    expect(createInput).toBeNull();
+    expect(settle).toHaveBeenCalledWith(expect.anything(), {
+      workspaceId,
+      runId,
+      status: "failed",
+      errorCode: "dispatch_failed",
+    });
+  });
+});
+
 describe("automation run workflow", () => {
   test("invokes durable failure settlement after dispatch retries exhaust", async () => {
     const dispatchAutomationRun = mock(async () => {

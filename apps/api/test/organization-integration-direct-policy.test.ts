@@ -134,7 +134,7 @@ const credential = {
   providerDomain: "service.example",
   kind: "api_key",
   subjectId: null,
-  credential: { apiKey: "fixture-only" },
+  credential: { headers: { authorization: "Bearer fixture-only" } },
   grantedScopes: ["read"],
   metadata: {},
 };
@@ -177,14 +177,14 @@ test("restricted policy preserves unchanged/reducing edits and revoke, but block
     expect(response.status, await response.text()).toBe(200);
   }
   for (const body of [
-    { credential: { apiKey: "replacement" } },
+    { credential: { headers: { authorization: "Bearer replacement" } } },
     { providerDomain: "replacement.example" },
     { kind: "delegated" },
     { grantedScopes: ["write"] },
     { metadata: { mcpUrl: "https://other.example/mcp" } },
     { metadata: { resource: "https://other.example/" } },
     { subjectId },
-    { status: "active", credential: { apiKey: "replacement" } },
+    { status: "active", credential: { headers: { authorization: "Bearer replacement" } } },
   ]) {
     const response = await f.request(`connections/${connection.id}`, "PATCH", body);
     expect(response.status, await response.text()).toBe(403);
@@ -216,7 +216,7 @@ test("canonical workspace model key remains exempt, including exact create recei
   expect(replay.status, await replay.clone().text()).toBe(201);
   expect((await replay.json()).connection.id).toBe(original.connection.id);
   const rotation = {
-    credential: { apiKey: "fixture-rotated" },
+    credential: { headers: { authorization: "Bearer fixture-rotated" } },
     expectedVersion: original.connection.version,
     operationId: crypto.randomUUID(),
   };

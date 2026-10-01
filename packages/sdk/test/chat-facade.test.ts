@@ -123,8 +123,10 @@ describe("Chat.send", () => {
 
     expect(server.creates).toHaveLength(1);
     expect(server.creates[0]).toEqual({
+      visibility: "private",
       agentAccess: "session",
-      memoryScope: "off",
+      memoryScope: "user",
+      agent: { renderer: "markdown" },
       initialMessage: "hello",
       requestedSessionId: chat.sessionId,
       idempotencyKey: `chat:${chat.sessionId}`,
@@ -261,7 +263,7 @@ describe("Chat.send", () => {
     expect(server.requestsTo("POST", "/events")).toHaveLength(1);
   });
 
-  test("memory defaults follow agentAccess, false maps to off, and user memory requires a user", async () => {
+  test("private Knowledge defaults, false maps to off, and explicit user memory requires a user", async () => {
     const server = fakeServer();
     await (
       await server.og.chat({ tenant: "acme", user: "u_1", conversation: "a", agentAccess: "user" })

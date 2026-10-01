@@ -289,8 +289,8 @@ export type MessageTimelineProps = {
    * scrolls the in-memory window.
    */
   onJumpToLatest?: (() => void | Promise<void>) | undefined;
-  /** Resolve the newest durable user message and load its bounded window.
-   * Wire useSessionEvents().jumpToLatestQuestion for unloaded history. */
+  /** @deprecated Retained for source compatibility; contextual prompt navigation
+   * uses only mounted prompts and never invokes this global resolver. */
   onJumpToLatestQuestion?: (() => Promise<number | null>) | undefined;
   /** Host-owned content appended after timeline groups, such as startup progress. */
   trailingState?: ReactNode | undefined;
@@ -479,7 +479,7 @@ function contentTopOf(node: HTMLElement, groupKey: string): number | null {
 }
 
 /** The question the reader is inside of, once its start has scrolled out of view. */
-type QuestionNav = { key: string | null };
+type QuestionNav = { key: string };
 
 /** How far a question's start must be above the viewport before navigation shows. */
 const QUESTION_NAV_HIDDEN_PX = 24;
@@ -487,11 +487,16 @@ const QUESTION_NAV_HIDDEN_PX = 24;
 function readQuestionNav(node: HTMLElement): QuestionNav | null {
   const view = node.getBoundingClientRect();
   const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
-  const prompt = prompts.at(-1);
+  // The last prompt before the reading position owns the response/work in view.
+  // A newer prompt farther down the conversation is not a navigation target.
+  const middle = view.top + view.height / 2;
+  const prompt = prompts
+    .reverse()
+    .find((candidate) => candidate.getBoundingClientRect().top <= middle);
   const key = prompt?.dataset.ogGroupKey;
   if (!prompt || !key) return null;
-  const top = prompt.getBoundingClientRect().top;
-  if (top >= view.top - QUESTION_NAV_HIDDEN_PX && top < view.bottom) {
+  const bounds = prompt.getBoundingClientRect();
+  if (bounds.top >= view.top - QUESTION_NAV_HIDDEN_PX || bounds.bottom > view.top) {
     return null;
   }
   return { key };
@@ -553,7 +558,6 @@ export function MessageTimeline({
   loadingNewer = false,
   onLoadNewer,
   onJumpToLatest,
-  onJumpToLatestQuestion,
   trailingState,
   emptyState,
   className,
@@ -755,11 +759,8 @@ export function MessageTimeline({
     scrollerRef: scrollRef,
     active: questionNav !== null,
     preference: QUESTION_PILL_PLACEMENTS,
+    allowDownwardFallback: true,
   });
-  const [questionTarget, setQuestionTarget] = useState<number | null>(null);
-  const [questionPending, setQuestionPending] = useState(false);
-  const [questionError, setQuestionError] = useState<string | null>(null);
-  const questionRequestRef = useRef(0);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -1326,19 +1327,10 @@ export function MessageTimeline({
     questionNavFrameRef.current = requestFrame(() => {
       questionNavFrameRef.current = null;
       const node = scrollRef.current;
-      const next = hasNewer
-        ? onJumpToLatestQuestion
-          ? { key: null }
-          : null
-        : node
-          ? (readQuestionNav(node) ??
-            (onJumpToLatestQuestion && !node.querySelector("[data-og-prompt]")
-              ? { key: null }
-              : null))
-          : null;
+      const next = node ? readQuestionNav(node) : null;
       setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
     });
-  }, [readableTurns, hasNewer, onJumpToLatestQuestion]);
+  }, [readableTurns]);
   useEffect(
     () => () => {
       if (questionNavFrameRef.current != null) {
@@ -1367,30 +1359,6 @@ export function MessageTimeline({
       ?.focus({ preventScroll: true });
     syncScrollBaseline(node);
     scheduleQuestionNav();
-  };
-  const jumpToLatestQuestion = async () => {
-    if (!onJumpToLatestQuestion) {
-      if (!hasNewer && questionNav?.key) jumpToQuestion(questionNav.key);
-      return;
-    }
-    const request = ++questionRequestRef.current;
-    releasePinFromReader();
-    wantPinRef.current = false;
-    setQuestionPending(true);
-    setQuestionError(null);
-    try {
-      const sequence = await onJumpToLatestQuestion();
-      if (request === questionRequestRef.current) setQuestionTarget(sequence);
-    } catch (reason) {
-      if (request === questionRequestRef.current)
-        setQuestionError(
-          reason instanceof Error && reason.name === "LatestQuestionQueuedError"
-            ? "The latest question is in the prompt queue."
-            : "Could not load the latest question. Try again.",
-        );
-    } finally {
-      if (request === questionRequestRef.current) setQuestionPending(false);
-    }
   };
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
@@ -1610,21 +1578,7 @@ export function MessageTimeline({
         }
       }
     };
-    const questionGroup =
-      questionTarget === null
-        ? undefined
-        : groups.find(
-            ({ group }) =>
-              group.kind === "item" &&
-              group.item.kind === "user-message" &&
-              (group.item.sourceEvents?.some((source) => source.sequence === questionTarget) ||
-                group.item.annotationSource?.sequence === questionTarget),
-          );
-    if (questionGroup) {
-      // Exact navigation wins over prepend correction on the same commit.
-      jumpToQuestion(questionGroup.key);
-      setQuestionTarget(null);
-    } else if (pendingJumpToStartRef.current && firstItemChanged) {
+    if (pendingJumpToStartRef.current && firstItemChanged) {
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
       pendingJumpToStartRef.current = false;
@@ -2583,35 +2537,28 @@ export function MessageTimeline({
                             data-og-question-nav=""
                             // Below the pinned work-header strip (py-1.5 row, 44px on coarse
                             // pointers), never over it: the header stays a full-width target.
-                            data-og-pill-placement={questionPillPlacement}
+                            data-og-pill-placement={questionPillPlacement.placement}
+                            style={{ marginTop: questionPillPlacement.offsetY }}
                             className={cn(
                               "pointer-events-none absolute inset-x-0 top-11 z-10 flex px-4 sm:px-6 pointer-coarse:top-14",
-                              QUESTION_PILL_PLACEMENT_CLASS[questionPillPlacement],
+                              QUESTION_PILL_PLACEMENT_CLASS[questionPillPlacement.placement],
                             )}
                           >
                             <motion.div
                               ref={questionPillRef}
                               layout="position"
                               transition={{ duration: 0.18, ease: "easeOut" }}
-                              className="pointer-events-auto inline-flex max-w-[calc(50%-0.5rem)] items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur"
+                              className="pointer-events-auto inline-flex max-w-full items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur"
                             >
                               <button
                                 type="button"
                                 data-og-jump-to-question=""
-                                onClick={() => void jumpToLatestQuestion()}
-                                disabled={questionPending}
-                                aria-busy={questionPending}
-                                title={questionError ?? undefined}
-                                className="inline-flex min-w-0 items-center gap-1.5 px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
+                                onClick={() => jumpToQuestion(questionNav.key)}
+                                className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
                               >
                                 <ArrowUpIcon aria-hidden className="size-3.5" />
-                                Latest question
+                                Back to your message
                               </button>
-                              {questionError && (
-                                <span role="status" className="px-2 text-og-xs">
-                                  {questionError}
-                                </span>
-                              )}
                             </motion.div>
                           </motion.div>
                         ) : null}
@@ -2639,7 +2586,7 @@ export function MessageTimeline({
                             ref={jumpPillRef}
                             type="button"
                             data-og-jump-to-latest=""
-                            data-og-pill-placement={jumpPillPlacement}
+                            data-og-pill-placement={jumpPillPlacement.placement}
                             layout="position"
                             initial={{ opacity: 0, y: 8 }}
                             animate={{ opacity: 1, y: 0 }}
@@ -2701,7 +2648,7 @@ export function MessageTimeline({
                             }}
                             className={cn(
                               "absolute bottom-4 w-fit",
-                              JUMP_PILL_PLACEMENT_CLASS[jumpPillPlacement],
+                              JUMP_PILL_PLACEMENT_CLASS[jumpPillPlacement.placement],
                               "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
                               "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                               "hover:border-og-border-strong",

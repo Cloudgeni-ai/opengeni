@@ -143,8 +143,19 @@ import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
 } from "@/lib/use-workspace-model-catalog";
+import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
+import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
+import {
+  capabilityAvailability,
+  capabilitySummary,
+  draftFromRequest,
+  requestFromDraft,
+  workspaceAgentDefaultsDraft,
+  type AgentCapabilityDraft,
+} from "@/lib/agent-capabilities";
 import {
   emptySessionDraft,
+  fitToolPolicyToAgentCapabilities,
   isSessionDraftComputeReady,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
@@ -282,6 +293,49 @@ function SessionsIndexRouteContent({
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const [capabilitiesOpenRequest, setCapabilitiesOpenRequest] = useState<
+    { panel: "capabilities"; nonce: number } | undefined
+  >(undefined);
+  // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
+  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
+  const agentAvailability = useMemo(
+    () => capabilityAvailability(context.clientConfig.agentConfig),
+    [context.clientConfig.agentConfig],
+  );
+  const workspaceAgentDraft = useMemo(
+    () =>
+      workspaceAgentDefaultsDraft({
+        capabilities: resolveWorkspaceAgentDefaults(workspace?.settings)?.capabilities,
+        legacyHumanInputOff: workspace?.settings.agentHumanInputEnabled === false,
+      }),
+    [workspace?.settings],
+  );
+  const composerAgentCapabilities = agentConfigEnabled
+    ? {
+        customized: draft.agentCapabilities !== undefined,
+        draft:
+          draft.agentCapabilities !== undefined
+            ? draftFromRequest(draft.agentCapabilities)
+            : workspaceAgentDraft,
+        availability: agentAvailability,
+        onCustomizedChange: (customized: boolean) =>
+          setDraft((current) => {
+            if (!customized) {
+              const { agentCapabilities: _dropped, ...rest } = current;
+              return rest;
+            }
+            return {
+              ...current,
+              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+            };
+          }),
+        onChange: (next: AgentCapabilityDraft) =>
+          setDraft((current) => ({
+            ...current,
+            agentCapabilities: requestFromDraft(next, agentAvailability),
+          })),
+      }
+    : undefined;
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -765,14 +819,17 @@ function SessionsIndexRouteContent({
     (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
   const persistedToolPolicy = useMemo(
     () =>
-      newSessionDraftToolPolicy({
-        selectedMcpServerIds: context.selectedCapabilityToolIds,
-        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
-        catalogReady: context.workspaceMcpCatalogReady,
-        customizing: connectorCustomizing,
-        explicit: toolSelectionExplicit,
-        ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
-      }),
+      fitToolPolicyToAgentCapabilities(
+        newSessionDraftToolPolicy({
+          selectedMcpServerIds: context.selectedCapabilityToolIds,
+          workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
+          catalogReady: context.workspaceMcpCatalogReady,
+          customizing: connectorCustomizing,
+          explicit: toolSelectionExplicit,
+          ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
+        }),
+        draft.agentCapabilities,
+      ),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
@@ -780,6 +837,7 @@ function SessionsIndexRouteContent({
       toolSelectionExplicit,
       connectorCustomizing,
       connectorExclusions,
+      draft.agentCapabilities,
     ],
   );
   const persistedValue = useMemo(
@@ -1570,132 +1628,160 @@ function SessionsIndexRouteContent({
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
-              <ComposerMobilePlus
-                connectorActions={{
-                  accountControls: {
-                    groups: connectionAccounts.availableAccountGroups,
-                    choices: connectionAccounts.accountChoices,
-                    onChoose: connectionAccounts.selectAccount,
-                    loading: connectionAccounts.loading,
-                    error: connectionAccounts.error,
-                    accessDenied: connectionAccounts.accessDenied,
-                    onRefresh: () => void connectionAccounts.refresh(),
-                    disabled: busy || newSessionDraft.loading,
-                  },
-                }}
-                menuSide="bottom"
-                draftChatSettings={{
-                  workspaceId,
-                  scope:
-                    createVisibility === "private" || personalWorkspace ? "personal" : "workspace",
-                  value: draft.agentLearning ?? {},
-                  onChange: (agentLearning) =>
-                    setDraft((current) => ({ ...current, agentLearning })),
-                }}
-                workspaceId={workspaceId}
-                disabled={busy || newSessionDraft.loading}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={context.toolMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={{
-                  mcpServerIds: context.selectedCapabilityToolIds,
-                  firstPartyToolIds: draft.firstPartyMcpTools,
-                }}
-                toolsDisabled={busy || newSessionDraft.loading}
-                connectorCustomizing={connectorCustomizing}
-                onConnectorCustomizingChange={(next) => {
-                  if (next) setConnectorCustomizing(true);
-                  else followWorkspaceConnectors();
-                }}
-                onToolSelectionChange={(selection) => {
-                  changeConnectorSelection(selection);
-                }}
-                {...(hasRunsOnChoices(runsOnChoices)
-                  ? {
-                      runsOn: {
-                        summary: runsOnSummary(runsOnChoices),
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <RunsOnMenuBody
-                            {...runsOnChoices}
-                            disabled={busy || newSessionDraft.loading}
-                            onChange={setDraft}
-                            onComputeChange={setExplicitComputeDraft}
-                            onRetryMachines={() => void fleet.refresh()}
-                          />
-                        ),
-                      },
+              <>
+                <ComposerMobilePlus
+                  openRequest={capabilitiesOpenRequest}
+                  connectorActions={{
+                    accountControls: {
+                      groups: connectionAccounts.availableAccountGroups,
+                      choices: connectionAccounts.accountChoices,
+                      onChoose: connectionAccounts.selectAccount,
+                      loading: connectionAccounts.loading,
+                      error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
+                      onRefresh: () => void connectionAccounts.refresh(),
+                      disabled: busy || newSessionDraft.loading,
+                    },
+                  }}
+                  menuSide="bottom"
+                  {...(composerAgentCapabilities
+                    ? {
+                        agentCapabilities: {
+                          ...composerAgentCapabilities,
+                          disabled: busy || newSessionDraft.loading,
+                        },
+                      }
+                    : {})}
+                  draftChatSettings={{
+                    workspaceId,
+                    scope:
+                      createVisibility === "private" || personalWorkspace
+                        ? "personal"
+                        : "workspace",
+                    value: draft.agentLearning ?? {},
+                    onChange: (agentLearning) =>
+                      setDraft((current) => ({ ...current, agentLearning })),
+                  }}
+                  workspaceId={workspaceId}
+                  disabled={busy || newSessionDraft.loading}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={context.toolMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={{
+                    mcpServerIds: context.selectedCapabilityToolIds,
+                    firstPartyToolIds: draft.firstPartyMcpTools,
+                  }}
+                  toolsDisabled={busy || newSessionDraft.loading}
+                  connectorCustomizing={connectorCustomizing}
+                  onConnectorCustomizingChange={(next) => {
+                    if (next) setConnectorCustomizing(true);
+                    else followWorkspaceConnectors();
+                  }}
+                  onToolSelectionChange={(selection) => {
+                    changeConnectorSelection(selection);
+                  }}
+                  {...(hasRunsOnChoices(runsOnChoices)
+                    ? {
+                        runsOn: {
+                          summary: runsOnSummary(runsOnChoices),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <RunsOnMenuBody
+                              {...runsOnChoices}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={setDraft}
+                              onComputeChange={setExplicitComputeDraft}
+                              onRetryMachines={() => void fleet.refresh()}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(hasVisibilityChoice({
+                    personalWorkspace,
+                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+                  })
+                    ? {
+                        visibility: {
+                          summary: visibilitySummary(draft.visibility),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <VisibilityMenuBody
+                              value={draft.visibility}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={(visibility) =>
+                                setDraft((current) => ({ ...current, visibility }))
+                              }
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        repositories: {
+                          selectedCount:
+                            context.selectedRepoIds.size +
+                            context.selectedPersonalGitHubRepoIds.size +
+                            context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <WorkspaceRepositoryMenuBody
+                              workspaceId={workspaceId}
+                              disabled={busy || newSessionDraft.loading}
+                              catalogRefresh={repositoryCatalogRefresh}
+                              onConnectWorkspaceApp={githubAppConnect.open}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        variableSets: {
+                          selectedCount: draft.variableSetIds.length,
+                          panel: (
+                            <ManagedSandboxFields
+                              variableSetsOnly
+                              variableSetWorkspaceId={workspaceId}
+                              canAttachVariableSets={canAttachVariableSets}
+                              canUseVariableSets={canUseVariableSets}
+                              draft={draft}
+                              onChange={setDraft}
+                              disabled={busy || newSessionDraft.loading}
+                              variableSets={selectableVariableSets}
+                              rigs={selectableRigs}
+                              personalResourceAccess={{
+                                names: selectedPersonalResourceNames,
+                                visibility: createVisibility,
+                              }}
+                              catalogRecovery={{
+                                error: fixedResourceCatalogError,
+                                refreshing: personalResourceCatalogRefreshPending,
+                                onRetry: () => void refreshPersonalResourceCatalogs(),
+                              }}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                />
+                {composerAgentCapabilities?.customized ? (
+                  <ComposerCapabilitiesChip
+                    summary={capabilitySummary(
+                      composerAgentCapabilities.draft.values,
+                      composerAgentCapabilities.availability,
+                    )}
+                    disabled={busy || newSessionDraft.loading}
+                    onOpen={() =>
+                      setCapabilitiesOpenRequest((current) => ({
+                        panel: "capabilities",
+                        nonce: (current?.nonce ?? 0) + 1,
+                      }))
                     }
-                  : {})}
-                {...(hasVisibilityChoice({
-                  personalWorkspace,
-                  canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
-                })
-                  ? {
-                      visibility: {
-                        summary: visibilitySummary(draft.visibility),
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <VisibilityMenuBody
-                            value={draft.visibility}
-                            disabled={busy || newSessionDraft.loading}
-                            onChange={(visibility) =>
-                              setDraft((current) => ({ ...current, visibility }))
-                            }
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      repositories: {
-                        selectedCount:
-                          context.selectedRepoIds.size +
-                          context.selectedPersonalGitHubRepoIds.size +
-                          context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <WorkspaceRepositoryMenuBody
-                            workspaceId={workspaceId}
-                            disabled={busy || newSessionDraft.loading}
-                            catalogRefresh={repositoryCatalogRefresh}
-                            onConnectWorkspaceApp={githubAppConnect.open}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      variableSets: {
-                        selectedCount: draft.variableSetIds.length,
-                        panel: (
-                          <ManagedSandboxFields
-                            variableSetsOnly
-                            variableSetWorkspaceId={workspaceId}
-                            canAttachVariableSets={canAttachVariableSets}
-                            canUseVariableSets={canUseVariableSets}
-                            draft={draft}
-                            onChange={setDraft}
-                            disabled={busy || newSessionDraft.loading}
-                            variableSets={selectableVariableSets}
-                            rigs={selectableRigs}
-                            personalResourceAccess={{
-                              names: selectedPersonalResourceNames,
-                              visibility: createVisibility,
-                            }}
-                            catalogRecovery={{
-                              error: fixedResourceCatalogError,
-                              refreshing: personalResourceCatalogRefreshPending,
-                              onRetry: () => void refreshPersonalResourceCatalogs(),
-                            }}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-              />
+                  />
+                ) : null}
+              </>
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
