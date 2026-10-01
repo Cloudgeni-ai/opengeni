@@ -119,6 +119,64 @@ async function humanFixture() {
 }
 
 describe("archived import PostgreSQL persistence", () => {
+  test("create and append acquire membership before the shared tenancy fence", async () => {
+    if (!client || !shared) return;
+    for (const operation of ["create", "append"] as const) {
+      const scope = await fixture();
+      const payload = {
+        importId: "lock-prefix",
+        title: "Lock prefix",
+        createdAt: "2019-01-01T00:00:00Z",
+        events: [event("initial")],
+      };
+      const imported =
+        operation === "append"
+          ? await importArchivedSession(client.db, { ...scope, payload })
+          : null;
+      let pending: Promise<{ error: unknown }> | undefined;
+      try {
+        await shared.admin.begin(async (blocker) => {
+          const [backend] = await blocker`select pg_backend_pid() as pid`;
+          await blocker`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${scope.accountId}`},0))`;
+          const mutation = imported
+            ? appendArchivedSessionEvents(client!.db, {
+                ...scope,
+                sessionId: imported.session.id,
+                importId: payload.importId,
+                payload: { batchId: "next", offset: 1, events: [event("next")] },
+              })
+            : importArchivedSession(client!.db, { ...scope, payload });
+          pending = mutation.then(
+            () => ({ error: null }),
+            (error: unknown) => ({ error }),
+          );
+          let waiting = false;
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            const [row] = await shared!.admin`select exists(
+              select 1 from pg_stat_activity
+              where datname=current_database()
+                and ${backend!.pid}::integer=any(pg_blocking_pids(pid))
+            ) as waiting`;
+            if (row!.waiting) {
+              waiting = true;
+              break;
+            }
+            await Bun.sleep(20);
+          }
+          expect(waiting, operation).toBe(true);
+          // The exclusive tenancy prefix must remain available while import
+          // waits for membership, otherwise fork/move can form a lock cycle.
+          const [tenancy] = await blocker`select pg_try_advisory_xact_lock(
+            hashtextextended(${`session-tenancy:${scope.workspaceId}`},0)
+          ) as acquired`;
+          expect(tenancy!.acquired, operation).toBe(true);
+        });
+      } finally {
+        if (pending) expect((await pending).error, operation).toBeNull();
+      }
+    }
+  }, 60_000);
+
   test("the actual pre0555 evaluator and provisioner accept the complete post0555 database", async () => {
     if (!client || !shared) return;
     const repoRoot = new URL("../../..", import.meta.url).pathname;

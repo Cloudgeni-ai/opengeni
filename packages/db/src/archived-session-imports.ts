@@ -19,7 +19,6 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type Database,
 } from "./database";
-import { lockExternalWorkspaceMembershipLifecycle } from "./external-identities";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import { lockSessionEventWriteRows } from "./session-control";
 import { acceptArchivedSessionFileAttachments } from "./session-file-attachments";
@@ -341,9 +340,8 @@ async function importArchivedSession(
     input.workspaceId,
     input.subjectId,
     async (tx) => {
-      // Membership lifecycle -> workspace-control -> workspace -> session/cursor.
-      // Both external and native authority must remain current through commit.
-      await lockExternalWorkspaceMembershipLifecycle(tx, input.accountId);
+      // The activity scope owns membership -> tenancy before this callback;
+      // create then owns workspace-control -> workspace -> session/cursor.
       let committedEvents: SessionEvent[] = [];
       const result = await dependencies
         .createSessionWithIdempotencyKeyResult(tx, {
@@ -443,6 +441,9 @@ async function importArchivedSession(
         events: committedEvents,
       };
     },
+    undefined,
+    "shared",
+    true,
   );
 }
 
@@ -470,7 +471,6 @@ async function appendArchivedSessionEvents(
     input.workspaceId,
     input.subjectId,
     async (tx) => {
-      await lockExternalWorkspaceMembershipLifecycle(tx, input.accountId);
       const locks = await lockSessionEventWriteRows(tx, {
         workspaceId: input.workspaceId,
         controlLock: "share",
@@ -532,6 +532,9 @@ async function appendArchivedSessionEvents(
         events,
       };
     },
+    undefined,
+    "shared",
+    true,
   );
 }
 

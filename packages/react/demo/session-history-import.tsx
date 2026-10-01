@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { SessionConversation } from "../src/components/session-conversation";
+import { SessionConversation } from "@opengeni/react/session-ui";
 import { fakeClient } from "../test/fake-client";
 import {
   ARCHIVED_SESSION_ID,

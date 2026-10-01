@@ -494,6 +494,21 @@ function expectArchivedImportBoundary(source: string): void {
     expect(functionCalls(functionNode, "withWorkspaceSubjectSessionActivityRls"), caller).toBe(
       true,
     );
+    const activityCalls: t.CallExpression[] = [];
+    const visitActivity = (node: t.Node): void => {
+      if (isCallExpression(node) && callName(node) === "withWorkspaceSubjectSessionActivityRls") {
+        activityCalls.push(node);
+      }
+      forEachChild(node, visitActivity);
+    };
+    forEachChild(functionNode, visitActivity);
+    expect(activityCalls, caller).toHaveLength(1);
+    const membershipFence = activityCalls[0]!.arguments[6];
+    expect(membershipFence?.type, caller).toBe("Literal");
+    expect(
+      membershipFence && "value" in membershipFence ? membershipFence.value : null,
+      caller,
+    ).toBe(true);
     const locks = callPositions(functionNode, "lockSessionEventWriteRows");
     const writes = callPositions(functionNode, "appendTimeline");
     expect(locks, caller).toHaveLength(1);
