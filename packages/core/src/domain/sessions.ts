@@ -19,7 +19,10 @@ import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
-import { withDeveloperSetupCredentialRestriction } from "../developer-setup-credential-ceiling";
+import {
+  requireDeveloperSetupDelegatedPermissions,
+  withDeveloperSetupCredentialRestriction,
+} from "../developer-setup-credential-ceiling";
 
 import {
   CLAUDE_CONNECTION_KINDS,
@@ -3051,6 +3054,7 @@ async function createSessionForRequestInFileScope(
   const parentFirstPartyMcpPermissions = parentSession
     ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
     : null;
+  requireDeveloperSetupDelegatedPermissions(turnExecutionPolicy, payload.firstPartyMcpPermissions);
   if (
     parentFirstPartyMcpPermissions &&
     payload.firstPartyMcpPermissions?.some(

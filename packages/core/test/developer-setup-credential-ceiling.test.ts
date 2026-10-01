@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import {
   metadataWithTurnExecutionPolicyV1,
+  Permission,
   signDelegatedAccessToken,
   type AccessContext,
   type AccessGrant,
@@ -16,7 +17,10 @@ import {
   requireApiKeyDelegationContext,
   requireApiKeyManagementContext,
 } from "../src/access";
-import { withDeveloperSetupCredentialRestriction } from "../src/developer-setup-credential-ceiling";
+import {
+  requireDeveloperSetupDelegatedPermissions,
+  withDeveloperSetupCredentialRestriction,
+} from "../src/developer-setup-credential-ceiling";
 
 const settings = testSettings({ productAccessMode: "managed", delegationSecret: "ceiling-test" });
 const policy = resolveTurnExecutionPolicyV1(settings, {
@@ -85,6 +89,46 @@ async function canonicalContext(restricted: boolean): Promise<AccessContext> {
 }
 
 describe("setup-specific inherited credential ceiling", () => {
+  test.each([
+    "billing:read",
+    "billing:manage",
+    "account:admin",
+    "account:read",
+    "workspace:create",
+    "usage_allowances:manage",
+    "api_keys:manage",
+    "secrets:read",
+  ] as const)(
+    "explicit setup permission selection rejects %s while authorized non-setup selection remains unchanged",
+    (permission) => {
+      expect(() =>
+        requireDeveloperSetupDelegatedPermissions(
+          { ...policy, credentialRestriction: "developer_setup" },
+          [permission],
+        ),
+      ).toThrow(`cannot delegate first-party MCP permission: ${permission}`);
+      expect(() => requireDeveloperSetupDelegatedPermissions(policy, [permission])).not.toThrow();
+    },
+  );
+
+  test("setup selection permits the exact ordinary workspace permissions and unchanged omission", () => {
+    const restricted = { ...policy, credentialRestriction: "developer_setup" as const };
+    expect(() => requireDeveloperSetupDelegatedPermissions(restricted, undefined)).not.toThrow();
+    const permissions = Permission.options.filter(
+      (permission) =>
+        ![
+          "billing:read",
+          "billing:manage",
+          "account:admin",
+          "account:read",
+          "workspace:create",
+          "usage_allowances:manage",
+          "api_keys:manage",
+          "secrets:read",
+        ].includes(permission),
+    );
+    expect(() => requireDeveloperSetupDelegatedPermissions(restricted, permissions)).not.toThrow();
+  });
   test("unmarked policies and forged grant/context metadata preserve non-setup behavior", () => {
     const authorization = accessGrantAuthorizationFromContext(forgedContext, grant);
     expect(isDeveloperSetupGrant(grant)).toBe(false);

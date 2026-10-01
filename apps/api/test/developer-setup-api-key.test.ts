@@ -18,6 +18,7 @@ import {
 import { registerUsageAllowanceRoutes } from "../src/routes/usage-allowances";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
+import { registerBillingRoutes } from "../src/routes/billing";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -91,6 +92,7 @@ function fixture(overrides: Partial<ApiKey> = {}, credentialKind = "organization
     settings: testSettings({
       productAccessMode: "managed",
       usageAllowancesEnabled: true,
+      billingMode: "stripe",
       delegationSecret,
     }),
     managedAuth: null,
@@ -100,6 +102,7 @@ function fixture(overrides: Partial<ApiKey> = {}, credentialKind = "organization
   registerUsageAllowanceRoutes(app, deps);
   registerWorkspaceRoutes(app, deps);
   registerOrganizationMembershipRoutes(app, deps);
+  registerBillingRoutes(app, deps);
   // Exercise the canonical authenticated key ceiling and permission resolver
   // used by setup routes, without manufacturing a stamped AccessContext.
   app.get("/guard/:permission", async (c) => {
@@ -484,6 +487,74 @@ describe("Developer setup organization API keys", () => {
       expect(spy).toHaveBeenCalledTimes(1);
     }
   });
+
+  test.each(["billing:read", "billing:manage", "account:admin"] as const)(
+    "setup-derived signed %s cannot enter financial read or management routes",
+    async (permission) => {
+      const { app } = fixture();
+      const balance = track(spyOn(db, "getBillingBalance"));
+      const customer = track(spyOn(db, "getBillingCustomer"));
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        accountId,
+        workspaceId,
+        subjectId: "worker:first-party-mcp",
+        principalKind: "agent_attempt",
+        credentialRestriction: "developer_setup",
+        sessionId: crypto.randomUUID(),
+        turnId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        permissions: [permission],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const headers = { authorization: `Bearer ${token}` };
+      expect((await request(app, "/v1/billing", "GET", undefined, headers)).status).toBe(403);
+      expect(
+        (
+          await request(
+            app,
+            "/v1/billing/portal",
+            "POST",
+            {
+              accountId,
+              returnUrl: "https://example.invalid/",
+            },
+            headers,
+          )
+        ).status,
+      ).toBe(403);
+      expect(balance).not.toHaveBeenCalled();
+      expect(customer).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each(["billing:read", "account:admin"] as const)(
+    "authorized non-setup signed %s retains financial read authority",
+    async (permission) => {
+      const { app } = fixture();
+      const balance = track(spyOn(db, "getBillingBalance").mockResolvedValue({} as never));
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        accountId,
+        workspaceId,
+        subjectId: "worker:first-party-mcp",
+        principalKind: "agent_attempt",
+        sessionId: crypto.randomUUID(),
+        turnId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        permissions: [permission],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      expect(
+        (
+          await request(app, "/v1/billing", "GET", undefined, {
+            authorization: `Bearer ${token}`,
+          })
+        ).status,
+      ).toBe(200);
+      expect(balance).toHaveBeenCalledTimes(1);
+    },
+  );
 
   test("discovers and provisions workspaces without redundant account/read scopes", async () => {
     const { app } = fixture();
