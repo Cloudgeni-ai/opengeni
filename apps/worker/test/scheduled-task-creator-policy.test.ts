@@ -1,6 +1,8 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as opengeniDb from "@opengeni/db";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
@@ -24,7 +26,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
-import type { ActivityServices } from "../src/activities/types";
+import type { ActivityServices, DispatchScheduledTaskRunInput } from "../src/activities/types";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -119,6 +121,12 @@ async function dispatchGeneratedSession(
   grant: Awaited<ReturnType<typeof workspaceGrant>>,
   taskId: string,
   settingsOverrides: Parameters<typeof testSettings>[0] = {},
+  dispatchOverrides: Partial<
+    Pick<
+      DispatchScheduledTaskRunInput,
+      "triggerType" | "credentialRestriction" | "agentRunUsageIdempotencyKey" | "initiator"
+    >
+  > = {},
 ) {
   const { settings, activities: scheduled } = activities(settingsOverrides);
   const result = await scheduled.dispatchScheduledTaskRun({
@@ -126,13 +134,19 @@ async function dispatchGeneratedSession(
     taskId,
     triggerType: "scheduled",
     producerKey: `scheduled-creator-${crypto.randomUUID()}`,
+    ...dispatchOverrides,
   });
+  const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, taskId, 10);
   if (result.action !== "start" && result.action !== "signal") {
-    throw new Error(`unexpected dispatch result: ${JSON.stringify(result)}`);
+    throw new Error(
+      `unexpected dispatch result: ${JSON.stringify(result)}; run: ${JSON.stringify({
+        status: run?.status,
+        error: run?.error,
+      })}`,
+    );
   }
   const session = await getSession(client.db, grant.workspaceId, result.sessionId);
   if (!session) throw new Error("generated session missing");
-  const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, taskId, 10);
   const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
     workspaceId: grant.workspaceId,
     runId: run!.id,
@@ -200,6 +214,40 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     expect(session.firstPartyMcpPermissions).toEqual(["sessions:read"]);
   }, 60_000);
 
+  test("a manual setup caller ceiling does not become generated-session standing policy", async () => {
+    if (!available) return;
+    const grant = await workspaceGrant();
+    const task = await generatedTask(grant, null);
+    const { session, accepted, result } = await dispatchGeneratedSession(
+      grant,
+      task.id,
+      {},
+      {
+        triggerType: "manual",
+        initiator: { kind: "subject", subjectId: grant.subjectId },
+        credentialRestriction: "developer_setup",
+        agentRunUsageIdempotencyKey: `manual-setup-${crypto.randomUUID()}`,
+      },
+    );
+    expect(TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy).credentialRestriction).toBe(
+      "developer_setup",
+    );
+    expect(readTurnExecutionPolicyV1(session.metadata).kind).toBe("absent");
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId: result.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`unexpected claim: ${claimed.action}`);
+    const frozen = readTurnExecutionPolicyV1(claimed.turn.metadata);
+    expect(frozen.kind).toBe("valid");
+    if (frozen.kind !== "valid") throw new Error("manual accepted turn policy missing");
+    expect(frozen.policy.credentialRestriction).toBe("developer_setup");
+  }, 60_000);
+
   test.each(["new_session_per_run", "reusable_session", "existing_session"] as const)(
     "%s dispatch freezes setup restriction into accepted runs and claimed turns",
     async (runMode) => {
@@ -216,7 +264,9 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
               tools: [],
               metadata: {},
               model: settings.openaiModel,
-              reasoningEffort: "low",
+              // Match the metadata-free target's database admission default.
+              reasoningEffort: "medium",
+              latencyMode: "standard",
               sandboxBackend: "none",
             })
           : null;
@@ -261,4 +311,71 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     },
     60_000,
   );
+
+  for (const runMode of ["new_session_per_run", "reusable_session"] as const) {
+    test.each(["missing", "altered"] as const)(
+      `${runMode} rejects %s standing setup policy during generated-session binding`,
+      async (tampering) => {
+        if (!available) return;
+        const grant = await workspaceGrant();
+        const task = await generatedTask(
+          grant,
+          {
+            firstPartyMcpTools: ["set_session_title", "scheduled_tasks_list"],
+            firstPartyMcpPermissions: ["sessions:read", "scheduled_tasks:manage"],
+            sessionPolicy: null,
+            credentialRestriction: "developer_setup",
+          },
+          runMode === "reusable_session" ? { runMode } : undefined,
+        );
+        const create = opengeniDb.createSessionWithIdempotencyKeyResult;
+        const creation = spyOn(
+          opengeniDb,
+          "createSessionWithIdempotencyKeyResult",
+        ).mockImplementation(async (db, input) => {
+          const policy = readTurnExecutionPolicyV1(input.metadata);
+          expect(policy.kind).toBe("valid");
+          if (policy.kind !== "valid") throw new Error("standing setup policy missing");
+          expect(policy.policy.credentialRestriction).toBe("developer_setup");
+          const metadata = { ...input.metadata };
+          if (tampering === "missing") {
+            delete metadata.turnExecutionPolicyV1;
+          } else {
+            Object.assign(
+              metadata,
+              metadataWithTurnExecutionPolicyV1({}, { ...policy.policy, latencyMode: "priority" }),
+            );
+          }
+          return await create(db, { ...input, metadata });
+        });
+        try {
+          const { activities: scheduled } = activities();
+          expect(
+            await scheduled.dispatchScheduledTaskRun({
+              workspaceId: grant.workspaceId,
+              taskId: task.id,
+              triggerType: "scheduled",
+              producerKey: `scheduled-creator-${crypto.randomUUID()}`,
+            }),
+          ).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+          expect(creation).toHaveBeenCalledTimes(1);
+          const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+          expect(run).toMatchObject({
+            status: "failed",
+            error: "scheduled_run_authority_proof_rejected",
+          });
+          const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+            workspaceId: grant.workspaceId,
+            runId: run!.id,
+          });
+          expect(
+            TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy).credentialRestriction,
+          ).toBe("developer_setup");
+        } finally {
+          creation.mockRestore();
+        }
+      },
+      60_000,
+    );
+  }
 });
