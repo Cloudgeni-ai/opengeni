@@ -6,6 +6,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
+import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
@@ -1217,15 +1218,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
-      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
-        beginSessionRealtimeInTransaction(scopedDb, {
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+        const accounts = await freezeSessionRealtimeConnectionAccounts({
+          db: scopedDb as unknown as Database,
+          settings,
+          grant,
+          workspaceId,
+          sessionId,
+        });
+        return beginSessionRealtimeInTransaction(scopedDb, {
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           ownerSubjectId: grant.subjectId,
           ...parsed.data,
-        }),
-      );
+          ...accounts,
+        });
+      });
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
       return c.json({ mode: result.mode, replay: result.replay }, result.replay ? 200 : 201);

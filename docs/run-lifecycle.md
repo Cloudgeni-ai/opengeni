@@ -270,6 +270,12 @@ does not accept this intent because it has no initial logical-turn boundary.
 
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
+Starting voice freezes native MCP account bindings and personal delegations
+from the authenticated request on `session_realtime_modes` (migration 0562).
+Live delegation and end/expiry transcript-tail Steer copy that exact snapshot;
+they never discover a later participant's accounts. Historical leases retain
+their absent bindings and empty delegation receipts. Revocation and physical
+provider authorization still run against current authority.
 Only the authenticated browser owner/connection is exclusive. Human
 composer/queue/Send/Steer, ordinary turns, recovery, compaction, goals, and
 maintenance continue through their existing transactions and worker claims

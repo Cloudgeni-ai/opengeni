@@ -90,6 +90,11 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns add column surface text`;
     await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
     await admin`alter table session_system_update_outbox add column mcp_account_bindings jsonb`;
+    // Current claim adapters read 0562 lease authority. Remove this temporary
+    // projection bridge before replay so the real migration owns its defaults.
+    await admin`alter table session_realtime_modes
+      add column personal_connection_delegations jsonb not null default '[]'::jsonb,
+      add column mcp_account_bindings jsonb`;
     // The current claim adapter also reads timer fields under the workspace
     // fence. These temporary nullable fields are removed before 0420 runs.
     await admin`
@@ -309,6 +314,9 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_turns drop column surface`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
+    await admin`alter table session_realtime_modes
+      drop column personal_connection_delegations,
+      drop column mcp_account_bindings`;
     await migrate(ownerUrl);
     // 0494 must recreate the real receipt columns after the temporary bridge
     // is gone, retaining historical NULL rather than accepting an empty list.

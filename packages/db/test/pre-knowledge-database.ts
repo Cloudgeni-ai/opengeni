@@ -17,7 +17,7 @@ export async function acquirePreKnowledgeTestDatabase(
     await admin`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
     // These later migrations require the post-0461 Knowledge/file policies.
     await admin`INSERT INTO schema_migrations(name) VALUES
-      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql')`;
+      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     // The import migration extends the withheld 0499 attachment helper.
@@ -32,7 +32,7 @@ export async function acquirePreKnowledgeTestDatabase(
       ADD COLUMN imported_archive_subject_id text,
       ADD COLUMN imported_archive_next_offset integer`;
     await admin`DELETE FROM schema_migrations WHERE name IN
-      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql')`;
+      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql','0488_permanent_skill_removal.sql','0499_session_attachment_access.sql','0501_session_sharing_execution.sql','0510_knowledge_index_funding_wait.sql','0511_knowledge_visible_index_status.sql','0515_autonomous_learning_defaults.sql','0561_scheduled_session_agent_identity.sql')`;
     for (const name of allowanceMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
