@@ -612,6 +612,10 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Once a preference snapshot exists, later attempts of that same turn copy its
+exact immutable descriptors rather than re-rendering historical state. This
+preserves accepted receipts across permanent Skill removal and renderer changes,
+without restoring removed content or relaxing live attempt authority.
 Service-only turns have no human preference scope and skip the preference
 snapshot capability entirely; service continuations carrying a frozen causal
 human and legacy subject turns still snapshot that human's applicable entries.
