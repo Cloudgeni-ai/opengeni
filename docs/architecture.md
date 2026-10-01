@@ -349,24 +349,22 @@ Canonical: `packages/core/src/access/index.ts`,
 capability descriptors, and token envelopes; `@opengeni/config` owns settings
 parsing, defaults, validation, and derived runtime configuration.
 
-Catalog membership, selectability, and cost are separate authorities. Deployment
-membership comes from `code` or an operator-owned database singleton. Workspace
-policy, connection readiness and model permissions, organization workspace assignments, and
-provider health determine selectability; deployment cost policy sets `free`/`credits`
-independently of upstream settlement. Workspace custom
-Gateway, OpenRouter, Anthropic API and Claude subscription rows are provider-qualified workspace overlays, never
-deployment catalog or billing rows. Deployment-managed `openrouter/*` and
-workspace-managed `workspace-openrouter/*` remain separate provider and billing
-identities for identical slugs. Claude setup: `apps/api/src/routes/workspace-model-providers.ts`; transport: `packages/runtime/src/anthropic-messages.ts`.
-Accepted turns freeze provider identity, not cost policy. Drain or fence them
-before changing `free`/`credits`. Database `codexModels` overrides membership,
-not credentials; retirement preserves only exact accepted execution. Workspace
-Codex choices and automatic defaults also require exact upstream membership in
-the live serving accounts' catalogs. `packages/core/src/codex-model-availability.ts`
-rechecks source authority and requires live support on every permitted serving
-account for browser, default, and agent choices. The shared token resolver refreshes
-expired credentials; the short support cache uses workspace, credential, and
-returned token revision.
+Catalog membership, selectability, and cost have separate authorities. Deployment
+membership uses `code` or an operator-owned database singleton; workspace policy,
+connection readiness/permissions, organization assignments, and provider health
+determine selectability. Deployment cost policy sets `free`/`credits` independently
+of upstream settlement. Workspace Gateway, OpenRouter, Anthropic API, and Claude
+subscription rows are provider-qualified overlays, separate from deployment
+catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
+provider/billing identities for identical slugs. Claude setup:
+`apps/api/src/routes/workspace-model-providers.ts`; transport:
+`packages/runtime/src/anthropic-messages.ts`.
+Accepted turns freeze provider identity, not cost; drain/fence before changing
+`free`/`credits`. Database `codexModels` changes membership, not credentials;
+retirement preserves exact accepted execution.
+`packages/core/src/codex-model-availability.ts` requires exact live support on every
+permitted serving account for browser/default/agent choices. It rechecks authority,
+refreshes tokens, and caches support by workspace/credential/revision.
 
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
