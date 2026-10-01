@@ -2898,6 +2898,8 @@ export const DelegatedAccessTokenPayload = z
     // select a principal kind instead of inferring "human" from absent machine
     // markers.
     principalKind: DelegatedAccessPrincipalKind,
+    /** Trusted frozen setup-key ceiling, covered by the token HMAC. */
+    credentialRestriction: z.literal("developer_setup").optional(),
     // Trusted embedding hosts can sign a causal service principal separately
     // from the grant subject that authorizes the request. The claim is consumed
     // only when a command creates a new session/turn.
@@ -17486,6 +17488,8 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+      /** Immutable setup-key ceiling inherited by this session/turn. */
+      credentialRestriction: z.literal("developer_setup").optional(),
     })
     .strict()
     .superRefine((policy, context) => {

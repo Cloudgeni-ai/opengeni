@@ -127,6 +127,7 @@ import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./cod
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
+import { turnCredentialRestriction } from "./credential-restriction";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -422,6 +423,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
@@ -1009,6 +1011,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
       settings: runSettings,
+      ...(credentialRestriction ? { credentialRestriction } : {}),
       scope: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1104,6 +1107,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
+        ...(credentialRestriction ? { credentialRestriction } : {}),
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,

@@ -5761,17 +5761,19 @@ export type ScheduledTaskCreatorSessionPolicy = {
 
 /**
  * Frozen creator boundary of a scheduled task (migration 0428). Every field is
- * null for a human/API-created task, which keeps the deployment default for
+ * null for an ordinary human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
  * cannot widen itself through a schedule. Only its owner's explicit access
  * refresh re-freezes the tools and permissions, within that person's grants;
- * the session policy never changes after create.
+ * the session policy and optional credential restriction never change after
+ * create. A restriction alone does not select tools or permissions.
  */
 export type ScheduledTaskCreatorPolicy = {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
   firstPartyMcpPermissions: Permission[] | null;
   sessionPolicy: ScheduledTaskCreatorSessionPolicy | null;
+  credentialRestriction?: "developer_setup";
 };
 
 export type CreateScheduledTaskInput = {
@@ -5790,7 +5792,7 @@ export type CreateScheduledTaskInput = {
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
-  /** Frozen creator boundary; omit (or pass null fields) for human/API creates. */
+  /** Trusted frozen creator boundary, never copied from task metadata. */
   creatorPolicy?: ScheduledTaskCreatorPolicy | null;
   targetSessionId?: string | null;
   variableSetId?: string | null;
@@ -17321,7 +17323,7 @@ export async function createScheduledTask(
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
           creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
           creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
-          creatorSessionPolicy: input.creatorPolicy?.sessionPolicy ?? null,
+          creatorSessionPolicy: scheduledTaskCreatorSessionPolicyForInsert(input.creatorPolicy),
           reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
           rigId: input.rigId ?? null,
@@ -17686,6 +17688,23 @@ export async function listScheduledTaskCreatorPolicies(
   });
 }
 
+/** Additive JSON on the existing write-once creator column; no new storage seam. */
+function scheduledTaskCreatorSessionPolicyForInsert(
+  policy: ScheduledTaskCreatorPolicy | null | undefined,
+): ScheduledTaskCreatorSessionPolicy | SQL | null {
+  if (policy?.credentialRestriction === undefined) return policy?.sessionPolicy ?? null;
+  if (policy.credentialRestriction !== "developer_setup") {
+    throw new Error("Malformed scheduled task credential restriction");
+  }
+  // The Drizzle column's original type describes the three legacy session
+  // fields. Serialize the additive JSON explicitly, including restriction-only
+  // snapshots without manufacturing a session policy or changing defaults.
+  return sql`${JSON.stringify({
+    ...policy.sessionPolicy,
+    credentialRestriction: policy.credentialRestriction,
+  })}::jsonb`;
+}
+
 function scheduledTaskCreatorPolicyFromRow(row: {
   firstPartyMcpTools: FirstPartyMcpToolName[] | null;
   firstPartyMcpPermissions: Permission[] | null;
@@ -17693,23 +17712,37 @@ function scheduledTaskCreatorPolicyFromRow(row: {
     agentAccess?: string | null;
     scopeSubjectId?: string | null;
     memoryScope?: string | null;
+    credentialRestriction?: unknown;
   } | null;
 }): ScheduledTaskCreatorPolicy {
+  const hasRestriction = Boolean(
+    row.sessionPolicy && Object.hasOwn(row.sessionPolicy, "credentialRestriction"),
+  );
+  if (hasRestriction && row.sessionPolicy?.credentialRestriction !== "developer_setup") {
+    throw new Error("Malformed scheduled task credential restriction");
+  }
+  const restrictionOnly =
+    hasRestriction &&
+    !["agentAccess", "scopeSubjectId", "memoryScope"].some((key) =>
+      Object.hasOwn(row.sessionPolicy!, key),
+    );
   return {
     firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
     firstPartyMcpPermissions: row.firstPartyMcpPermissions
       ? [...row.firstPartyMcpPermissions]
       : null,
-    sessionPolicy: row.sessionPolicy
-      ? {
-          agentAccess: row.sessionPolicy.agentAccess ?? null,
-          scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
-          memoryScope:
-            row.sessionPolicy.memoryScope === "session"
-              ? "off"
-              : (row.sessionPolicy.memoryScope ?? null),
-        }
-      : null,
+    ...(hasRestriction ? { credentialRestriction: "developer_setup" as const } : {}),
+    sessionPolicy:
+      row.sessionPolicy && !restrictionOnly
+        ? {
+            agentAccess: row.sessionPolicy.agentAccess ?? null,
+            scopeSubjectId: row.sessionPolicy.scopeSubjectId ?? null,
+            memoryScope:
+              row.sessionPolicy.memoryScope === "session"
+                ? "off"
+                : (row.sessionPolicy.memoryScope ?? null),
+          }
+        : null,
   };
 }
 

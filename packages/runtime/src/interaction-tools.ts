@@ -1478,6 +1478,7 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
   scope: AttemptToolScope;
   subjectId?: string;
   subjectLabel?: string;
+  credentialRestriction?: "developer_setup";
   fetch?: typeof globalThis.fetch;
 };
 
@@ -1518,6 +1519,9 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
         turnId: input.scope.turnId,
         attemptId: input.scope.attemptId,
         executionGeneration: input.scope.executionGeneration,
+        ...(input.credentialRestriction
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
         exp: Math.floor(Date.now() / 1_000) + 60 * 60,
       });
       const headers = new Headers(init?.headers);

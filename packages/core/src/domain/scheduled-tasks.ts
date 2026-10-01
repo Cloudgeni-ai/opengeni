@@ -30,6 +30,7 @@ import {
   SessionAgentAccess,
   SessionScopeSubjectId,
   SessionMemoryScope,
+  readTurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
@@ -51,6 +52,7 @@ import {
   getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
+  getSessionTurnForAttempt,
   getSessionAuthorityProjection,
   getWorkspaceDefaultRigId,
   withSessionRlsActorContext,
@@ -63,6 +65,7 @@ import {
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
   type ScheduledTaskCreatorPolicy,
+  type SessionCommandActor,
   type TemporalScheduleCleanupClaim,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
@@ -70,7 +73,13 @@ import { HTTPException } from "hono/http-exception";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { isDeepStrictEqual } from "node:util";
-import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  hasPermission,
+  isDeveloperSetupAuthorization,
+  isDeveloperSetupGrant,
+  requirePermission,
+  type AccessGrantAuthorization,
+} from "../access";
 import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -433,14 +442,13 @@ export async function createValidatedScheduledTask(input: {
     input.authorization,
     creationInitiator.actor,
   );
-  const creatorPolicy = creationInitiator.actor
-    ? await frozenScheduledTaskCreatorPolicy({
-        db: input.db,
-        settings: input.settings,
-        grant: input.grant,
-        sessionId: creationInitiator.actor.sessionId,
-      })
-    : null;
+  const creatorPolicy = await frozenScheduledTaskCreatorPolicy({
+    db: input.db,
+    settings: input.settings,
+    grant: input.grant,
+    authorization: input.authorization,
+    actor: creationInitiator.actor ?? null,
+  });
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -502,7 +510,8 @@ export async function createValidatedScheduledTask(input: {
 }
 
 /**
- * Freeze the creating session's boundary onto an agent-created task so the
+ * Freeze authenticated credential restrictions for every creation lane, and
+ * the creating session's boundary onto an agent-created task so the
  * sessions generated for it inherit exactly what the creator could see and
  * do, never the deployment default. Tools are the session's effective
  * model-visible selection under the deployment ceiling; permissions are the
@@ -512,18 +521,54 @@ export async function createValidatedScheduledTask(input: {
  * projection when it exposes those facts; each absent fact is stored as null
  * so a generated session keeps its own default for that key.
  */
-async function frozenScheduledTaskCreatorPolicy(input: {
+export async function frozenScheduledTaskCreatorPolicy(input: {
   db: Database;
   settings: Settings;
   grant: AccessGrant;
-  sessionId: string;
-}): Promise<ScheduledTaskCreatorPolicy> {
-  const session = await getSession(input.db, input.grant.workspaceId, input.sessionId);
+  authorization?: AccessGrantAuthorization | undefined;
+  actor: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
+}): Promise<ScheduledTaskCreatorPolicy | null> {
+  let restricted =
+    (input.authorization?.grant === input.grant &&
+      isDeveloperSetupAuthorization(input.authorization)) ||
+    isDeveloperSetupGrant(input.grant);
+  if (!input.actor) {
+    // A restriction is not an agent tool/permission selection. Keep the exact
+    // first-party and session defaults of ordinary API/service/asUser tasks.
+    return restricted
+      ? {
+          firstPartyMcpTools: null,
+          firstPartyMcpPermissions: null,
+          sessionPolicy: null,
+          credentialRestriction: "developer_setup",
+        }
+      : null;
+  }
+  const session = await getSession(input.db, input.grant.workspaceId, input.actor.sessionId);
   if (!session) {
     throw new HTTPException(403, {
       message: "the calling agent session is not available in this workspace",
     });
   }
+  const turn = await getSessionTurnForAttempt(
+    input.db,
+    input.grant.workspaceId,
+    input.actor.sessionId,
+    input.actor.attemptId,
+  );
+  if (!turn || turn.id !== input.actor.turnId) {
+    throw new HTTPException(403, { message: "the calling agent attempt is not available" });
+  }
+  // These are server-frozen policies, not task/agentConfig metadata. The DB
+  // insert also verifies this exact actor under its ownership locks.
+  const turnPolicy = readTurnExecutionPolicyV1(turn.metadata);
+  const sessionPolicy = readTurnExecutionPolicyV1(session.metadata);
+  restricted ||= Boolean(
+    (turnPolicy.kind === "valid" &&
+      turnPolicy.policy.credentialRestriction === "developer_setup") ||
+    (sessionPolicy.kind === "valid" &&
+      sessionPolicy.policy.credentialRestriction === "developer_setup"),
+  );
   const firstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
     input.settings,
     session.firstPartyMcpTools,
@@ -546,6 +591,7 @@ async function frozenScheduledTaskCreatorPolicy(input: {
   return {
     firstPartyMcpTools,
     firstPartyMcpPermissions,
+    ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
     sessionPolicy: {
       agentAccess: agentAccess.success ? agentAccess.data : null,
       scopeSubjectId: scopeSubjectId.success ? scopeSubjectId.data : null,

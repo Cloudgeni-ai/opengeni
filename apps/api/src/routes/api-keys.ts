@@ -258,19 +258,7 @@ async function requireWorkspaceApiKeyControl(
   workspaceId: string,
 ): Promise<AccessGrantAuthorization> {
   requireApiKeyManagementContext(await requireAccessContext(c, deps));
-  const authorization = await requireAccessGrantAuthorization(
-    c,
-    deps,
-    workspaceId,
-    "api_keys:manage",
-  );
-  const grant = authorization.grant;
-  // Attempt credentials must never turn the workspace-admin wildcard inherited
-  // from setup into a durable credential/delegation escape hatch.
-  if (grant.principalKind === "agent_attempt" || grant.metadata?.sessionId !== undefined) {
-    throw new HTTPException(403, { message: "Agent attempts cannot manage API keys" });
-  }
-  return authorization;
+  return await requireAccessGrantAuthorization(c, deps, workspaceId, "api_keys:manage");
 }
 
 function authenticatedApiKeyId(context: AccessContext): string | null {

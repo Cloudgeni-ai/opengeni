@@ -1226,6 +1226,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxRuntime,
             turn,
             session,
+            turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
             workspaceVariableSet,

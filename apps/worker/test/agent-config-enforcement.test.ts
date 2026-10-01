@@ -2,7 +2,11 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { sessionWithEffectiveToolPolicy, resolveSessionAgentConfigForCreate } from "@opengeni/core";
 import { RunContext, type ModelRequest, type Tool } from "@openai/agents";
-import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveTurnExecutionPolicyV1,
+  type Settings,
+} from "@opengeni/config";
 import {
   AGENT_CAPABILITY_IDS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
@@ -17,9 +21,12 @@ import {
   type FirstPartyMcpToolName,
   type ResolvedAgentConfig,
   type AgentMediaAttachment,
+  metadataWithTurnExecutionPolicyV1,
+  verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import { sessionEffectiveToolProjectionInput } from "@opengeni/core";
 import * as db from "@opengeni/db";
+import * as runtimeExports from "@opengeni/runtime";
 import { createObservability } from "@opengeni/observability";
 import {
   buildOpenGeniAgent,
@@ -93,6 +100,7 @@ type FixtureOptions = {
   modelId?: string;
   subscription?: "codex-subscription" | "xai-subscription";
   localMediaCredential?: boolean;
+  credentialRestrictionSource?: "accepted" | "initial" | "spoof" | "none";
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -100,8 +108,18 @@ type FixtureOptions = {
 // token-scoped tools/list response, and transport providers. It never applies
 // agent capability filtering itself.
 async function captureWorkerRequest(options: FixtureOptions = {}) {
+  const delegatedPayloads: Awaited<ReturnType<typeof verifyDelegatedAccessToken>>[] = [];
+  const interactionPayloads: Awaited<ReturnType<typeof verifyDelegatedAccessToken>>[] = [];
   const mcp = startTestMcpServer({
     toolsForAuthorization: () => [...FIRST_PARTY_MCP_TOOL_NAMES],
+    validateAuthorization: async (authorization) => {
+      if (authorization?.startsWith("Bearer ogd_")) {
+        delegatedPayloads.push(
+          await verifyDelegatedAccessToken("test-delegation-secret", authorization.slice(7)),
+        );
+      }
+      return true;
+    },
   });
   const configuredServerIds = [
     "opengeni",
@@ -162,6 +180,32 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     spyOn(db, "persistAttemptToolCatalog").mockImplementation(async (_db, catalog) => catalog),
     spyOn(db, "cancelQueuedCodemodeOperationsForAttempt").mockResolvedValue(0),
   ];
+  if (options.credentialRestrictionSource) {
+    const createInteractionTools = runtimeExports.createFirstPartyInteractionAttemptToolDefinitions;
+    persistence.push(
+      spyOn(runtimeExports, "createFirstPartyInteractionAttemptToolDefinitions").mockImplementation(
+        (input) =>
+          createInteractionTools({
+            ...input,
+            fetch: (async (_request, init) => {
+              const authorization = new Headers(init?.headers).get("authorization")!;
+              interactionPayloads.push(
+                await verifyDelegatedAccessToken("test-delegation-secret", authorization.slice(7)),
+              );
+              return Response.json({
+                browserSessionId: SCOPE.sessionId,
+                controllerGeneration: "controller-1",
+                revision: 1,
+                text: "clipboard",
+                source: "copy",
+                sourceTargetId: "tab-1",
+                updatedAt: new Date().toISOString(),
+              });
+            }) as typeof fetch,
+          }),
+      ),
+    );
+  }
   let preparation: PrepareToolsOptions | undefined;
   let buildOptions: BuildAgentOptions | undefined;
   const runtime = {
@@ -171,10 +215,16 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       // MCP fixture advertises arbitrary extra names but does not decode tokens.
       const scopedSettings: Settings = {
         ...runSettings,
+        ...(options.credentialRestrictionSource
+          ? { opengeniMcpInternalUrl: `${mcp.url}?ws={workspaceId}` }
+          : {}),
         mcpServers: runSettings.mcpServers.map((server) =>
           server.id === "opengeni"
             ? {
                 ...server,
+                ...(options.credentialRestrictionSource
+                  ? { url: `${mcp.url}?ws={workspaceId}` }
+                  : {}),
                 allowedTools: [...(prepareOptions?.firstPartyTools ?? [])].filter(
                   (name) =>
                     !options.modelId || !FIRST_PARTY_IN_PROCESS_TOOL_NAMES.includes(name as never),
@@ -198,6 +248,24 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     rootSessionId: SCOPE.sessionId,
     title: "Configured test session",
     titleSource: "human",
+    metadata:
+      options.credentialRestrictionSource === "initial"
+        ? metadataWithTurnExecutionPolicyV1(
+            {},
+            {
+              ...resolveTurnExecutionPolicyV1(settings, {
+                modelId: settings.openaiModel,
+                requestedModelId: null,
+                modelSource: "session",
+                reasoningEffort: "low",
+                reasoningSource: "session",
+              }),
+              credentialRestriction: "developer_setup",
+            },
+          )
+        : options.credentialRestrictionSource === "spoof"
+          ? { credentialRestriction: "developer_setup" }
+          : {},
     ...(Object.hasOwn(options, "agent") ? { agent: options.agent } : {}),
     instructions: null,
     resources: [],
@@ -244,6 +312,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     productModelId: "scripted-model",
     upstreamModelId: "scripted-model",
     latencyMode: "standard",
+    ...(options.credentialRestrictionSource === "accepted"
+      ? { credentialRestriction: "developer_setup" }
+      : {}),
   } as BuildTurnAgentDeps["turnExecutionPolicy"];
   try {
     const policy = await prepareTurnToolPolicy({
@@ -360,7 +431,19 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     const request = model.requests[0]!;
     const prepared =
       (await context.eventing.preparedTools!.ready) ?? context.eventing.preparedTools!;
+    if (options.credentialRestrictionSource) {
+      const interaction = preparation!.attemptToolDefinitions!.find(
+        (tool) => tool.identity.toolName === "browser_clipboard",
+      );
+      if (!interaction) throw new Error("interaction tool missing from worker preparation");
+      await interaction.execute(
+        { browserSessionId: SCOPE.sessionId },
+        { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "fixture" } },
+      );
+    }
     return {
+      delegatedPayloads,
+      interactionPayloads,
       request,
       names: request.tools.map(toolName).sort(),
       visibleNames: visibleTools.map(toolName).sort(),
@@ -389,6 +472,25 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     mcp.close();
   }
 }
+
+test.each(["accepted", "initial", "spoof", "none"] as const)(
+  "worker tool environment signs only trusted %s setup provenance",
+  async (credentialRestrictionSource) => {
+    const captured = await captureWorkerRequest({ credentialRestrictionSource, builtins: false });
+    const restriction =
+      credentialRestrictionSource === "accepted" || credentialRestrictionSource === "initial"
+        ? "developer_setup"
+        : undefined;
+    expect(captured.preparation.credentialRestriction).toBe(restriction);
+    expect(captured.delegatedPayloads.length).toBeGreaterThan(0);
+    expect(captured.interactionPayloads).toHaveLength(1);
+    for (const payload of [...captured.delegatedPayloads, ...captured.interactionPayloads]) {
+      expect(payload.credentialRestriction).toBe(restriction);
+      expect(Object.hasOwn(payload, "credentialRestriction")).toBe(!!restriction);
+      expect(payload.principalKind).toBe("agent_attempt");
+    }
+  },
+);
 
 function expectedFirstPartyTools(config: ResolvedAgentConfig | null, settings: Settings) {
   return allowedFirstPartyMcpToolsForSession(settings, [...FIRST_PARTY_MCP_TOOL_NAMES]).filter(

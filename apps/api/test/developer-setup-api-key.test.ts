@@ -246,6 +246,15 @@ describe("Developer setup organization API keys", () => {
 
   test("setup can onboard an ordinary external member without credential-delegation powers", async () => {
     const { app } = fixture();
+    const ordinaryPermissions: Permission[] = [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "files:upload",
+      "files:read",
+      "mcp_servers:attach",
+    ];
     const add = track(
       spyOn(db, "addExternalWorkspaceMemberOperation").mockResolvedValue({
         id: "55555555-5555-4555-8555-555555555555",
@@ -259,12 +268,13 @@ describe("Developer setup organization API keys", () => {
       (
         await request(app, `${workspacePath}/external-members`, "POST", {
           identity: { source: "product", externalId: "person" },
-          permissions: ["workspace:read", "sessions:read", "sessions:create"],
+          permissions: ordinaryPermissions,
           operationId: "88888888-8888-4888-8888-888888888888",
         })
       ).status,
     ).toBe(200);
     expect(add).toHaveBeenCalledTimes(1);
+    expect(add.mock.calls[0]![2]).toMatchObject({ permissions: ordinaryPermissions });
     const update = track(
       spyOn(db, "updateExternalWorkspaceMemberOperation").mockResolvedValue({
         subjectId: "external_user:person",
@@ -320,7 +330,7 @@ describe("Developer setup organization API keys", () => {
     },
   );
 
-  test("inherited attempt-admin cannot mint or delegate durable API-key authority", async () => {
+  test("setup-derived attempt-admin cannot mint or delegate durable API-key authority", async () => {
     const { app } = fixture();
     const attemptPermissions: Permission[] = ["workspace:admin", "api_keys:manage"];
     const token = await signDelegatedAccessToken(delegationSecret, {
@@ -328,6 +338,7 @@ describe("Developer setup organization API keys", () => {
       workspaceId,
       subjectId: "attempt",
       principalKind: "agent_attempt",
+      credentialRestriction: "developer_setup",
       sessionId: crypto.randomUUID(),
       turnId: crypto.randomUUID(),
       attemptId: crypto.randomUUID(),
@@ -336,17 +347,26 @@ describe("Developer setup organization API keys", () => {
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
     const headers = { authorization: `Bearer ${token}` };
-    expect(
-      (
-        await request(
-          app,
-          `${workspacePath}/api-keys`,
-          "POST",
-          { name: "Escalation", permissions: attemptPermissions },
-          headers,
-        )
-      ).status,
-    ).toBe(403);
+    const writes = [
+      track(spyOn(db, "listApiKeys")),
+      track(spyOn(db, "createApiKey")),
+      track(spyOn(db, "revokeApiKey")),
+    ];
+    for (const method of ["GET", "POST", "DELETE"] as const) {
+      const path = `${workspacePath}/api-keys${method === "DELETE" ? `/${keyId}` : ""}`;
+      expect(
+        (
+          await request(
+            app,
+            path,
+            method,
+            method === "POST" ? { name: "Escalation", permissions: attemptPermissions } : undefined,
+            headers,
+          )
+        ).status,
+      ).toBe(403);
+    }
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
     expect(
       (
         await request(
@@ -361,6 +381,108 @@ describe("Developer setup organization API keys", () => {
         )
       ).status,
     ).toBe(403);
+  });
+
+  test.each([
+    ["GET", "api_keys:manage"],
+    ["POST", "api_keys:manage"],
+    ["DELETE", "api_keys:manage"],
+    ["GET", "account:admin"],
+    ["POST", "account:admin"],
+    ["DELETE", "account:admin"],
+  ] as const)(
+    "setup-admitted attempts cannot %s organization keys with %s",
+    async (method, permission) => {
+      const { app } = fixture();
+      const creatingGrant = await (await request(app, "/guard/sessions:create")).json();
+      // Session admission currently uses this exact wildcard predicate; key
+      // control remains denied even when runtime signing carries that scope.
+      expect(hasPermission(creatingGrant.permissions, permission)).toBe(true);
+      track(spyOn(db, "listOrganizationApiKeys").mockResolvedValue([]));
+      minting();
+      track(
+        spyOn(db, "revokeOrganizationApiKey").mockResolvedValue(
+          key({ revokedAt: now.toISOString() }),
+        ),
+      );
+      const token = await signDelegatedAccessToken(delegationSecret, {
+        accountId,
+        workspaceId,
+        subjectId: "worker:first-party-mcp",
+        principalKind: "agent_attempt",
+        credentialRestriction: "developer_setup",
+        sessionId: crypto.randomUUID(),
+        turnId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+        permissions: [permission],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const path = method === "DELETE" ? `${organizationPath}/${keyId}` : organizationPath;
+      const body = method === "POST" ? { name: "Escalation", access: "full" } : undefined;
+      const response = await request(app, path, method, body, { authorization: `Bearer ${token}` });
+      expect(response.status).toBe(403);
+    },
+  );
+
+  test("authorized non-setup attempts retain organization and workspace key control", async () => {
+    const { app } = fixture();
+    const orgList = track(spyOn(db, "listOrganizationApiKeys").mockResolvedValue([]));
+    const orgCreate = minting();
+    const orgRevoke = track(
+      spyOn(db, "revokeOrganizationApiKey").mockResolvedValue(
+        key({ revokedAt: now.toISOString() }),
+      ),
+    );
+    const workspaceList = track(spyOn(db, "listApiKeys").mockResolvedValue([]));
+    const workspaceCreate = track(
+      spyOn(db, "createApiKey").mockImplementation(async (_db, input) =>
+        key({ workspaceId, name: input.name, permissions: input.permissions }),
+      ),
+    );
+    const workspaceRevoke = track(spyOn(db, "revokeApiKey").mockResolvedValue({ revoked: true }));
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      permissions: ["workspace:admin", "api_keys:manage"],
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const headers = { authorization: `Bearer ${token}` };
+    for (const base of [organizationPath, `${workspacePath}/api-keys`]) {
+      expect((await request(app, base, "GET", undefined, headers)).status).toBe(200);
+      expect(
+        (
+          await request(
+            app,
+            base,
+            "POST",
+            base === organizationPath
+              ? { name: "Authorized", access: "read" }
+              : { name: "Authorized", permissions: ["sessions:read"] },
+            headers,
+          )
+        ).status,
+      ).toBe(201);
+      expect((await request(app, `${base}/${keyId}`, "DELETE", undefined, headers)).status).toBe(
+        200,
+      );
+    }
+    for (const spy of [
+      orgList,
+      orgCreate,
+      orgRevoke,
+      workspaceList,
+      workspaceCreate,
+      workspaceRevoke,
+    ]) {
+      expect(spy).toHaveBeenCalledTimes(1);
+    }
   });
 
   test("discovers and provisions workspaces without redundant account/read scopes", async () => {
