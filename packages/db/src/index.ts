@@ -71973,6 +71973,13 @@ export async function claimSessionWorkForAttempt(
               return { action: "unclaimed", reason: "stale-approval" };
             }
             if (activeTurn.status === "recovering") {
+              // An internal setup coroutine unwound after possible dispatch.
+              // A new attempt would replay the whole helper, not just observe
+              // its original command. Neither a wake nor lease/command loss
+              // proves that the remaining setup finished.
+              if (sandboxSetupOutcomeUnknownFromTurnMetadata(activeTurn.metadata)) {
+                return { action: "unclaimed", reason: "no-work" };
+              }
               const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(activeTurn.metadata);
               if (lifecycleWait) {
                 const [lease] = await tx
@@ -74257,6 +74264,10 @@ export type SessionWorkPeek =
       kind: "sandbox-lifecycle-wait";
       ref: SandboxLifecycleWait;
     }
+  | {
+      kind: "sandbox-setup-outcome-unknown";
+      ref: SandboxSetupOutcomeUnknown;
+    }
   | { kind: "approval-pending"; triggerEventId: string; admissionFence?: SessionAdmissionFence }
   | {
       kind: "approval-wait";
@@ -74779,6 +74790,10 @@ export async function peekSessionWork(
         );
       }
       if (turn.status === "recovering" || turn.status === "waiting_capacity") {
+        const setupUnknown = sandboxSetupOutcomeUnknownFromTurnMetadata(turn.metadata);
+        if (turn.status === "recovering" && setupUnknown) {
+          return { kind: "sandbox-setup-outcome-unknown", ref: setupUnknown };
+        }
         const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(turn.metadata);
         if (turn.status === "recovering" && lifecycleWait) {
           const [lease] = await scopedDb
@@ -77018,6 +77033,35 @@ async function wakeSandboxLifecycleWaitersTx(
 }
 
 const SANDBOX_LIFECYCLE_WAIT_METADATA_KEY = "sandboxLifecycleWait";
+const SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY = "sandboxSetupOutcomeUnknown";
+
+/** Logical setup is incomplete even if one retained physical command exits.
+ * There is deliberately no deadline or lease-liveness clearing condition. */
+export type SandboxSetupOutcomeUnknown = {
+  version: 1;
+  turnId: string;
+  attemptId: string;
+  reason: "sandbox_command_start_outcome_unknown";
+};
+
+function sandboxSetupOutcomeUnknownFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SandboxSetupOutcomeUnknown | null {
+  const value = metadata?.[SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const marker = value as Partial<SandboxSetupOutcomeUnknown>;
+  if (
+    marker.version !== 1 ||
+    typeof marker.turnId !== "string" ||
+    marker.turnId.length === 0 ||
+    typeof marker.attemptId !== "string" ||
+    marker.attemptId.length === 0 ||
+    marker.reason !== "sandbox_command_start_outcome_unknown"
+  ) {
+    return null;
+  }
+  return marker as SandboxSetupOutcomeUnknown;
+}
 
 export type SandboxLifecycleWait = {
   version: 1;
@@ -79218,6 +79262,8 @@ export type RequestSessionTurnRecoveryInput = {
   reason: string;
   detail?: Record<string, unknown>;
   sandboxLifecycleWait?: SandboxLifecycleWait;
+  /** Park incomplete setup; this never authorizes a replacement setup attempt. */
+  sandboxSetupOutcomeUnknown?: true;
   providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
@@ -79483,6 +79529,16 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(input.sandboxSetupOutcomeUnknown
+              ? {
+                  [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
+                    version: 1,
+                    turnId: input.turnId,
+                    attemptId: input.attemptId,
+                    reason: "sandbox_command_start_outcome_unknown",
+                  } satisfies SandboxSetupOutcomeUnknown,
+                }
+              : {}),
             ...(input.providerRecoveryCount !== undefined
               ? { providerRecoveryCount: input.providerRecoveryCount }
               : {}),

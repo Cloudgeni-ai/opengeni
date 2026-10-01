@@ -19,6 +19,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   maxTurnsExceededRunState,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -338,6 +339,64 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // back to the workflow-claimed turn when the local lookup had not
   // finished yet.
   const recoveryTurnId = attempt.turnId;
+  // Unlike proven pre-dispatch failure, a genuine SDK Start/Wait uncertainty
+  // cannot reconstruct setup on a replacement attempt. The exact command and
+  // writer remain retained by sandbox-runtime; the logical turn is parked as
+  // recovering with a durable no-replay marker, not failed or completed.
+  if (
+    isModalCommandStartOutcomeUnknownError(error) &&
+    recoveryTurnId &&
+    attempt.triggerEventId &&
+    attempt.executionGeneration > 0
+  ) {
+    if (eventing.turnStartedPublished) {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }
+    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    try {
+      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: input.attemptId,
+        reason: "sandbox_command_start_outcome_unknown",
+        sandboxSetupOutcomeUnknown: true,
+        detail: {
+          code: "sandbox_command_start_outcome_unknown",
+          retryable: false,
+          setupOutcome: "unknown",
+          replay: "blocked",
+          providerRecoveryCount: attempt.providerRecoveryCount,
+        },
+      });
+    } catch (checkpointError) {
+      const databaseRecovery = postClaimDatabaseRecoveryFailure({
+        error: checkpointError,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        executionGeneration: attempt.executionGeneration,
+        sandboxSetupOutcomeUnknown: true,
+      });
+      if (!databaseRecovery) throw checkpointError;
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      throw databaseRecovery;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    acknowledgeRecoveryQuiescence();
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    control.activityStatus = "recovering";
+    control.turnMetricOutcome = "recovering";
+    control.activityError = error;
+    return claimedResult({ status: "recovering", deferredUntilWake: true });
+  }
   // A true epoch supersession and a provider lifecycle transition are both
   // recoverable control-plane states, never session failures. A rotation
   // persists an exact group/epoch wait marker so the workflow parks before

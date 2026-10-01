@@ -20,6 +20,9 @@ import {
   releaseLeaseHolder,
   retainedProcessSettlementIdentity,
   settleRetainedProcess,
+  getSession,
+  getSessionTurn,
+  peekSessionWork,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -30,6 +33,8 @@ import {
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { createSandboxTurnRuntime } from "../src/activities/agent-turn/sandbox-runtime";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
+import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
+import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 
 const { CommandStartOutcomeUnknownError } = createRequire(import.meta.resolve("@opengeni/runtime"))(
   "modal",
@@ -208,6 +213,84 @@ function unknownCommand(instanceId: string) {
     error: new ProviderCommandStartOutcomeUnknownError(command, sdkError),
   };
 }
+
+test("the real retained SDK writer parks its owning turn without failure, setup replay or capture", async () => {
+  const fixture = await admittedInternalMutation();
+  const { error: original, command } = unknownCommand(fixture.instanceId);
+  let starts = 0;
+  const failure = await fixture.runtime
+    .runWorkspaceMutationForSandbox(
+      fixture.sandbox as never,
+      "eagerOwnedSandboxSetup",
+      async () => {
+        starts++;
+        throw original;
+      },
+    )
+    .catch((error) => error);
+  const context = createTurnContext({ settings: testSettings(), cancellationRequestedAt: null });
+  Object.assign(context.attempt, {
+    turnId: fixture.claim.turn.id,
+    triggerEventId: fixture.claim.turn.triggerEventId,
+    executionGeneration: fixture.claim.turn.executionGeneration,
+    providerRecoveryCount: 5,
+  });
+  const result = await settleTurnFailure({
+    ...context,
+    error: failure,
+    input: {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      attemptId: fixture.attemptId,
+    },
+    settings: testSettings(),
+    db: client.db,
+    bus: { publish: async () => undefined },
+    observability: {},
+    cancellationSignal: fixture.cancellation.signal,
+    sandboxRotationController: new AbortController(),
+    claimedResult: (value: object) => ({
+      ...value,
+      turnId: fixture.claim.turn.id,
+      attemptId: fixture.attemptId,
+    }),
+    acknowledgeLostAttemptOwnership: () => undefined,
+    acknowledgeRecoveryQuiescence: () => undefined,
+  } as never);
+  expect(result).toMatchObject({ status: "recovering", deferredUntilWake: true });
+  expect(starts).toBe(1);
+  expect(await getSession(client.db, fixture.workspaceId, fixture.session.id)).toMatchObject({
+    status: "recovering",
+  });
+  expect(await getSessionTurn(client.db, fixture.workspaceId, fixture.claim.turn.id)).toMatchObject(
+    {
+      status: "recovering",
+      activeAttemptId: null,
+      metadata: {
+        sandboxSetupOutcomeUnknown: { turnId: fixture.claim.turn.id, attemptId: fixture.attemptId },
+      },
+    },
+  );
+  const [retained] = await shared.admin`select provider_command from sandbox_retained_processes
+    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+  expect(retained!.provider_command).toEqual(command);
+  const [admission] =
+    await shared.admin`select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+  expect(admission).toMatchObject({ provider_outcome: "retained", settled_at: null });
+  expect(
+    await readWorkspaceArchiveCapturePreflight(client.db, {
+      ...fixture.captureScope,
+      liveness: "warm",
+    }),
+  ).toBeNull();
+  // Physical quiescence does not falsely make the incomplete helper runnable.
+  // Its real attempt receipt remains independently required by work peek.
+  expect((await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).kind).not.toBe(
+    "runnable",
+  );
+});
 
 test.each(["exited", "lost"] as const)(
   "internal SDK unknown retains its original writer until exact %s proof",
