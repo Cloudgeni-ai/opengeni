@@ -610,7 +610,10 @@ Buffers:          500000 kB
     fn parse_nvidia_smi_skips_malformed_lines_and_empty_is_none() {
         // A header-ish / short line is skipped; a fully empty output → no GPUs
         // (the null-when-absent contract).
-        assert!(parse_nvidia_smi("").is_empty());
+        assert_eq!(
+            parse_nvidia_smi(""),
+            Vec::<opengeni_agent_proto::v1::GpuSample>::new()
+        );
         let gpus = parse_nvidia_smi("garbage line with too few fields\nNVIDIA T4, 5, 100, 16000\n");
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "NVIDIA T4");

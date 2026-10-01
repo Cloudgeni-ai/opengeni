@@ -2721,14 +2721,15 @@ mod tests {
             })
             .await
             .unwrap();
-            assert!(link
-                .desktop_status
-                .read()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .unavailable_reason
-                .is_empty());
+            assert_eq!(
+                link.desktop_status
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .unavailable_reason,
+                ""
+            );
             assert_eq!(link.epoch.load(), 42);
         };
         tokio::select! {

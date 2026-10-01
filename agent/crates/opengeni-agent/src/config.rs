@@ -781,7 +781,10 @@ mod tests {
         );
         remove_connection(&reconnected.connection_id, "https://one.example").expect("disconnect");
         assert!(!save_renewed_connection(&reconnected, &renewed).expect("disconnect wins"));
-        assert!(load_connections("https://one.example").unwrap().is_empty());
+        assert_eq!(
+            load_connections("https://one.example").unwrap(),
+            Vec::<StoredConnection>::new()
+        );
     }
 
     #[test]
@@ -847,9 +850,10 @@ mod tests {
             .expect("remove")
             .expect("present");
         assert_eq!(removed, connection);
-        assert!(load_connections("https://unused.example")
-            .expect("load")
-            .is_empty());
+        assert_eq!(
+            load_connections("https://unused.example").expect("load"),
+            Vec::<StoredConnection>::new()
+        );
     }
 
     #[cfg(unix)]
@@ -899,7 +903,7 @@ mod tests {
         };
         let stored = StoredCredentials::from_proto(proto, "beta");
         assert_eq!(stored.update_channel, "beta");
-        assert!(stored.resume_token.is_empty());
+        assert_eq!(stored.resume_token, "");
         assert!(stored.consented_screen_control);
         // The proto relay producer token now threads straight through (M8b).
         assert_eq!(stored.relay_token, "ogr_producer");

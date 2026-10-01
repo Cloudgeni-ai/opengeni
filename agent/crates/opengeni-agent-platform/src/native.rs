@@ -1471,8 +1471,13 @@ mod tests {
     fn exec_descendant_fixture() {
         let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
             .expect("descendant fixture pid-file env");
-        std::fs::write(pid_file, std::process::id().to_string())
+        let pid_file = Path::new(&pid_file);
+        let pending_pid_file = pid_file.with_extension("pending");
+        std::fs::write(&pending_pid_file, std::process::id().to_string())
             .expect("write descendant fixture pid");
+        // Existence is the parent's exit signal. Publish a complete PID before
+        // it can exit and cause containment to terminate this child.
+        std::fs::rename(&pending_pid_file, pid_file).expect("publish descendant fixture pid");
         // Bound the fixture itself so a failing containment regression cannot leave
         // permanent test work behind. Production cleanup should terminate it well
         // before this fallback expires.
