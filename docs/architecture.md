@@ -191,8 +191,8 @@ unless review is configured; human-owned constraints remain. Goals never live
 in `Agent.instructions` or solely workflow memory.
 Generic caps cannot replace lifecycle fixes.
 
-Goal completion is not chat delivery. One handoff corrects empty
-finals; repetition completes with a typed notice, preserving goals/history/waits.
+Goal completion is not chat delivery: one handoff corrects empty finals;
+repetition ends with a typed notice, preserving goals/history.
 See [run lifecycle](run-lifecycle.md).
 
 Non-transient preclaim rejection parks accepted work behind a durable admission
