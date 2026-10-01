@@ -90,6 +90,11 @@ export function defaultModelSummary(
 export function DefaultSessionModelPreferenceRow(props: {
   workspaceId: string;
   canManage: boolean;
+  /**
+   * Who pays for the default, in words: "paid with Acme's Opengeni credits".
+   * The trigger already names the model and its payment source; this says whose.
+   */
+  describePayer?: ((model: WorkspaceModelCatalogModel) => string) | undefined;
 }) {
   const context = useAppContext();
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
@@ -153,6 +158,11 @@ export function DefaultSessionModelPreferenceRow(props: {
   }
 
   const selected = pickerRows.find((row) => row.id === draft.model) ?? null;
+  const selectedModel = catalog.models.find((model) => model.id === draft.model) ?? null;
+  const payer = selectedModel && props.describePayer ? props.describePayer(selectedModel) : null;
+  const starts = payer
+    ? `New chats and schedules start with this model, ${payer}.`
+    : "New chats and schedules start with this model.";
   const cantRun =
     catalog.loading || catalog.error
       ? null
@@ -170,11 +180,7 @@ export function DefaultSessionModelPreferenceRow(props: {
     <SettingRow
       label="Default model"
       controlWidth="auto"
-      description={
-        configured
-          ? "New chats and schedules start with this model."
-          : `New chats and schedules start with this model. ${automaticDefaultNote(automatic?.source)}`
-      }
+      description={configured ? starts : `${starts} ${automaticDefaultNote(automatic?.source)}`}
       error={cantRun}
       hint={saving ? "Saving…" : undefined}
       control={

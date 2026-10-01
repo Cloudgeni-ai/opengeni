@@ -1,4 +1,3 @@
-import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
 import type { OrganizationModelProviderKind, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon, UserIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -71,17 +70,12 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { ListRow, RowList } from "@/components/ui/list-row";
 import { MetaChip } from "@/components/ui/meta-chip";
-import { PageHeader } from "@/components/ui/page-header";
 import { RowButton } from "@/components/ui/page-actions";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingNavRow, SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
-import {
-  availabilityReasonLabel,
-  billingClassForModel,
-  payerSummaryForModel,
-} from "@/lib/model-policy";
+import { billingClassForModel, payerSummaryForModel } from "@/lib/model-policy";
 import {
   accountKey,
   accountKeyOf,
@@ -522,16 +516,12 @@ export function WorkspaceModelsPage({
         canManageSettings={canManageSettings}
         canConnect={canConnect}
         empty={!loadingAccounts && listed.every((count) => count === 0)}
-        summary={
-          <DefaultModelLine
-            workspaceId={workspaceId}
-            models={catalog.models}
-            loading={catalog.loading}
-            defaultModel={catalog.defaultSelection?.model ?? null}
-            organizationName={organizationName}
-            codexFromOrganization={codex.source?.effectiveSource === "organization"}
-            grokFromOrganization={grok.inherited}
-          />
+        describePayer={(model) =>
+          payerPhrase(model, {
+            organizationName,
+            codexFromOrganization: codex.source?.effectiveSource === "organization",
+            grokFromOrganization: grok.inherited,
+          })
         }
         whoCanConnect={
           canConnect ? null : (
@@ -700,55 +690,6 @@ function OrganizationGatewayRow({
   );
 }
 
-/** The one line under the title: what a new chat here starts with, and who pays. */
-function DefaultModelLine({
-  workspaceId,
-  models,
-  loading,
-  defaultModel,
-  organizationName,
-  codexFromOrganization,
-  grokFromOrganization,
-}: {
-  workspaceId: string;
-  models: readonly WorkspaceModelCatalogModel[];
-  loading: boolean;
-  /** The server's default when the workspace has none saved. */
-  defaultModel: string | null;
-  organizationName: string;
-  codexFromOrganization: boolean;
-  grokFromOrganization: boolean;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
-  const configured = resolveWorkspaceSessionDefaults(workspace?.settings);
-  const modelId = configured?.model ?? defaultModel ?? context.clientConfig.defaultModel;
-  if (loading) {
-    return (
-      <span
-        aria-hidden="true"
-        data-slot="skeleton"
-        className="inline-block h-4 w-full max-w-md animate-pulse rounded-md bg-surface-2 align-middle"
-      />
-    );
-  }
-  const model = models.find((candidate) => candidate.id === modelId);
-  if (!model) return null;
-  const runnable = model.credentialReadiness.status === "ready" && model.availability.selectable;
-  const reason = availabilityReasonLabel(model.availability.reason);
-  return (
-    <span data-testid="models-default-line">
-      New chats here start with <span className="font-medium text-fg">{model.label}</span>,{" "}
-      {payerPhrase(model, { organizationName, codexFromOrganization, grokFromOrganization })}.
-      {runnable ? null : (
-        <span className="text-status-waiting">
-          {` It can't run right now${reason ? ` (${reason.toLocaleLowerCase()})` : ""}.`}
-        </span>
-      )}
-    </span>
-  );
-}
-
 /** "Acme's", "Acme Robotics'". */
 export function possessive(name: string): string {
   return /s$/i.test(name) ? `${name}'` : `${name}'s`;
@@ -885,7 +826,7 @@ function ModelsList({
   canManageSettings,
   canConnect,
   empty,
-  summary,
+  describePayer,
   whoCanConnect,
   onEditAllowed,
   onConnect,
@@ -900,8 +841,8 @@ function ModelsList({
   canConnect: boolean;
   /** Nothing is connected (and nothing is still loading). */
   empty: boolean;
-  /** The line that says what a new chat starts with and who pays. */
-  summary: ReactNode;
+  /** Who pays for the default model, for its row: "paid with Acme's Opengeni credits". */
+  describePayer: (model: WorkspaceModelCatalogModel) => string;
   /** For people who can't add accounts: who can. */
   whoCanConnect: ReactNode;
   onEditAllowed: () => void;
@@ -923,49 +864,48 @@ function ModelsList({
       Connect account
     </RowButton>
   );
+  // Defaults first: what a new chat here starts with, and who pays for it.
   return (
-    <>
-      <PageHeader title="Models" description={summary} />
-      <SectionStack className="mt-8">
-        <Section
-          title="Accounts"
-          description="Subscriptions, API keys and credits that pay for models here."
-          action={canConnect && !empty ? connect : null}
-        >
-          {empty ? (
-            <EmptyState
-              variant="page"
-              icon={<KeyRoundIcon />}
-              title="No accounts connected"
-              description={
-                canConnect
-                  ? "Connect a subscription or an API key to pay for models here."
-                  : "Nothing pays for models here yet."
-              }
-              action={canConnect ? connect : null}
-              className="pt-8 pb-6"
-            />
-          ) : (
-            <>
-              {accountsNote}
-              {accounts}
-            </>
-          )}
-          {whoCanConnect}
-        </Section>
-        <Section title="Defaults">
-          <SettingRowGroup>
-            <DefaultSessionModelPreferenceRow
-              key={`default-model:${workspaceId}:${revision}`}
-              workspaceId={workspaceId}
-              canManage={canManageSettings}
-            />
-            <AllowedModelsRow state={policy} onEdit={onEditAllowed} />
-          </SettingRowGroup>
-        </Section>
-        {providerSections}
-      </SectionStack>
-    </>
+    <SectionStack>
+      <Section title="Defaults">
+        <SettingRowGroup>
+          <DefaultSessionModelPreferenceRow
+            key={`default-model:${workspaceId}:${revision}`}
+            workspaceId={workspaceId}
+            canManage={canManageSettings}
+            describePayer={describePayer}
+          />
+          <AllowedModelsRow state={policy} onEdit={onEditAllowed} />
+        </SettingRowGroup>
+      </Section>
+      <Section
+        title="Accounts"
+        description="Subscriptions, API keys and credits that pay for models here."
+        action={canConnect && !empty ? connect : null}
+      >
+        {empty ? (
+          <EmptyState
+            variant="page"
+            icon={<KeyRoundIcon />}
+            title="No accounts connected"
+            description={
+              canConnect
+                ? "Connect a subscription or an API key to pay for models here."
+                : "Nothing pays for models here yet."
+            }
+            action={canConnect ? connect : null}
+            className="pt-8 pb-6"
+          />
+        ) : (
+          <>
+            {accountsNote}
+            {accounts}
+          </>
+        )}
+        {whoCanConnect}
+      </Section>
+      {providerSections}
+    </SectionStack>
   );
 }
 

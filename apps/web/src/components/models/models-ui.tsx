@@ -108,7 +108,7 @@ export function payerShortLabel(row: { billingClass: string; providerLabel: stri
     case "supergrok_subscription":
       return "SuperGrok";
     case "opengeni_credits":
-      return "Credits";
+      return "Opengeni credits";
     case "byok":
     case "organization_byok":
       return row.providerLabel;

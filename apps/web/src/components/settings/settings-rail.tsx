@@ -63,7 +63,7 @@ export const WORKSPACE_SETTINGS_COPY: Record<
     description: ({ workspace, organization }) =>
       `People from ${organization} who can use ${workspace}.`,
   },
-  // The page's first line says what a new chat here uses and who pays.
+  // No subtitle: the Default model row says what a new chat uses and who pays.
   models: {
     title: "Models",
   },

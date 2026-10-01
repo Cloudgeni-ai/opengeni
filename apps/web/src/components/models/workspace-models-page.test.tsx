@@ -201,7 +201,24 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("@/components/default-session-model", () => ({
-  DefaultSessionModelPreferenceRow: () => <div>Default model</div>,
+  DefaultSessionModelPreferenceRow: ({
+    describePayer,
+  }: {
+    describePayer?: (model: Record<string, unknown>) => string;
+  }) => (
+    <div data-testid="default-model-row">
+      Default model{" "}
+      {describePayer?.({
+        id: "codex/gpt-6-astra",
+        label: "GPT-6 Astra",
+        provider: "codex",
+        providerLabel: "Codex",
+        source: "codex",
+        cost: "subscription",
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      })}
+    </div>
+  ),
 }));
 // Menus and confirms as plain buttons: the real ones are Radix portals.
 mock.module("@/components/ui/dropdown-menu", () => ({
@@ -435,6 +452,21 @@ describe("Codex rows", () => {
 });
 
 describe("Models list", () => {
+  test("no summary line under the title: the Default model row says who pays, first", async () => {
+    const view = await render();
+    try {
+      expect(view.container.querySelector('[data-testid="models-default-line"]')).toBeNull();
+      expect(view.container.textContent).not.toContain("New chats here start with");
+      const row = view.container.querySelector('[data-testid="default-model-row"]');
+      expect(row?.textContent).toContain("paid by this workspace's Codex subscription");
+      // Defaults come before Accounts.
+      const headings = [...view.container.querySelectorAll("h2")].map((h) => h.textContent);
+      expect(headings.indexOf("Defaults")).toBeLessThan(headings.indexOf("Accounts"));
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("one flat Accounts list: no provider group headers, no unconnected providers", async () => {
     const view = await render();
     try {
