@@ -150,6 +150,7 @@ export function ComposerMobilePlusPanel(
     setPanel: (panel: Panel) => void;
     setOpen: (open: boolean) => void;
     dialogOpen: boolean;
+    dialogFocusOwnerRef: { current: boolean };
   },
 ) {
   const { triggerRef, panel, setPanel, setOpen, dialogOpen } = props;
@@ -216,6 +217,7 @@ export function ComposerMobilePlusPanel(
   return (
     <ComposerPanelContent
       dialog={dialogOpen}
+      dialogFocusOwnerRef={props.dialogFocusOwnerRef}
       panel={panel}
       triggerRef={triggerRef}
       side={props.menuSide ?? (props.expandedPanelPresentation === "dialog" ? "bottom" : "top")}
@@ -456,6 +458,7 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
 
 function ComposerPanelContent(props: {
   dialog: boolean;
+  dialogFocusOwnerRef: { current: boolean };
   side: "top" | "bottom";
   panel: Panel;
   triggerRef: { current: HTMLButtonElement | null };
@@ -488,6 +491,9 @@ function ComposerPanelContent(props: {
 
   return (
     <DropdownMenuContent
+      onCloseAutoFocus={(event) => {
+        if (props.dialogFocusOwnerRef.current) event.preventDefault();
+      }}
       align="start"
       side={props.side}
       sideOffset={8}

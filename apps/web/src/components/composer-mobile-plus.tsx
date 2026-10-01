@@ -81,6 +81,7 @@ export function ComposerMobilePlus(
   },
 ) {
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogFocusOwnerRef = useRef(false);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
   const openNonce = props.openRequest?.nonce;
@@ -111,6 +112,9 @@ export function ComposerMobilePlus(
     panel !== "settings" &&
     panel !== "visibility" &&
     props.expandedPanelPresentation === "dialog";
+  // The retired menu's deferred callback must observe the current owner,
+  // including after the lazy panel has changed presentation or unmounted.
+  dialogFocusOwnerRef.current = dialogOpen;
 
   return (
     <Dialog
@@ -154,6 +158,7 @@ export function ComposerMobilePlus(
               setPanel={setPanel}
               setOpen={setOpen}
               dialogOpen={dialogOpen}
+              dialogFocusOwnerRef={dialogFocusOwnerRef}
             />
           </Suspense>
         ) : null}
