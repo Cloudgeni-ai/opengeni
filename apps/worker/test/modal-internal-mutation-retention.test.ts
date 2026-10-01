@@ -25,6 +25,7 @@ import {
 import {
   isModalCommandStartOutcomeUnknownError,
   ProviderCommandStartOutcomeUnknownError,
+  RoutingMutationOutcomeUnknownError,
 } from "@opengeni/runtime";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { createSandboxTurnRuntime } from "../src/activities/agent-turn/sandbox-runtime";
@@ -359,16 +360,43 @@ test.each([
   "multiple",
   "binding failure",
   "promotion failure",
+  "aggregate index getter",
+  "descriptor getter",
+  "nested cursor getter",
 ] as const)(
   "%s unknown cannot clear its admission through ordinary proof-bearing cleanup",
   async (failureKind) => {
     const fixture = await admittedInternalMutation();
     const first = unknownCommand(fixture.instanceId);
     let thrown: unknown = first.error;
+    let getterReads = 0;
     if (failureKind === "bare SDK") thrown = first.sdkError;
     if (failureKind === "wrong sandbox") thrown = unknownCommand("sb-unrelated").error;
     if (failureKind === "multiple")
       thrown = new AggregateError([first.error, unknownCommand(fixture.instanceId).error]);
+    if (failureKind === "aggregate index getter") {
+      const errors: unknown[] = [];
+      Object.defineProperty(errors, "0", {
+        get: () => {
+          getterReads++;
+          return first.error;
+        },
+      });
+      thrown = new AggregateError([]);
+      Object.defineProperty(thrown, "errors", { value: errors });
+    }
+    if (failureKind === "descriptor getter" || failureKind === "nested cursor getter") {
+      const target = failureKind === "descriptor getter" ? first.command : first.command.streams;
+      const key = failureKind === "descriptor getter" ? "taskId" : "stdout";
+      const value =
+        failureKind === "descriptor getter" ? first.command.taskId : first.command.streams.stdout;
+      Object.defineProperty(target, key, {
+        get: () => {
+          getterReads++;
+          return value;
+        },
+      });
+    }
     if (failureKind === "binding failure")
       fixture.sandbox.established.session.modal.cpClient.workspaceNameLookup = async () => {
         throw new Error("Authenticated provider namespace unavailable");
@@ -390,7 +418,11 @@ test.each([
         },
       )
       .catch((error) => error);
-    expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(true);
+    expect(failure).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(getterReads).toBe(0);
+    expect(isModalCommandStartOutcomeUnknownError(failure)).toBe(
+      failureKind !== "aggregate index getter",
+    );
     expect(failure.retainedProcess).toBeUndefined();
     await expect(fixture.sandbox.release({ workspaceWritersQuiesced: true })).rejects.toThrow(
       "still outcome-unknown",
