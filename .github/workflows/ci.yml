@@ -1127,6 +1127,13 @@ jobs:
       - name: Clean published consumer
         run: bun run test:publish-consumer
 
+      - name: Registry dependency export guard regression
+        run: bun test scripts/test-registry-dependency-exports.test.ts scripts/test-effective-dependency-exports.test.ts
+
+      - name: Frozen Version PR effective registry export closure
+        if: github.head_ref == 'changeset-release/main' || inputs.automation_pr_number != ''
+        run: bun run test:effective-dependency-exports
+
       - name: Runtime embedding consumer
         run: bun run test:runtime-embedding-consumer
 

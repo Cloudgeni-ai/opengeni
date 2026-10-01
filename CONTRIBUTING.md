@@ -101,6 +101,43 @@ Two publish-coherence rules learned the hard way (all versions are 0.x):
 - **A minor bump of a package must cascade to its dependents.** Published manifests carry caret ranges (`^0.3.0`), and under 0.x caret semantics a minor bump (0.3.0 → 0.4.0) leaves every dependent's range. Add a patch changeset covering the dependent closure in the same release, or external consumers nest a stale copy of the bumped package.
 - **Merging a Version PR only creates versioned source; it does not publish.** GitHub branch protection may still require a review to merge into `main`. Ordinary candidate and operator admission bind the merged associated PR, not a later GitHub `APPROVE` or structured PASS body. Merge deliberately, then run the evidence-bound candidate, acceptance, and release workflows for that exact retained source.
 
+### Registry dependency export smoke
+
+`bun run test:publish-consumer` proves a local release train: its sibling tarballs
+and overrides intentionally do not prove compatibility with published dependencies.
+Build packages, then run `bun run test:effective-dependency-exports` before
+publication. This stages the selected consumer dependency closure and exposes
+ordinary npm range resolution through a read-only loopback registry: existing
+exact versions use integrity-checked npm tarballs, while genuinely new versions
+use the cut's candidate tarballs. Existing versions must match all shipped local
+files (JSON key ordering is normalized); changed bytes without a new version
+fail. No workspace links or install overrides substitute an invalid range.
+Frozen Version PR CI and stable publication run this effective guard before any
+publish. Ordinary PRs run the hermetic regression because pending changesets do
+not yet represent frozen package versions.
+
+`bun run test:registry-dependency-exports --candidate` packs each selected package
+separately and installs only its declared registry dependency closure, without
+sibling candidates, links, or overrides. Build packages first. `--published-source`
+instead installs exact workspace versions from npm; `--published` checks current
+`latest`, or use `--package @opengeni/react@7.4.0` to reproduce a historical failure.
+
+The stable package-publication workflow additionally runs registry-only candidate
+and exact-published modes **after** registry reconciliation. These postpublication
+checks fail on an incoherent published closure but do not undo an npm publish.
+Running a registry-only candidate before its prerequisite versions are published
+fails intentionally, so this is not a pre-publication gate for an unpublished
+release train. Ordinary CI runs the hermetic missing-export regression.
+
+Both modes test normal resolution and the lowest **published** compatible version
+of each direct `@opengeni/*` runtime dependency. Browser Vite builds retain all
+exports of the selected client entrypoints; Node imports cover the Connect,
+contracts, SDK, and Codemode profiles. Initial coverage is bounded to the explicit
+profiles in `scripts/test-registry-dependency-exports.ts`: not every package,
+subpath, conditional export, intermediate semver version, optional peer behavior,
+third-party minimum, native runtime, or computed dynamic import is proven. Add
+profiles and regression fixtures when extending the supported closure.
+
 ## Code Style
 
 - Prefer existing repository patterns over new abstractions.
