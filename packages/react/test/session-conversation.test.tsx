@@ -99,7 +99,7 @@ test("proxy sandbox capability disables default downloads in the complete conver
   }
 });
 
-test("Latest question stays unavailable until initial history is ready", async () => {
+test("contextual navigation stays unavailable when initial history has no mounted prompt", async () => {
   const fixture = latestQuestionClient("pending");
   const listEvents = fixture.client.listEvents;
   let releaseHistory!: () => void;
@@ -122,17 +122,11 @@ test("Latest question stays unavailable until initial history is ready", async (
     expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
     releaseHistory();
     await waitFor(
-      () => view.container.querySelector("[data-og-jump-to-question]") !== null,
-      "Latest question did not appear after initial history",
+      () => view.container.querySelector("[data-og-wide-table-message]") !== null,
+      "history did not render",
     );
-    const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
-    expect(latest).not.toBeNull();
-    await actRun(() => latest!.click());
-    await waitFor(
-      () => (document.activeElement as HTMLElement)?.dataset.queueTurnId === fixture.turn.id,
-      "Latest question did not focus the pending prompt",
-    );
-    expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(fixture.turn.id);
+    expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
+    expect(fixture.reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(false);
   } finally {
     releaseHistory();
     await view.unmount();
@@ -146,15 +140,15 @@ for (const mode of [
   "legacy-running",
   "legacy-settled",
 ] as const) {
-  test(`Latest question reaches the real ${mode} destination through SessionConversation`, async () => {
+  test(`unmounted ${mode} prompts do not cause global navigation through SessionConversation`, async () => {
     const { client, turn, reads } = latestQuestionClient(mode);
     const view = await renderComponent(
       <SessionConversation client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
     );
     try {
       await waitFor(
-        () => view.container.querySelector("[data-og-jump-to-question]") !== null,
-        "Latest question did not become available",
+        () => view.container.querySelector("[data-og-wide-table-message]") !== null,
+        "history did not render",
       );
       if (mode === "pending") {
         const queueButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -163,67 +157,18 @@ for (const mode of [
         if (queueButton?.getAttribute("aria-expanded") === "true")
           await actRun(() => queueButton.click());
       }
-      const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
-      expect(latest).not.toBeNull();
-      await actRun(() => latest!.click());
-      await waitFor(
-        () => reads.some((read) => read.includeTypes?.includes("user.message")),
-        "Latest question did not read its navigation destination",
-      );
-      expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(true);
-      if (mode === "pending") {
-        await waitFor(
-          () => (document.activeElement as HTMLElement)?.dataset.queueTurnId === turn.id,
-          "Latest question did not focus the pending prompt",
-        );
-        expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(turn.id);
-        expect(
-          view.container.querySelector('[data-og-session-chrome-panel="queue"]'),
-        ).not.toBeNull();
-        expect(
-          view.container.querySelector("[data-og-timeline-scroller]")?.textContent,
-        ).not.toContain("Newest queued question");
-      } else {
-        const destination =
-          mode === "withdrawn" ? "Previous valid question" : "Newest queued question";
-        await waitFor(
-          () =>
-            [...view.container.querySelectorAll("[data-og-prompt]")].some((item) =>
-              item.textContent?.includes(destination),
-            ),
-          "Latest question did not show the requested prompt",
-        );
-        const prompts = [...view.container.querySelectorAll("[data-og-prompt]")].map(
-          (item) => item.textContent,
-        );
-        expect(
-          prompts.some((text) =>
-            text?.includes(
-              mode === "withdrawn" ? "Previous valid question" : "Newest queued question",
-            ),
-          ),
-        ).toBe(true);
-        if (mode === "withdrawn")
-          expect(prompts.some((text) => text?.includes("Newest queued question"))).toBe(false);
-      }
+      expect(view.container.querySelector("[data-og-prompt]")).toBeNull();
+      expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
+      expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(false);
+      expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).not.toBe(turn.id);
     } finally {
       await view.unmount();
     }
   });
 }
 
-test("deferred queued refresh cannot reopen or focus the queue after Jump to start", async () => {
+test("Jump to start loads history without redirecting focus to a pending queue item", async () => {
   const fixture = latestQuestionClient("pending");
-  let release!: (snapshot: SessionQueueSnapshot) => void;
-  const deferred = new Promise<SessionQueueSnapshot>((resolve) => {
-    release = resolve;
-  });
-  let deferRefresh = false;
-  let reads = 0;
-  fixture.client.getQueue = async () => {
-    if (deferRefresh && ++reads === 2) return deferred;
-    return fixture.snapshot;
-  };
   const view = await renderComponent(
     <SessionConversation
       client={fixture.client}
@@ -245,15 +190,9 @@ test("deferred queued refresh cannot reopen or focus the queue after Jump to sta
     await flush(20);
     const start = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-start]");
     expect(start).not.toBeNull();
-    deferRefresh = true;
-    await actRun(() =>
-      view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]")!.click(),
-    );
-    await flush(30);
-    expect(reads).toBe(2);
+    expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
     await actRun(() => start!.click());
     await flush(40);
-    release(fixture.snapshot);
     await flush(80);
     expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).not.toBe(fixture.turn.id);
     expect(view.container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();
@@ -261,7 +200,6 @@ test("deferred queued refresh cannot reopen or focus the queue after Jump to sta
       "Previous valid question",
     );
   } finally {
-    release(fixture.snapshot);
     await view.unmount();
   }
 });
@@ -398,11 +336,8 @@ test("complete conversation loads queue and provides queue actions beside compos
     const latestQuestion = view.container.querySelector<HTMLButtonElement>(
       "[data-og-jump-to-question]",
     );
-    expect(latestQuestion).not.toBeNull();
-    expect(view.container.querySelectorAll("[data-og-jump-to-question]")).toHaveLength(1);
-    await actRun(() => latestQuestion!.click());
-    await flush(30);
-    expect(latestQuestionLookups).toBe(1);
+    expect(latestQuestion).toBeNull();
+    expect(latestQuestionLookups).toBe(0);
     const disclosure = view.container.querySelector<HTMLButtonElement>(
       "[data-og-user-message-disclosure]",
     )!;
