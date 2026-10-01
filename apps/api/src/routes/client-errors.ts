@@ -139,6 +139,17 @@ export function createClientSignalAdmission(
   return createKeyedAdmission<string>(options);
 }
 
+/**
+ * Web vitals arrive from every page load rather than only on failure, so they
+ * get a much larger dedicated bucket per metric (burst 1,200, then 20 a
+ * second per process). The browser samples vitals before sending.
+ */
+export function createClientWebVitalAdmission(
+  options: { capacity?: number; refillPerSecond?: number; now?: () => number } = {},
+): ClientSignalAdmission {
+  return createKeyedAdmission<string>({ capacity: 1_200, refillPerSecond: 20, ...options });
+}
+
 function signalAdmissionKey(report: ClientSignalReport): string {
   switch (report.signal) {
     case "request_failure":
@@ -203,11 +214,13 @@ export function registerClientErrorRoutes(
     settings: Pick<Settings, "corsAllowOriginRegex" | "publicBaseUrl" | "webBaseUrl">;
     admission?: ClientErrorAdmission;
     signalAdmission?: ClientSignalAdmission;
+    webVitalAdmission?: ClientSignalAdmission;
   },
 ): void {
   const { observability, settings } = deps;
   const admission = deps.admission ?? createClientErrorAdmission();
   const signalAdmission = deps.signalAdmission ?? createClientSignalAdmission();
+  const webVitalAdmission = deps.webVitalAdmission ?? createClientWebVitalAdmission();
   // Publish the finite series at zero so the first failure after a deploy is
   // an increase from a baseline rather than a series appearing from nothing.
   for (const kind of CLIENT_ERROR_KINDS) {
@@ -285,7 +298,8 @@ export function registerClientErrorRoutes(
       const report = parseClientBeaconReport(await c.req.text().catch(() => null));
       if (!report) return reject(c, "invalid", 400);
       if (isClientSignalReport(report)) {
-        if (!signalAdmission.admit(signalAdmissionKey(report))) {
+        const bucket = report.signal === "web_vital" ? webVitalAdmission : signalAdmission;
+        if (!bucket.admit(signalAdmissionKey(report))) {
           return reject(c, "rate_limited", 429, report.signal);
         }
         recordClientSignal(observability, report);

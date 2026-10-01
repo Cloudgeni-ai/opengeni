@@ -203,10 +203,15 @@ a signal body as `invalid`, so the extension is backward compatible.
 Both counters are published at zero for every label pair on API start, and a
 rate-limited signal is counted in
 `opengeni_client_error_reports_rejected_total{reason="rate_limited",kind=<signal>}`.
-Admission uses the same token-bucket bounds as the error kinds (burst 30, then
-one every two seconds per process) in separate buckets, one per request action,
-per stream event, and per vital metric, so a burst of one signal never spends
-the error budget. A request failure and a degraded stream (`reconnect_exhausted`
+Request-failure and stream signals use the same token-bucket bounds as the
+error kinds (burst 30, then one every two seconds per process) in separate
+buckets, one per request action and per stream event, so a burst of one signal
+never spends the error budget. Web vitals arrive from every sampled page load,
+so each vital metric has a larger dedicated bucket (burst 1,200, then 20 a
+second per process). The browser sends vitals for 25% of page loads by default
+(`VITE_OPENGENI_WEB_VITALS_SAMPLE_RATE`), so multiply
+`opengeni_client_web_vital_count` by `1 / rate` to estimate page loads; quantiles
+need no scaling. A request failure and a degraded stream (`reconnect_exhausted`
 or `long_disconnect`) write one warning (`Web client request failed before a
 response` / `Web client live stream degraded`) with `surface`, `op` (the action
 or stream), `reason`, `clientRoute` and `clientRevision`; reconnects and vitals

@@ -1,6 +1,7 @@
-// Always-loaded entry for a full-page connect redirect. The journey module is
-// imported only when a redirect actually starts, so it stays out of the
-// session bundle graph; the marker is written before the page navigates.
+// Entry for a full-page connect redirect from the session route and the app
+// context. Importing the journey module on demand keeps those call sites from
+// adding a static edge to it (it is still loaded with lib/analytics.ts when
+// analytics is active); the marker is written before the page navigates.
 import type { IntegrationClass, IntegrationConnectMethod } from "./integration-connect-analytics";
 
 export async function markIntegrationConnectRedirect(

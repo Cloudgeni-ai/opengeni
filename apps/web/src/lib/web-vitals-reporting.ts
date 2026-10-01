@@ -15,10 +15,17 @@ import { journeyPage } from "./analytics-journey";
 import { reportClientWebVital } from "./client-signals";
 
 /**
- * Fraction of documents that report vitals. Every document reports while
- * traffic is low; the API's per-metric admission bounds the volume.
+ * Fraction of page loads that report vitals, decided once per document.
+ * Vitals arrive from every page load, so they are sampled; multiply counts by
+ * `1 / rate` to estimate page loads (quantiles need no scaling). Configure it
+ * at build time with `VITE_OPENGENI_WEB_VITALS_SAMPLE_RATE` (0 to 1).
  */
-export const WEB_VITALS_SAMPLE_RATE = 1;
+export const DEFAULT_WEB_VITALS_SAMPLE_RATE = 0.25;
+
+export function webVitalsSampleRate(value: unknown): number {
+  const rate = typeof value === "string" && value.trim() !== "" ? Number(value) : Number.NaN;
+  return Number.isFinite(rate) && rate >= 0 && rate <= 1 ? rate : DEFAULT_WEB_VITALS_SAMPLE_RATE;
+}
 
 const METRICS: Readonly<Record<Metric["name"], ClientWebVitalMetric | null>> = {
   CLS: "cls",
@@ -42,10 +49,15 @@ export function installWebVitalsReporting(
   options: {
     pathname?: string;
     random?: () => number;
+    /** Overrides the build-time rate (tests). */
+    sampleRate?: number;
     report?: typeof reportClientWebVital;
   } = {},
 ): void {
-  if ((options.random ?? Math.random)() >= WEB_VITALS_SAMPLE_RATE) return;
+  const rate =
+    options.sampleRate ??
+    webVitalsSampleRate(import.meta.env?.VITE_OPENGENI_WEB_VITALS_SAMPLE_RATE);
+  if ((options.random ?? Math.random)() >= rate) return;
   const page = webVitalPage(options.pathname ?? window.location.pathname);
   const report = options.report ?? reportClientWebVital;
   const onMetric = (metric: Metric) => {

@@ -20,3 +20,28 @@ describe("web vitals projection", () => {
     expect(webVitalPage("/somewhere/else")).toBe("other");
   });
 });
+
+describe("web vitals sampling", () => {
+  test("defaults to 25% and accepts only a rate between 0 and 1", async () => {
+    const { DEFAULT_WEB_VITALS_SAMPLE_RATE, webVitalsSampleRate } =
+      await import("./web-vitals-reporting");
+    expect(DEFAULT_WEB_VITALS_SAMPLE_RATE).toBe(0.25);
+    expect(webVitalsSampleRate(undefined)).toBe(0.25);
+    expect(webVitalsSampleRate("0.1")).toBe(0.1);
+    expect(webVitalsSampleRate("1")).toBe(1);
+    expect(webVitalsSampleRate("0")).toBe(0);
+    for (const invalid of ["", "2", "-1", "half"]) expect(webVitalsSampleRate(invalid)).toBe(0.25);
+  });
+
+  test("an unsampled page load installs no observers and reports nothing", async () => {
+    const { installWebVitalsReporting } = await import("./web-vitals-reporting");
+    const reported: unknown[] = [];
+    installWebVitalsReporting({
+      pathname: "/",
+      sampleRate: 0.25,
+      random: () => 0.5,
+      report: (...args) => void reported.push(args),
+    });
+    expect(reported).toEqual([]);
+  });
+});

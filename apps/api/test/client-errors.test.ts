@@ -9,6 +9,7 @@ import {
   CLIENT_ERROR_REPORT_MAX_BYTES,
   createClientErrorAdmission,
   createClientSignalAdmission,
+  createClientWebVitalAdmission,
   parseClientBeaconReport,
   parseClientErrorReport,
   registerClientErrorRoutes,
@@ -473,5 +474,30 @@ describe("signal reports through the full API app", () => {
         'action="create_session",reason="network"',
       ),
     ).toBe(1);
+  });
+});
+
+describe("web vital admission", () => {
+  test("vitals use a much larger bucket than failure signals", async () => {
+    const observability = createObservability(observabilitySettings, { component: "api" });
+    const app = new Hono();
+    registerClientErrorRoutes(app, {
+      observability,
+      settings: originSettings,
+      signalAdmission: createClientSignalAdmission({ capacity: 1, refillPerSecond: 0 }),
+    });
+    const statuses: number[] = [];
+    for (let index = 0; index < 100; index += 1) {
+      statuses.push((await post(app, JSON.stringify(webVital))).status);
+    }
+    expect(statuses.every((status) => status === 204)).toBe(true);
+    let now = 0;
+    const admission = createClientWebVitalAdmission({ now: () => now });
+    let admitted = 0;
+    for (let index = 0; index < 2_000; index += 1)
+      if (admission.admit("web_vital:lcp")) admitted += 1;
+    expect(admitted).toBe(1_200);
+    now += 1_000;
+    expect(admission.admit("web_vital:lcp")).toBe(true);
   });
 });

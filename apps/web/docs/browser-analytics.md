@@ -150,6 +150,12 @@ of a redirect that normally carries them. Exact-return Connect redirects
 report `outcome_unknown`. A back-forward-cache restore does not re-run boot and
 is not observed.
 
+`integration_connect_finished` can arrive without a matching
+`integration_connect_started` in the same tab, for example when the provider
+returns in a new tab, consent was granted mid-flow, or `sessionStorage` was
+cleared. Count started and finished events independently and do not build
+funnels that require pairing them.
+
 ## Failed-turn recovery
 
 When the failed-turn banner is shown, `turn_failure_viewed{failure_class}` is
@@ -308,8 +314,10 @@ The same beacon carries closed failure and health signals
   lazily with the `web-vitals` package, so neither is in the initial or
   direct-session bundle graph. LCP, INP, CLS and TTFB are reported once per
   document (timings in seconds) with `page`, the closed journey label of the
-  page the document loaded on. Every document is sampled
-  (`WEB_VITALS_SAMPLE_RATE = 1`); the API bounds admission.
+  page the document loaded on. Vitals are sampled: 25% of page loads by
+  default, decided once per document, configurable at build time with
+  `VITE_OPENGENI_WEB_VITALS_SAMPLE_RATE` (0 to 1). Multiply vital counts by
+  `1 / rate` to estimate page loads; quantiles need no scaling.
 
 Automated browsers (`navigator.webdriver`, for example CI acceptance runs)
 report none of these signals, so test traffic never skews the series; the
