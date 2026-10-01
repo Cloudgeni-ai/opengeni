@@ -193,22 +193,24 @@ export async function stageRegistryCandidate(
   const tarballs = join(temporaryRoot, "tarballs");
   await mkdir(staging, { recursive: true });
   await mkdir(tarballs, { recursive: true });
-  // Same payload directories as the existing clean release-train consumer.
-  for (const path of ["dist", "src", "styles", "LICENSE", "README.md", "CHANGELOG.md"]) {
-    try {
-      await cp(join(repoRoot, pkg.dir, path), join(staging, path), { recursive: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || path === "dist") throw error;
-    }
-  }
+  // Preserve declared assets and ignore files; let the publisher's npm packlist
+  // select the payload, not a directory allowlist. Dependency trees and build
+  // caches do not belong in this isolated source copy.
+  const excluded = new Set(["node_modules", ".git", ".cache", ".turbo", ".bun-cache"]);
+  await cp(join(repoRoot, pkg.dir), staging, {
+    recursive: true,
+    filter: (path) => !excluded.has(basename(path)),
+  });
   await writeFile(join(staging, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const output = await run(
-    ["bun", "pm", "pack", "--ignore-scripts", "--quiet", "--destination", tarballs],
+    ["npm", "pack", "--ignore-scripts", "--offline", "--json", "--pack-destination", tarballs],
     staging,
   );
-  const filename = output.trim().split("\n").at(-1);
-  if (!filename) throw new Error(`No packed candidate for ${pkg.name}`);
-  return { manifest, tarball: join(tarballs, basename(filename)) };
+  const packed = JSON.parse(output) as Array<{ filename: string }>;
+  const filename = packed[0]?.filename;
+  if (packed.length !== 1 || typeof filename !== "string" || basename(filename) !== filename)
+    throw new Error(`No single packed candidate for ${pkg.name}`);
+  return { manifest, tarball: join(tarballs, filename) };
 }
 
 async function assertIsolatedPackage(root: string, name: string): Promise<string> {

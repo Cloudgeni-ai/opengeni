@@ -1,17 +1,25 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import {
+  assertUnchangedPublishedBytes,
   effectiveRegistry,
   proveEffectiveConsumers,
+  shippedInventory,
   verifyTarballIntegrity,
   type PackedCandidate,
   type RegistryManifest,
   type RegistryMetadata,
 } from "./test-effective-dependency-exports";
-import { run, type SmokeManifest } from "./test-registry-dependency-exports";
+import { repoRoot, type WorkspacePackage } from "./publishable-workspaces";
+import {
+  candidateManifest,
+  run,
+  stageRegistryCandidate,
+  type SmokeManifest,
+} from "./test-registry-dependency-exports";
 
 async function pack(
   root: string,
@@ -158,6 +166,96 @@ test("benign top-level and dependency key reordering remains unchanged published
     registry.stop();
   });
 });
+
+for (const selection of ["files", ".npmignore", ".gitignore"] as const) {
+  test(`candidate staging matches npm publication inventory with ${selection} selection`, async () => {
+    await fixture(async (root) => {
+      const source = join(root, "source");
+      const reference = join(root, "reference");
+      const publishedTarballs = join(root, "published");
+      const staging = join(root, "candidate");
+      const sourceManifest: SmokeManifest = {
+        ...manifest("@opengeni/staging-fixture", "0.3.0"),
+        main: "./src/index.ts",
+        exports: { ".": { types: "./src/index.ts", default: "./src/index.ts" } },
+        ...(selection === "files" ? { files: ["dist", "runtime-data.json"] } : {}),
+        scripts: { prepack: 'node -e "process.exit(91)"' },
+        dependencies: { "@opengeni/connect": "workspace:*" },
+        devDependencies: { "private-fixture": "workspace:*" },
+      };
+      const ignores = [
+        "src/",
+        "ignored-root.json",
+        "node_modules/",
+        ".cache/",
+        ".turbo/",
+        ".bun-cache/",
+        "README.md",
+        "LICENSE.txt",
+        ...(selection === "files" ? ["runtime-data.json"] : []),
+      ].join("\n");
+      const files = {
+        "package.json": JSON.stringify(sourceManifest),
+        "dist/index.js": "export const value = 1;",
+        "dist/index.d.ts": "export declare const value: number;",
+        "dist/.npmignore": "ignored.txt\n",
+        "dist/ignored.txt": "excluded nested file",
+        "src/index.ts": "export const value = 1;",
+        "runtime-data.json": '{"runtime":"asset"}',
+        "ignored-root.json": '{"excluded":true}',
+        "README.md": "Default npm inclusion",
+        "LICENSE.txt": "Default npm license inclusion",
+        "node_modules/private-fixture/index.js": "private dependency",
+        ".cache/stale.bin": "build cache",
+        ".turbo/stale.bin": "build cache",
+        ".bun-cache/stale.bin": "dependency cache",
+        [selection === ".gitignore" ? ".gitignore" : ".npmignore"]: ignores,
+        ...(selection === ".npmignore" ? { ".gitignore": "runtime-data.json\n" } : {}),
+      };
+      for (const [path, contents] of Object.entries(files)) {
+        await mkdir(dirname(join(source, path)), { recursive: true });
+        await writeFile(join(source, path), contents);
+      }
+      const versions = new Map([["@opengeni/connect", "0.3.0"]]);
+      const publishedManifest = candidateManifest(sourceManifest, versions);
+      await cp(source, reference, { recursive: true });
+      await writeFile(join(reference, "package.json"), JSON.stringify(publishedManifest));
+      await mkdir(publishedTarballs);
+      const packed = JSON.parse(
+        await run(
+          [
+            "npm",
+            "pack",
+            "--ignore-scripts",
+            "--offline",
+            "--json",
+            "--pack-destination",
+            publishedTarballs,
+          ],
+          reference,
+        ),
+      ) as Array<{ filename: string }>;
+      const published = join(publishedTarballs, packed[0]!.filename);
+      const pkg: WorkspacePackage = {
+        dir: relative(repoRoot, source),
+        packagePath: join(source, "package.json"),
+        name: sourceManifest.name,
+        version: sourceManifest.version,
+        packageJson: sourceManifest,
+      };
+      const candidate = await stageRegistryCandidate(pkg, staging, versions);
+      const inventory = await shippedInventory(candidate.tarball, root);
+      for (const path of ["runtime-data.json", "README.md", "LICENSE.txt"])
+        expect(inventory.has(path)).toBe(true);
+      for (const path of ["ignored-root.json", "dist/ignored.txt"])
+        expect(inventory.has(path)).toBe(false);
+      await assertUnchangedPublishedBytes(pkg.name, candidate.tarball, published, root);
+      expect(await readFile(pkg.packagePath, "utf8")).toBe(files["package.json"]);
+      for (const directory of ["node_modules", ".cache", ".turbo", ".bun-cache"])
+        await expect(lstat(join(staging, "package", directory))).rejects.toThrow("ENOENT");
+    });
+  });
+}
 
 test("effective closure rejects changed unpublished Connect bytes labelled as the existing 0.3.0 version", async () => {
   await fixture(async (root) => {
