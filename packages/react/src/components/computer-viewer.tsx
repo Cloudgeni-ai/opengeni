@@ -1522,14 +1522,18 @@ function ComputerViewport(props: {
           <LoaderCircleIcon className="size-3 animate-spin" /> Acting
         </div>
       ) : null}
-      {showCanvas && (!rawInputEnabled || (!props.pointerInput && !props.keyboardInput)) ? (
+      {showCanvas && (!rawInputEnabled || !props.pointerInput || !props.keyboardInput) ? (
         <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
           <span>
-            {props.pointerInput || props.keyboardInput
+            {!rawInputEnabled && (props.pointerInput || props.keyboardInput)
               ? "Background view · use native controls"
-              : "View only · mouse and keyboard unavailable"}
+              : !props.pointerInput && !props.keyboardInput
+                ? "View only · mouse and keyboard unavailable"
+                : props.keyboardInput
+                  ? "Keyboard only · mouse unavailable"
+                  : "Mouse only · keyboard unavailable"}
           </span>
-          {props.target && (props.pointerInput || props.keyboardInput) ? (
+          {!rawInputEnabled && props.target && (props.pointerInput || props.keyboardInput) ? (
             <button
               type="button"
               disabled={props.mutating}

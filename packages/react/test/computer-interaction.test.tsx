@@ -1558,10 +1558,23 @@ describe("ComputerViewer input reliability", () => {
   });
 
   test.each([
-    { pointerInput: false, keyboardInput: true },
-    { pointerInput: true, keyboardInput: false },
-    { pointerInput: false, keyboardInput: false },
-  ])("honors mouse and keyboard availability independently (%p)", async (capabilities) => {
+    {
+      pointerInput: false,
+      keyboardInput: true,
+      expectedHint: "Keyboard only · mouse unavailable",
+    },
+    {
+      pointerInput: true,
+      keyboardInput: false,
+      expectedHint: "Mouse only · keyboard unavailable",
+    },
+    {
+      pointerInput: false,
+      keyboardInput: false,
+      expectedHint: "View only · mouse and keyboard unavailable",
+    },
+  ])("honors mouse and keyboard availability independently (%p)", async (testCase) => {
+    const { expectedHint, ...capabilities } = testCase;
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
@@ -1608,10 +1621,10 @@ describe("ComputerViewer input reliability", () => {
       expect(fixture.actions.some(({ action }) => action.type === "keyboard")).toBe(
         capabilities.keyboardInput,
       );
+      expect(fixture.rendered.container.textContent).toContain(expectedHint);
+      expect(fixture.rendered.container.textContent).not.toContain("Control directly");
       if (!capabilities.pointerInput && !capabilities.keyboardInput) {
         expect(fixture.actions).toEqual([]);
-        expect(fixture.rendered.container.textContent).toContain("View only");
-        expect(fixture.rendered.container.textContent).not.toContain("Control directly");
       }
     } finally {
       await fixture.rendered.unmount();
