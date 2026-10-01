@@ -69,8 +69,9 @@ The authenticated organization administrator's browser API equivalent is
 SDK in that authenticated browser/admin context:
 `createOrganizationApiKey(organizationId, { name, access: "developer_setup" })`.
 The setup key itself must **not** mint keys. Do not send a `permissions` array
-to this organization-key route. The preset chooses the exact permission set;
-an explicit `expiresAt` may shorten its lifetime. Save the one-time `token`
+to this organization-key route. The preset chooses the exact permission set.
+Omit `expiresAt` to keep the short default; the API honors an explicit expiry
+override, so 24 hours is a default rather than a hard maximum. Save the one-time `token`
 without logging the response. A lost creation response needs inventory and
 administrator revocation/replacement, not a blind repeated POST.
 
