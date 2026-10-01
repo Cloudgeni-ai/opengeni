@@ -195,6 +195,7 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
+        "Usage",
         "API keys",
         "Developer",
         "Insights",
@@ -210,7 +211,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([5, 3]);
+      ).toEqual([6, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");

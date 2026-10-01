@@ -40,16 +40,25 @@ describe("allowance timeline presentation", () => {
         event(1, "agent.message.completed", { messageId: "work", text: "Working" }),
         completed,
       ]);
+      const serialized = JSON.stringify(items);
       const notice = items.find((item) => item.kind === "notice");
-      expect(notice).toMatchObject({
-        tone: "failed",
-        text: expect.stringContaining(
-          scope === "workspace" ? "organization administrator" : "workspace administrator",
-        ),
+      // Plain-text consumers keep the canonical sentence; renderers use the
+      // structured refusal, so a host can reword or replace the row.
+      expect(notice?.kind === "notice" ? notice.text : "").toContain(
+        scope === "workspace" ? "organization administrator" : "workspace administrator",
+      );
+      expect(notice?.kind === "notice" ? notice.allowance : undefined).toMatchObject({
+        code: "allowance_exhausted",
+        scope,
+        resetsAt: "2026-10-01T00:00:00Z",
       });
-      expect(JSON.stringify(items)).toContain("2026-10-01 00:00 UTC");
-      expect(JSON.stringify(items)).not.toMatch(/buy credits|subscription|PRIVATE/i);
-      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({ outcome: "failed" });
+      expect(serialized).toContain("2026-10-01 00:00 UTC");
+      expect(serialized).not.toMatch(/buy credits|subscription/i);
+      // The turn summary states the fact once; the notice row carries the remedy.
+      expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+        outcome: "failed",
+        failureText: "Usage limit reached",
+      });
       expect(creditExhaustedFromEvents([completed])).toBe(false);
       expect(
         groupTimeline(items, { readableTurns: true }).some(
@@ -96,6 +105,25 @@ describe("allowance timeline presentation", () => {
       event(5, "turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
     ]);
     expect(items.filter((item) => item.kind === "notice")).toHaveLength(2);
+  });
+
+  test("a queued prompt refused before it starts stays above the limit row", () => {
+    const prompt: SessionEvent = {
+      ...event(1, "user.message", {
+        text: "Draft the checklist",
+        routing: "queued_for_execution",
+      }),
+      turnId: null,
+    };
+    const items = buildTimeline([
+      prompt,
+      event(2, "turn.queued", { turnId: "turn", triggerEventId: prompt.id }),
+      event(3, "usage.exhausted", { ...refusal, scope: "member" }),
+      event(4, "turn.completed", { ...refusal, scope: "member", segmentLimit: "budget_exhausted" }),
+    ]);
+    const kinds = items.map((item) => item.kind);
+    expect(kinds.indexOf("user-message")).toBeGreaterThanOrEqual(0);
+    expect(kinds.indexOf("user-message")).toBeLessThan(kinds.indexOf("notice"));
   });
 
   test("ordinary insufficient credits retain their existing presentation", () => {

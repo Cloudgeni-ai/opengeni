@@ -1,4 +1,5 @@
 import type {
+  AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
   MediaGenerationResult,
@@ -391,6 +392,12 @@ export type NoticeItem = {
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
+  /**
+   * A usage ceiling refused further work. `text` keeps the canonical sentence
+   * for plain-text consumers; `MessageTimeline` renders this structured row
+   * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
+   */
+  allowance?: AllowanceExhaustedRefusal;
   occurredAt: string;
 };
 
