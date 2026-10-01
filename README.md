@@ -7,10 +7,10 @@
   </a>
 </p>
 
-<h3 align="center">Production-ready self-hostable agentic service.</h3>
+<h3 align="center">Agents in your product. Infrastructure out of the box.</h3>
 
 <p align="center">
-  Durable sessions · human approvals · governed memory · your choice of compute
+  Durable streaming sessions · sandboxes · tools and MCP · per-user credentials · memory · multi-tenant workspaces · React components you restyle · managed cloud or self-host
 </p>
 
 <p align="center">
@@ -18,7 +18,8 @@
 </p>
 
 <p align="center">
-  <a href="https://docs.opengeni.ai/quickstart">Quickstart</a> ·
+  <a href="https://docs.opengeni.ai/embed-manually">Add it to your product</a> ·
+  <a href="https://docs.opengeni.ai/why-opengeni">Why Opengeni</a> ·
   <a href="https://docs.opengeni.ai">Docs</a> ·
   <a href="https://docs.opengeni.ai/guides/self-host">Self-host</a> ·
   <a href="https://github.com/Cloudgeni-ai/opengeni/issues">Issues</a>
@@ -32,25 +33,39 @@
 
 ---
 
-Opengeni is a production-ready agentic service: it runs AI agents that do real work, keeps a session going for hours or days, records every step in a replayable event log, stops for a human when an action needs approval, and puts each session either in a managed sandbox or directly on a machine you own.
+**Opengeni is open-source infrastructure for adding AI agents to your product.** Your product keeps its users, data, and UI. Opengeni runs the agent behind them: streaming sessions that survive reloads and restarts, a sandbox to run code in, your APIs and MCP servers called as the signed-in user, memory across conversations, and a separate workspace for every customer. Drop the React conversation into your app and restyle it with CSS variables, or drive everything from the TypeScript SDK and HTTP API. Use the managed cloud at [app.opengeni.ai](https://app.opengeni.ai) or self-host the same Apache-2.0 code.
 
-Opengeni is not the agent; it is everything the agent needs around it. Give agents work from the web app and follow along, or call the same session API from your own product and let Opengeni hold the state, history, approvals, and outputs. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
+**Who it's for:** teams shipping an agent inside a SaaS or internal product, such as a support agent, an analyst, or an operations or coding agent, who would rather configure that agent than build and run the platform underneath it. The same platform is also a ready-to-use agent workspace for your own team in the browser. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
+
+## How it fits into your product
+
+1. **Your server** mounts one route with `createSessionProxyHandler` from `@opengeni/sdk`. It runs your existing auth, maps each customer to an Opengeni workspace, and keeps your API key on the server.
+2. **Your frontend** renders `OpenGeniChat` from `@opengeni/react`: the user's chats and a conversation with streaming replies, tool activity, attachments, and questions, styled with your colors, fonts, and corner radii.
+3. **Opengeni** runs every session: the model loop, calls to your MCP server or OpenAPI-described API with a short-lived token for that user, code in a sandbox, files, and memory. Every event is stored in Postgres, so any client can reconnect mid-stream and continue where it left off.
+
+The fastest way to wire it up is to give your coding agent (Claude Code, Codex, or Cursor) the [`opengeni-client` skill](https://docs.opengeni.ai/embed-with-a-coding-agent) and one prompt. To do it by hand, follow [Embed manually](https://docs.opengeni.ai/embed-manually), or see the code [below](#use-it-from-your-code-and-product).
+
+**Opengeni and agent frameworks.** LangGraph, Mastra, CrewAI, the OpenAI Agents SDK, and the Vercel AI SDK help you write an agent loop in your own code. Opengeni ships the loop and runs it as a service, together with what a product agent needs in production: sessions, streaming, sandboxes, tools, credentials, memory, tenancy, and UI. If you want to hand-code the agent's control flow, a framework is the right tool. If you want an agent feature in your product without building that platform, use Opengeni. See [Why Opengeni](https://docs.opengeni.ai/why-opengeni) and the [framework comparison](https://docs.opengeni.ai/compare-agent-frameworks).
 
 ## Get started
 
-**The fastest way is the managed service.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, connect a model (a ChatGPT/Codex or SuperGrok subscription, a provider key, or prepaid credits), and start your first session. Nothing to deploy. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
+**The fastest way is the managed cloud.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, connect a model (a ChatGPT/Codex or SuperGrok subscription, a provider key, or prepaid credits), and start your first session. Nothing to deploy. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it. Usage billed through Opengeni costs the model price plus 5%, with no seat or platform fees; a subscription or key you connect is billed by its provider.
 
-Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production.
+Prefer to run it yourself? Everything is open source under Apache-2.0. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production with the Helm chart and reference Terraform for AWS, Azure, and GCP.
 
 ## Features
 
-- **Durable, replayable sessions.** Every event lands in Postgres. Live streams backfill from it, so a browser reload, a new client, or an audit replays the same history.
-- **Sessions that finish the job.** Give a session a goal with success criteria. The agent keeps working until it completes the goal with evidence, pauses with a rationale, or a human interrupts.
-- **Humans in the loop.** Tool approvals gate risky actions. Agents can ask structured questions and resume the exact tool call after the answer, even across restarts.
-- **Run anywhere.** A managed sandbox (Docker, Modal, or a cloud provider) or a **Connected Machine**: your laptop, build server, or GPU box, enrolled once and driven directly. Machines only dial out and receive no Opengeni credentials.
-- **Agent Knowledge.** Files, retained sources, and useful findings in one searchable library, with personal and workspace ownership and optional review before anything is published.
-- **Integrate into your product.** Embed the full conversation with the `SessionConversation` React component behind a packaged, tenant- and user-scoped proxy on your server. Your organization API key stays there.
-- **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform for Azure, AWS, and GCP yourself. All of it is Apache-2.0.
+- **Embed in your product.** `OpenGeniChat` and `SessionConversation` from `@opengeni/react` render the complete conversation, and every visual decision is a `--og-*` CSS variable, so it matches your brand. Your server mounts a packaged, tenant- and user-scoped proxy, and your organization API key stays there. Already have a Vercel AI SDK `useChat` UI? A text-only chat facade can serve it.
+- **Durable streaming sessions.** Replies stream over SSE with automatic reconnect and resume. Every event lands in Postgres, so a reload, a new client, or a worker restart continues the same session instead of losing it.
+- **Sandboxes and your own machines.** A session runs code in a managed sandbox (Docker, Modal, or a cloud sandbox provider), on a **Connected Machine** you enroll (a laptop, build server, or GPU box that only dials out), or with no compute at all.
+- **Tools and MCP.** Give the agent your product's actions through an MCP server or an OpenAPI description, plus built-in connections. You choose exactly which tools each session gets.
+- **Credentials, handled.** Per-user OAuth connections, short-lived tokens you mint per session, and encrypted secrets that stay out of prompts.
+- **Memory.** Agent Knowledge keeps files, sources, and findings in one searchable library with personal and workspace scope, so agents remember what matters across sessions.
+- **Multi-tenant workspaces.** Map each customer to a workspace with `ensureWorkspace`. Sessions, files, knowledge, and connections stay inside it, enforced by the API and Postgres row-level security.
+- **Swap models freely.** OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, any OpenAI-compatible endpoint, or a ChatGPT/Codex or SuperGrok subscription.
+- **Background agents and goals.** Start agents on a schedule or from webhooks, and give a session a goal with success criteria so it keeps working until the job is done.
+- **Approvals and questions when you need them.** Require approval for sensitive tools, and let the agent ask the user structured questions mid-task.
+- **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform yourself. All of it is Apache-2.0.
 
 ## Run it locally
 

@@ -1,0 +1,102 @@
+---
+title: "Opengeni compared with agent frameworks"
+sidebarTitle: "Compare with frameworks"
+description: "How Opengeni relates to LangGraph, CrewAI, Mastra, the Vercel AI SDK, the OpenAI Agents SDK, Letta, Inngest AgentKit, and hosted agent runtimes, and when to pick each."
+icon: "scale-balanced"
+---
+
+Most agent tools are **frameworks**: libraries you use to write an agent loop inside your own application. Opengeni is a **service with the loop built in**. It runs your product's agent and provides what that agent needs in production: durable streaming sessions, sandboxes, tools and MCP, per-user credentials, memory, multi-tenant workspaces, and React components you restyle. You can use the managed cloud or self-host it under Apache-2.0.
+
+So the question is usually not "which is better" but "which layer do you want to own".
+
+## The short version
+
+- **You want to hand-code the agent's logic in your own process.** Use a framework: LangGraph for explicit graphs, Mastra for an all-in-one TypeScript stack, CrewAI for role-based teams in Python, the OpenAI Agents SDK for minimal primitives, or Inngest AgentKit if you already run Inngest.
+- **You are adding a simple AI feature or chat to a web app.** The Vercel AI SDK is the lightest path for model calls and streaming UI.
+- **Long-term, self-editing memory is the product.** Letta specializes in it.
+- **You want an agent feature in your product with the infrastructure handled.** Use Opengeni. You configure the agent's instructions, tools, model, and compute, mount one backend route, and render one React component.
+
+## At a glance
+
+|                       | What it is                                                            | Core license                                    | Durable runs                                 | Streaming UI                                                  | Sandboxed code                                   | End-user tenancy and auth                         | Hosted option                        |
+| --------------------- | --------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------------- | ------------------------------------ |
+| **Opengeni**          | Agent service with a built-in loop, plus the infrastructure around it | Apache-2.0                                      | Built in: Postgres event log and Temporal    | SSE with resume, plus React conversation components you theme | Built in: managed sandboxes or your own machines | Built in: workspace per customer, per-user tokens | Opengeni Cloud, or self-host         |
+| **LangGraph**         | Graph and state orchestration library (Python, JS)                    | MIT                                             | Checkpointers; Agent Server adds queues      | Streaming and a `useStream` hook; no component library        | Not in core                                      | In LangSmith Deployment                           | LangSmith Deployment (paid)          |
+| **CrewAI**            | Multi-agent framework with Crews and Flows (Python)                   | MIT                                             | Flow state snapshots                         | Streaming; no UI components                                   | Through tools such as E2B or Modal               | Not in the open-source framework                  | CrewAI AMP (paid)                    |
+| **Mastra**            | Batteries-included agent framework (TypeScript)                       | Apache-2.0, with enterprise-licensed `ee/` code | Workflow suspend and resume from snapshots   | AI SDK-compatible streams; no own component library           | Many sandbox backends                            | Auth integrations for your server                 | Mastra Platform                      |
+| **Vercel AI SDK**     | Provider-agnostic model and UI toolkit (TypeScript)                   | Apache-2.0                                      | Through the separate Workflow SDK            | `useChat` hooks and AI Elements components                    | Through Vercel Sandbox                           | Not built in                                      | Vercel Workflow, Sandbox, AI Gateway |
+| **OpenAI Agents SDK** | Lightweight agent library (Python, TypeScript)                        | MIT                                             | Not built in; Temporal integration available | Streaming events; no UI components                            | Sandbox agents with several providers            | Not built in                                      | None for SDK agents                  |
+| **Letta**             | Stateful agent server centered on memory                              | Apache-2.0                                      | Agent state on the server; resumable streams | SSE; no UI components                                         | E2B for custom tools                             | Identities map end users to agents                | Letta API (paid)                     |
+| **Inngest AgentKit**  | Agent networks and routers on Inngest durable execution (TypeScript)  | Apache-2.0 (Inngest server is source-available) | Through Inngest steps and retries            | React hooks over Inngest Realtime; no component library       | Not built in                                     | Not built in                                      | Inngest Cloud                        |
+
+All of them support tool calling and MCP in some form. Facts about other projects were checked against their official documentation on 1 October 2026; they change quickly, so check their docs before deciding.
+
+## Opengeni and each framework
+
+### LangGraph
+
+LangGraph is the strongest choice when the agent's control flow is the product: explicit nodes, edges, state, checkpoints, and interrupts that you design and test in code, with a large Python and JavaScript ecosystem and LangSmith for tracing and deployment.
+
+Opengeni does not ask you to design a graph. Its agent loop is built in, and you shape behavior with instructions, Skills, tools, goals, and model choice. In exchange you get the product layer that LangGraph leaves to you or to LangSmith Deployment: a per-customer workspace model, per-user tool credentials, managed sandboxes, memory, and an embeddable conversation UI. Pick LangGraph for bespoke orchestration; pick Opengeni to ship an agent feature. They also combine: a LangGraph agent served over HTTP or MCP can be one of an Opengeni agent's tools.
+
+### CrewAI
+
+CrewAI makes role-based multi-agent teams quick to build in Python, with Flows for deterministic, event-driven pipelines and a managed platform for business automation.
+
+Opengeni is built around one durable session per conversation or task. Agents can start child sessions for parallel work, but Opengeni does not model fixed roles the way Crews do. Pick CrewAI when your problem maps naturally onto a team of specialists in a Python backend; pick Opengeni when the agent lives in your product and its users, credentials, and UI matter more than role choreography.
+
+### Mastra
+
+Mastra is the closest comparison for TypeScript teams: agents, workflows, memory, RAG, evals, observability, and a local Studio in one framework, deployed as part of your own server.
+
+The difference is where the agent runs and how much you assemble. With Mastra you write and deploy the agent code and choose your own storage, sandbox provider, auth, and UI library. Opengeni is a separate service that already includes those parts, plus multi-tenant workspaces, per-user credentials, and React components. Pick Mastra for code-level control inside your own TypeScript app; pick Opengeni to integrate a finished agent platform through an SDK.
+
+### Vercel AI SDK
+
+The Vercel AI SDK is the best-known way to call models from TypeScript and stream the results into React with `useChat`, and AI Elements adds ready-made chat components. For a simple AI feature, it is the lightest option.
+
+It is a library, not a runtime. Durable execution, sandboxes, memory, and per-user tenancy come from other products or your own code. Opengeni provides those as one service. They work together: if your product already has a `useChat` UI, Opengeni's [chat facade](/integrate/existing-chat-ui) can serve it as a text-only backend, and you can move to Opengeni's full conversation components when you want tool activity, attachments, and questions.
+
+### OpenAI Agents SDK
+
+The OpenAI Agents SDK offers a small set of primitives (agents, tools, handoffs, guardrails, sessions, tracing) in Python and TypeScript, with first-class access to OpenAI features such as realtime voice. Despite the name, it works with other model providers.
+
+Opengeni's runtime is itself built on the OpenAI Agents SDK, and adds everything around a single run: durable sessions that survive worker restarts, streaming with resume, sandboxes, credentials, memory, tenancy, and UI. Opengeni is not limited to OpenAI models: it supports OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, OpenAI-compatible endpoints, and ChatGPT/Codex or SuperGrok subscriptions. Pick the SDK to write a lightweight agent into your own code; pick Opengeni when you do not want to build the service around it.
+
+### Letta
+
+Letta, formerly MemGPT, runs stateful agents on a server, and its core idea is memory: always-in-context memory blocks the agent edits itself, plus archival memory.
+
+Opengeni's memory is [Knowledge](/concepts/memory-and-knowledge): a searchable library of files, sources, and findings, scoped to a person or a workspace, with optional review before anything is published. Pick Letta when an agent that learns about each user over months is the core of your product; pick Opengeni when memory is one part of a product agent that also needs tools, sandboxes, credentials, tenancy, and UI.
+
+### Inngest AgentKit
+
+Inngest AgentKit builds networks of agents with code-defined or model-driven routing, and gets retries and durability from Inngest's execution engine. It is a natural fit if you already run background jobs on Inngest.
+
+Opengeni has its own durable execution for every session, plus [background agents](/integrate/background-agents) that start on a schedule or from your product's events. Pick AgentKit for event-driven multi-agent pipelines in an Inngest codebase; pick Opengeni when those agents also need to work with your users in your product's UI.
+
+## Hosted agent runtimes
+
+Model providers now run agents for you: Anthropic's Claude Managed Agents (public beta since April 2026) and OpenAI's Agents API (public beta since September 2026). They are the closest in shape to Opengeni. You configure an agent, and the provider runs sessions, tools, sandboxes, and per-user credential vaults.
+
+- **Models.** Each runs only its own provider's models. Opengeni works with OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, OpenAI-compatible endpoints, and ChatGPT/Codex or SuperGrok subscriptions, chosen per session.
+- **Where it runs.** Their control planes are hosted by the provider. Sandboxes can run on your infrastructure, but orchestration stays with the provider. Opengeni's control plane is Apache-2.0 and runs on Opengeni Cloud or entirely in your own cloud.
+- **The product layer.** Opengeni also includes the parts you would otherwise build on top: a workspace per customer, a tenant-scoped session proxy for your backend, and React conversation components you restyle.
+
+Pick a provider runtime if you are committed to that provider's models and its hosting terms. Pick Opengeni for model choice, the option to self-host, or a ready-made embed in your product.
+
+## Next steps
+
+<CardGroup cols={3}>
+  <Card title="Why Opengeni" icon="lightbulb" href="/why-opengeni">
+    What you get, who it is for, and when another tool fits better.
+  </Card>
+  <Card title="Embed in your product" icon="plug" href="/embed-with-a-coding-agent">
+    Hand the integration to your coding agent, or follow four manual steps.
+  </Card>
+  <Card title="How it fits together" icon="diagram-project" href="/integrate/how-it-fits-together">
+    The browser, your backend, and Opengeni.
+  </Card>
+</CardGroup>
+
+Spotted something out of date about another project? [Open an issue](https://github.com/Cloudgeni-ai/opengeni/issues).

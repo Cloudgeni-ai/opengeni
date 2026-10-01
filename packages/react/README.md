@@ -1,5 +1,11 @@
 # @opengeni/react
 
+> Part of [Opengeni](https://opengeni.ai), open-source infrastructure for adding AI agents to your
+> product. `OpenGeniChat` and `SessionConversation` drop a complete, streaming agent conversation
+> into your app, and every visual decision is a CSS variable you can restyle. Start with
+> [Why Opengeni](https://docs.opengeni.ai/why-opengeni) and the
+> [conversation UI guide](https://docs.opengeni.ai/integrate/conversation-ui).
+
 React hooks and styled components for OpenGeni, built on
 [`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,

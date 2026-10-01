@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+> Part of [Opengeni](https://opengeni.ai), open-source infrastructure for adding AI agents to your
+> product: durable streaming sessions, sandboxes, tools and MCP, per-user credentials, memory,
+> multi-tenant workspaces, and React components you restyle, on the managed cloud or self-hosted.
+> Start with [Why Opengeni](https://docs.opengeni.ai/why-opengeni) and
+> [Embed manually](https://docs.opengeni.ai/embed-manually), or browse the
+> [SDK reference](https://docs.opengeni.ai/reference/sdk).
+
 Framework-agnostic TypeScript SDK for the OpenGeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
