@@ -1324,7 +1324,8 @@ ordinary function tools and OpenGeni's text compaction remain available.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
-become terminal quota; ordinary throttling remains recoverable. An unrecognized
+become terminal quota; ordinary throttling remains recoverable. General billing
+refusals remain terminal payment errors and do not imply exhausted credits. An unrecognized
 SSE error type has no synthetic HTTP status and grants no automatic recovery.
 Arbitrary provider error bodies remain excluded from this adapter's diagnostics.
 

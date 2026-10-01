@@ -180,6 +180,9 @@ export function classifyProviderQuotaExhaustion(
   // status keeps its existing classification (a 5xx is transient, other 4xx
   // are already terminal request faults).
   const hasCode = (codes: ReadonlySet<string>) => fields.some((value) => codes.has(value.trim()));
+  // Native Claude marks a general billing/payment refusal separately. A 402
+  // does not prove that this account has exhausted its credit allowance.
+  if (fields.some((value) => value.trim() === "anthropic_billing_error")) return null;
   // Claude's configured spend cap is a documented HTTP 400 exception. Only
   // the adapter's explicit spend marker admits it; ordinary validation stays
   // terminal request failure even if its text mentions quota or rate limits.

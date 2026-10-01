@@ -5,6 +5,7 @@ import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-
 import { classifyProviderQuotaError } from "../../../packages/runtime/src/provider-quota";
 import { ResponsesStreamingTerminalError } from "../../../packages/runtime/src/responses-terminal-error";
 import { agentRunFailurePayload, providerRetryAfterMs } from "../src/activities/agent-turn/errors";
+import { failedSessionCopy } from "../../web/src/lib/failed-session-copy";
 
 const provider: ResolvedModelProvider = {
   id: "claude",
@@ -153,19 +154,60 @@ test("Responses safety and unknown codes never acquire transient recovery from w
 });
 
 test("unknown Claude stream error does not invent a retryable HTTP server failure", async () => {
-  const error = await claudeFailure({ type: "future_error", message: "overloaded / rate limit" });
-  expect((error as { status?: number }).status).toBeUndefined();
-  expect(agentRunFailurePayload(error).retryable).not.toBe(true);
+  for (const type of ["future_error", "toString", "__proto__", "constructor"]) {
+    const error = await claudeFailure({ type, message: "overloaded / rate limit" });
+    expect((error as { status?: number }).status).toBeUndefined();
+    expect(agentRunFailurePayload(error).retryable).not.toBe(true);
+  }
 });
 
-test("documented Claude billing stream failure remains a payment refusal", async () => {
-  const error = await claudeFailure({ type: "billing_error", message: "private" });
-  expect((error as { status?: number }).status).toBe(402);
-  expect(agentRunFailurePayload(error)).toMatchObject({
-    code: "provider_quota_exhausted",
-    quotaScope: "credits",
-    retryable: false,
+test("Claude payment-detail errors remain terminal without claiming exhausted credits", async () => {
+  for (const status of [402, undefined]) {
+    const error = await claudeFailure(
+      { type: "billing_error", message: "Payment card requires updating" },
+      status,
+    );
+    expect((error as { status?: number }).status).toBe(402);
+    expect(classifyProviderQuotaError(error)).toBeNull();
+    const payload = agentRunFailurePayload(error);
+    expect(payload).toMatchObject({ code: "provider_billing_error", retryable: false });
+    expect(payload.quotaScope).toBeUndefined();
+    const copy = failedSessionCopy({
+      reason: payload.error,
+      recordedDetail: payload.error,
+      failureCode: payload.code,
+      failedAt: null,
+      consecutiveRecoveryCount: null,
+    });
+    expect(copy.reason).toContain("payment details");
+    expect(copy.reason).not.toMatch(/out of credits|quota.*used up/i);
+  }
+});
+
+test("native Claude credential refusal stays actionable through the worker and banner", async () => {
+  const error = await claudeFailure({ type: "authentication_error", message: "private" }, 401);
+  const payload = agentRunFailurePayload(error);
+  const copy = failedSessionCopy(
+    {
+      reason: payload.error,
+      recordedDetail: payload.error,
+      failureCode: payload.code,
+      failedAt: null,
+      consecutiveRecoveryCount: null,
+    },
+    false,
+    false,
+    true,
+  );
+  expect(copy).toMatchObject({
+    reason:
+      "The model provider rejected the credentials for this model. Choose another model below.",
+    retryUnhelpful: true,
+    unavailableModel: false,
   });
+  expect(copy.detail).toBe(
+    "Claude credentials expired or were revoked. Replace the key or setup token in Models.",
+  );
 });
 
 test("real request refusal wins over rate-limit wording", () => {

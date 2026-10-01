@@ -2751,6 +2751,10 @@ rewrites. Uncoded provider failures and `provider_rate_limited` /
 `provider_unavailable` / `provider_quota_exhausted` get short plain-language copy
 (rejected credentials, provider billing or access, a used-up daily limit, quota,
 rate limiting) with the exact recorded text behind a Details toggle. A closed
+`provider_billing_error` instead uses neutral payment-detail copy: a general
+billing refusal is not proof that credits are exhausted. Native Claude's
+legacy authored credential rejection remains classified as rejected credentials.
+A closed
 `quotaScope` marker, on a quota turn failure or a quota-refused compaction, picks
 the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
 projection carries it only as one of those four literals. Every

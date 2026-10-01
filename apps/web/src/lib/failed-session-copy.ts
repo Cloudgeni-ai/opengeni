@@ -22,6 +22,11 @@ const PROVIDER_BILLING: KnownFailure = {
   retryUnhelpful: false,
   suggestModel: true,
 };
+const PROVIDER_PAYMENT: KnownFailure = {
+  message: "The model provider couldn't bill this request. Check the account's payment details.",
+  retryUnhelpful: false,
+  suggestModel: true,
+};
 const PROVIDER_ACCESS: KnownFailure = {
   message: "The model provider denied access to this model.",
   retryUnhelpful: false,
@@ -88,10 +93,19 @@ export function classifyProviderFailure(
   failureCode?: string | null,
   quotaScope?: string | null,
 ): KnownFailure | null {
+  if (failureCode === "provider_billing_error") return PROVIDER_PAYMENT;
   const scoped = quotaScopeFailure(quotaScope);
   if (scoped) return scoped;
   if (failureCode && !PROVIDER_TEXT_CODES.has(failureCode)) return null;
   const text = recorded.toLowerCase();
+  // Closed legacy copy authored by the native Claude adapter, whose original
+  // worker payload omitted the HTTP status/code. Preserve its credential
+  // remedy without granting classification to arbitrary expiry wording.
+  if (
+    recorded.trim() ===
+    "Claude credentials expired or were revoked. Replace the key or setup token in Models."
+  )
+    return CREDENTIALS;
   // OpenGeni's own credit exhaustion has a dedicated billing remedy upstream.
   if (text.includes("opengeni credits")) return null;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A

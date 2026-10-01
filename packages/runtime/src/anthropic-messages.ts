@@ -561,9 +561,11 @@ export class AnthropicMessagesModel implements Model {
           : {},
         code: contextExceeded
           ? "context_length_exceeded"
-          : response.status === 400 || response.status === 429
-            ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
-            : "anthropic_http_error",
+          : response.status === 402
+            ? "anthropic_billing_error"
+            : response.status === 400 || response.status === 429
+              ? (anthropicHttpSpendLimitCode(detail) ?? "anthropic_http_error")
+              : "anthropic_http_error",
       });
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
@@ -608,7 +610,8 @@ export class AnthropicMessagesModel implements Model {
         };
         // A new error type is not evidence of a server failure. Never invent
         // a retryable status for an unknown terminal; completed tools stay saved.
-        const status = typeof kind === "string" ? statuses[kind] : undefined;
+        const status =
+          typeof kind === "string" && Object.hasOwn(statuses, kind) ? statuses[kind] : undefined;
         const spendCode =
           status === 400 || status === 429 ? anthropicSpendLimitCode(event.error) : undefined;
         throw Object.assign(
@@ -619,7 +622,13 @@ export class AnthropicMessagesModel implements Model {
           ),
           {
             ...(status !== undefined ? { status } : {}),
-            code: spendCode ?? (status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error"),
+            code:
+              spendCode ??
+              (status === 402
+                ? "anthropic_billing_error"
+                : status === 429
+                  ? "rate_limit_exceeded"
+                  : "anthropic_stream_error"),
             request_id: response.headers.get("request-id"),
             headers: response.headers.has("retry-after")
               ? { "retry-after": response.headers.get("retry-after")! }
