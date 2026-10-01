@@ -582,6 +582,10 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Runtime robustness on main f874217f5: the empty-final-reply notice and
+    // per-model availability in the session timeline measure 711,698 gzip
+    // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(711_698, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
     // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
     // remain below their existing caps; retain the standard gzip variance allowance.

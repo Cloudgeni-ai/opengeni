@@ -320,4 +320,9 @@ describe("web bundle budget policy", () => {
       SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET - SESSION_WAIT_COMMAND_WAKE_RAW_MEASUREMENT,
     ).toBeGreaterThanOrEqual(MINIMUM_RAW_HEADROOM_BYTES);
   });
+
+  test("bounds the runtime-robustness session graph growth", () => {
+    const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
+    expect(source).toContain("wholeKibEnvelope(711_698, 1.5 * kib)");
+  });
 });
