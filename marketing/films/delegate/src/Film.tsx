@@ -6,7 +6,7 @@ import { cameraAt } from "./camera";
 import { T } from "./timeline";
 import { ease, prog } from "./anim";
 import { HourApp } from "./components/HourApp";
-import { BrandScenes } from "./components/BrandScenes";
+import { BrandScenes, BrandBackdrop } from "./components/BrandScenes";
 
 export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) => {
   const frame = useCurrentFrame();
@@ -32,6 +32,7 @@ export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) =>
 
   return (
     <AbsoluteFill style={{ background: C.bg, overflow: "hidden" }}>
+      <BrandBackdrop t={t} />
       <BrandScenes t={t} />
       {!surfaceGone && (
         <div
@@ -39,13 +40,11 @@ export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) =>
             position: "absolute",
             inset: 0,
             overflow: "hidden",
-            borderRadius: 22 * lift,
-            transform: `translateY(${-1260 * slide}px) scale(${surfaceScale})`,
+            borderRadius: 26,
+            transform: `translateY(${-1260 * slide}px) scale(${.92 * surfaceScale})`,
             transformOrigin: "50% 50%",
             boxShadow:
-              lift > 0
-                ? `0 ${50 * lift}px ${140 * lift}px rgba(0,0,0,${0.6 * lift}), 0 ${6 * lift}px ${18 * lift}px rgba(0,0,0,${0.4 * lift}), 0 0 0 1px rgba(255,255,255,${0.07 * lift})`
-                : "none",
+              "0 24px 65px rgba(17,19,17,.18), 0 0 0 1px rgba(255,255,255,.65)",
             background: C.bg,
           }}
         >
@@ -62,14 +61,6 @@ export const Film: React.FC<{ withAudio?: boolean }> = ({ withAudio = true }) =>
           >
             <HourApp t={t} />
           </div>
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              pointerEvents: "none",
-              background: "radial-gradient(ellipse 75% 70% at 50% 48%, rgba(0,0,0,0) 58%, rgba(0,0,0,0.30) 100%)",
-            }}
-          />
         </div>
       )}
       {withAudio && <Audio src={staticFile("audio/original-score.m4a")} />}

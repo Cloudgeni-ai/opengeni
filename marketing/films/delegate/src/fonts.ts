@@ -9,14 +9,15 @@ const faces = [
 ] as const;
 
 export const fontsReady = Promise.all(
-  faces.map(({ family, file }) =>
+  [...faces.map(({ family, file }) =>
     loadFont({ family, url: staticFile(`fonts/${file}`), weight: "100 900" }),
-  ),
+  ), loadFont({ family: "Instrument Serif", url: staticFile("fonts/InstrumentSerif-Italic.ttf"), weight: "400", style: "italic" })],
 );
 
 export const F = {
   ui: "Inter, sans-serif",
   display: "Archivo, sans-serif",
   brandSans: "'DM Sans', sans-serif",
+  serif: "'Instrument Serif', serif",
   mono: "'JetBrains Mono', monospace",
 } as const;
