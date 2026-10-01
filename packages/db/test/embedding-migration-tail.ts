@@ -68,4 +68,6 @@ export const embeddingMigrationTail = [
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",
+  // Patches the scheduled generated-session fence from withheld 0414; replay after it.
+  "0561_scheduled_generated_session_agent_config_fence.sql",
 ];

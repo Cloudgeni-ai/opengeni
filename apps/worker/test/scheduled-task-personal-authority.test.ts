@@ -1512,6 +1512,9 @@ describe("scheduled task personal MCP authority", () => {
       // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
       for (const name of allowanceMigrationTail)
         await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // 0561 also extends this function for agent-configured generated sessions;
+      // keep the replay on the exact post-0414 body.
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0561_scheduled_generated_session_agent_config_fence.sql')`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
         new URL(
