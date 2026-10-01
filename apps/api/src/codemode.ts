@@ -14,12 +14,13 @@ import {
   type CodemodeOperation,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { hasPermission, requireSessionAuthorization } from "@opengeni/core";
+import { hasPermission, isDeveloperSetupGrant, requireSessionAuthorization } from "@opengeni/core";
 import {
   getActiveSessionTurnForExecution,
   getAttemptToolCatalog,
   getCodemodeOperation,
   submitCodemodeOperation,
+  type SessionTurnForExecution,
 } from "@opengeni/db";
 import { getSession } from "@opengeni/db";
 import {
@@ -30,6 +31,7 @@ import {
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   signDelegatedAccessToken,
+  readTurnExecutionPolicyV1,
   siteSessionPath,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -83,7 +85,7 @@ export async function codemodeSessionRequest(
   ) => Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
 ): Promise<Request> {
   siteSessionPath(path, grant.workspaceId, request.method);
-  const { authority } = await requireActiveCodemodeCatalog(deps, grant);
+  const { authority, turn } = await requireActiveCodemodeCatalog(deps, grant);
   const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
@@ -91,10 +93,19 @@ export async function codemodeSessionRequest(
     resolveProxySettings?.(session) ?? deps.settings,
     session,
   );
+  const turnPolicy = readTurnExecutionPolicyV1(turn.metadata);
+  const initialPolicy = readTurnExecutionPolicyV1(session.metadata);
+  const restricted =
+    isDeveloperSetupGrant(grant) ||
+    (turnPolicy.kind === "valid" &&
+      turnPolicy.policy.credentialRestriction === "developer_setup") ||
+    (initialPolicy.kind === "valid" &&
+      initialPolicy.policy.credentialRestriction === "developer_setup");
   const token = await signDelegatedAccessToken(secret, {
     ...authority,
     permissions,
     principalKind: "agent_attempt",
+    ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
     exp: Math.floor(Date.now() / 1000) + 60,
   });
   const target = new URL(request.url);
@@ -212,7 +223,11 @@ export function requireMatchingCodemodeCatalog(
 export async function requireActiveCodemodeCatalog(
   deps: ApiRouteDeps,
   grant: AccessGrant,
-): Promise<{ authority: CodemodeGrantAuthority; catalog: AttemptToolCatalog }> {
+): Promise<{
+  authority: CodemodeGrantAuthority;
+  catalog: AttemptToolCatalog;
+  turn: SessionTurnForExecution;
+}> {
   if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError("invalid_grant");
   const authority = codemodeAuthorityForGrant(grant)!;
   await requireSessionAuthorization(deps, grant, {
@@ -242,7 +257,7 @@ export async function requireActiveCodemodeCatalog(
       attemptId: authority.attemptId,
     }),
   );
-  return { authority, catalog };
+  return { authority, catalog, turn: active };
 }
 
 export async function submitAndDispatchCodemodeCall(
