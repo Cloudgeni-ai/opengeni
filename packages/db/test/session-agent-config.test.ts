@@ -77,6 +77,25 @@ async function storedConfig(sessionId: string): Promise<unknown> {
 }
 
 describe("sessions.agent_config (0551)", () => {
+  test("the complete migrated fixture applies 0551 and the newer allowance tail", async () => {
+    const applied = await shared.admin<{ name: string }[]>`
+      SELECT name FROM schema_migrations
+      WHERE name IN (
+        '0551_session_agent_config.sql',
+        '0552_usage_allowances.sql',
+        '0553_non_model_debit_attribution.sql',
+        '0554_video_allowance_refunds.sql'
+      )
+      ORDER BY name
+    `;
+    expect(applied.map((migration) => migration.name)).toEqual([
+      "0551_session_agent_config.sql",
+      "0552_usage_allowances.sql",
+      "0553_non_model_debit_attribution.sql",
+      "0554_video_allowance_refunds.sql",
+    ]);
+  }, 60_000);
+
   test("an omitted configuration stores NULL and reads as a legacy session", async () => {
     const grant = await workspace();
     const session = await createSession(client.db, sessionInput(grant));

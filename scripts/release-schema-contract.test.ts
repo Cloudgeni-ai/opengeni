@@ -137,6 +137,12 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const sourceContract = await buildCompleteSchemaContract();
+    // Agent configuration is required even when the allowance tail is newer.
+    expect(
+      sourceContract.migrations.find(
+        (migration) => migration.path === "0551_session_agent_config.sql",
+      ),
+    ).toMatchObject({ path: "0551_session_agent_config.sql", deploymentMode: "rolling" });
     const failedSessionVariableSetAttach = sourceContract.migrations.find(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
