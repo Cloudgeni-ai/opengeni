@@ -152,6 +152,7 @@ function OperationalWorkspaceSettingsRoute({
           organizationLabel={organizationLabel}
           personal={personal}
           canManageSettings={canManageSettings}
+          canAddAccounts={administersOrganization}
           gatewayRevision={gatewayRevision}
         />
       ) : null}
@@ -195,12 +196,15 @@ function WorkspaceGeneralSettings({
   organizationLabel,
   personal,
   canManageSettings,
+  canAddAccounts,
   gatewayRevision,
 }: {
   workspaceId: string;
   organizationLabel: string;
   personal: boolean;
   canManageSettings: boolean;
+  /** Organization owners and admins: the only people who add model accounts. */
+  canAddAccounts: boolean;
   gatewayRevision: number;
 }) {
   const context = useAppContext();
@@ -360,12 +364,15 @@ function WorkspaceGeneralSettings({
           workspaceId={workspaceId}
           canManage={canManageSettings}
           refreshKey={gatewayRevision}
-          onConnectGateway={() =>
-            void navigate({
-              to: "/workspaces/$workspaceId/organization",
-              params: { workspaceId },
-              search: { section: "models", workspace: workspaceId, view: "connect:vercel" },
-            })
+          onConnectGateway={
+            canAddAccounts
+              ? () =>
+                  void navigate({
+                    to: "/workspaces/$workspaceId/organization",
+                    params: { workspaceId },
+                    search: { section: "models", workspace: workspaceId, view: "connect:vercel" },
+                  })
+              : undefined
           }
         />
         <WorkspaceSandboxImageRow

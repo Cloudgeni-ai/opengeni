@@ -1,8 +1,9 @@
 import type { ModelConnectionAccessPolicy } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { ConnectionAccessKind } from "@/components/connection-access-settings";
+import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { CheckboxField } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -48,12 +49,15 @@ export function useOrganizationWorkspaces(
   client: OpenGeniBrowserClient,
   organizationId: string,
   enabled: boolean,
-): { workspaces: { id: string; name: string }[] | null; error: boolean } {
+): { workspaces: { id: string; name: string }[] | null; error: boolean; retry: () => void } {
   const [state, setState] = useState<{
     workspaces: { id: string; name: string }[] | null;
     error: boolean;
   }>({ workspaces: null, error: false });
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((value) => value + 1), []);
   useEffect(() => {
+    setState({ workspaces: null, error: false });
     if (!enabled || !organizationId) return;
     let live = true;
     client
@@ -72,8 +76,8 @@ export function useOrganizationWorkspaces(
     return () => {
       live = false;
     };
-  }, [client, organizationId, enabled]);
-  return state;
+  }, [client, organizationId, enabled, attempt]);
+  return { ...state, retry };
 }
 
 /** Why the choice can't be connected yet, or null. */
@@ -136,6 +140,8 @@ export function ConnectAudienceFields({
   organizationName,
   here,
   workspaces,
+  workspacesError = false,
+  onRetryWorkspaces,
   value,
   onChange,
   disabled = false,
@@ -145,6 +151,9 @@ export function ConnectAudienceFields({
   here?: { id: string; name: string; personal: boolean } | null | undefined;
   /** The organization's shared workspaces; null while loading. */
   workspaces: { id: string; name: string }[] | null;
+  /** The list couldn't be read: say so, with a way to try again. */
+  workspacesError?: boolean;
+  onRetryWorkspaces?: () => void;
   value: ConnectAudience;
   onChange: (next: ConnectAudience) => void;
   disabled?: boolean;
@@ -189,7 +198,18 @@ export function ConnectAudienceFields({
       {selected ? (
         <fieldset className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
           <legend className="mb-2 text-xs leading-4.5 font-medium text-fg">Workspaces</legend>
-          {workspaces === null ? (
+          {workspaces === null && workspacesError ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              <p className="m-0 text-sm leading-5 text-fg-muted">
+                Couldn't load the organization's workspaces.
+              </p>
+              {onRetryWorkspaces ? (
+                <Button type="button" variant="outline" size="sm" onClick={onRetryWorkspaces}>
+                  Try again
+                </Button>
+              ) : null}
+            </div>
+          ) : workspaces === null ? (
             <Skeleton className="h-5 w-48 rounded-md" />
           ) : (
             workspaces.map((workspace) => (

@@ -128,3 +128,23 @@ export function workspaceModelsRedirect(input: {
     ...(input.view ? { view: input.view === "connect-workspace" ? "connect" : input.view } : {}),
   };
 }
+
+/**
+ * Organization > Models without `?workspace=` is the organization's own page.
+ * Links saved from the old organization Models page named its accounts and
+ * connect steps without the "org:" mark; read them as the organization's.
+ * Every link into a workspace's page carries `workspace`, so nothing is lost.
+ */
+export function organizationModelsSearch(input: {
+  workspace: string | undefined;
+  account: string | undefined;
+  view: ModelsView | undefined;
+}): { account: string | undefined; view: ModelsView | undefined } {
+  if (input.workspace) return { account: input.account, view: input.view };
+  const key = accountKeyOf(input.account);
+  const step = connectStepOf(input.view);
+  return {
+    account: key && !key.organization ? accountKey(key.provider, key.id, true) : input.account,
+    view: step && !step.organization ? `connect-org:${step.provider}` : input.view,
+  };
+}

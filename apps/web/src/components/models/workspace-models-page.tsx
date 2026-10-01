@@ -84,6 +84,7 @@ import { useOrganizationCodexSubscriptions } from "@/components/organization-cod
 import { useOrganizationProviderConnection } from "@/components/organization-model-provider-connection";
 import { useSuperGrokSubscriptions } from "@/components/supergrok-connection";
 import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
+import { DetailSkeleton } from "@/components/ui/detail-sheet";
 import { EmptyState } from "@/components/ui/empty-state";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { ListRow, RowList } from "@/components/ui/list-row";
@@ -130,7 +131,63 @@ const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
   claude_subscription: "claude_subscription",
 };
 
-export function WorkspaceModelsPage({
+/**
+ * The organization's own accounts and the connect choices in progress. They
+ * outlive moving between the list and a workspace's page, so a sign-in that
+ * is still going (and its "which workspaces" choice) is never dropped.
+ * Read only for owners and admins.
+ */
+export function useOrganizationModelAccounts({
+  organizationId,
+  enabled,
+}: {
+  organizationId: string | undefined;
+  enabled: boolean;
+}) {
+  const { client, clientConfig } = useAppContext();
+  const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
+  const orgId = organizationId ?? "";
+  const orgCodex = useOrganizationCodexSubscriptions({ client, organizationId: orgId, enabled });
+  const orgGrok = useSuperGrokSubscriptions({
+    client,
+    organizationId: orgId,
+    canManage: true,
+    enabled,
+  });
+  const organizationGateway = (id: GatewayId, on = true) => ({
+    client,
+    organizationId: orgId,
+    providerKind: ORGANIZATION_KIND[id],
+    enabled: enabled && on,
+  });
+  const orgGateways: Record<GatewayId, ProviderConnection> = {
+    vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
+    openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
+    anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
+    claude_subscription: useOrganizationProviderConnection(
+      organizationGateway("claude_subscription", claudeEnabled),
+    ),
+  };
+  // Which workspaces can use what is being connected, per provider.
+  const [audiences, setAudiences] = useState<Partial<Record<string, ConnectAudience>>>({});
+  return { orgCodex, orgGrok, orgGateways, audiences, setAudiences };
+}
+
+export type OrganizationModelAccounts = ReturnType<typeof useOrganizationModelAccounts>;
+
+type WorkspaceModelsPageProps = Parameters<typeof WorkspaceModelsPageBody>[0];
+
+/** The Models page with its own organization accounts (the section keeps them across pages). */
+export function WorkspaceModelsPage(props: Omit<WorkspaceModelsPageProps, "organizationAccounts">) {
+  const organizationAccounts = useOrganizationModelAccounts({
+    organizationId: props.organizationId,
+    enabled: props.canManageOrganizationModels && Boolean(props.organizationId),
+  });
+  return <WorkspaceModelsPageBody {...props} organizationAccounts={organizationAccounts} />;
+}
+
+export function WorkspaceModelsPageBody({
+  organizationAccounts,
   anchorWorkspaceId,
   workspacePage,
   workspaces,
@@ -172,6 +229,8 @@ export function WorkspaceModelsPage({
   account: string | undefined;
   view: ModelsView | undefined;
   onConnectionChange: () => void;
+  /** The organization's accounts, from `useOrganizationModelAccounts`. */
+  organizationAccounts: OrganizationModelAccounts;
 }) {
   const { client, clientConfig } = useAppContext();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
@@ -212,31 +271,7 @@ export function WorkspaceModelsPage({
 
   /* The organization's own accounts: read only for people who manage them. */
   const orgId = organizationId ?? "";
-  const orgCodex = useOrganizationCodexSubscriptions({
-    client,
-    organizationId: orgId,
-    enabled: organizationAdmin,
-  });
-  const orgGrok = useSuperGrokSubscriptions({
-    client,
-    organizationId: orgId,
-    canManage: true,
-    enabled: organizationAdmin,
-  });
-  const organizationGateway = (id: GatewayId, enabled = true) => ({
-    client,
-    organizationId: orgId,
-    providerKind: ORGANIZATION_KIND[id],
-    enabled: organizationAdmin && enabled,
-  });
-  const orgGateways: Record<GatewayId, ProviderConnection> = {
-    vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
-    openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
-    anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
-    claude_subscription: useOrganizationProviderConnection(
-      organizationGateway("claude_subscription", claudeEnabled),
-    ),
-  };
+  const { orgCodex, orgGrok, orgGateways, audiences, setAudiences } = organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
 
@@ -288,9 +323,6 @@ export function WorkspaceModelsPage({
 
   const key = accountKeyOf(account);
   const step = connectStepOf(view);
-  // Which workspaces can use what is being connected, per provider, kept
-  // while moving between the connect pages.
-  const [audiences, setAudiences] = useState<Partial<Record<string, ConnectAudience>>>({});
   const orgWorkspaces = useOrganizationWorkspaces(
     client,
     orgId,
@@ -298,6 +330,7 @@ export function WorkspaceModelsPage({
   );
   // Connect account opened from a workspace's page starts from that workspace.
   const connectHere = workspacePage ? { id: workspaceId, name: workspaceName, personal } : null;
+  const reconnectStep = useRef<string | null>(null);
   const pageKey = `${view ?? ""}|${account ?? ""}`;
   const root = useFocusOnNavigation(pageKey, {
     onList: pageKey === "|",
@@ -332,6 +365,18 @@ export function WorkspaceModelsPage({
       ? gateways[provider as GatewayId].connected
       : false;
   };
+  const providerLoading = (provider: string): boolean =>
+    provider === "codex"
+      ? codex.loading
+      : provider === "supergrok"
+        ? !grok.unavailable && grok.loading
+        : (GATEWAYS as readonly string[]).includes(provider) &&
+          !gateways[provider as GatewayId].settled;
+  // Once a sign-in-again step opens it stays open, even after the account
+  // turns active again while its page is still being opened.
+  const workspaceStep = step && !step.organization ? step : null;
+  if (workspaceStep && reconnecting(workspaceStep.provider)) reconnectStep.current = view ?? null;
+  const reconnectAllowed = Boolean(workspaceStep && reconnectStep.current === view);
   const listLabel = workspacePage
     ? personal
       ? "Your Personal workspace"
@@ -364,9 +409,24 @@ export function WorkspaceModelsPage({
       </DetailPage>
     );
   } else if (
-    (view === "connect" || view === "connect-workspace" || (step && !step.organization)) &&
+    workspaceStep &&
     !organizationAdmin &&
-    !(step && reconnecting(step.provider))
+    !reconnectAllowed &&
+    providerLoading(workspaceStep.provider)
+  ) {
+    // Whether this is a sign-in again isn't known until the accounts load.
+    page = (
+      <DetailPage
+        back={{ label: listLabel, onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailSkeleton />
+      </DetailPage>
+    );
+  } else if (
+    (view === "connect" || view === "connect-workspace" || workspaceStep) &&
+    !organizationAdmin &&
+    !reconnectAllowed
   ) {
     // Only owners and admins add accounts. Anyone else who can change this
     // workspace's own accounts may still sign one in again or replace its key.
@@ -423,6 +483,8 @@ export function WorkspaceModelsPage({
           organizationName={organizationName}
           here={connectHere}
           workspaces={orgWorkspaces.workspaces}
+          workspacesError={orgWorkspaces.error}
+          onRetryWorkspaces={orgWorkspaces.retry}
           value={audience}
           onChange={(next) => setAudiences((current) => ({ ...current, [provider]: next }))}
           disabled={signingIn}
@@ -448,21 +510,30 @@ export function WorkspaceModelsPage({
       </>
     );
     const blockedReason = audienceBlockedReason(audience);
-    const limitAfterConnect = async (connectionId: string | null, isNew: boolean) => {
-      if (!connectionId || !isNew) return;
+    // "All workspaces" changes nothing, so signing an existing account in
+    // again keeps its Available in; "Only selected workspaces" always applies.
+    const limitAfterConnect = async (connectionId: string | null) => {
+      if (!connectionId) return;
       const applied = await applyConnectAudience(
         client,
         { organizationId: orgId, kind: accessKind, connectionId },
         audience,
       );
       if (!applied) {
+        const target =
+          provider === "codex" || provider === "supergrok"
+            ? accountKey(provider, connectionId, true)
+            : accountKey("gateway", provider, true);
         toast.error("Connected, but it couldn't be limited to those workspaces", {
-          description: "Every workspace can use it until you change Available in on its page.",
+          description: "Every workspace can use it until you change Available in.",
+          action: {
+            label: "Change Available in",
+            onClick: () => nav.openView("model-access", target),
+          },
         });
       }
     };
     if (provider === "codex") {
-      const existing = new Set(orgCodex.accounts.map((each) => each.id));
       page = (
         <OrgCodexConnectPage
           codex={orgCodex}
@@ -470,11 +541,10 @@ export function WorkspaceModelsPage({
           onClose={backToList}
           fields={fields}
           blockedReason={blockedReason}
-          onAccountConnected={(id) => limitAfterConnect(id, !existing.has(id ?? ""))}
+          onAccountConnected={(id) => limitAfterConnect(id)}
         />
       );
     } else if (provider === "supergrok") {
-      const existing = new Set(orgGrok.accounts.map((each) => each.id));
       page = (
         <SuperGrokConnectPage
           grok={orgGrok}
@@ -482,7 +552,7 @@ export function WorkspaceModelsPage({
           onClose={backToList}
           fields={fields}
           blockedReason={blockedReason}
-          onAccountConnected={(id) => limitAfterConnect(id, !existing.has(id ?? ""))}
+          onAccountConnected={(id) => limitAfterConnect(id)}
         />
       );
     } else {
@@ -494,7 +564,7 @@ export function WorkspaceModelsPage({
           onConnected={() => nav.openAccount(accountKey("gateway", provider, true))}
           fields={fields}
           blockedReason={blockedReason}
-          afterSave={() => limitAfterConnect("current", true)}
+          afterSave={() => limitAfterConnect("current")}
           footerStart={false}
         />
       );
@@ -597,7 +667,7 @@ export function WorkspaceModelsPage({
               workspaceName={personal ? "your Personal workspace" : workspaceName}
               onConnect={
                 organizationAdmin && canManageConnections
-                  ? () => nav.openView("connect:codex")
+                  ? () => nav.openWorkspace(workspaceId, undefined, "connect:codex")
                   : undefined
               }
             />
@@ -629,7 +699,7 @@ export function WorkspaceModelsPage({
               title={orgGateways[key.id].config.title}
               workspaceName={workspaceName}
               personal={personal}
-              onConnect={() => nav.openView(`connect:${key.id}`)}
+              onConnect={() => nav.openWorkspace(workspaceId, undefined, `connect:${key.id}`)}
             />
           ) : null
         }

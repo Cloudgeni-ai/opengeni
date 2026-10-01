@@ -3,12 +3,15 @@ import { useMemo } from "react";
 
 import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { ModelsWorkspace } from "@/components/models/organization-models-list";
-import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
+import {
+  WorkspaceModelsPageBody,
+  useOrganizationModelAccounts,
+} from "@/components/models/workspace-models-page";
 import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import type { ModelsView } from "@/lib/models-route";
+import { organizationModelsSearch, type ModelsView } from "@/lib/models-route";
 import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -33,8 +36,8 @@ export function OrganizationModelsSection({
   administrator,
   administeredWorkspaceIds,
   workspace: requestedWorkspace,
-  account,
-  view,
+  account: requestedAccount,
+  view: requestedView,
 }: {
   /** The workspace the settings URL goes through. */
   anchorWorkspaceId: string;
@@ -50,6 +53,22 @@ export function OrganizationModelsSection({
   const context = useAppContext();
   const navigate = useNavigate();
   const overview = useOrganizationWorkspaces(context.client, organizationId, administrator);
+  // Kept here, above the per-workspace page, so moving between the list and a
+  // workspace's page never drops a sign-in that is still going.
+  const organizationAccounts = useOrganizationModelAccounts({
+    organizationId,
+    enabled: administrator && Boolean(organizationId),
+  });
+  // Old organization Models links name its accounts without the "org:" mark.
+  const { account, view } = useMemo(
+    () =>
+      organizationModelsSearch({
+        workspace: requestedWorkspace,
+        account: requestedAccount,
+        view: requestedView,
+      }),
+    [requestedAccount, requestedView, requestedWorkspace],
+  );
 
   const workspaces = useMemo<ModelsWorkspace[]>(() => {
     const own = context.workspaces.filter((each) => each.accountId === organizationId);
@@ -98,7 +117,9 @@ export function OrganizationModelsSection({
   const targetWorkspace = context.workspaces.find((each) => each.id === target) ?? null;
   const targetEntry = workspaces.find((each) => each.id === target);
   // A workspace page this person can't manage (or can't open) says so instead.
-  if (requestedWorkspace && (!targetWorkspace || !targetEntry?.canManage)) {
+  // Owners and admins still open it: its defaults read-only, and the
+  // organization's accounts and Connect account as everywhere else.
+  if (requestedWorkspace && (!targetWorkspace || (!targetEntry?.canManage && !administrator))) {
     return (
       <DetailPage
         back={{
@@ -123,8 +144,9 @@ export function OrganizationModelsSection({
 
   const personal = isPersonalWorkspace(targetWorkspace, context.managedSelfContext);
   return (
-    <WorkspaceModelsPage
+    <WorkspaceModelsPageBody
       key={`models:${target}`}
+      organizationAccounts={organizationAccounts}
       anchorWorkspaceId={anchorWorkspaceId}
       workspacePage={Boolean(requestedWorkspace)}
       workspaces={workspaces}

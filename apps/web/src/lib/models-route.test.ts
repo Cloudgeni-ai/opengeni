@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  organizationModelsSearch,
   accountKey,
   accountKeyOf,
   connectStepOf,
@@ -62,5 +63,29 @@ describe("Models URLs", () => {
         view: "connect-workspace",
       }),
     ).toEqual({ section: "models", workspace: "ws-1", view: "connect" });
+  });
+
+  test("old organization Models links open the organization's accounts and connect steps", () => {
+    expect(
+      organizationModelsSearch({ workspace: undefined, account: "codex:acct-1", view: undefined }),
+    ).toEqual({ account: "org:codex:acct-1", view: undefined });
+    expect(
+      organizationModelsSearch({ workspace: undefined, account: undefined, view: "connect:codex" }),
+    ).toEqual({ account: undefined, view: "connect-org:codex" });
+    expect(
+      organizationModelsSearch({
+        workspace: undefined,
+        account: "gateway:openrouter",
+        view: "model-access",
+      }),
+    ).toEqual({ account: "org:gateway:openrouter", view: "model-access" });
+    // A workspace's page keeps its own accounts and steps.
+    expect(
+      organizationModelsSearch({
+        workspace: "ws-1",
+        account: "codex:acct-1",
+        view: "connect:codex",
+      }),
+    ).toEqual({ account: "codex:acct-1", view: "connect:codex" });
   });
 });
