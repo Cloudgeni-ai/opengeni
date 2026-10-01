@@ -1128,7 +1128,31 @@ jobs:
         run: bun run test:publish-consumer
 
       - name: Registry dependency export guard regression
-        run: bun test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
+        # A PR workflow can be newer than its exact frozen source checkout.
+        # New sources declaring the guard must retain and pass every test;
+        # older sources without this feature cannot run tests added later.
+        run: |
+          bun --no-env-file -e '
+          const paths = [
+            "./scripts/test-registry-dependency-exports.test.ts",
+            "./scripts/test-effective-dependency-exports.test.ts",
+            "./scripts/dependency-export-workflow-contract.test.ts",
+          ];
+          const manifest = await Bun.file("package.json").json();
+          const declared = Object.hasOwn(manifest.scripts ?? {}, "test:effective-dependency-exports");
+          const present = await Promise.all(paths.map((path) => Bun.file(path).exists()));
+          if (!declared && present.every((value) => !value)) {
+            console.log("Registry export guard is not part of this selected source revision.");
+            process.exit(0);
+          }
+          if (!declared || present.some((value) => !value)) {
+            throw new Error("Registry export guard source is incomplete");
+          }
+          const child = Bun.spawn([process.execPath, "--no-env-file", "test", ...paths], {
+            stdout: "inherit", stderr: "inherit",
+          });
+          process.exit(await child.exited);
+          '
 
       - name: Frozen Version PR effective registry export closure
         if: github.head_ref == 'changeset-release/main' || inputs.automation_pr_number != ''
