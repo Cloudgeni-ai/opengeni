@@ -1,6 +1,8 @@
 import {
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -1327,6 +1329,16 @@ export function buildTimeline(
         finalizeOpen(turnId, "complete", event.occurredAt);
         const completedTurn = turnEndItem(event, "complete", null);
         items.push(completedTurn);
+        if (turnCompletedWithEmptyFinalReply(payload)) {
+          items.push({
+            kind: "notice",
+            id: `${event.id}-empty-final-reply`,
+            tone: "input",
+            text: EMPTY_FINAL_REPLY_NOTICE,
+            recordedOutcome: true,
+            occurredAt: event.occurredAt,
+          });
+        }
         const hasCompletedFinalResponse =
           latestAgentResponse?.completed === true &&
           latestAgentResponse.item.phase !== "commentary" &&

@@ -73,6 +73,23 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+An empty or whitespace-only final after tool execution or a completed goal,
+with no input/approval wait, receives one durable developer-message handoff in
+the same logical turn. The worker checkpoints the original response and tool
+results first, then continues from that truth without replaying completed
+tools. The turn-scoped marker survives recovery and compaction; a second empty
+final settles `turn.completed` with `emptyFinalReply: true`. The timeline shows
+an informational notice, and SDK chat replies expose the marker and notice.
+It does not claim a deliverable was sent, fail or pause the goal, or defer later
+child-result wakes; active goals retain normal continuation eligibility.
+This bounds only the handoff correction, not legitimate
+run length or tool work, and introduces no Temporal retry or history rewrite.
+Explicit `wait_for_input`, approvals, and maintenance compaction remain exempt.
+Completed hosted-tool history also establishes handoff eligibility, including
+after attempt recovery. The durable developer reminder stays exact; Chat
+requests project its structured text to a Chat-native system string without
+rewriting stored history.
+
 Each accepted turn also freezes a content-free **surface**
 (`session_turns.surface`, `SessionTurnSurface` in
 `packages/contracts/src/product-analytics.ts`): the product surface its request
@@ -792,6 +809,18 @@ the worker clear its in-memory copy. Failed requests and late/zombie completion
 events cannot reset the streak. Successful inference between transient outages
 therefore starts the next outage at the first backoff step instead of consuming
 a lifetime budget for a long-running turn.
+OpenAI/Azure HTTP-200 Responses `response.failed` / `response.error` terminals
+are intercepted before the SDK flattens their diagnostic. Closed server-error
+and overload codes use this recovery lane; rate-limit codes retain the pacing
+below. Invalid requests, content-policy refusals, and unknown terminal codes
+remain terminal even when their diagnostic mentions transient failures. The
+failure/recovery `detail` preserves the exact provider message through 4 KiB;
+larger messages keep a UTF-8-safe prefix and explicit truncation marker. SDK
+error messages, tracing and worker public diagnostics stay structural.
+Recognized safety diagnostics veto transient recovery regardless of a broad
+server-error code; bounded terminal detail still participates in context-overflow
+classification. Streamed terminals retain bounded Retry-After evidence before
+the SDK discards the HTTP receipt, including long quota-reset hints.
 An explicit provider retry hint is a lower bound. Rate limits wait for the
 longer of the provider's `Retry-After` (60 s when absent) and an escalating floor
 of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without

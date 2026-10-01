@@ -18,15 +18,10 @@ import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
-  canonicalizeConfiguredModelId,
   codeSearchDeploymentPolicy,
-  configuredAllowedModels,
   configuredAllowedReasoningEfforts,
-  configuredModels,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
-  withCodexCatalogProvider,
-  withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import {
   ClientConfig,
@@ -108,10 +103,16 @@ import {
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireAccessContext,
   requirePermission,
   releaseManagedAuthRequestActorLease,
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
+  resolveCallerWorkspaceModelSelections,
+  resolveDefaultSessionModelForSelections,
+  selectDefaultSessionModel,
+  isWorkspaceModelAdmissible,
+  resolveWorkspaceModelSelection,
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -1071,27 +1072,117 @@ export function createAppComposition(deps: AppDependencies): {
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
-    const baseCatalogSettings = resolvedCatalog.settings;
-    const codexCatalogSettings = baseCatalogSettings.codexSubscriptionEnabled
-      ? withCodexCatalogProvider(baseCatalogSettings)
-      : baseCatalogSettings;
-    const catalogSettings = baseCatalogSettings.supergrokSubscriptionEnabled
-      ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
-      : codexCatalogSettings;
+    let catalogSettings = resolvedCatalog.settings;
+    let selections = resolveWorkspaceModelSelection({
+      settings: catalogSettings,
+      policy: null,
+      codexSubscriptionActive: false,
+    });
+    let defaultSelection = selectDefaultSessionModel({
+      settings: catalogSettings,
+      selections,
+      workspaceDefaults: null,
+      creditsAvailable: false,
+    });
+    let modelSelectionForbidden = false;
+    const requestedWorkspaceId = c.req.query("workspaceId");
+    if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
+      throw new HTTPException(422, { message: "workspaceId must not be empty" });
+    }
+    const callerScoped =
+      requestedWorkspaceId !== undefined ||
+      deps.settings.productAccessMode !== "managed" ||
+      c.req.header("authorization") !== undefined ||
+      // Browser bootstrap precedes session-set reconciliation. A cookie alone
+      // cannot scope this public read (broker/changed actors need an epoch).
+      c.req.header("x-opengeni-actor-epoch") !== undefined ||
+      c.req.header("x-opengeni-external-actor") !== undefined;
+    if (callerScoped) {
+      let context: Awaited<ReturnType<typeof requireAccessContext>> | null = null;
+      try {
+        context = await requireAccessContext(c, routeDeps);
+      } catch (error) {
+        // A stale browser cookie must not break the signed-out bootstrap.
+        // Explicit workspace/bearer/external-actor requests fail closed.
+        if (
+          !(error instanceof HTTPException && error.status === 401) ||
+          requestedWorkspaceId !== undefined ||
+          c.req.header("authorization") !== undefined ||
+          c.req.header("x-opengeni-actor-epoch") !== undefined ||
+          c.req.header("x-opengeni-external-actor") !== undefined
+        ) {
+          throw error;
+        }
+      }
+      const workspaceId = requestedWorkspaceId ?? context?.defaultWorkspaceId;
+      if (context && workspaceId) {
+        const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+        await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+          catalogSettings = (
+            await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+              accountId: grant.accountId,
+              workspaceId,
+            })
+          ).settings;
+          selections = await resolveCallerWorkspaceModelSelections(
+            deps.db,
+            catalogSettings,
+            { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+            { observeAvailability: true },
+          );
+          if (!hasPermission(grant.permissions, "sessions:create")) {
+            modelSelectionForbidden = true;
+            selections = [];
+          }
+          const workspace = await getWorkspace(deps.db, workspaceId);
+          defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
+            settings: catalogSettings,
+            accountId: grant.accountId,
+            workspaceSettings: workspace?.settings ?? {},
+            selections,
+          });
+        });
+      } else if (context) {
+        // An organization key has no implicit workspace. Do not advertise
+        // another workspace's authority; it can request an exact workspace.
+        selections = [];
+        modelSelectionForbidden = true;
+      }
+    }
+    const models = selections.filter(isWorkspaceModelAdmissible);
+    const defaultModel = defaultSelection.model;
+    const fallbackDefinition = selections.find(
+      ({ model }) => model.id === defaultModel || model.aliases.includes(defaultModel),
+    );
+    const legacyModelFallback =
+      models.length === 0
+        ? {
+            id: defaultModel,
+            availability: {
+              status: "unavailable" as const,
+              selectable: false as const,
+              reason: modelSelectionForbidden
+                ? ("policy_blocked" as const)
+                : (fallbackDefinition?.availability.reason ?? ("unsupported" as const)),
+              checkedAt: fallbackDefinition?.availability.checkedAt ?? null,
+            },
+          }
+        : undefined;
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
-        allowedModels: configuredAllowedModels(catalogSettings),
-        // Provider-grouped model list for the picker. configuredModels() carries the
-        // union of the built-in allow-list and every registry provider's models, in
-        // selection order (default model first); project each to the client-safe
-        // provider-blind ClientModel shape (execution topology remains server-side).
-        models: configuredModels(catalogSettings).map(projectClientModel),
-        defaultReasoningEffort: deps.settings.openaiReasoningEffort,
+        defaultModel,
+        allowedModels: models.length > 0 ? models.map(({ model }) => model.id) : [defaultModel],
+        ...(legacyModelFallback ? { legacyModelFallback } : {}),
+        // Availability remains an observation hint, not the admission predicate.
+        models: models.map(({ model, availability }) => ({
+          ...projectClientModel(model),
+          availability,
+        })),
+        defaultReasoningEffort: defaultSelection.reasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         defaultSandboxBackend: deps.settings.sandboxBackend,
         mcpServers: deps.settings.mcpServers.map((server) => ({

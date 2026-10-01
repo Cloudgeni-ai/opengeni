@@ -55,6 +55,7 @@ export default defineConfig({
     "@opengeni/contracts/browser-storage",
     "@opengeni/contracts/mcp-endpoint",
     "@opengeni/contracts/session-titles",
+    "@opengeni/contracts/session-final-reply",
     "@opengeni/contracts/site-session-http",
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",

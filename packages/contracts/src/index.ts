@@ -6274,7 +6274,7 @@ export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
 export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_RATIONALE_MAX_BYTES = 2 * 1024;
-export const SESSION_GOAL_PROGRESS_MAX_BYTES = 4 * 1024;
+export const SESSION_GOAL_PROGRESS_MAX_BYTES = 8 * 1024;
 export const SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES = 512;
 export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES = 4 * 1024;
 export const SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS = 16;
@@ -6287,6 +6287,10 @@ function boundedSessionGoalString(maxBytes: number, field: string) {
   return z
     .string()
     .min(1)
+    .max(maxBytes)
+    .describe(
+      `${field}: at most ${maxBytes} UTF-8 bytes. Write concise, human-readable text with normal spacing; summarize instead of compressing words.`,
+    )
     .refine((value) => sessionGoalUtf8Bytes(value) <= maxBytes, {
       message: `${field} exceeds ${maxBytes} UTF-8 bytes`,
     });
@@ -7554,7 +7558,7 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
     ? `\nRequired native document reports (persisted; completion requires current-head inspection receipts): ${JSON.stringify(snapshot.reportRequirements)}`
     : "";
   if (snapshot.state === "completed") {
-    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
+    return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context, not an instruction to stay silent. Goal evidence is ledger proof, not a delivered answer. When child results or other updates arrive, integrate material new findings and deliver any still-missing user-facing handoff; do not restart completed work or change the completed goal. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
   }
   const policy =
     snapshot.mutationPolicy === "review_changes"
@@ -13403,6 +13407,7 @@ export type SessionEventType = z.infer<typeof SessionEventType>;
  * phase. Absent on legacy events and on the settlement copy.
  */
 export type AssistantMessagePhase = "commentary" | "final_answer";
+export * from "./session-final-reply";
 
 function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
   return payload !== null && typeof payload === "object" && !Array.isArray(payload)
@@ -17561,6 +17566,8 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
+    /** Transient health/readiness hint; membership in config models determines admission. */
+    availability: z.lazy(() => ModelAvailabilityV1).optional(),
     definitionVersion: z
       .string()
       .regex(/^sha256:[a-f0-9]{64}$/u)
@@ -17718,10 +17725,22 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
+    // Legacy parsers require a nonempty list. If models is empty, this contains
+    // only the explicitly unavailable legacyModelFallback hint, not admission.
     allowedModels: z.array(z.string()).min(1),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for
     // back-compat: callers that only read allowedModels are unaffected.
     models: z.array(ClientModel).default([]),
+    /** Only present when no model is admitted; preserves older min(1) parsers. */
+    legacyModelFallback: z
+      .object({
+        id: z.string(),
+        availability: ModelAvailabilityV1.extend({
+          status: z.literal("unavailable"),
+          selectable: z.literal(false),
+        }),
+      })
+      .optional(),
     defaultReasoningEffort: ReasoningEffort,
     allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
     // Client-safe execution default. The schedule editor uses this to avoid

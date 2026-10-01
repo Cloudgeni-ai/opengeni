@@ -104,6 +104,52 @@ describe("default model precedence", () => {
     });
   });
 
+  test("a stably blocked deployment default falls back with the model's own effort", () => {
+    const settings = hostedSettings({
+      openaiModel: "codex/gpt-6-sol",
+      openaiAllowedModels: "gpt-6-luna",
+      openaiReasoningEffort: "low",
+    });
+    const catalog = selections(settings).map((selection) => ({
+      ...selection,
+      model: {
+        ...selection.model,
+        capabilities: {
+          ...selection.model.capabilities,
+          reasoning: { ...selection.model.capabilities.reasoning, defaultEffort: "high" as const },
+        },
+      },
+    }));
+    const result = selectDefaultSessionModel({
+      settings,
+      selections: catalog,
+      workspaceDefaults: null,
+      creditsAvailable: false,
+    });
+    expect(result).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "high",
+      source: "deployment",
+    });
+    expect(result.reasoningEffort).not.toBe(settings.openaiReasoningEffort);
+  });
+
+  test("provider health and resolver uncertainty preserve the stably admissible default", () => {
+    const settings = hostedSettings({
+      openaiProvider: "azure",
+      openaiModel: "gpt-6-luna",
+      azureOpenaiBaseUrl: "https://fixture.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: undefined,
+      azureOpenaiAdToken: undefined,
+      openaiReasoningEffort: "low",
+    });
+    expect(decide(settings)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "low",
+      source: "deployment",
+    });
+  });
+
   test("a connected ChatGPT/Codex subscription makes its default model the default", () => {
     expect(decide(hostedSettings(), { codex: true })).toEqual({
       model: "codex/gpt-6-astra",
@@ -256,6 +302,9 @@ beforeAll(async () => {
   restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("core-default-session-model");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Default model integration tests require real PostgreSQL");
+    }
     available = false;
     return;
   }
