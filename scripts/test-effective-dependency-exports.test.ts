@@ -4,8 +4,9 @@ import { cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import {
-  assertUnchangedPublishedBytes,
+  assertUnchangedPublishedSourceAndAssets,
   effectiveRegistry,
+  isGeneratedDistBuildOutput,
   proveEffectiveConsumers,
   shippedInventory,
   verifyTarballIntegrity,
@@ -33,10 +34,12 @@ async function pack(
   await mkdir(tarballs, { recursive: true });
   await writeFile(
     join(directory, "package.json"),
-    JSON.stringify({ ...packageManifest, files: Object.keys(files) }),
+    JSON.stringify({ ...packageManifest, files: packageManifest.files ?? Object.keys(files) }),
   );
-  for (const [name, contents] of Object.entries(files))
+  for (const [name, contents] of Object.entries(files)) {
+    await mkdir(dirname(join(directory, name)), { recursive: true });
     await writeFile(join(directory, name), contents);
+  }
   const output = await run(
     ["bun", "pm", "pack", "--ignore-scripts", "--quiet", "--destination", tarballs],
     directory,
@@ -62,6 +65,18 @@ function manifest(
   dependencies?: Record<string, string>,
 ): SmokeManifest {
   return { name, version, type: "module", exports: { ".": "./index.js" }, dependencies };
+}
+
+function builtManifest(
+  name: string,
+  version: string,
+  dependencies?: Record<string, string>,
+): SmokeManifest {
+  return {
+    ...manifest(name, version, dependencies),
+    exports: { ".": "./dist/index.js" },
+    files: ["src", "dist", "runtime-data.json"],
+  };
 }
 
 async function sourceFor(
@@ -93,6 +108,197 @@ const timeout = "export class ConnectPopupTimeoutError extends Error {}";
 const importer =
   'import { ConnectPopupClosedError } from "@opengeni/connect"; export const Closed = ConnectPopupClosedError;';
 const profiles = { "@opengeni/react": { browser: ["."], node: ["."] } };
+
+test("generated-dist comparison exclusion is limited to known build formats outside asset subtrees", () => {
+  for (const path of [
+    "dist/index.js",
+    "dist/chunk-HASH.js",
+    "dist/nested/index.d.ts",
+    "dist/index.js.map",
+    "dist/index.d.ts.map",
+  ])
+    expect(isGeneratedDistBuildOutput(path)).toBe(true);
+  for (const path of [
+    "src/index.js",
+    "index.js",
+    "dist/index.ts",
+    "dist/runtime.json",
+    "dist/styles.css",
+    "dist/styles.css.map",
+    "dist/kernel.wasm",
+    "dist/assets/worker.js",
+    "dist/nested/assets/worker.js.map",
+  ])
+    expect(isGeneratedDistBuildOutput(path)).toBe(false);
+});
+
+test("same-source generated dist layout variance is admitted but registry dependency bytes stay immutable", async () => {
+  await fixture(async (root) => {
+    const pkg = builtManifest("@opengeni/connect", "0.3.0");
+    const shared = {
+      "src/index.ts": closed,
+      "dist/assets/runtime-data.json": '{"value":1}',
+    };
+    const original = await pack(root, "registry", pkg, {
+      ...shared,
+      "dist/index.js": 'export { ConnectPopupClosedError } from "./chunk-OLD.js";',
+      "dist/chunk-OLD.js": closed,
+      "dist/index.d.ts": "export declare class ConnectPopupClosedError extends Error {}",
+      "dist/index.js.map": '{"version":3,"sources":["old-layout"]}',
+      "dist/index.d.ts.map": '{"version":3,"sources":["old-declaration-layout"]}',
+    });
+    const candidate = await pack(root, "candidate", pkg, {
+      ...shared,
+      "dist/index.js": 'export { ConnectPopupClosedError } from "./chunk-NEW.js";',
+      "dist/chunk-NEW.js": `${closed}\n`,
+      "dist/index.d.ts":
+        "// regenerated\nexport declare class ConnectPopupClosedError extends Error {}",
+      "dist/index.js.map": '{"version":3,"sources":["new-layout"]}',
+      "dist/index.d.ts.map": '{"version":3,"sources":["new-declaration-layout"]}',
+    });
+    const source = await sourceFor(original);
+    const candidates = new Map([[pkg.name, candidate]]);
+    const registry = await effectiveRegistry(candidates, source, root);
+    try {
+      const metadata = registry.metadata.get(pkg.name)!;
+      const response = await fetch(metadata.versions[pkg.version]!.dist.tarball);
+      const served = Buffer.from(await response.arrayBuffer());
+      expect(served).toEqual(await readFile(original.tarball));
+      expect(served).not.toEqual(await readFile(candidate.tarball));
+    } finally {
+      registry.stop();
+    }
+    await expect(
+      effectiveRegistry(
+        candidates,
+        { ...source, tarball: async () => readFile(candidate.tarball) },
+        root,
+      ),
+    ).rejects.toThrow("integrity mismatch");
+  });
+});
+
+for (const changed of [
+  "src/index.ts",
+  "runtime-data.json",
+  "dist/runtime-data.json",
+  "dist/styles.css",
+  "dist/styles.css.map",
+  "dist/kernel.wasm",
+  "dist/assets/worker.js",
+  "dist/assets/worker.js.map",
+]) {
+  test(`source/asset drift at ${changed} still rejects an existing version`, async () => {
+    await fixture(async (root) => {
+      const pkg = builtManifest("@opengeni/connect", "0.3.0");
+      const files = {
+        "src/index.ts": closed,
+        "dist/index.js": closed,
+        [changed]: "original shipped content",
+      };
+      const original = await pack(root, "registry", pkg, files);
+      const candidate = await pack(root, "candidate", pkg, {
+        ...files,
+        [changed]: "changed shipped content",
+      });
+      await expect(
+        effectiveRegistry(new Map([[pkg.name, candidate]]), await sourceFor(original), root).then(
+          (registry) => registry.stop(),
+        ),
+      ).rejects.toThrow(changed);
+    });
+  });
+}
+
+for (const target of ["browser", "Node"] as const) {
+  test(`${target} tests the local same-version root against registry bytes, not the passing registry root or local dependency build`, async () => {
+    await fixture(async (root) => {
+      const connectManifest = builtManifest("@opengeni/connect", "0.3.0");
+      const reactManifest = builtManifest("@opengeni/react", "7.4.0", {
+        "@opengeni/connect": "^0.3.0",
+      });
+      const publishedConnect = await pack(root, "published-connect", connectManifest, {
+        "src/index.ts": closed,
+        "dist/index.js": timeout,
+        "dist/index.d.ts": "export declare class ConnectPopupClosedError extends Error {}",
+      });
+      const localConnect = await pack(root, "local-connect", connectManifest, {
+        "src/index.ts": closed,
+        "dist/index.js": closed,
+        "dist/index.d.ts": "export declare class ConnectPopupClosedError extends Error {}",
+      });
+      const publishedReact = await pack(root, "published-react", reactManifest, {
+        "src/index.ts": importer,
+        "dist/index.js": "export const Closed = null;",
+        "dist/index.d.ts": "export declare const Closed: unknown;",
+      });
+      const localReact = await pack(root, "local-react", reactManifest, {
+        "src/index.ts": importer,
+        "dist/index.js": importer,
+        "dist/index.d.ts": "export declare const Closed: unknown;",
+      });
+      const connectSource = await sourceFor(publishedConnect);
+      const reactSource = await sourceFor(publishedReact);
+      const candidates = new Map([
+        [connectManifest.name, localConnect],
+        [reactManifest.name, localReact],
+      ]);
+      const registry = await effectiveRegistry(
+        candidates,
+        {
+          metadata: (name) =>
+            name === reactManifest.name ? reactSource.metadata(name) : connectSource.metadata(name),
+          tarball: (registryManifest) =>
+            registryManifest.name === reactManifest.name
+              ? reactSource.tarball()
+              : connectSource.tarball(),
+        },
+        root,
+      );
+      try {
+        const selected = {
+          [reactManifest.name]: {
+            browser: target === "browser" ? ["."] : [],
+            node: target === "Node" ? ["."] : [],
+          },
+        };
+        const control = join(root, "registry-root-control");
+        await mkdir(control);
+        await proveEffectiveConsumers(
+          new Map(candidates).set(reactManifest.name, publishedReact),
+          selected,
+          registry,
+          control,
+        );
+        const proof = proveEffectiveConsumers(candidates, selected, registry, root);
+        await expect(proof).rejects.toThrow(
+          /@opengeni\/react resolved:[\s\S]*ConnectPopupClosedError/u,
+        );
+        await expect(proof).rejects.toThrow(
+          /@opengeni\/react minimum:[\s\S]*ConnectPopupClosedError/u,
+        );
+        for (const lane of ["resolved", "minimum"]) {
+          const consumer = join(root, `_opengeni_react-${lane}`);
+          const installed = join(consumer, "node_modules", reactManifest.name);
+          const consumerPackage = JSON.parse(
+            await readFile(join(consumer, "package.json"), "utf8"),
+          );
+          expect(consumerPackage.dependencies[reactManifest.name]).toBe(
+            `file:${localReact.tarball}`,
+          );
+          expect(consumerPackage.overrides).toBeUndefined();
+          expect(consumerPackage.workspaces).toBeUndefined();
+          expect((await lstat(installed)).isSymbolicLink()).toBe(false);
+          expect(await readFile(join(installed, "dist/index.js"), "utf8")).toBe(importer);
+          const dependency = dirname(Bun.resolveSync("@opengeni/connect/package.json", installed));
+          expect(await readFile(join(dependency, "dist/index.js"), "utf8")).toBe(timeout);
+        }
+      } finally {
+        registry.stop();
+      }
+    });
+  });
+}
 
 for (const field of ["exports", "imports"] as const) {
   for (const nested of [false, true]) {
@@ -140,7 +346,9 @@ for (const field of ["exports", "imports"] as const) {
           effectiveRegistry(new Map([[name, changed]]), await sourceFor(original), root).then(
             (registry) => registry.stop(),
           ),
-        ).rejects.toThrow("changed shipped bytes without a new version: package.json");
+        ).rejects.toThrow(
+          "changed shipped source/manifest/assets without a new version: package.json",
+        );
       });
     });
   }
@@ -249,7 +457,8 @@ for (const selection of ["files", ".npmignore", ".gitignore"] as const) {
         expect(inventory.has(path)).toBe(true);
       for (const path of ["ignored-root.json", "dist/ignored.txt"])
         expect(inventory.has(path)).toBe(false);
-      await assertUnchangedPublishedBytes(pkg.name, candidate.tarball, published, root);
+      expect(inventory).toEqual(await shippedInventory(published, root));
+      await assertUnchangedPublishedSourceAndAssets(pkg.name, candidate.tarball, published, root);
       expect(await readFile(pkg.packagePath, "utf8")).toBe(files["package.json"]);
       for (const directory of ["node_modules", ".cache", ".turbo", ".bun-cache"])
         await expect(lstat(join(staging, "package", directory))).rejects.toThrow("ENOENT");
@@ -264,7 +473,7 @@ test("effective closure rejects changed unpublished Connect bytes labelled as th
     const local = await pack(root, "candidate", connect, closed);
     await expect(
       effectiveRegistry(new Map([[connect.name, local]]), await sourceFor(old), root),
-    ).rejects.toThrow("changed shipped bytes without a new version: index.js");
+    ).rejects.toThrow("changed shipped source/manifest/assets without a new version: index.js");
   });
 });
 

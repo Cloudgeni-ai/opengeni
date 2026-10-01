@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Prepublication proof of the effective, immutable npm release closure. */
+/** Prepublication proof of local packed roots against immutable npm dependencies. */
 import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -111,7 +111,18 @@ export async function shippedInventory(
   return inventory;
 }
 
-export async function assertUnchangedPublishedBytes(
+export function isGeneratedDistBuildOutput(path: string): boolean {
+  // The guarded TypeScript build emits ESM .js, .d.ts and their maps under dist.
+  // Asset subtrees and other formats remain byte-checked. This is a comparison
+  // policy, not evidence that two generated outputs are semantically equivalent.
+  return (
+    path.startsWith("dist/") &&
+    !path.split("/").includes("assets") &&
+    /\.(?:js|d\.ts)(?:\.map)?$/u.test(path)
+  );
+}
+
+export async function assertUnchangedPublishedSourceAndAssets(
   name: string,
   candidate: string,
   published: string,
@@ -122,11 +133,11 @@ export async function assertUnchangedPublishedBytes(
     shippedInventory(published, root),
   ]);
   const changed = [...new Set([...local.keys(), ...registry.keys()])]
-    .filter((path) => local.get(path) !== registry.get(path))
+    .filter((path) => !isGeneratedDistBuildOutput(path) && local.get(path) !== registry.get(path))
     .sort();
   if (changed.length)
     throw new Error(
-      `${name} changed shipped bytes without a new version: ${changed.slice(0, 12).join(", ")}`,
+      `${name} changed shipped source/manifest/assets without a new version: ${changed.slice(0, 12).join(", ")}`,
     );
 }
 
@@ -134,7 +145,10 @@ export async function assertUnchangedPublishedBytes(
  * Read-only loopback registry overlay, not an install override. Ordinary semver
  * resolution sees real npm versions plus genuinely new versions from this cut.
  * Already-published identities are always served from integrity-verified npm
- * tarballs and must equal the candidate's shipped payload, not local siblings.
+ * tarballs, never local dependency builds. Their shipped source, semantic
+ * manifest and non-generated assets must match the candidate; generated dist
+ * byte equality is deliberately not asserted. Each root is tested separately
+ * from its local packed tarball against this registry-only dependency closure.
  */
 export async function effectiveRegistry(
   candidates: ReadonlyMap<string, PackedCandidate>,
@@ -153,14 +167,14 @@ export async function effectiveRegistry(
       verifyTarballIntegrity(bytes, existing.dist.integrity ?? "");
       const published = join(root, `${name.replace(/[^a-zA-Z0-9]/gu, "_")}.tgz`);
       await writeFile(published, bytes);
-      await assertUnchangedPublishedBytes(
+      await assertUnchangedPublishedSourceAndAssets(
         `${name}@${candidate.manifest.version}`,
         candidate.tarball,
         published,
         root,
       );
       process.stdout.write(
-        `[effective-exports] ${name}@${candidate.manifest.version}: immutable registry bytes\n`,
+        `[effective-exports] ${name}@${candidate.manifest.version}: immutable registry dependency bytes; source/manifest/assets match; generated dist byte equality not asserted\n`,
       );
     } else {
       if (
@@ -239,10 +253,12 @@ export async function proveEffectiveConsumers(
             minimums[dep] = lowestPublishedVersion(range, Object.keys(metadata.versions));
           }
         }
+        // Test the local packed root even when its version already exists.
+        // Only its dependencies resolve through the immutable registry overlay.
         await writeFile(
           join(consumer, "package.json"),
           JSON.stringify(
-            consumerManifest(candidate.manifest, candidate.manifest.version, minimums),
+            consumerManifest(candidate.manifest, `file:${candidate.tarball}`, minimums),
           ),
         );
         await run(["bun", "install", "--ignore-scripts", "--registry", registry.url], consumer);
@@ -267,7 +283,9 @@ export async function proveEffectiveConsumers(
           }
         }
         await proveInstalledConsumer(consumer, manifest, profile);
-        process.stdout.write(`[effective-exports] ${name} ${lane} browser/Node consumers passed\n`);
+        process.stdout.write(
+          `[effective-exports] ${name} locally packed root ${lane} browser/Node consumers passed\n`,
+        );
       } catch (error) {
         failures.push(`${name} ${lane}: ${error instanceof Error ? error.message : String(error)}`);
       }
