@@ -411,11 +411,7 @@ function CreateApiKeyPage({
             const created = await onCreate({
               name: trimmed,
               ...(description.trim() ? { description: description.trim() } : {}),
-              ...(access === "developer_setup"
-                ? { preset: DEVELOPER_SETUP_API_KEY_PRESET.id }
-                : access === "read"
-                  ? { access: "read" as const }
-                  : {}),
+              ...(access === "full" ? {} : { access }),
             });
             if (created === null) return false;
             setToken(created);

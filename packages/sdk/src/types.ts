@@ -3222,6 +3222,7 @@ export const KNOWN_PERMISSIONS = [
   "github:manage",
   "github:use",
   "api_keys:manage",
+  "usage_allowances:manage",
   "connections:read",
   "connections:write",
   "capabilities:manage",
@@ -4995,10 +4996,12 @@ export type UpdateWorkspaceRequest = {
  * permissions: `full` can provision shared workspaces, external members, and
  * `asUser` sessions (user requests additionally need live membership);
  * `read` only inventories shared workspaces and reads their sessions, events,
- * and files. Organization-key scope excludes Personal workspaces and bypasses neither
+ * and files. `developer_setup` configures shared workspaces and budgets without
+ * API-key management or credential delegation; its default expiry is 24 hours.
+ * Organization-key scope excludes Personal workspaces and bypasses neither
  * session visibility nor the explicit `secrets:read` permission requirement.
  */
-export type OrganizationApiKeyAccess = "full" | "read";
+export type OrganizationApiKeyAccess = "full" | "read" | "developer_setup";
 
 export type ApiKey = {
   id: string;
@@ -5036,6 +5039,8 @@ export type CreateOrganizationApiKeyRequest = {
   expiresAt?: string | undefined;
   /** Omitted means `full`. */
   access?: OrganizationApiKeyAccess | undefined;
+  /** Optional creation alias for the developer_setup access tier. */
+  preset?: "developer_setup" | undefined;
 };
 
 export type ListApiKeysResponse = {

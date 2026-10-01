@@ -59,7 +59,7 @@ try {
       );
       if (
         JSON.stringify(submitted) !==
-        JSON.stringify([{ name: "Organization automation", preset: "developer_setup" }])
+        JSON.stringify([{ name: "Organization automation", access: "developer_setup" }])
       ) {
         throw new Error(`Incorrect setup payload: ${JSON.stringify(submitted)}`);
       }

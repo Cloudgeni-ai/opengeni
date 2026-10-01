@@ -141,6 +141,9 @@ describe("API key descriptions", () => {
       CreateOrganizationApiKeyRequest.parse({ name: "setup", preset: "developer_setup" }),
     ).toEqual({ name: "setup", access: "full", preset: "developer_setup" });
     expect(
+      CreateOrganizationApiKeyRequest.parse({ name: "setup", access: "developer_setup" }),
+    ).toEqual({ name: "setup", access: "developer_setup" });
+    expect(
       CreateOrganizationApiKeyRequest.safeParse({
         name: "setup",
         access: "read",

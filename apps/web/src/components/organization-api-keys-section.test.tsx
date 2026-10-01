@@ -94,7 +94,7 @@ afterAll(() => {
 
 describe("organization API keys section", () => {
   test.each([
-    ["Developer setup", { preset: "developer_setup" }, "expires after 24 hours"],
+    ["Developer setup", { access: "developer_setup" }, "expires after 24 hours"],
     ["Read only", { access: "read" }, "Can't create or change anything"],
   ] as const)(
     "submits the exact %s choice on the existing create page",
