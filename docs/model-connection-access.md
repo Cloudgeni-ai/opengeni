@@ -37,7 +37,13 @@ policy. Rotation-off catalogs use the effective active subscription; rotating
 pools combine permissions from eligible subscriptions. An assigned paused or
 unhealthy default remains selected when rotation is off, so disabling rotation
 never silently changes the billed account. Codex and SuperGrok allocation filter
-accounts by the requested model.
+accounts by the requested model. The workspace catalog and automatic new-session
+defaults also intersect Codex definitions with live `/codex/models` support on
+every permitted serving account. A successful catalog omitting a model makes that
+choice unavailable; a catalog read failure never proves support. Catalog probes
+use the shared refreshing token resolver and cache public model support briefly
+per workspace and returned credential revision. The browser, automatic defaults,
+and agent model list share these observations.
 The worker checks the exact selected connection again before model execution,
 including pins and recovered leases. Workspace Gateway and OpenRouter key loading
 also checks the exact credential ID. Their catalog and startup checks follow the

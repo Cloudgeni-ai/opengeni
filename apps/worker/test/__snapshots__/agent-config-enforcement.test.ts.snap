@@ -179,6 +179,7 @@ exports[`agent configuration reaches the production model request api creator re
     "opengeni__session_pause",
     "opengeni__session_resume",
     "opengeni__session_send_message",
+    "opengeni__session_set_model",
     "opengeni__session_set_project",
     "opengeni__session_steer",
     "opengeni__session_wait",
@@ -233,7 +234,7 @@ exports[`agent configuration reaches the production model request api creator re
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "70b4178946e5ef380dc7e564a6801c8a0809dc0e5e67bbe9ee725875039b7b7a",
+  "requestSha256": "6847d3e5238d075ba884d432b326b40e1b664546e2bd315cf441a5494dab1466",
 }
 `;
 
@@ -416,6 +417,7 @@ exports[`agent configuration reaches the production model request slack creator 
     "opengeni__session_pause",
     "opengeni__session_resume",
     "opengeni__session_send_message",
+    "opengeni__session_set_model",
     "opengeni__session_set_project",
     "opengeni__session_steer",
     "opengeni__session_wait",
@@ -470,7 +472,7 @@ exports[`agent configuration reaches the production model request slack creator 
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "70b4178946e5ef380dc7e564a6801c8a0809dc0e5e67bbe9ee725875039b7b7a",
+  "requestSha256": "6847d3e5238d075ba884d432b326b40e1b664546e2bd315cf441a5494dab1466",
 }
 `;
 
@@ -653,6 +655,7 @@ exports[`agent configuration reaches the production model request scheduled crea
     "opengeni__session_pause",
     "opengeni__session_resume",
     "opengeni__session_send_message",
+    "opengeni__session_set_model",
     "opengeni__session_set_project",
     "opengeni__session_steer",
     "opengeni__session_wait",
@@ -707,7 +710,7 @@ exports[`agent configuration reaches the production model request scheduled crea
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "70b4178946e5ef380dc7e564a6801c8a0809dc0e5e67bbe9ee725875039b7b7a",
+  "requestSha256": "6847d3e5238d075ba884d432b326b40e1b664546e2bd315cf441a5494dab1466",
 }
 `;
 
@@ -890,6 +893,7 @@ exports[`agent configuration reaches the production model request automation cre
     "opengeni__session_pause",
     "opengeni__session_resume",
     "opengeni__session_send_message",
+    "opengeni__session_set_model",
     "opengeni__session_set_project",
     "opengeni__session_steer",
     "opengeni__session_wait",
@@ -944,7 +948,7 @@ exports[`agent configuration reaches the production model request automation cre
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "70b4178946e5ef380dc7e564a6801c8a0809dc0e5e67bbe9ee725875039b7b7a",
+  "requestSha256": "6847d3e5238d075ba884d432b326b40e1b664546e2bd315cf441a5494dab1466",
 }
 `;
 
@@ -1127,6 +1131,7 @@ exports[`agent configuration reaches the production model request site_auth_main
     "opengeni__session_pause",
     "opengeni__session_resume",
     "opengeni__session_send_message",
+    "opengeni__session_set_model",
     "opengeni__session_set_project",
     "opengeni__session_steer",
     "opengeni__session_wait",
@@ -1181,7 +1186,7 @@ exports[`agent configuration reaches the production model request site_auth_main
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "70b4178946e5ef380dc7e564a6801c8a0809dc0e5e67bbe9ee725875039b7b7a",
+  "requestSha256": "6847d3e5238d075ba884d432b326b40e1b664546e2bd315cf441a5494dab1466",
 }
 `;
 
@@ -1364,6 +1369,7 @@ exports[`agent configuration reaches the production model request omitted and nu
     "opengeni__session_pause",
     "opengeni__session_resume",
     "opengeni__session_send_message",
+    "opengeni__session_set_model",
     "opengeni__session_set_project",
     "opengeni__session_steer",
     "opengeni__session_wait",
@@ -1418,6 +1424,6 @@ exports[`agent configuration reaches the production model request omitted and nu
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "70b4178946e5ef380dc7e564a6801c8a0809dc0e5e67bbe9ee725875039b7b7a",
+  "requestSha256": "6847d3e5238d075ba884d432b326b40e1b664546e2bd315cf441a5494dab1466",
 }
 `;

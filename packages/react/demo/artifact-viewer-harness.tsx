@@ -28,8 +28,23 @@ const control: SessionQueueSnapshot["effectiveControl"] = {
   override: null,
   settlement: null,
 };
+// `?long` adds earlier turns and a longer answer so the latest question can
+// scroll out of view (browser tests for the floating timeline pills).
+const long = new URLSearchParams(window.location.search).has("long");
+const findings = long
+  ? [
+      "",
+      ...Array.from(
+        { length: 8 },
+        (_, index) =>
+          `- Team ${index + 1} closed ${12 + index * 3} tasks and reopened ${index % 3}; review lead time stayed under two days.`,
+      ),
+      "",
+    ]
+  : [];
 const reply = [
   "The weekly report and a dashboard are ready.",
+  ...findings,
   "",
   `[Open the weekly report](/workspaces/${WORKSPACE_ID}/artifacts/editable/${EDITABLE_ID})`,
   "",
@@ -39,12 +54,37 @@ const reply = [
   JSON.stringify({ siteId: SITE_ID }),
   "```",
 ].join("\n");
+const earlier: SessionEvent[] = long
+  ? Array.from({ length: 3 }, (_, index): SessionEvent[] => [
+      {
+        id: `earlier-question-${index}`,
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        sequence: 1 + index * 2,
+        type: "user.message",
+        payload: { text: `Check the status of milestone ${index + 1}.` },
+        occurredAt: `2026-09-2${index + 1}T10:00:00Z`,
+      },
+      {
+        id: `earlier-answer-${index}`,
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        sequence: 2 + index * 2,
+        type: "agent.message.completed",
+        payload: {
+          text: `Milestone ${index + 1} is on track. Two reviews are open and the remaining work is scheduled for next week.`,
+        },
+        occurredAt: `2026-09-2${index + 1}T10:01:00Z`,
+      },
+    ]).flat()
+  : [];
 const events: SessionEvent[] = [
+  ...earlier,
   {
     id: "question",
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
-    sequence: 1,
+    sequence: earlier.length + 1,
     type: "user.message",
     payload: { text: "Summarize this week's progress." },
     occurredAt: "2026-09-30T10:00:00Z",
@@ -53,7 +93,7 @@ const events: SessionEvent[] = [
     id: "answer",
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
-    sequence: 2,
+    sequence: earlier.length + 2,
     type: "agent.message.completed",
     payload: { text: reply },
     occurredAt: "2026-09-30T10:01:00Z",

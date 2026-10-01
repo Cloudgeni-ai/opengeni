@@ -728,6 +728,7 @@ export type LatencyMode = z.infer<typeof LatencyMode>;
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
 export const ErrorCode = z.enum([
+  "allowance_exhausted",
   "unauthenticated",
   "forbidden",
   "not_found",
@@ -3597,6 +3598,7 @@ export type ListSlackUserLinkAccessRequestsResponse = z.infer<
 >;
 
 export * from "./organization-usage";
+export * from "./usage-allowances";
 
 export const UsageEventType = z.enum([
   "agent_run.created",
@@ -3978,6 +3980,9 @@ export const LimitDecision = z.discriminatedUnion("allowed", [
     allowed: z.literal(false),
     code: z.string(),
     message: z.string(),
+    scope: z.enum(["workspace", "member"]).optional(),
+    resetsAt: z.string().nullable().optional(),
+    subjectId: z.string().optional(),
   }),
 ]);
 export type LimitDecision = z.infer<typeof LimitDecision>;
@@ -6463,6 +6468,7 @@ export const SessionGoalPausedReason = z.enum([
   "no_progress",
   "max_auto_continuations",
   "limits",
+  "allowance",
 ]);
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
 
@@ -10250,7 +10256,7 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
  * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
- * `insufficient_credits`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
+ * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
  * (transient). Readers must tolerate new reasons.
  */
 export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ z
@@ -13294,6 +13300,9 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
 export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
+  "usage.threshold_reached",
+  "usage.exhausted",
+  "usage.period_reset",
   "session.created",
   "session.variable_sets.updated",
   "session.runtime.configured",
@@ -13623,6 +13632,9 @@ export const SESSION_EVENT_RAW_DELTA_TYPES = [
 
 export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
+    "usage.threshold_reached",
+    "usage.exhausted",
+    "usage.period_reset",
     "session.status.changed",
     "session.command.backgrounded",
     "session.wait.started",

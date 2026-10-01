@@ -199,18 +199,20 @@ export function priorityOrder(
       for (const x of byCov.filter((y) => (y.cov[j] ?? 0) >= p.subFloor).slice(0, p.subFallback))
         add(x);
   });
-  // declarations a correct change must also touch (sibling mutations, other entry points), best first
-  for (const x of [...passages]
-    .filter((y) => (y.ct ?? 0) >= o.cfg.change.threshold)
-    .sort((a, b) => (b.ct ?? 0) - (a.ct ?? 0))
-    .slice(0, o.cfg.change.maxChosen))
-    add(x);
   for (const x of diverseOrder(
     byRel.filter((y) => irel(y) >= o.T2 && !out.includes(y)),
     eff,
     p.filePenalty,
     new Map(taken),
   ))
+    add(x);
+  // declarations a correct change must also touch (sibling mutations, other entry points), best first.
+  // They come after the passages that passed T2: they add what a literal relevance check misses, and
+  // must never push a verified passage out of the budget (held-out replay, 2026-10-01).
+  for (const x of [...passages]
+    .filter((y) => (y.ct ?? 0) >= o.cfg.change.threshold)
+    .sort((a, b) => (b.ct ?? 0) - (a.ct ?? 0))
+    .slice(0, o.cfg.change.maxChosen))
     add(x);
   for (const x of byRel) {
     if (out.length >= p.minPassages) break;

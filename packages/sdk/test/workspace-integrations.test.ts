@@ -203,6 +203,36 @@ test("signature helpers retain routing and embedder identity additions", async (
   ).rejects.toThrow("signature verification failed");
 });
 
+test("verified pre-upgrade session and usage deliveries default their missing lane", async () => {
+  const secret = "legacy-lane-secret";
+  for (const type of ["turn.completed", "usage.exhausted", "usage.period_reset"]) {
+    const event = {
+      id: "event",
+      type,
+      workspaceId: "workspace",
+      ...(type === "turn.completed" ? { sessionId: "session" } : {}),
+      data: {},
+    };
+    const body = JSON.stringify(event);
+    const verified = await verifyWebhookEvent({
+      body,
+      secret,
+      headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, body) },
+    });
+    expect(JSON.stringify(verified.event)).toBe(JSON.stringify({ ...event, lane: "workspace" }));
+    for (const lane of [null, "invalid", ...(type.startsWith("usage.") ? ["organization"] : [])]) {
+      const invalidBody = JSON.stringify({ ...event, lane });
+      await expect(
+        verifyWebhookEvent({
+          body: invalidBody,
+          secret,
+          headers: { "OpenGeni-Signature": await signOpenGeniPayload(secret, invalidBody) },
+        }),
+      ).rejects.toThrow();
+    }
+  }
+});
+
 test("secret rotation helpers use exact scoped POSTs and return the new secret once", async () => {
   const calls: { path: string; method: string | undefined }[] = [];
   const client = new OpenGeniClient({

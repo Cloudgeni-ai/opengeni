@@ -48,6 +48,7 @@ export type TurnSettleFn = (input: {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   suppressGoalContinuation?: boolean;
+  allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
 }) => Promise<boolean>;

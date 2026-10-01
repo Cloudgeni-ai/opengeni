@@ -126,7 +126,10 @@ const budgets = {
   // gzip bytes there: main 6eb431b03 measures 80,769 and the head 82,325 on
   // Bun 1.3.14 macOS/arm64. Keep the standard whole-KiB headroom.
   initialFileGzip: wholeKibEnvelope(82_325),
-  initialFiles: 17,
+  // Usage allowances add typed refusal rendering to the session timeline and
+  // usage event types to shared contracts; Rolldown splits one shared members
+  // chunk into two (807 gzip bytes). Aggregate initial gzip stays under its cap.
+  initialFiles: 18,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,
@@ -479,6 +482,11 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Usage allowances: typed allowance refusal rendering in the session timeline
+    // plus usage event types in shared contracts, on top of main f874217f5
+    // (artifact viewer). Linux/x64 CI measures 2,531,746 raw / 713,634 gzip.
+    // Keep the established 1.5 KiB allowance; other caps stay fixed.
+    wholeKibEnvelope(2_531_746, 1.5 * kib),
     // Launch sign-up attribution: memory-only first-touch capture at boot and
     // attributed sign-up/social request bodies in the shared API helper. Base
     // 23e0a242a measures 2,453,795 raw / 693,297 gzip; this change 2,455,310 /
@@ -587,9 +595,21 @@ const effectiveBudgets = {
     // 17 files. Keep the established 1.5 KiB headroom; gzip below is the same
     // measurement, and every other cap stays fixed.
     wholeKibEnvelope(2_545_412, 1.5 * kib),
+    // Agent configuration integrated with main bb2f7ea7f (allowances, timeline
+    // placement and session model controls): Bun 1.4 Linux/x64 measures
+    // 2,571,800 raw / 725,870 gzip across 38 files; startup remains 17 files.
+    // Grouping the new config/allowance modules into startup-sdk-runtime was
+    // tried first: 2,572,020 / 726,382, still 38 files, so retain the smaller
+    // existing partition. Shared SDK methods and capability contracts are
+    // retained runtime code, not settings-only modules to move behind a route.
+    // Bound only these measured aggregates with the established 1.5 KiB
+    // headroom; every initial, per-file, file-count, lazy and CSS cap stays fixed.
+    wholeKibEnvelope(2_571_800, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Usage allowances on main f874217f5: 713,634 gzip (Linux/x64 CI).
+    wholeKibEnvelope(713_634, 1.5 * kib),
     // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
     // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
     // remain below their existing caps; retain the standard gzip variance allowance.
@@ -660,6 +680,8 @@ const effectiveBudgets = {
     wholeKibEnvelope(709_242, 1.5 * kib),
     // Agent configuration merged with main f874217f5, as measured above.
     wholeKibEnvelope(717_339, 1.5 * kib),
+    // Same current-main integration and grouping trial documented above.
+    wholeKibEnvelope(725_870, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

@@ -4,6 +4,8 @@ import type { WorkspaceSlackReactionSummonSettings } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../src/http/api-error";
 import { isApiContractProtectedMutation } from "../src/app";
 import { requireAccessKey } from "../src/http/auth";
 import { authorizeSlackSharedImageRead } from "../src/integrations/slack-bot";
@@ -18,6 +20,7 @@ import {
   slackInvocationModelContext,
   slackReactionInboxEntry,
   slackReactionTaskText,
+  slackAdmissionFailureText,
   SLACK_DELIVERY_EVENT_TYPES,
   SLACK_INTERACTION_MAX_BODY_BYTES,
   verifySlackRequestSignature,
@@ -25,6 +28,56 @@ import {
 
 const signingSecret = "slack-signing-secret-for-tests";
 const now = new Date("2026-08-01T12:00:00.000Z");
+
+describe("Slack allowance admission remedies", () => {
+  test.each(["workspace", "member"] as const)(
+    "typed %s refusal precedes generic HTTP 402",
+    (scope) => {
+      const refusal = {
+        code: "allowance_exhausted" as const,
+        scope,
+        subjectId: "user:member",
+        resetsAt: "2026-10-01T02:30:00+02:00",
+        message: "PRIVATE_SQL buy credits",
+      };
+      for (const error of [
+        new HTTPException(402, {
+          message: "PRIVATE_WRAPPER",
+          cause: { ...refusal, allowed: false },
+        }),
+        new ApiHttpError(402, { code: refusal.code, message: refusal.message, details: refusal }),
+      ]) {
+        const text = slackAdmissionFailureText(error);
+        expect(text).toContain(
+          scope === "workspace" ? "organization administrator" : "workspace administrator",
+        );
+        expect(text).toContain("2026-10-01 00:30 UTC");
+        expect(text).not.toMatch(/subscription|PRIVATE|user:member|buy credits/i);
+      }
+    },
+  );
+
+  test("null reset is explicit and normal source/balance and limit errors are unchanged", () => {
+    expect(
+      slackAdmissionFailureText(
+        new HTTPException(402, {
+          cause: {
+            code: "allowance_exhausted",
+            scope: "member",
+            resetsAt: null,
+            message: "Exhausted",
+          },
+        }),
+      ),
+    ).toContain("no automatic reset");
+    expect(slackAdmissionFailureText(new HTTPException(402))).toBe(
+      "OpenGeni could not start this task because the selected model has no available billing source. Open OpenGeni, select a connected subscription model, and try again.",
+    );
+    expect(slackAdmissionFailureText(new HTTPException(429))).toContain(
+      "review the workspace limits",
+    );
+  });
+});
 
 describe("Slack acknowledgement legacy line identity", () => {
   test("new interactions keep the original post seed; historical frozen lines keep their seed", () => {

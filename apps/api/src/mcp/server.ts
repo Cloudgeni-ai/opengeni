@@ -94,6 +94,7 @@ import {
   decryptVariableSetValue,
   encryptVariableSetValue,
   getSession,
+  getScheduledTaskRevisionAuthoritySubject,
   getSessionGoal,
   getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
@@ -340,6 +341,10 @@ import {
   searchAtlassianLive,
 } from "../integrations/atlassian";
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
+import {
+  allowanceExhaustedMessage,
+  parseAllowanceExhaustedRefusal,
+} from "@opengeni/contracts/allowance-refusal";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
@@ -370,7 +375,7 @@ const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 // API-wide request-body ceiling for this 200-code-point field.
 const MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS = WORK_DISCOVERY_QUERY_MAX_CHARS * 8;
 
-type OrchestrationToolName = "session_create" | "session_send_message";
+type OrchestrationToolName = "session_create" | "session_send_message" | "session_steer";
 
 function boundedOrchestrationFailureMessage(value: string): string {
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
@@ -440,6 +445,14 @@ function sessionCreateValidationFailureResult(error: z4.ZodError) {
 }
 
 function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknown) {
+  const allowance =
+    (error instanceof HTTPException ? parseAllowanceExhaustedRefusal(error.cause) : null) ??
+    parseAllowanceExhaustedRefusal(error);
+  if (allowance) {
+    return {
+      error: { ...allowance, message: allowanceExhaustedMessage(allowance), retryable: false },
+    };
+  }
   if (error instanceof SessionSpawnDeniedError) {
     const denial = sessionSpawnDenialEnvelope(error);
     return {
@@ -1692,13 +1705,24 @@ export function buildOpenGeniMcpServer(
             agentConfig: task.agentConfig,
             requireOnline: true,
           });
-          await requireLimit(deps, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            action: "agent_run:create",
-            quantity: 1,
-            model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
+          const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(deps.db, {
+            accountId: task.accountId,
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+            taskAuthorityRevision: task.authorityRevision,
           });
+          await requireLimit(
+            { ...deps, settings: catalogSettings },
+            {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              initiatingHumanSubjectId:
+                taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
+              action: "agent_run:create",
+              quantity: 1,
+              model: await resolveScheduledTaskPreflightModel(deps.db, catalogSettings, task),
+            },
+          );
         }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
         const agentRunUsageIdempotencyKey =
@@ -5629,33 +5653,37 @@ function registerWorkspaceOrchestrationTools(
           },
         },
         async ({ sessionId, instruction, idempotencyKey }) => {
-          const result = await steerAgentSession(
-            deps,
-            exactAgentCommandContext(grant, callerSessionId, "first_party_mcp"),
-            { targetSessionId: sessionId, instruction, idempotencyKey },
-          );
-          return json(
-            mcpMutationReceipt({
-              operation: "session_steer",
-              committed: true,
-              outcome: result.replay ? "replayed" : "updated",
-              changed: !result.replay,
-              resource: {
-                type: "session_system_update",
-                id: result.updateId,
-                state: result.effectiveState,
-              },
-              relatedResources: [{ type: "session", id: sessionId }],
-              timestamp: result.receipt.createdAt.toISOString(),
-              idempotency: { status: result.replay ? "replayed" : "applied" },
-              facts: {
-                interruptionCount: result.interruptionCount,
-                stoppingPreviousAttempt: result.interruptionCount > 0,
-              },
-              updateId: result.updateId,
-              nextAction: { tool: "session_get", arguments: { sessionId } },
-            }),
-          );
+          try {
+            const result = await steerAgentSession(
+              deps,
+              exactAgentCommandContext(grant, callerSessionId, "first_party_mcp"),
+              { targetSessionId: sessionId, instruction, idempotencyKey },
+            );
+            return json(
+              mcpMutationReceipt({
+                operation: "session_steer",
+                committed: true,
+                outcome: result.replay ? "replayed" : "updated",
+                changed: !result.replay,
+                resource: {
+                  type: "session_system_update",
+                  id: result.updateId,
+                  state: result.effectiveState,
+                },
+                relatedResources: [{ type: "session", id: sessionId }],
+                timestamp: result.receipt.createdAt.toISOString(),
+                idempotency: { status: result.replay ? "replayed" : "applied" },
+                facts: {
+                  interruptionCount: result.interruptionCount,
+                  stoppingPreviousAttempt: result.interruptionCount > 0,
+                },
+                updateId: result.updateId,
+                nextAction: { tool: "session_get", arguments: { sessionId } },
+              }),
+            );
+          } catch (error) {
+            return orchestrationFailureResult("session_steer", error);
+          }
         },
       );
 

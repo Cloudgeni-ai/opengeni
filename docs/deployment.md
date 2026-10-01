@@ -1,5 +1,17 @@
 # Deployment
 
+Workspace/member allowances use rolling migrations and a default-off producer
+gate. Upgrade every API, control worker, and turn worker before enabling
+`OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
+of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
+
+Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
+EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
+inventory during a rolling upgrade; no maintenance drain is required for these
+additions. The final `knowledge_index_claim` replacement pins
+`pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
+accounting sources. Upgrade consumers before enabling producer writes.
+
 ## Scheduled Slack channel posts (0530)
 
 `0530_scheduled_slack_bot_messages.sql` is rolling. It adds the private

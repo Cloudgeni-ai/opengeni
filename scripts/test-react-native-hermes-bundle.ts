@@ -98,6 +98,14 @@ async function verifyBundles(): Promise<void> {
     const corrected = await readFile(correctedPath, "utf8");
     invariant(corrected.includes("buildTimeline"), "Metro bundle omitted the public session entry");
     invariant(
+      corrected.includes("usage allowance is exhausted"),
+      "Metro bundle omitted the synchronous allowance refusal presenter",
+    );
+    invariant(
+      !corrected.includes("$ZodType") && !corrected.includes("ZodError"),
+      "The public session bundle loaded the schema runtime through allowance presentation",
+    );
+    invariant(
       !corrected.includes("await _$$_REQUIRE"),
       "Corrected public session bundle still contains Metro top-level await",
     );

@@ -58,6 +58,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./model-catalog";
+export * from "./codex-model-availability";
 export * from "./default-session-model";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`

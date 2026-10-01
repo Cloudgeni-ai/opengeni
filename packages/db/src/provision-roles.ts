@@ -524,6 +524,8 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "maintain_usage_allowances(integer,integer)",
+    "usage_allowance_command(jsonb)",
     "ensure_external_identity(uuid,text,text)",
     "lookup_external_identity(uuid,text,text,text)",
     "prepare_external_workspace_membership_operation(jsonb)",
@@ -704,6 +706,28 @@ BEGIN
         ${literal(schema)},
         ${literal(role)}
       );
+    END IF;
+    IF to_regprocedure(format('%I.usage_allowance_command(jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.usage_allowance_capability_active(uuid,uuid) TO PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_period(jsonb,timestamptz), %I.count_workspace_allowance_debit() FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_usage_allowance_attribution() FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.validate_usage_allowance_config(jsonb), %I.validate_usage_allowance_rule(jsonb), %I.emit_usage_allowance_notifications(uuid,uuid,jsonb,text,timestamptz,text) FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_usage_allowance_period(uuid,uuid,jsonb,timestamptz) FROM %I',${literal(schema)},${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.usage_allowance_members(uuid,uuid), %I.usage_allowance_effective_period(uuid,jsonb,timestamptz) FROM %I',${literal(schema)},${literal(schema)},${literal(role)});
+      IF to_regprocedure(format('%I.reverse_video_allowance_refund()', ${literal(schema)})) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.reverse_video_allowance_refund() FROM %I', ${literal(schema)}, ${literal(role)});
+      END IF;
+      FOREACH runtime_table IN ARRAY ARRAY['workspace_usage_allowances','workspace_member_allowances',
+        'workspace_allowance_grants','workspace_allowance_counters','workspace_allowance_notifications','workspace_allowance_periods',
+        'workspace_video_allowance_allocations','usage_allowance_attribution_receipts',
+        'workspace_allowance_clear_receipts']
+      LOOP
+        EXECUTE format('REVOKE ALL ON TABLE opengeni_private.%I FROM %I',runtime_table,${literal(role)});
+        EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.%I FROM %I',
+          (SELECT string_agg(quote_ident(attname),',') FROM pg_attribute
+            WHERE attrelid=format('opengeni_private.%I',runtime_table)::regclass
+              AND attnum>0 AND NOT attisdropped),runtime_table,${literal(role)});
+      END LOOP;
     END IF;
     -- Migration 0300's tenancy backfill ledger seam has the same shape: its
     -- own conditional GRANT block is skipped whenever opengeni_app does not
@@ -2129,6 +2153,11 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.usage_allowance_capabilities') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM PUBLIC;
     END IF;
     IF to_regclass('opengeni_private.session_file_attachments') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM %I', ${literal(role)});

@@ -932,7 +932,9 @@ describe("migration 0359 Insights FORCE-RLS read capability", () => {
     if (!owned || !appClient || !app) return;
     const input = await seedFixture();
     const sessionCount = 256;
-    const factsPerSession = 8;
+    // Exercise per-fact scalar RLS amortization, not a sparse window dominated
+    // by the fixed visible-session scan. Keep the 1.5x requirement unchanged.
+    const factsPerSession = 32;
     const sessionIds: string[] = [];
     for (let offset = 0; offset < sessionCount; offset += 16) {
       const batch = await Promise.all(
@@ -978,6 +980,16 @@ describe("migration 0359 Insights FORCE-RLS read capability", () => {
           from opengeni_private.visible_workspace_insights_model_call_facts(
             ${input.workspaceId}, ${input.since}, ${input.until}, 'needle', 'needle-model'
           )`;
+        // Each nullability shape has a separate cached PL/pgSQL plan. Warm
+        // both unfiltered paths actually compared below, not only the needle.
+        await tx`
+          select count(*) from model_call_facts
+          where account_id=${input.accountId} and workspace_id=${input.workspaceId}
+            and occurred_at>=${input.since} and occurred_at<${input.until}`;
+        await tx`
+          select count(*) from opengeni_private.visible_workspace_insights_model_call_facts(
+            ${input.workspaceId}, ${input.since}, ${input.until}
+          )`;
       }
       const directTimes: number[] = [];
       const repairedTimes: number[] = [];
@@ -1005,7 +1017,9 @@ describe("migration 0359 Insights FORCE-RLS read capability", () => {
       }
       return { directTimes, repairedTimes };
     });
-    expect(median(plans.repairedTimes)).toBeLessThan(median(plans.directTimes) / 1.5);
+    expect(median(plans.repairedTimes), JSON.stringify(plans)).toBeLessThan(
+      median(plans.directTimes) / 1.5,
+    );
 
     let selectiveIndexScans = 0;
     for (let attempt = 0; attempt < 20; attempt += 1) {

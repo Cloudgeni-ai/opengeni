@@ -399,10 +399,13 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelRequestCapture,
+  withModelCallLifecycle,
+  type ModelCallLifecycle,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
+export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,
@@ -8146,6 +8149,10 @@ export async function prepareRunInput(
 }
 
 export type RunAgentStreamOptions = {
+  /** Producer-side gate before calling any resolved model/provider. */
+  beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
+  /** Register terminal response settlement before the next producer model request. */
+  onModelResponse?: ModelCallLifecycle["onModelResponse"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -8391,8 +8398,17 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
-    const stream = await withPreparedCompactionRequest(agent, () =>
-      runAgentStreamInternal(agent, input, settings, overrides, scope),
+    const stream = await withModelCallLifecycle(
+      {
+        ...(overrides.beforeModelRequest
+          ? { beforeModelRequest: overrides.beforeModelRequest }
+          : {}),
+        ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+      },
+      () =>
+        withPreparedCompactionRequest(agent, () =>
+          runAgentStreamInternal(agent, input, settings, overrides, scope),
+        ),
     );
     // Observe the SDK's own settlement promise before exposing the stream. Do
     // not wrap/replace SDK history, errors, cancellation, or stream iteration.

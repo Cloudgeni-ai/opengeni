@@ -25,6 +25,26 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Allowance lifecycle recovery
+
+`getWorkspaceAllowance(workspaceId)` still returns nullable configuration.
+Use `getWorkspaceAllowanceState(workspaceId)` when you also need the lifecycle
+version: `{ version: 0, config: null }` means never configured, while a positive
+version with null configuration means cleared. Recreation uses that exact
+version as `expectedVersion`.
+
+`clearWorkspaceAllowance(workspaceId, { expectedVersion, operationId })` returns
+`{ version }`. The optional operation ID makes a lost response recoverable:
+reuse the same actor, operation ID and exact request. Replay rechecks current
+authority and returns 409 after any later allowance lifecycle change. On 409,
+read the current state and decide whether a new operation is intended; never
+guess a CAS version. The SDK does not automatically retry mutations.
+
+State reads require the same budget-read authority as configuration reads.
+Full usage additionally requires target workspace access; organization budget
+authority alone does not expose the member roster. Agents cannot read or
+change allowances.
+
 ## Embed the conversation (default)
 
 The default product integration is the full OpenGeni conversation:

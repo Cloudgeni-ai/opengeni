@@ -20,6 +20,11 @@ On [app.opengeni.ai](https://app.opengeni.ai), agent usage is paid with prepaid 
 - `getBillingUsage` returns usage for accounting and requires billing permission. Chat replies do not carry a per-request price.
 - Distinguish OpenGeni credit charges from what your model provider bills you directly.
 
+For per-seat included usage, administrator splits, top-ups, team budgets, or
+browser progress meters, see [Usage allowances](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/usage-allowances.md).
+Keep organization-budget writes on your backend; the conversation proxy exposes
+only the user's own usage. Allowances are post-call ceilings, not prepaid reservations.
+
 ## Keep SDK and server compatible
 
 Published SDKs and servers are compatible within the same major version. Within a major, changes are additive: servers ignore unknown request fields, and clients ignore unknown response fields and event types. Install `@opengeni/sdk` and `@opengeni/react` from the same release, and read the server version from `/healthz` or `/v1/config/client`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).

@@ -1,4 +1,4 @@
-import { AgentConfigError, type ErrorCode } from "@opengeni/contracts";
+import { AgentConfigError, AllowanceExhaustedRefusal, type ErrorCode } from "@opengeni/contracts";
 import { WorkspaceControlBusyError } from "@opengeni/db";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
@@ -26,6 +26,25 @@ export class ApiHttpError extends HTTPException {
     this.outcomeUnknown = options.outcomeUnknown;
     this.details = options.details;
   }
+}
+
+/** Preserve typed admission details through the common public error envelope. */
+export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof HTTPException) || error.status !== 402) return null;
+  const parsed = AllowanceExhaustedRefusal.safeParse(
+    error.cause && typeof error.cause === "object"
+      ? Object.fromEntries(Object.entries(error.cause).filter(([key]) => key !== "allowed"))
+      : error.cause,
+  );
+  if (!parsed.success) return null;
+  const { code, message, ...details } = parsed.data;
+  return new ApiHttpError(402, {
+    code,
+    message,
+    retryable: false,
+    outcomeUnknown: false,
+    details,
+  });
 }
 
 /**

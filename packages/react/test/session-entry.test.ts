@@ -53,7 +53,13 @@ describe("session-only entry", () => {
     expect(visited.has(join(packageRoot, "src/session-context.ts"))).toBe(true);
     expect([...visited].some((file) => file.includes("/src/components/"))).toBe(false);
     expect([...visited].some((file) => file.includes("/src/commands/"))).toBe(false);
-    expect([...thirdParty].sort()).toEqual(["@opengeni/sdk", "react"]);
+    // The synchronous refusal presenter is an explicit schema-runtime-free
+    // SDK leaf, not permission to import contracts/server/workbench barrels.
+    expect([...thirdParty].sort()).toEqual([
+      "@opengeni/sdk",
+      "@opengeni/sdk/allowance-refusal",
+      "react",
+    ]);
     expect(visited.size).toBeGreaterThan(5);
   });
 
@@ -77,7 +83,12 @@ describe("session-only entry", () => {
         minify: true,
         rollupOptions: {
           input: join(import.meta.dir, "fixtures/session-consumer.ts"),
-          external: ["react", "react/jsx-runtime", "@opengeni/sdk"],
+          external: [
+            "react",
+            "react/jsx-runtime",
+            "@opengeni/sdk",
+            "@opengeni/sdk/allowance-refusal",
+          ],
         },
       },
     });

@@ -298,6 +298,14 @@ server file.
 
 ## Boundary and ownership
 
+For included-usage plans, per-seat equal splits, administrator sliders, custom
+shares, top-ups, and monthly team budgets, see
+[Usage allowances](usage-allowances.md). Allowance amounts are integer USD
+micros and govern actual OpenGeni credit debits; they are soft post-call
+ceilings, not reservations or organization-credit purchases. Keep budget
+configuration/grants in organization-authorized backend flows and use the
+session proxy's own-usage route for a browser meter.
+
 ```text
 product browser / mobile client
              |

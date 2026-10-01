@@ -2606,6 +2606,8 @@ export async function sendAgentMessageInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     text: string;
+    /** Fresh admission only, after receipt replay and exact caller authority. */
+    assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /**
      * Bound the workspace control prefix wait (request-scoped API callers pass
      * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
@@ -2666,6 +2668,7 @@ export async function sendAgentMessageInTransaction(
     targetSessionId: input.targetSessionId,
     action: "message",
   });
+  await input.assertFreshAdmission?.(db);
   const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
@@ -2857,6 +2860,8 @@ export async function steerAgentSessionInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     instruction: string;
+    /** Runs before resume, supersession or interruption; never on receipt replay. */
+    assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -2920,6 +2925,7 @@ export async function steerAgentSessionInTransaction(
     targetSessionId: input.targetSessionId,
     action: "steer",
   });
+  await input.assertFreshAdmission?.(db);
   const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,

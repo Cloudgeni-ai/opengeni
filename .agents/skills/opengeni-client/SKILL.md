@@ -224,6 +224,11 @@ with `agentConfig.agent`, and change a running session with `updateSessionAgent`
 `session.effectiveTools`. Read [Configure the agent](references/configure-the-agent.md)
 before choosing; it also covers `chats`, the admission switch and error codes.
 
+For per-seat included usage, administrator splits, top-ups, team budgets, or
+browser progress meters, read [Usage allowances](references/usage-allowances.md).
+Keep organization-budget writes on the backend; the conversation proxy exposes
+only own usage. These are post-call ceilings, not prepaid reservations.
+
 ## Build Gotchas
 
 - Always pass `baseUrl` (`process.env.OPENGENI_API_BASE_URL`); the chat facade

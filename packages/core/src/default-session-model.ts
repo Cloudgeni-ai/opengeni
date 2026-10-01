@@ -37,6 +37,8 @@ import {
   type WorkspaceModelSelectionInput,
 } from "./model-catalog";
 
+import { loadWorkspaceCodexModelAvailability } from "./codex-model-availability";
+
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
   "minimal",
@@ -325,6 +327,7 @@ export async function loadWorkspaceModelSelectionInput(
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
     policy,
     codexSubscriptionActive,
+    observations,
     workspaceGatewayConnectionActive,
     workspaceGatewayCustomModels,
     openRouterConnectionActive,
@@ -337,6 +340,7 @@ export async function loadWorkspaceModelSelectionInput(
     connectionRestrictionsAndXaiReadiness(db, settings, context),
     getWorkspaceModelPolicy(db, workspaceId),
     workspaceCodexSubscriptionActive(db, settings, workspaceId),
+    loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
     workspaceVercelAiGatewayConnectionActive(db, workspaceId),
     listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
     workspaceOpenRouterConnectionActive(db, workspaceId),
@@ -367,6 +371,7 @@ export async function loadWorkspaceModelSelectionInput(
     settings,
     policy,
     codexSubscriptionActive,
+    observations,
     xaiSubscriptionActive,
     workspaceGatewayConnectionActive,
     workspaceGatewayCustomModels,

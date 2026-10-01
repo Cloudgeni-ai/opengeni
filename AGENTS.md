@@ -251,6 +251,12 @@ preserves the router, never removed execution authority.
 - Advisory work discovery never becomes authority. Apply tenancy/private-session rules, exact attempt validation, Slack-private scope, and optional host list narrowing before lifecycle filters, title/active-goal/typed-claim matching, ranking, counts, cursors, or ancestor expansion. Never search `initialMessage`, instructions, resources, tools, files, or full history. Work claims are bounded, durable, non-exclusive evidence with exact-attempt CAS/idempotency and lifecycle settlement; they do not lock, reserve, reassign, authorize, cancel, steer, message, or require a search. Preserve the literal `advisoryOnly` and `noAdditionalAccess` projection facts, keep automatic nudges off until separately reviewed, and use the independent rollout switches instead of deleting evidence or rolling back migrations. See `docs/work-discovery.md`.
 - Personal Knowledge can retrieve authorized shared entries, but all authoring stays in its exact writable owner layer. Evidence and group links never widen access. See `docs/knowledge.md`.
 - Workspace integration primitives (credential provider, webhooks, `_meta.opengeni`, allowlisted `defaultSandboxImage`) are admin-configured and never agent-configurable. The webhook enqueue trigger runs inside the session-event writer's transaction and must never abort it; the credential provider replaces the injected `runCredentials` port only for its workspace and reuses that lifecycle; `_meta.opengeni` is informational identity set from trusted worker scope, never authority. See `docs/workspace-integrations.md`.
+- Usage allowances are organization-owned workspace ceilings and workspace-admin
+  member ceilings, never agent-editable funding. Count each actual credit debit
+  atomically with its ledger insert and attribute it to the frozen initiating
+  human, not the session creator. Admission reads counters; post-call stopping
+  permits overshoot without reservations. Enable new writes only after the
+  complete fleet supports enforcement. See `docs/usage-allowances.md`.
 - Codex rate-limit reset credits are never automatic agent capacity. Their
   irreversible consume path is managed-cookie owning-human web-only with durable
   provider idempotency; do not add an SDK, MCP, Codemode, worker, scheduled, or

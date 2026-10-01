@@ -60,6 +60,8 @@ export type {
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEvent,
   WorkspaceWebhookEventType,
+  SessionWorkspaceWebhookEvent,
+  WorkspaceUsageWebhookEvent,
 } from "@opengeni/contracts";
 export {
   OPENGENI_DELIVERY_ID_HEADER,
@@ -122,16 +124,24 @@ export async function verifyWebhookEvent(input: SignedRequest): Promise<{
   deliveryId: string | null;
 }> {
   const event = await verifiedObject(input);
+  const usageEvent = typeof event.type === "string" && event.type.startsWith("usage.");
+  const lane = event.lane === undefined ? "workspace" : event.lane;
   if (
     typeof event.id !== "string" ||
     typeof event.type !== "string" ||
     typeof event.workspaceId !== "string" ||
-    typeof event.sessionId !== "string"
+    (lane !== "workspace" && lane !== "organization") ||
+    (usageEvent && lane !== "workspace") ||
+    !(
+      typeof event.sessionId === "string" ||
+      ((event.sessionId === null || event.sessionId === undefined) &&
+        ["usage.threshold_reached", "usage.exhausted", "usage.period_reset"].includes(event.type))
+    )
   ) {
     throw new OpenGeniSignatureError();
   }
   return {
-    event: event as WorkspaceWebhookEvent,
+    event: { ...event, lane } as WorkspaceWebhookEvent,
     deliveryId: header(input.headers, OPENGENI_DELIVERY_ID_HEADER),
   };
 }

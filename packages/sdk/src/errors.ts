@@ -68,6 +68,62 @@ export class OpenGeniSetupError extends OpenGeniApiError {
   }
 }
 
+/** A settled usage ceiling refuses the next call; retry after reset or an authorized grant. */
+export class OpenGeniAllowanceExhaustedError extends OpenGeniApiError {
+  readonly scope: "workspace" | "member";
+  readonly resetsAt: string | null;
+  readonly subjectId: string | undefined;
+
+  constructor(
+    status: number,
+    body: string,
+    options: ConstructorParameters<typeof OpenGeniApiError>[2] = {},
+  ) {
+    super(status, body, {
+      ...options,
+      code: "allowance_exhausted",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    this.name = "OpenGeniAllowanceExhaustedError";
+    const refusal = allowanceExhaustedFields(body);
+    this.scope = refusal?.scope ?? "workspace";
+    this.resetsAt = refusal?.resetsAt ?? null;
+    this.subjectId = refusal?.subjectId;
+  }
+}
+
+/** Accept both the API error envelope and the standalone admission refusal. */
+export function allowanceExhaustedFields(body: string): {
+  scope: "workspace" | "member";
+  resetsAt: string | null;
+  subjectId?: string;
+} | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    const error =
+      root.error && typeof root.error === "object" && !Array.isArray(root.error)
+        ? (root.error as Record<string, unknown>)
+        : root;
+    if (error.code !== "allowance_exhausted") return null;
+    const fields =
+      error.details && typeof error.details === "object" && !Array.isArray(error.details)
+        ? (error.details as Record<string, unknown>)
+        : error;
+    if (fields.scope !== "workspace" && fields.scope !== "member") return null;
+    if (fields.resetsAt !== null && typeof fields.resetsAt !== "string") return null;
+    return {
+      scope: fields.scope,
+      resetsAt: fields.resetsAt,
+      ...(typeof fields.subjectId === "string" ? { subjectId: fields.subjectId } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export type OpenGeniSecureContextRequiredReason = "insecure_context" | "web_crypto_unavailable";
 
 /**

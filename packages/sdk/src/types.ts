@@ -1974,6 +1974,9 @@ export type SessionHumanInputRequest = {
 };
 
 export const SESSION_EVENT_TYPES = [
+  "usage.threshold_reached",
+  "usage.exhausted",
+  "usage.period_reset",
   "session.created",
   "session.variable_sets.updated",
   "session.runtime.configured",
