@@ -420,6 +420,44 @@ describe("early accepted-definition mismatch", () => {
     }
   });
 
+  test.each([false, true])(
+    "setup uncertainty after eventing preserves history and no-replay authority on checkpoint outage %s",
+    async (outage) => {
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      const { deps } = codexFailureDeps({ error: genuineSetupUnknown() });
+      const reconcile = mock(async () => {
+        if (outage)
+          throw Object.assign(new Error("history database reset"), { code: "ECONNRESET" });
+      });
+      const terminal = mock(async () => true);
+      deps.historySink.reconcileConversationTruth = reconcile;
+      deps.eventing.settle = terminal;
+      try {
+        if (outage) {
+          await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+            type: "OpenGeniPostClaimDatabaseRecovery",
+            details: [expect.objectContaining({ sandboxSetupOutcomeUnknown: true })],
+          });
+          expect(recovery).not.toHaveBeenCalled();
+        } else {
+          expect(await settleTurnFailure(deps as any)).toMatchObject({
+            status: "recovering",
+            deferredUntilWake: true,
+          });
+          expect(recovery).toHaveBeenCalledTimes(1);
+        }
+        expect(reconcile).toHaveBeenCalledWith({ requireDurable: true });
+        expect(terminal).not.toHaveBeenCalled();
+        expect(deps.control.activityStatus).toBe("recovering");
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
   test("a setup-unknown checkpoint outage carries the no-replay marker into DB-only recovery", async () => {
     const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockRejectedValue(
       Object.assign(new Error("database connection reset"), { code: "ECONNRESET" }),

@@ -349,12 +349,12 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     attempt.triggerEventId &&
     attempt.executionGeneration > 0
   ) {
-    if (eventing.turnStartedPublished) {
-      await flushRuntimeBatcher();
-      await historySink.reconcileConversationTruth({ requireDurable: true });
-    }
     let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
     try {
+      if (eventing.turnStartedPublished) {
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ requireDurable: true });
+      }
       recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
