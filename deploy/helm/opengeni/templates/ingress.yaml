@@ -139,3 +139,72 @@ spec:
           {{- end }}
     {{- end }}
 {{- end }}
+{{- $mcpOAuthEnabled := has (lower (trim (toString (.Values.config.OPENGENI_MCP_OAUTH_ENABLED | default "false")))) (list "true" "1" "yes" "y" "on") }}
+{{- $mcpOAuthHosts := list }}
+{{- range .Values.ingress.hosts }}
+  {{- $host := . }}
+  {{- $hasApiRoute := false }}
+  {{- range .paths }}
+    {{- if eq .service "api" }}
+      {{- $hasApiRoute = true }}
+    {{- end }}
+  {{- end }}
+  {{- if $hasApiRoute }}
+    {{- $mcpOAuthHosts = append $mcpOAuthHosts $host }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.mcpOAuthIngress.enabled .Values.api.enabled $mcpOAuthEnabled (gt (len $mcpOAuthHosts) 0) }}
+---
+# Workspace MCP OAuth publishes its authorization-server metadata, protected-
+# resource metadata, registration, authorization, and token endpoints at the
+# issuer origin root, outside /v1. Without these exact API routes the primary
+# Ingress sends them to the web application, which answers HTML and breaks MCP
+# client discovery. Rendered only while OPENGENI_MCP_OAUTH_ENABLED is true.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-mcp-oauth
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+  {{- with .Values.ingress.mcpOAuthIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $mcpOAuthHosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          - path: /.well-known/oauth-authorization-server
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-api
+                port:
+                  name: http
+          - path: /.well-known/oauth-protected-resource
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-api
+                port:
+                  name: http
+          {{- range list "/oauth/register" "/oauth/authorize" "/oauth/token" }}
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-api
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

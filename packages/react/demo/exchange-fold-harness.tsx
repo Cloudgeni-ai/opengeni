@@ -44,6 +44,8 @@ type ExchangeFoldHarness = {
   olderRequested(): boolean;
   /** Deliver the older history the timeline asked for. */
   completeOlder(): void;
+  /** The deprecated global navigation callback must never be used by the UI. */
+  questionResolverCalls(): number;
 };
 
 declare global {
@@ -307,13 +309,24 @@ function stickyScenario(): Draft[] {
 }
 
 /** Several exchanges, so a window that starts inside one can load older history. */
-function historyScenario(): Draft[] {
+function historyScenario(tallPrompt = false): Draft[] {
   const { drafts, add, tool, stream, settle } = script();
   for (let exchange = 1; exchange <= 4; exchange += 1) {
     const turnId = `turn-${exchange}`;
     add(
       "user.message",
-      { text: `Question ${exchange}: how did signups move this week?` },
+      {
+        text: `Question ${exchange}: how did signups move this week?${
+          tallPrompt && exchange === 2
+            ? "\n\n" +
+              Array.from(
+                { length: 14 },
+                (_, index) =>
+                  `Requirement ${index + 1}: compare the full signup history with the previous week and explain the retained evidence.`,
+              ).join("\n\n")
+            : ""
+        }`,
+      },
       null,
       30,
     );
@@ -476,6 +489,7 @@ const SCENARIOS: Record<string, () => Draft[]> = {
   "follow-up": followUpScenario,
   notes: notesScenario,
   history: historyScenario,
+  "history-tall": () => historyScenario(true),
   sticky: stickyScenario,
   "review-maintenance": () => {
     const { drafts, add } = script();
@@ -588,6 +602,7 @@ function App() {
   // the reader's position right before the prepend lands.
   const deferOlder = useRef(false);
   const olderRequested = useRef(false);
+  const questionResolverCalls = useRef(0);
   const [dark, setDark] = useState(true);
   const [compact, setCompact] = useState(true);
   const [playing, setPlaying] = useState(false);
@@ -625,6 +640,7 @@ function App() {
         setCount(value);
       },
       olderRequested: () => olderRequested.current,
+      questionResolverCalls: () => questionResolverCalls.current,
       completeOlder: () => setWindowStart(0),
       indexOf: (type, match = {}) =>
         drafts.flatMap((draft, index) =>
@@ -730,7 +746,13 @@ function App() {
             hasOlder={windowStart > 0}
             hasNewer={historyMode && count < drafts.length}
             onJumpToStart={() => setWindowStart(0)}
+            onJumpToLatest={() => {
+              setHistoryMode(false);
+              setWindowStart(0);
+              setCount(drafts.length);
+            }}
             onJumpToLatestQuestion={async () => {
+              questionResolverCalls.current++;
               const end = historyMode ? drafts.length : count;
               const target =
                 drafts
