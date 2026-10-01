@@ -154,16 +154,23 @@ test("parent-scope changes abort stale reads and reset the pagination stack", as
   const requests: Array<{ parentSessionId?: string | null; cursor?: string; signal: AbortSignal }> =
     [];
   const stale = deferred<ConversationSearchPage>();
+  const allScope = deferred<ConversationSearchPage>();
+  const returnedParentScope = deferred<ConversationSearchPage>();
+  let parentReads = 0;
+  let allReads = 0;
   const view = await harness(async (_workspace, request, options) => {
     requests.push({ ...request, signal: options!.signal! });
     if (request.parentSessionId === null && request.cursor) return stale.promise;
-    if (request.parentSessionId === null)
+    if (request.parentSessionId === null) {
+      if (++parentReads > 1) return returnedParentScope.promise;
       return page({
         matches: Array.from({ length: 50 }, (_, index) => hit(`parent-${index}`)),
         hasMore: true,
         nextCursor: "parent-next",
         countIsExact: false,
       });
+    }
+    if (++allReads > 1) return allScope.promise;
     return page({ matches: [hit("child")] });
   });
   try {
@@ -182,7 +189,11 @@ test("parent-scope changes abort stale reads and reset the pagination stack", as
     await flush();
     expect(requests.at(-1)?.cursor).toBeUndefined();
     expect(requests.at(-1)).not.toHaveProperty("parentSessionId");
+    // Hold the new response until after checking the reset: act() may let a
+    // zero-delay read finish before render() returns on a busy CI runner.
     await act(async () => stale.resolve(page({ matches: [hit("stale-parent")] })));
+    expect(view.state().page).toBeNull();
+    await act(async () => allScope.resolve(page({ matches: [hit("child")] })));
     expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["child"]);
     await view.render({ parentSessionId: null });
     expect(view.state().page).toBeNull();
@@ -190,6 +201,8 @@ test("parent-scope changes abort stale reads and reset the pagination stack", as
     expect(requests.at(-1)?.parentSessionId).toBeNull();
     expect(requests.at(-1)?.cursor).toBeUndefined();
     expect(view.state().pageIndex).toBe(0);
+    await act(async () => returnedParentScope.resolve(page({ matches: [hit("returned-parent")] })));
+    expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["returned-parent"]);
   } finally {
     await view.unmount();
   }

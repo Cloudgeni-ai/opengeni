@@ -482,6 +482,11 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Parent-scoped session discovery adds its SDK request field and shared
+    // search identity/cancellation wiring. Bun 1.4 Linux/x64 measures base
+    // 2,536,098 raw and candidate 2,538,730 (configured CI: 2,538,748).
+    // Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_538_748, 1.5 * kib),
     // Usage allowances UI (composer limit notice, conversation refusal row)
     // with #3053's final-reply notice: 2,536,098 raw on Bun 1.4 macOS/arm64.
     wholeKibEnvelope(2_536_098, 1.5 * kib),
