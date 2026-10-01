@@ -380,19 +380,15 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Agents run on Connected Machines (`selfhosted`), without creating sandboxes.
-Browser shutdown: [native lifecycle](../agent/README.md#distribution).
-Managed updates fence new work and require idle commands, uploads, and every
-owned browser/computer controller. Browserd reports only a private idle boolean;
-unavailable proof defers the update and preserves normal admission.
-Mac updates preserve signed bundles; writes check ACLs
-([native writer](../agent/TRANSACTIONAL-WRITES.md)).
+Connected Machines (`selfhosted`) run agents without sandboxes. [Native updates](../agent/README.md#distribution)
+fence admission and require idle commands, uploads and browser/computer controllers;
+unavailable proof defers updates. Mac updates preserve signed bundles and
+[write ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
-The machine owns files, Git authentication, environment, and [renewable credentials](connected-machines.md).
+Machines own files, Git authentication, environment and [credential renewal](connected-machines.md).
 OpenGeni neither clones repositories nor installs durable control-plane credentials;
-authorized child processes receive only transient, exact-attempt Codemode authority.
-
-Sandboxless attachment rebuilds native capabilities through [same-turn recovery](run-lifecycle.md), without replaying completed tools.
+children receive transient, exact-attempt Codemode authority.
+[Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
 
 Machine paths are host-native and session-specific, not universal `/workspace`
 aliases. Unavailability produces a typed operation outcome; text-only reasoning
