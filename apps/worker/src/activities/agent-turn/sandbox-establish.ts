@@ -102,6 +102,7 @@ export type SandboxRouteOk = {
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];
   groupBoxImage: ReturnType<typeof rigProviderImageSourceImage>;
+  groupBoxImagePolicy: "new_creates_only";
   sandboxCreationBackend: Settings["sandboxBackend"];
   effectiveRunCredentialBackend: Settings["sandboxBackend"];
 };
@@ -299,6 +300,7 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     machinePrimary,
     groupBoxBackend,
     groupBoxImage,
+    groupBoxImagePolicy: "new_creates_only",
     sandboxCreationBackend,
     effectiveRunCredentialBackend,
   };
@@ -341,6 +343,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     machinePrimary,
     groupBoxBackend,
     groupBoxImage,
+    groupBoxImagePolicy,
     rigVersion,
     turnResources,
   } = deps;
@@ -665,6 +668,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 ...(groupBoxImage
                   ? {
                       image: groupBoxImage,
+                      imagePolicy: groupBoxImagePolicy,
                     }
                   : {}),
                 // The lazy acquire must enforce the same frozen rig authority
@@ -744,17 +748,17 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 backend: groupBoxBackend,
                 os: groupBoxOs,
                 environment: sandboxEnvironment,
-                // IMAGE IS SHARED STATE (B3): the container image
-                // this run resolves. The lease stamps it + conflicts on a live shared box
-                // running a DIFFERENT image (solo → durable rotation; N-holders →
-                // SandboxImageConflictError surfaced as an actionable turn error). Select
-                // the image for the actual group-box backend; a configured Modal image must
+                // Deployment/workspace pins select NEW creates only. The lease
+                // retains a live group's image through between-turn repins, even
+                // with other holders; only rotation/reaping elects a new image.
+                // Select the image for the actual group-box backend; a configured Modal image must
                 // never override a Docker run. The selfhosted branch
                 // (establishSelfhostedTurnSession) NEVER passes
                 // an image — B3 lives only on this managed-box branch.
                 ...(groupBoxImage
                   ? {
                       image: groupBoxImage,
+                      imagePolicy: groupBoxImagePolicy,
                     }
                   : {}),
                 // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease

@@ -37,6 +37,7 @@ describe("managed sandbox logical image identity", () => {
 
     expect(route.groupBoxBackend).toBe("modal");
     expect(route.groupBoxImage).toBe(logicalImage);
+    expect(route.groupBoxImagePolicy).toBe("new_creates_only");
     expect(runSettings.modalImageId).toBe("im-01M0X53D38C3458D71F48QH2T1");
   });
 

@@ -612,6 +612,10 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Once a preference snapshot exists, later attempts of that same turn copy its
+exact immutable descriptors rather than re-rendering historical state. This
+preserves accepted receipts across permanent Skill removal and renderer changes,
+without restoring removed content or relaxing live attempt authority.
 Service-only turns have no human preference scope and skip the preference
 snapshot capability entirely; service continuations carrying a frozen causal
 human and legacy subject turns still snapshot that human's applicable entries.
@@ -2043,7 +2047,15 @@ attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
 not create a temporary box and ask SDK hydration to replace it. Directory and tar
 archives still hydrate the elected destination. This removes the hidden second
-create. Migration 0523 adds a durable Modal creation receipt immediately before
+create. Deployment/workspace image pins apply only to new sandbox creates. Turn,
+viewer and direct-operation admissions retain a warming, warm or re-armable
+draining group's recorded image under the lease row lock; a between-turn repin
+neither relabels the existing provider nor requests rotation. The cold successor
+election after normal rotation/reaping stamps the then-selected pin. Explicit
+required-image changes retain their shared-state conflict behavior; rig-version,
+capture, rotation and epoch fences remain enforced.
+
+Migration 0523 adds a durable Modal creation receipt immediately before
 the physical `SandboxCreate` RPC. The runtime's `modal-create-session.ts` owns
 creation and retains the pinned SDK's public session implementation; its
 `modal-create-boundary.ts` hook runs after image/secret preparation and before
@@ -2363,7 +2375,16 @@ readers cannot parse the new discriminator. After old active locators have
 settled or passed the existing evidence-backed drain, remove the legacy live
 reader; historical records remain immutable and do not authorize execution.
 
-SDK-internal setup/readiness commands still use their original live SDK observer
+Modal lease readiness uses `ModalCommandControl.verifyExecReadiness`: a fixed
+`/bin/true` invocation with no shell, user environment or command admission.
+The existing 60-second budget covers channel readiness and exit observation.
+Only typed local pre-dispatch failure retries Start. A transport failure after
+dispatch instead observes the same UUID, retrying transient reads without another
+Start. Budget expiry and attempt cancellation abort the native RPCs; success
+requires zero exit and EOF on both streams. Definitive rejection and nonzero
+exit remain failures. This applies to both new boxes and warm reattachment.
+
+Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range
 (1–2147483647), so a setup process cannot collide with a retained command. Only
 the same adapter can read those aliases; they cannot be bound as durable commands

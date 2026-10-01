@@ -1,5 +1,7 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { posix } from "node:path";
+import { status } from "@grpc/grpc-js";
+import { setTimeout as delay } from "node:timers/promises";
 import { shellQuote } from "@openai/agents-core/sandbox/internal";
 import {
   SandboxProviderCommand,
@@ -293,6 +295,74 @@ export class ModalCommandControl {
     if (sandboxId !== this.sandboxId)
       throw new Error("Modal instance changed during supervision capability verification");
     return { sandboxId, taskId: task.taskId };
+  }
+
+  /** Fixed provider readiness probe. No shell, user environment, admission or
+   * SDK Start retries. Once Start may have been sent, only observe that exact
+   * invocation; DNS-shaped server replies never authorize another Start. */
+  async verifyExecReadiness(signal: AbortSignal): Promise<number> {
+    signal.throwIfAborted();
+    const sandboxId = this.sandboxId;
+    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+    if (sandboxId !== this.sandboxId)
+      throw new Error("Modal sandbox changed during readiness preparation");
+    const identity = { taskId: task.taskId, execId: randomUUID() };
+    const transientObservation = (error: unknown) =>
+      [status.UNAVAILABLE, status.DEADLINE_EXCEEDED].includes(
+        (error as { code?: number } | null)?.code ?? -1,
+      );
+    const pause = () => delay(100, undefined, { signal });
+    return await this.withRouter(task.taskId, signal, async (router) => {
+      for (;;) {
+        signal.throwIfAborted();
+        try {
+          await router.start(
+            { ...identity, commandArgs: ["/bin/true"], workdir: "/tmp", env: {} },
+            signal,
+          );
+          break;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error instanceof ModalCommandStartPreDispatchUnavailableError) {
+            await pause();
+            continue;
+          }
+          // A lost Start acknowledgement is not replay permission. The probe
+          // may already exist, so keep this identity even if observation later
+          // exhausts the caller's readiness budget.
+          if (
+            error instanceof ModalCommandStartRejectedError ||
+            error instanceof ModalCommandStartNotDispatchedError
+          )
+            throw error;
+          break;
+        }
+      }
+      const streams = {
+        stdout: { offset: 0, eof: false },
+        stderr: { offset: 0, eof: false },
+      };
+      for (;;) {
+        signal.throwIfAborted();
+        try {
+          for (const stream of ["stdout", "stderr"] as const) {
+            const cursor = streams[stream];
+            if (cursor.eof) continue;
+            const page = await router.read(identity, stream, cursor.offset, 1_000, signal);
+            cursor.offset += page.bytes.length;
+            cursor.eof = page.eof;
+          }
+          const exit = await router.poll(identity, signal);
+          signal.throwIfAborted();
+          if (exit !== null && streams.stdout.eof && streams.stderr.eof) return exit;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (!transientObservation(error)) throw error;
+        }
+        await pause();
+      }
+    });
   }
 
   /** Separate authenticated provider execution of the installed control helper.

@@ -1526,6 +1526,8 @@ losing readers reread without duplicating output or settling uncaptured tails.
 Router credentials remain in memory. Legacy batch readers only drain existing
 commands; their locators are never reinterpreted as offsets. The reaper drains
 progressing output within a bounded claim, since exit requires both streams at EOF.
+Lease readiness uses a fixed native probe with the same pre-dispatch guard;
+uncertain Starts observe their exact invocation within the existing readiness budget.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;

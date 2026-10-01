@@ -71,5 +71,5 @@ export const embeddingMigrationTail = [
   // Patches the scheduled producer fence after its withheld prerequisites.
   "0561_scheduled_session_agent_identity.sql",
   // Patches the reaper installed by withheld 0345/0388/0391/0397.
-  "0563_browser_deadline_checkpoints.sql",
+  "0564_browser_deadline_checkpoints.sql",
 ];
