@@ -44,6 +44,15 @@ authoritative. Source-session links are exposed only when that session is
 readable. Content is loaded through the existing authenticated artifact APIs;
 catalog results contain no storage credentials or temporary download URLs.
 
+Images and other files need `files:read`; Sites, documents, spreadsheets, and
+presentations need `artifacts:read`. A viewer holding only one of the two gets
+the other kinds silently omitted from the catalog, so the console names the
+gap ("Sites and documents are hidden", or "You can't see sites here." on a
+hidden kind's tab) instead of reporting "none yet". A Site or editable-artifact
+page that the viewer cannot read says the viewer needs artifact access rather
+than suggesting the item was removed. The API's 403/404 semantics are
+unchanged; the console decides from a 403 or from the viewer's loaded grant.
+
 ## Presentation and version semantics
 
 The workspace library opens as a preview gallery: cards with a thumbnail, the

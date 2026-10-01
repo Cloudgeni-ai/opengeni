@@ -47,12 +47,14 @@ import {
 } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import { ARTIFACT_ACCESS_REQUIRED } from "@/lib/artifact-access";
 import {
   artifactKey,
   artifactKindLabel,
   artifactKinds,
   artifactPath,
   artifactRoute,
+  isEditableArtifactKind,
   type ArtifactCatalogFilters,
   type ArtifactKind,
 } from "@/lib/artifact-catalog";
@@ -551,6 +553,7 @@ export function ArtifactLibrary({
   compact = false,
   emptyAction,
   onEmptyChange,
+  artifactKindsHidden = false,
 }: {
   workspaceId: string;
   sessionId?: string;
@@ -572,6 +575,11 @@ export function ArtifactLibrary({
   emptyAction?: ReactNode;
   /** Nothing at all yet: the page hides its header action, the empty state has it. */
   onEmptyChange?: (empty: boolean) => void;
+  /**
+   * The viewer can't read Sites and editable artifacts here (no
+   * `artifacts:read`), so the catalog omits them: say so instead of "none yet".
+   */
+  artifactKindsHidden?: boolean;
 }) {
   const [view, setView] = useState<ArtifactView>(readArtifactView);
   const changeView = (next: ArtifactView) => {
@@ -604,8 +612,13 @@ export function ArtifactLibrary({
       ? "artifacts"
       : (artifactKinds.find(([kind]) => kind === filters.kind)?.[1] ?? "").toLocaleLowerCase();
 
+  const hiddenKindSelected =
+    artifactKindsHidden && (filters.kind === "site" || isEditableArtifactKind(filters.kind));
+
   let body: ReactNode;
-  if (error && items.length === 0 && isPermissionDenied(error)) {
+  if (hiddenKindSelected) {
+    body = <Notice title={`You can't see ${kindLabel} here.`}>{ARTIFACT_ACCESS_REQUIRED}</Notice>;
+  } else if (error && items.length === 0 && isPermissionDenied(error)) {
     body = <Notice title="You can't see artifacts here.">Ask a workspace admin for access.</Notice>;
   } else if (error && items.length === 0) {
     body = (
@@ -768,6 +781,9 @@ export function ArtifactLibrary({
           </div>
         ) : null}
       </div>
+      {artifactKindsHidden && filters.kind === "all" && !(error && isPermissionDenied(error)) ? (
+        <Notice title="Sites and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
+      ) : null}
       <div className="min-w-0">{body}</div>
     </section>
   );
