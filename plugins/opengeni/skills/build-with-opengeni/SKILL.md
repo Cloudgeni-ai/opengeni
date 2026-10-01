@@ -4,10 +4,12 @@ description: >-
   Integrate OpenGeni agents into the user's own product, backend, website, CLI,
   or automation with the @opengeni/sdk and @opengeni/react packages: server-side
   API keys, per-user isolation with asUser, the packaged session proxy, the
-  embedded chat UI, and a minimal hello-world. Use when the user wants to add AI
-  agents, an assistant, or OpenGeni to an app they are building. Not for
-  offloading the current coding task (use offload-to-opengeni) or for changing
-  OpenGeni itself.
+  embedded chat UI, and a minimal hello-world. Also spins up a small local demo
+  web app with an OpenGeni agent chat whose chats appear as sessions in an
+  OpenGeni workspace. Use when the user wants to add AI agents, an assistant, or
+  OpenGeni to an app they are building, or asks for a local OpenGeni chat app or
+  demo. Not for offloading the current coding task (use offload-to-opengeni) or
+  for changing OpenGeni itself.
 ---
 
 # Build with OpenGeni
@@ -24,6 +26,16 @@ in [`opengeni-client/SKILL.md`](opengeni-client/SKILL.md) with its
 hello world below. Without these files, fetch
 https://docs.opengeni.ai/llms.txt and the canonical guide at
 https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client.
+
+## Quick local demo app
+
+If the user asks for a small, local, or demo web app with an OpenGeni agent
+chat (rather than adding OpenGeni to an existing product), follow
+[`local-demo-app.md`](local-demo-app.md) exactly. It is a tested recipe: a Vite +
+React page with `OpenGeniChat` and one Node server holding the API key, where
+every chat becomes a session in the given workspace. It needs
+`OPENGENI_API_KEY`, `OPENGENI_BASE_URL`, `OPENGENI_ORGANIZATION_ID`, and
+`OPENGENI_WORKSPACE_ID`, and skips the questions below.
 
 ## Work adaptively
 
@@ -44,8 +56,9 @@ https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-clien
 
 - **Organization API key** (full access) for a product backend that serves many
   tenants. Store it in the product's secret manager as `OPENGENI_API_KEY`, with
-  `OPENGENI_API_BASE_URL` and `OPENGENI_ORGANIZATION_ID`. The user creates it in
-  OpenGeni organization settings; never ask them to paste it into chat or
+  `OPENGENI_BASE_URL` (the deployment origin; the longer guide calls it
+  `OPENGENI_API_BASE_URL`) and `OPENGENI_ORGANIZATION_ID`. The user creates it
+  in OpenGeni organization settings; never ask them to paste it into chat or
   commit it.
 - **Workspace API key** for an integration deliberately limited to one
   workspace.
@@ -60,7 +73,7 @@ throwaway tenant workspace and returns one reply.
 import { OpenGeni } from "@opengeni/sdk/chat";
 
 const og = new OpenGeni({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!, // always set it explicitly
+  baseUrl: process.env.OPENGENI_BASE_URL!, // always set it explicitly
   apiKey: process.env.OPENGENI_API_KEY!, // organization API key, server only
   organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
   source: "hello-opengeni",
@@ -118,6 +131,7 @@ pattern are in [`opengeni-client/SKILL.md`](opengeni-client/SKILL.md).
 
 ## Where to read next
 
+- Small local demo app with a chat: `local-demo-app.md`
 - Product shapes, headless hooks, workbench: `opengeni-client/references/product-shapes-and-ui.md`
 - REST/SDK workflows: `opengeni-client/references/api-workflows.md`
 - Isolation, visibility, `agentAccess`: `opengeni-client/references/isolation-and-authorization.md`

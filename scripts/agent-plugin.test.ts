@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { FIRST_PARTY_MCP_TOOL_NAMES } from "../packages/contracts/src/index";
+import { Permission } from "../packages/contracts/src/permissions";
 import { parseSkillFrontmatter } from "../packages/contracts/src/skill-metadata";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -23,6 +24,27 @@ const mcp = readJson("plugins/opengeni/.mcp.json") as {
 const skillNames = readdirSync(join(pluginRoot, "skills")).sort();
 const skillText = (name: string) =>
   readFileSync(join(pluginRoot, "skills", name, "SKILL.md"), "utf8");
+
+const buildSkillDir = join(pluginRoot, "skills/build-with-opengeni");
+const demoRecipe = readFileSync(join(buildSkillDir, "local-demo-app.md"), "utf8");
+/** The recipe's files: fenced blocks whose info string names a path, e.g. ```ts server.ts. */
+const demoFiles = new Map(
+  [...demoRecipe.matchAll(/^```[\w-]+ ([^\s`]+)\n([\s\S]*?)^```$/gmu)].map(
+    (match) => [match[1]!, match[2]!] as const,
+  ),
+);
+
+/** Resolve `@opengeni/<pkg>[/<subpath>]` through the workspace package's exports map. */
+function workspaceExport(specifier: string): string {
+  const match = /^@opengeni\/([a-z-]+)(\/.+)?$/u.exec(specifier);
+  if (!match) throw new Error(`not an @opengeni import: ${specifier}`);
+  const packageDir = join(root, "packages", match[1]!);
+  const exports = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"))
+    .exports as Record<string, Record<string, string>>;
+  const entry = exports[match[2] ? `.${match[2]}` : "."];
+  if (!entry) throw new Error(`${specifier} is not exported`);
+  return join(packageDir, entry.default ?? entry.import ?? entry.style!);
+}
 
 function substitute(template: string, values: Record<string, string>): string {
   return template.replaceAll(/\$\{user_config\.([a-z_]+)\}/gu, (_, key: string) => {
@@ -100,5 +122,73 @@ describe("coding-agent plugin", () => {
     for (const match of build.matchAll(/`(opengeni-client\/references\/[^`]+\.md)`/gu)) {
       expect(existsSync(join(pluginRoot, "skills/build-with-opengeni", match[1]!))).toBe(true);
     }
+  });
+
+  test("the local demo recipe is linked and lists every file it runs", () => {
+    expect(skillText("build-with-opengeni")).toContain("](local-demo-app.md)");
+    expect([...demoFiles.keys()].sort()).toEqual([
+      ".env",
+      ".gitignore",
+      "index.html",
+      "server.ts",
+      "src/main.tsx",
+      "tsconfig.json",
+    ]);
+    expect(demoFiles.get("index.html")).toContain('src="/src/main.tsx"');
+    expect(demoRecipe).toContain(
+      'npm pkg set type=module scripts.dev="tsx --env-file=.env server.ts"',
+    );
+    expect(demoRecipe).toContain("npm install @opengeni/sdk@latest @opengeni/react@latest");
+  });
+
+  test("the local demo recipe imports only real @opengeni exports", async () => {
+    const imports = [...demoFiles.entries()]
+      .filter(([path]) => /\.tsx?$/u.test(path))
+      .flatMap(([, code]) => [
+        ...code.matchAll(/^import (?:\{([^}]*)\} from )?"(@opengeni\/[^"]+)";$/gmu),
+      ]);
+    expect(imports.map((match) => match[2]).sort()).toEqual([
+      "@opengeni/react",
+      "@opengeni/react/compiled.css",
+      "@opengeni/sdk",
+      "@opengeni/sdk",
+      "@opengeni/sdk/express",
+    ]);
+    for (const [, names, specifier] of imports) {
+      const file = workspaceExport(specifier!);
+      expect(existsSync(file)).toBe(true);
+      if (!names) continue;
+      const module = (await import(file)) as Record<string, unknown>;
+      for (const name of names.split(",").map((part) => part.trim())) {
+        expect(`${specifier}:${name}:${typeof module[name]}`).toBe(`${specifier}:${name}:function`);
+      }
+    }
+  });
+
+  test("the local demo server reads exactly the documented .env settings and real permissions", () => {
+    const server = demoFiles.get("server.ts")!;
+    const read = new Set(
+      [...server.matchAll(/(?:process\.env\.|required\(")([A-Z_]+)/gu)].map((match) => match[1]!),
+    );
+    read.delete("PORT");
+    const documented = new Set(
+      [...demoFiles.get(".env")!.matchAll(/^(?:# )?([A-Z_]+)=/gmu)].map((match) => match[1]!),
+    );
+    expect([...read].sort()).toEqual([...documented].sort());
+    expect([...documented]).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_API_KEY",
+        "OPENGENI_BASE_URL",
+        "OPENGENI_ORGANIZATION_ID",
+        "OPENGENI_WORKSPACE_ID",
+      ]),
+    );
+    expect(demoFiles.get(".gitignore")!.split("\n")).toContain(".env");
+    const permissions = /permissions: \[([^\]]+)\]/u.exec(server)![1]!;
+    for (const match of permissions.matchAll(/"([^"]+)"/gu)) {
+      expect(Permission.safeParse(match[1]).success).toBe(true);
+    }
+    expect(server).toContain('sandboxBackend: "none"');
+    expect(server).toContain('http.listen(port, "127.0.0.1"');
   });
 });
