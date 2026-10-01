@@ -622,7 +622,10 @@ test("stale pagination completion does not restore focus or grow a new browse ge
   await waitForHeldTodayPage();
   await selectView("Status", "All");
   await waitForRows("Today", 4);
-  await page.getByRole("button", { name: /^Session view/ }).evaluate((element) => element.blur());
+  const view = page.getByRole("button", { name: /^Session view/ });
+  // Finish the menu's deferred focus handoff before testing stale pagination.
+  await view.and(page.locator(":focus")).waitFor();
+  await view.evaluate((element) => element.blur());
   await releaseTodayPage();
   await page.waitForFunction(() =>
     window.sessionSidebarQa.listCalls.some(
