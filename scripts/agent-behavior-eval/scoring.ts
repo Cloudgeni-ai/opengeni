@@ -179,7 +179,7 @@ export function summarizeVariant(
 }
 
 /**
- * Release gate (dossier §16.4 / AC18): the candidate's judge mean must be at
+ * Release evaluation gate: the candidate's judge mean must be at
  * least baseline − judgeMargin, and no gated scenario's deterministic pass rate
  * may drop by more than maxPassRateDrop. Scenarios that did not complete in
  * both variants are reported but not gated.
