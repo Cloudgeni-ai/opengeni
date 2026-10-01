@@ -1389,7 +1389,39 @@ and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For each subsequent activation:
+For the OPE-563 **fleet permission-on** cutover, rolling migration
+`0565_session_tenancy_operator_permission.sql` is inert preparation only. It
+adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
+it neither activates organizations nor changes sessions. The CLI additionally
+requires the separately reviewed maintenance marker
+`0566_private_sessions_fleet_activation.sql` before accepting:
+
+```bash
+bun run db:activate-session-tenancy -- \
+  --all-organizations --enable-organization-private-sessions \
+  --activated-by '<bounded-operator-identity>'
+```
+
+Run this only inside the existing protected, drained maintenance release after
+fresh all-organization evidence and release admission clearance. Persist and
+prove canonical activation `true` in durable Helm values **while the runtime is
+parked and before the first committed witness**; a Job-only override is not
+sufficient. Recovery and every later release must retain that value after any
+activation witness. Before a witness, an unwind additionally requires verified
+zero activation receipts; after one, recovery is forward-only.
+
+The fleet command freezes `managed_accounts`, preflights pending activations,
+then writes receipts and enables the preference for **every** frozen account,
+including already-activated accounts with missing/false settings, in one
+transaction. It checks final receipt plus enabled coverage before committing.
+Preference changes are audited as `service:session-tenancy-activation`, with no
+invented human membership; already-enabled accounts are no-ops. No existing
+session visibility, chat default, credential owner, or authority is changed.
+The single-organization command below retains its original preference-neutral
+behavior. Marker ordinal references must follow the project renumber command
+if newer main migrations claim these ordinals.
+
+For each subsequent single-organization activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
@@ -1400,11 +1432,11 @@ For each subsequent activation:
    `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
-3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only. Never flip it on a running pre-activation
-   generation as a way to "test" activation;
+3. prepare canonical activation `true` for the new image generation. Never
+   flip it on a running pre-activation generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
-   migration-only secret and Job identity;
+   migration-only secret and Job identity, then persist and verify canonical
+   activation `true` in durable Helm values while they remain parked;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
 6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
