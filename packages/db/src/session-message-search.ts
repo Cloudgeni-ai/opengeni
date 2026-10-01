@@ -85,6 +85,11 @@ export async function scanSessionMessages(
         request.sessionId ?? null,
         request.archiveStatus ?? "active",
         ...(request.groupBy ? [{ groupBy: request.groupBy }] : []),
+        // Keep omitted-filter cursors compatible; explicit roots/children are
+        // distinct scopes and cannot consume any other traversal's cursor.
+        ...(request.parentSessionId !== undefined
+          ? [{ parentSessionId: request.parentSessionId }]
+          : []),
       ]),
     )
     .digest("hex");

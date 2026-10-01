@@ -8,13 +8,20 @@ SDK mirrors are checked for parity.
 
 ## Request and matching
 
-The request takes `query` (1–200 UTF-16 code units), optional `sessionId`,
+The request takes `query` (1–200 UTF-16 code units), optional `sessionId` and `parentSessionId`,
 `archiveStatus` (`active`, `archived`, `all`; default `active`), `limit` (1–50;
 default 20), and an opaque `cursor`. Whitespace is significant. The query is a
 literal substring, not a regexp, SQL wildcard, token query, or relevance query.
 Matching uses ECMAScript Unicode simple case folding (`iu`); it does not apply
 locale-dependent lowercasing, Unicode normalization, or multi-character folding
 (`ss` does not match `ß`). Every **non-overlapping occurrence** is returned.
+
+`parentSessionId` follows session-list semantics: omit it to search all authorized
+sessions, pass `null` for root sessions only, or a UUID for that parent's direct
+children only (not all descendants). The HTTP query encodes null as the literal
+`parentSessionId=null`; the SDK serializes this for you. This predicate intersects
+`sessionId`, live authority, and archive filters before scanning, grouping, or
+limiting candidates. It grants no access to the parent or its children.
 
 For the workspace picker, optionally pass `groupBy: "session"`. This returns
 only the first occurrence in the first matching message of each session, then
@@ -72,7 +79,8 @@ same scope in a different order does not invalidate a continuation — only a re
 scope change does. Cursors carry bounded positions/counts, not source message
 text. Counts from a cursor are continuation bookkeeping, never authorization or billing
 evidence. Invalid or changed-scope cursors return HTTP 400.
-Grouping mode is also bound to the cursor; it cannot be switched mid-traversal.
+Grouping mode and the parent filter are also bound to the cursor; neither can be
+switched mid-traversal. Omitted, null, and each parent UUID are distinct scopes.
 
 ## Bounded scanning and cancellation
 

@@ -181,13 +181,90 @@ test("HTTP workspace grouping returns one representative and rejects an in-sessi
   expect(invalid.status).toBe(400);
 }, 180_000);
 
+test("HTTP parent filters preserve all, roots and direct children and fence cursors", async () => {
+  const f = await fixture();
+  const app = appWith();
+  const descendants = [];
+  let parentSessionId = f.session.id;
+  for (let depth = 0; depth < 2; depth++) {
+    const session = await createSession(client.db, {
+      ...f.grant,
+      parentSessionId,
+      initialMessage: "child title only",
+      resources: [],
+      metadata: {},
+      model: "test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      values (${f.grant.accountId}, ${f.grant.workspaceId}, ${session.id}, 1, 'user.message', ${shared.admin.json({ text: "twice twice" })})`;
+    descendants.push(session);
+    parentSessionId = session.id;
+  }
+  const [child, grandchild] = descendants;
+  const scopes = [undefined, "null", f.session.id, child!.id];
+  const expected = [
+    [f.session.id, child!.id, grandchild!.id],
+    [f.session.id],
+    [child!.id],
+    [grandchild!.id],
+  ];
+  const read = (query: Record<string, string>) =>
+    app.request(`${f.path}?${new URLSearchParams(query)}`, {
+      headers: { authorization: f.authorization },
+    });
+  for (const [index, parent] of scopes.entries()) {
+    const filter = parent === undefined ? {} : { parentSessionId: parent };
+    const grouped = await read({ query: "twice", groupBy: "session", ...filter });
+    expect(grouped.status).toBe(200);
+    const matches = SessionMessageSearchResponse.parse(await grouped.json()).matches;
+    expect(matches.map((match) => match.sessionId).sort()).toEqual(expected[index]!.sort());
+    const request = { query: "twice", limit: "1", ...filter };
+    const first = await read(request);
+    expect(first.status).toBe(200);
+    const page = SessionMessageSearchResponse.parse(await first.json());
+    expect(page.nextCursor).not.toBeNull();
+    expect((await read({ ...request, cursor: page.nextCursor! })).status).toBe(200);
+    for (const nextParent of scopes) {
+      if (nextParent === parent) continue;
+      expect(
+        (
+          await read({
+            query: "twice",
+            cursor: page.nextCursor!,
+            ...(nextParent === undefined ? {} : { parentSessionId: nextParent }),
+          })
+        ).status,
+      ).toBe(400);
+    }
+  }
+  for (const query of [
+    { parentSessionId: "null", sessionId: child!.id },
+    { parentSessionId: f.session.id, sessionId: grandchild!.id },
+    { parentSessionId: crypto.randomUUID() },
+  ]) {
+    const response = await read({ query: "twice", ...query });
+    expect(response.status).toBe(200);
+    const page = SessionMessageSearchResponse.parse(await response.json());
+    expect(page.matches).toHaveLength(0);
+    expect(page.scannedMessages).toBe(0);
+  }
+}, 180_000);
+
 test("search filters intersect host list scope, denied scopes reveal no counts, unavailable host fails closed", async () => {
   const f = await fixture();
   const denied = appWith({
     authorizeSession: async () => ({ allowed: false, reason: "forbidden" }),
     resolveListScope: async () => ({ kind: "scoped", rootSessionIds: [], sessionIds: [] }),
   });
-  for (const query of [{ query: "twice" }, { query: "twice", sessionId: f.session.id }]) {
+  for (const query of [
+    { query: "twice" },
+    { query: "twice", sessionId: f.session.id },
+    { query: "twice", parentSessionId: "null" },
+    { query: "twice", parentSessionId: f.session.id },
+  ]) {
     const response = await denied.request(`${f.path}?${new URLSearchParams(query)}`, {
       headers: { authorization: f.authorization },
     });
@@ -229,6 +306,9 @@ test("unauthenticated, cross-workspace, invalid and out-of-bound requests fail c
     "query=x&limit=51",
     "query=x&limit=NaN",
     "query=x&sessionId=bad",
+    "query=x&parentSessionId=bad",
+    "query=x&parentSessionId=",
+    "query=x&parentSessionId=all",
     "query=x&includeTools=true",
     "query=x&cursor=broken",
   ]) {

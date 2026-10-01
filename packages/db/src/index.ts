@@ -36930,7 +36930,13 @@ export async function searchSessionMessagesForSubject(
         tx,
         workspaceId,
         parsed,
-        sessionFilters({ ...authority, archiveStatus: parsed.archiveStatus }),
+        sessionFilters({
+          ...authority,
+          archiveStatus: parsed.archiveStatus,
+          ...(parsed.parentSessionId !== undefined
+            ? { parentSessionId: parsed.parentSessionId }
+            : {}),
+        }),
         [authority.subjectId, canonicalSearchScopeIdentity(authority.authorizationScope)],
         options.signal,
       );

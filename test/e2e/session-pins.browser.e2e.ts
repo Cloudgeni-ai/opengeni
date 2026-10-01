@@ -743,10 +743,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .locator("a[data-session-row]")
         .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
       const dialog = await openWorkspaceSearch(page, "Created grouping child");
+      expect(
+        await dialog
+          .getByRole("radio", { name: "Parent sessions", exact: true })
+          .getAttribute("aria-checked"),
+      ).toBe("true");
       const matchingSessions = dialog.locator('[aria-label="Matching sessions"]');
+      await matchingSessions
+        .getByText("No matching sessions. Try a shorter phrase or different words.", {
+          exact: true,
+        })
+        .waitFor();
+      expect(
+        await matchingSessions.getByRole("button", { name: /Created grouping child/ }).count(),
+      ).toBe(0);
+      await dialog.getByRole("radio", { name: "All sessions", exact: true }).click();
       await matchingSessions.getByRole("button", { name: /Created grouping child/ }).waitFor();
       expect(await matchingSessions.locator("[data-search-result]").count()).toBe(1);
-      // Workspace search includes the child as a flat result but never changes
+      // All-session search includes the child as a flat result but never changes
       // the independent browse hierarchy or installs a child-only creator filter.
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "hidden" });

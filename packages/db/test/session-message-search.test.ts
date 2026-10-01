@@ -46,7 +46,7 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
-const makeSession = () =>
+const makeSession = (parentSessionId?: string) =>
   createSession(client.db, {
     accountId,
     workspaceId,
@@ -57,6 +57,7 @@ const makeSession = () =>
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
+    ...(parentSessionId ? { parentSessionId } : {}),
   });
 async function insert(
   sessionId: string,
@@ -247,6 +248,75 @@ test("list scope, member removal, workspace and personally archived boundaries a
     (await collect({ query: "isolated-token", sessionId: allowed.id, archiveStatus: "archived" }))
       .matches,
   ).toHaveLength(1);
+}, 180_000);
+
+test("parent scope filters candidates before scanning, grouping, limits and counts", async () => {
+  const root = await makeSession();
+  const otherRoot = await makeSession();
+  const child = await makeSession(root.id);
+  const otherChild = await makeSession(root.id);
+  const sibling = await makeSession(otherRoot.id);
+  const grandchild = await makeSession(child.id);
+  const sessions = [root, otherRoot, child, otherChild, sibling, grandchild];
+  const authority = {
+    subjectId,
+    authorizationScope: {
+      kind: "scoped" as const,
+      sessionIds: sessions.map((session) => session.id),
+      rootSessionIds: [],
+    },
+  };
+  for (const session of sessions)
+    await insert(session.id, 1, "user.message", { text: "parent-scope-token" });
+  // Excluded history must not consume the 33-candidate/32-window page budget.
+  for (let sequence = 2; sequence <= 70; sequence++)
+    await insert(child.id, sequence, "user.message", { text: "parent-scope-token" });
+
+  const roots = await collect({ query: "parent-scope-token", parentSessionId: null }, authority);
+  expect(roots.matches.map((match) => match.sessionId).sort()).toEqual(
+    [root.id, otherRoot.id].sort(),
+  );
+  expect(roots.page.scannedMessages).toBe(2);
+  expect(roots.pages).toBe(1);
+  const groupedRoots = await collect(
+    { query: "parent-scope-token", parentSessionId: null, groupBy: "session", limit: 1 },
+    authority,
+  );
+  expect(groupedRoots.matches.map((match) => match.sessionId).sort()).toEqual(
+    [root.id, otherRoot.id].sort(),
+  );
+  expect(groupedRoots.page.scannedMessages).toBe(2);
+  const children = await collect(
+    { query: "parent-scope-token", parentSessionId: root.id, groupBy: "session", limit: 1 },
+    authority,
+  );
+  expect(children.matches.map((match) => match.sessionId).sort()).toEqual(
+    [child.id, otherChild.id].sort(),
+  );
+  expect(children.page.scannedMessages).toBe(2);
+  const all = await collect({ query: "parent-scope-token", groupBy: "session" }, authority);
+  expect(all.matches.map((match) => match.sessionId).sort()).toEqual(
+    sessions.map((session) => session.id).sort(),
+  );
+  for (const request of [
+    { parentSessionId: root.id, sessionId: root.id },
+    { parentSessionId: root.id, sessionId: grandchild.id },
+    { parentSessionId: null, sessionId: child.id },
+    { parentSessionId: crypto.randomUUID() },
+  ]) {
+    const denied = await collect({ query: "parent-scope-token", ...request }, authority);
+    expect(denied.matches).toHaveLength(0);
+    expect(denied.page.scannedMessages).toBe(0);
+  }
+  const denied = await collect(
+    { query: "parent-scope-token", parentSessionId: root.id },
+    {
+      subjectId,
+      authorizationScope: { kind: "scoped", sessionIds: [root.id], rootSessionIds: [] },
+    },
+  );
+  expect(denied.matches).toHaveLength(0);
+  expect(denied.page.scannedMessages).toBe(0);
 }, 180_000);
 
 test("cursors bind subject, query and filters and cannot broaden authorization", async () => {

@@ -5,6 +5,8 @@ export const SessionMessageSearchRequest = z
   .object({
     query: z.string().min(1).max(200),
     sessionId: z.string().uuid().optional(),
+    /** Omitted: all sessions; null: roots; UUID: direct children only. */
+    parentSessionId: z.string().uuid().nullable().optional(),
     groupBy: z.literal("session").optional(),
     archiveStatus: z.enum(["active", "archived", "all"]).optional(),
     limit: z.number().int().min(1).max(50).optional(),

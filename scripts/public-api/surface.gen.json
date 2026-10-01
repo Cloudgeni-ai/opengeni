@@ -20186,6 +20186,7 @@
         "$.cursor": "string?",
         "$.groupBy": "const?=[\"\\\"session\\\"\"]",
         "$.limit": "integer?",
+        "$.parentSessionId": "string? null",
         "$.query": "string!",
         "$.sessionId": "string?"
       }

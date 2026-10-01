@@ -154,6 +154,17 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
   return { running, grouped };
 }
 
+/** Recent is a human-facing root-session list, including only root pins. */
+export function recentParentSessions(sessions: Session[], pinned: Session[], limit = 6): Session[] {
+  const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
+  const { running, grouped } = groupSessionsForRail(ordinary);
+  return [
+    ...pinned.filter((session) => !session.parentSessionId),
+    ...running,
+    ...grouped.flatMap((bucket) => bucket.sessions),
+  ].slice(0, limit);
+}
+
 /* ----------------------------------------------------------------------------
    Lineage nesting for the rail
 

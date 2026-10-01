@@ -1493,6 +1493,9 @@ export class OpenGeniClient {
       {
         query: request.query,
         ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
+        ...(request.parentSessionId === undefined
+          ? {}
+          : { parentSessionId: request.parentSessionId ?? "null" }),
         ...(request.groupBy !== undefined ? { groupBy: request.groupBy } : {}),
         ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
         ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),

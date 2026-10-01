@@ -138,7 +138,7 @@ import {
   resolvePersonalResourceOwnerScope,
   selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
-import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
+import { recentParentSessions, relativeTimeLabel } from "@/lib/sessions-group";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -1937,18 +1937,12 @@ function draftSaveFailureText(draft: { conflict: Error | null; error: Error | nu
 // the model picker — never raw wire ids as the primary display.
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { sessions, pinned } = useWorkspaceSessions({
+    parentSessionId: null,
     limit: 12,
     pollIntervalMs: 30_000,
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const recent = useMemo(() => {
-    const ordinary = sessions.filter((session) => !session.pinned);
-    const { running, grouped } = groupSessionsForRail(ordinary);
-    // Pins are server-authoritative and intentionally sit above ordinary
-    // recency rows here too. `sessions` retains the historical all-visible-row
-    // contract, so remove its pins before recombining the explicit section.
-    return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, 6);
-  }, [pinned, sessions]);
+  const recent = useMemo(() => recentParentSessions(sessions, pinned), [pinned, sessions]);
 
   if (recent.length === 0) {
     return null;
@@ -1956,9 +1950,7 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 
   return (
     <section className="mt-12">
-      <h2 className="mb-1.5 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
-        Recent sessions
-      </h2>
+      <h2 className="mb-3 px-0.5 text-base font-semibold text-fg">Recent sessions</h2>
       {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
           min-content width, defeating truncate and overflowing the page. */}
       <ul className="flex min-w-0 flex-col divide-y divide-border/60">
