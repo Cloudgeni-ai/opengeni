@@ -58,13 +58,13 @@ import {
 describe("web bundle budget policy", () => {
   test("pins the measured agent-configuration and current-main merge aggregates", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
-    expect(source).toContain("wholeKibEnvelope(2_571_800, 1.5 * kib)");
-    expect(source).toContain("wholeKibEnvelope(725_870, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(2_572_187, 1.5 * kib)");
+    expect(source).toContain("wholeKibEnvelope(726_074, 1.5 * kib)");
     expect(source).toContain("Grouping the new config/allowance modules into startup-sdk-runtime");
-    expect(wholeKibEnvelope(2_571_800, 1.5 * KIB)).toBe(2514 * KIB);
-    expect(wholeKibEnvelope(725_870, 1.5 * KIB)).toBe(711 * KIB);
-    expect(2514 * KIB - 2_571_800).toBeGreaterThanOrEqual(1.5 * KIB);
-    expect(711 * KIB - 725_870).toBeGreaterThanOrEqual(1.5 * KIB);
+    expect(wholeKibEnvelope(2_572_187, 1.5 * KIB)).toBe(2514 * KIB);
+    expect(wholeKibEnvelope(726_074, 1.5 * KIB)).toBe(711 * KIB);
+    expect(2514 * KIB - 2_572_187).toBeGreaterThanOrEqual(1.5 * KIB);
+    expect(711 * KIB - 726_074).toBeGreaterThanOrEqual(1.5 * KIB);
     for (const limit of [
       "initialRaw: 1485 * kib",
       "initialGzip: 405 * kib",

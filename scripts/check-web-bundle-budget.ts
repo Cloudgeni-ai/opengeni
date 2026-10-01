@@ -602,9 +602,12 @@ const effectiveBudgets = {
     // tried first: 2,572,020 / 726,382, still 38 files, so retain the smaller
     // existing partition. Shared SDK methods and capability contracts are
     // retained runtime code, not settings-only modules to move behind a route.
+    // The required peer-state leaf fixes a production registration cycle;
+    // the final graph is 2,572,187 / 726,074 across 39 files. Recalibrating to
+    // that measurement leaves both rounded aggregate caps unchanged.
     // Bound only these measured aggregates with the established 1.5 KiB
     // headroom; every initial, per-file, file-count, lazy and CSS cap stays fixed.
-    wholeKibEnvelope(2_571_800, 1.5 * kib),
+    wholeKibEnvelope(2_572_187, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -681,7 +684,7 @@ const effectiveBudgets = {
     // Agent configuration merged with main f874217f5, as measured above.
     wholeKibEnvelope(717_339, 1.5 * kib),
     // Same current-main integration and grouping trial documented above.
-    wholeKibEnvelope(725_870, 1.5 * kib),
+    wholeKibEnvelope(726_074, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
