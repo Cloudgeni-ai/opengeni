@@ -114,6 +114,13 @@ describe("BrowserSession route discipline", () => {
     );
     const channel = await readFile(new URL("../src/sandbox/channel-a.ts", import.meta.url), "utf8");
     expect(channel).toContain("retainedInstanceId: ctx.retainedInstanceId");
+    const holder = source.slice(
+      source.indexOf("async function ensureInteractionHolder"),
+      source.indexOf("async function releaseInteractionHolder"),
+    );
+    expect(holder).toContain('imagePolicy: "new_creates_only"');
+    expect(holder).toContain("expectedEpoch: placement.lease.leaseEpoch");
+    expect(holder).toContain("rigVersionId: sourceSession.rigVersionId");
   });
   test("explicit Lightpanda preserves Connected Machine placement and semantic capabilities", () => {
     const grant: AccessGrant = {

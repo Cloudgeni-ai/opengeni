@@ -4012,6 +4012,7 @@ async function ensureInteractionHolder(
     },
     os: placement.lease.os,
     image: sandboxRuntime.image,
+    imagePolicy: "new_creates_only",
     rigVersionId: sourceSession.rigVersionId,
     leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
     expectedEpoch: placement.lease.leaseEpoch,
