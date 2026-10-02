@@ -688,6 +688,7 @@ export function ComputerViewer({
                 connectionError={computer.controlError ?? frames.error ?? computer.error}
                 mutating={computer.mutating}
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
+                backgroundInput={computer.session?.capabilities?.backgroundInput === true}
                 clipboardEnabled={computer.session?.capabilities?.clipboard === true}
                 pointerInput={computer.session?.capabilities?.pointerInput === true}
                 keyboardInput={computer.session?.capabilities?.keyboardInput === true}
@@ -1054,6 +1055,7 @@ function ComputerViewport(props: {
   connectionError: Error | null;
   mutating: boolean;
   backgroundActions: boolean;
+  backgroundInput: boolean;
   clipboardEnabled: boolean;
   pointerInput: boolean;
   keyboardInput: boolean;
@@ -1104,7 +1106,10 @@ function ComputerViewport(props: {
     !streamFailed &&
     !props.controlUnavailable &&
     !props.machineLocked &&
-    (!props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true);
+    (props.backgroundInput ||
+      !props.backgroundActions ||
+      props.target?.kind === "screen" ||
+      props.target?.focused === true);
 
   const clearBufferedInput = useCallback(() => {
     if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
@@ -1121,6 +1126,22 @@ function ComputerViewport(props: {
 
   const pointerInputEnabled = rawInputEnabled && props.pointerInput;
   const keyboardInputEnabled = rawInputEnabled && props.keyboardInput;
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const viewport = canvas?.parentElement;
+    if (!canvas || !viewport) return;
+    const fit = () => fitComputerCanvas(canvas);
+    fit();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", fit);
+      return () => window.removeEventListener("resize", fit);
+    }
+    // The canvas is absolute, so fitting it cannot resize the observed dock.
+    const observer = new ResizeObserver(fit);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1833,9 +1854,11 @@ function ComputerStatusBar(props: {
           ? "Reconnect to use desktop input"
           : screen
             ? "Full screen · input may move pointer and focus"
-            : props.session?.capabilities?.backgroundActions
-              ? "Window · app controls work in the background"
-              : (props.target?.kind ?? "Desktop")}
+            : props.session?.capabilities?.backgroundInput
+              ? "Window · clicks and typing stay in the background"
+              : props.session?.capabilities?.backgroundActions
+                ? "Window · app controls work in the background"
+                : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
       {props.refreshing ? <LoaderCircleIcon className="size-3 animate-spin" /> : null}
@@ -1932,11 +1955,26 @@ function paintCanvas(
   width: number,
   height: number,
 ): void {
+  const dimensionsChanged = canvas.width !== width || canvas.height !== height;
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d", { alpha: false });
   if (!context) throw new Error("Desktop canvas is unavailable.");
   context.drawImage(image, 0, 0, width, height);
+  if (dimensionsChanged) fitComputerCanvas(canvas);
+}
+
+function fitComputerCanvas(canvas: HTMLCanvasElement): void {
+  const viewport = canvas.parentElement;
+  if (!viewport || canvas.width <= 0 || canvas.height <= 0) return;
+  const scale = Math.min(
+    viewport.clientWidth / canvas.width,
+    viewport.clientHeight / canvas.height,
+  );
+  // Hidden docks retain their previous fit until their content box is visible.
+  if (!Number.isFinite(scale) || scale <= 0) return;
+  canvas.style.width = `${canvas.width * scale}px`;
+  canvas.style.height = `${canvas.height * scale}px`;
 }
 
 function loadImage(url: string): Promise<HTMLImageElement> {

@@ -43,7 +43,7 @@ export type {
   SessionClientLike,
 } from "./client";
 export { OpenGeniProvider } from "./provider";
-export type { OpenGeniProviderProps } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -130,7 +130,12 @@ export type {
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
 } from "./voice-recording-store";
-export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
+export {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+  COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  composerSubmissionErrorMessage,
+  isModelUnavailableSubmissionError,
+} from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,

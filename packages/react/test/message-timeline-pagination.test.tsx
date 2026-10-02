@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { StrictMode, useState, type ComponentType } from "react";
 import { flushSync } from "react-dom";
 import {
@@ -214,7 +215,12 @@ test.each(["promise", "synchronous"])(
     const onLoadNewer = () => {
       calls += 1;
       if (calls === 1) {
-        const failure = new Error("Sign in again to read this session");
+        const failure = new OpenGeniApiError(
+          401,
+          JSON.stringify({
+            error: { code: "unauthorized", message: "Sign in again to read this OpenGeni session" },
+          }),
+        );
         if (mode === "synchronous") throw failure;
         return Promise.reject(failure);
       }
@@ -226,7 +232,7 @@ test.each(["promise", "synchronous"])(
     await intersect(r.container);
     expect(calls).toBe(1);
     expect(r.container.querySelector("[data-og-newer-error]")?.textContent).toContain(
-      "Sign in again",
+      "Sign in to continue.",
     );
     await intersect(r.container);
     await intersect(r.container);

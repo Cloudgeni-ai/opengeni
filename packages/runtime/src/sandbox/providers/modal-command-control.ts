@@ -2,7 +2,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import { posix } from "node:path";
 import { status } from "@grpc/grpc-js";
 import { setTimeout as delay } from "node:timers/promises";
-import { shellQuote } from "@openai/agents-core/sandbox/internal";
+import { modalCommandArgv } from "./modal-command-argv";
 import {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -18,6 +18,7 @@ import {
   ProviderCommandObservationUnavailableError,
 } from "../provider-command-session";
 import { isModalCommandObservationTransportError } from "./modal-command-observation-errors";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { classifyProviderSandboxFailure } from "../provider-errors";
 import {
   ModalCommandControl as LegacyControl,
@@ -256,20 +257,7 @@ export class ModalCommandControl {
           controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
         }
       : undefined;
-    let commandArgs = [
-      args.shell ?? "/bin/sh",
-      args.shell && (args.login ?? true) ? "-lc" : "-c",
-      args.cmd,
-    ];
-    if (args.runAs) {
-      const user = shellQuote(args.runAs),
-        invocation = commandArgs.map(shellQuote).join(" ");
-      commandArgs = [
-        "/bin/sh",
-        "-c",
-        `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then exec ${invocation}; elif [ "$(id -u)" = 0 ]; then exec su -s /bin/sh ${user} -c ${shellQuote(`exec ${invocation}`)}; else exec sudo -n -u ${user} -- ${invocation}; fi`,
-      ];
-    }
+    let commandArgs = modalCommandArgv(args);
     const env = typeof this.environment === "function" ? this.environment() : this.environment;
     if (supervision)
       commandArgs = [
@@ -353,16 +341,55 @@ export class ModalCommandControl {
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     await this.withStartRouter(task.taskId, signal, async (router) => {
       const identity = { taskId: task.taskId!, execId: randomUUID() };
-      await router.start(
-        {
+      const observation: ControlObservation = {
+        command: {
+          kind: "modal-router-v1",
+          sandboxId,
           ...identity,
-          commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
-          workdir: "/tmp",
-          env: {},
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
         },
-        signal,
-      );
-      const { output, exit } = await this.readControlOutput(identity, 128, signal);
+        output: "",
+      };
+      let startUnknown: ModalCommandStartOutcomeUnknownError | undefined;
+      try {
+        await router.start(
+          {
+            ...identity,
+            commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
+            workdir: "/tmp",
+            env: {},
+          },
+          signal,
+        );
+      } catch (error) {
+        // A lost acknowledgement does not authorize another Start. This fixed
+        // read-only probe can still prove capability by observing its original
+        // invocation inside the same five-second budget.
+        if (!(error instanceof ModalCommandStartOutcomeUnknownError)) throw error;
+        if (error.taskId !== identity.taskId || error.execId !== identity.execId) throw error;
+        startUnknown = error;
+      }
+      let result: { output: string; exit: number };
+      try {
+        result = await this.readControlOutput(identity, 128, signal, observation);
+      } catch (error) {
+        if (!startUnknown) throw error;
+        // Missing/denied observation cannot erase a genuine unknown Start or
+        // turn it into sandbox-loss or replay authority.
+        throw new ProviderCommandObservationUnavailableError(
+          structuredClone(observation.command),
+          new AggregateError(
+            [startUnknown, error],
+            "Original capability Start and observation remain uncertain",
+          ),
+          error instanceof ProviderCommandObservationUnavailableError && error.readRetryAllowed,
+        );
+      }
+      signal.throwIfAborted();
+      const { output, exit } = result;
       if (exit !== 0 || output !== "native-subreaper-v1")
         throw new Error(
           "Exact Modal instance lacks compatible native supervision; command not admitted",
@@ -638,24 +665,53 @@ export class ModalCommandControl {
     if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
     if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
       throw new Error("Invalid Modal output read bounds");
+    signal?.throwIfAborted();
+    const stdout = command.streams.stdout;
+    const stderr = command.streams.stderr;
+    if (
+      stdout.eof &&
+      stderr.eof &&
+      stdout.utf8Remainder === "" &&
+      stderr.utf8Remainder === "" &&
+      stdout.exitCode !== null &&
+      stdout.exitCode === stderr.exitCode
+    ) {
+      // Both complete streams and their matching terminal observation were
+      // already captured. An expired provider handle cannot revoke that exact
+      // evidence; the session still atomically verifies the retained cursor.
+      return {
+        command: structuredClone(command),
+        expected: structuredClone(command),
+        chunks: [],
+        exitCode: stdout.exitCode,
+        providerExited: true,
+        streamFidelity: command.pty ? "merged" : "separate",
+      };
+    }
     const budget = new AbortController();
     const abort = () => budget.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
+    // The router deliberately ends a quiet stream at its read deadline with
+    // a partial page. Let that deadline settle before outer containment aborts
+    // the whole page, including bytes already read from the other stream.
+    // Caller cancellation still bounds this allowance independently.
     const deadline = performance.now() + Math.max(1, waitMs);
     const timeout = setTimeout(
       () => budget.abort(new Error("Modal command read budget exhausted")),
-      Math.max(1, waitMs),
+      Math.max(1, waitMs) + 5_000,
     );
     let lastError: unknown;
     try {
       for (let attempt = 0; attempt < 5; attempt++) {
         signal?.throwIfAborted();
+        if (attempt > 0 && performance.now() >= deadline) break;
         try {
           return await this.readRouterPage(
             command,
-            Math.max(1, deadline - performance.now()),
+            Math.min(Math.max(1, waitMs), Math.max(1, deadline - performance.now())),
             budget.signal,
+            deadline,
           );
         } catch (error) {
           signal?.throwIfAborted();
@@ -672,7 +728,7 @@ export class ModalCommandControl {
             throw error;
           }
           lastError = error;
-          if (budget.signal.aborted || attempt === 4) break;
+          if (budget.signal.aborted || performance.now() >= deadline || attempt === 4) break;
           try {
             await delay(Math.min(100, Math.max(1, deadline - performance.now())), undefined, {
               signal: budget.signal,
@@ -694,14 +750,38 @@ export class ModalCommandControl {
     command: ModalRouterProviderCommand,
     waitMs: number,
     signal: AbortSignal,
+    deadline: number,
   ): Promise<ModalProviderOutputPage> {
     const next = structuredClone(command);
     const cancellation = new AbortController();
-    const abort = () => cancellation.abort(signal?.reason);
+    const lookupCancellation = new AbortController();
+    const abort = () => {
+      cancellation.abort(signal.reason);
+      lookupCancellation.abort(signal.reason);
+    };
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
+    const lookupTimeout = setTimeout(
+      () =>
+        lookupCancellation.abort(
+          new ProviderCommandObservationUnavailableError(
+            structuredClone(command),
+            new Error("Modal command read access budget exhausted"),
+          ),
+        ),
+      Math.max(1, deadline - performance.now()),
+    );
     try {
-      return await this.withRouter(command.taskId, cancellation.signal, async (router) => {
+      return await this.withRouter(command.taskId, lookupCancellation.signal, async (router) => {
+        clearTimeout(lookupTimeout);
+        lookupCancellation.signal.throwIfAborted();
+        signal.throwIfAborted();
+        if (performance.now() >= deadline)
+          throw new ProviderCommandObservationUnavailableError(
+            structuredClone(command),
+            new Error("Modal command read budget exhausted"),
+          );
+        const remainingWait = Math.max(1, Math.min(waitMs, deadline - performance.now()));
         const operations = [
           ...(["stdout", "stderr"] as const).map(async (stream) =>
             command.streams[stream].eof
@@ -710,7 +790,7 @@ export class ModalCommandControl {
                   command,
                   stream,
                   command.streams[stream].byteOffset,
-                  waitMs,
+                  remainingWait,
                   cancellation.signal,
                 ),
           ),
@@ -765,6 +845,7 @@ export class ModalCommandControl {
         };
       });
     } finally {
+      clearTimeout(lookupTimeout);
       signal?.removeEventListener("abort", abort);
     }
   }

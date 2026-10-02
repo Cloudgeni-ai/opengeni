@@ -58,7 +58,7 @@ Then open the smallest source files that answer the question:
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
-- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
@@ -337,6 +337,13 @@ For tools and MCP work, distinguish:
 - Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
+Configured agents receive capability-gated prompt modules under
+`packages/runtime/src/agent-instructions/`; media guidance belongs to the media
+module, while deferred discovery mechanics remain always on. Inspect the
+runtime's current authorized tool catalog before concluding a tool is absent.
+Integration catalogs and sandbox CLI inventories do not enumerate runtime
+media adapters. Literal-prefix recovery hints never load schemas or grant access.
+
 Managed Codemode clients are release-owned, not image-version-owned. Inspect
 `packages/runtime/src/sandbox/codemode-client.ts` and the runtime/process build
 scripts for the bundled CLI/ESM asset. Warm managed boxes receive verified,
@@ -347,6 +354,10 @@ Do not repair stale clients by weakening catalog integrity or choosing npm lates
 Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery
+
+The stock Schedules chat shortcut sends the request and time zone. Its setup
+procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
+selected through the worker's configured bundled-Skill rules.
 
 For queueing or scheduling work:
 

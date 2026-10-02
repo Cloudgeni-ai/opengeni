@@ -207,6 +207,7 @@ export {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
@@ -723,6 +724,7 @@ export type {
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
   ClaudeUsageWindow,
+  ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -1028,6 +1030,7 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionBackgroundCommand,
+  SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
@@ -1042,6 +1045,8 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListEntry,
+  SessionListEntryResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,
   SessionQueueMutationResponse,
@@ -1393,3 +1398,5 @@ export type {
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
 } from "./types";
+
+export { sessionListEntry } from "./session-list-entries";

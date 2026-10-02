@@ -559,6 +559,17 @@ The managed-human API surface is:
   Personal workspaces; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
+Workspace deletion is a hard delete, not an archive or retirement command.
+Both workspace DELETE routes return `409` when retained audit or other linked
+records prevent deletion; the transaction rolls back and no external schedule
+cleanup runs. Keep that workspace and use the existing key-revocation,
+membership-revocation, and scheduled-task pause/delete operations to remove
+operational access and automation. These separate operations require their
+existing permissions and concurrency preconditions; DELETE does not perform
+them. There is currently no supported workspace archive/retirement endpoint,
+so this containment does not remove the retained workspace from inventory.
+Do not delete audit/history rows or weaken their foreign keys to force cleanup.
+
 The organization overview, organization/shared-workspace metadata, member
 inventory, retention, and organization Codex routes require either a direct
 managed-human cookie session or the exact provenance-stamped single-user local

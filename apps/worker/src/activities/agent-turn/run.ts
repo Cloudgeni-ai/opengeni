@@ -183,6 +183,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       bus,
       runtime,
       summarizeContextForCompaction,
+      requestWorkerDrain,
+      turnFinalizationTimeoutMs,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -944,28 +946,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
-              const binding = claudeUsageObserver.binding(providerId);
-              if (!binding) return headers;
-              const credential = await resolveClaudeSubscriptionCredential(
-                db,
-                settings,
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  scope: binding.scope,
-                },
-                {
-                  expectedConnectionId: binding.expectedConnectionId,
-                  expectedCredentialVersion: binding.expectedCredentialVersion,
+              return claudeUsageObserver.prepareRequestWithObserver(
+                providerId,
+                headers,
+                async (binding) => {
+                  const credential = await resolveClaudeSubscriptionCredential(
+                    db,
+                    settings,
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      scope: binding.scope,
+                    },
+                    {
+                      expectedConnectionId: binding.expectedConnectionId,
+                      expectedCredentialVersion: binding.expectedCredentialVersion,
+                    },
+                  );
+                  if (credential && "reconnectRequired" in credential)
+                    throw new ClaudeSubscriptionReconnectRequired();
+                  return credential;
                 },
               );
-              if (!credential) return headers; // A replaced connection never lends its new token to this turn.
-              if ("reconnectRequired" in credential)
-                throw new ClaudeSubscriptionReconnectRequired();
-              claudeUsageObserver.renew(providerId, credential);
-              headers.set("authorization", `Bearer ${credential.token}`);
-              headers.delete("x-api-key");
-              return headers;
             });
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
@@ -1844,6 +1846,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
     } finally {
       await finalizeTurnAttempt({
+        turnFinalizationTimeoutMs,
+        requestWorkerDrain,
         input,
         settings,
         db,

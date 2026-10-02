@@ -210,6 +210,12 @@ export default defineConfig({
               priority: 5,
             },
             {
+              // Isolate list title helpers so older-server fallbacks can load
+              // them without promoting the shared chat route graph to startup.
+              name: "session-list-titles",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.ts$/,
+            },
+            {
               // The SDK's error and wire-type runtime, and the attribution and
               // analytics helpers beside them, load at startup for every route.
               // Entry-aware splitting otherwise cuts this one unit in two as
@@ -252,10 +258,14 @@ export default defineConfig({
               // CalendarClock is also a session header/rail glyph. Keep it
               // here so management revision UI cannot share its route chunk
               // and make management controls static session dependencies.
+              // The mobile menu also belongs to sessions. Keep its glyph here
+              // so it cannot pull lazy settings glyphs into the shared graph.
+              // Plus is already rendered by the composer. Coalesce its tiny
+              // shared chunk here to avoid another direct-session request.
               // The usage-limit gauge and allowance wording are drawn by the
               // conversation's refusal row and by the lazy usage pages.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },

@@ -205,6 +205,10 @@
     "./presentation-artifact-query": {
       "types": "./src/presentation-artifact-query.ts",
       "default": "./src/presentation-artifact-query.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
     }
   },
   "publishConfig": {

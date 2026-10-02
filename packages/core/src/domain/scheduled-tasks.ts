@@ -103,6 +103,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   creationInitiatorForGrant,
+  modelUnavailableHttpException,
   settingsWithSessionMcpServerMetadata,
 } from "./sessions";
 import {
@@ -155,9 +156,7 @@ function workspaceCustomModelCommitGuard(input: {
       reference,
     });
     if (!active) {
-      throw new HTTPException(422, {
-        message: `model is not available: ${input.modelId}`,
-      });
+      throw modelUnavailableHttpException(input.modelId);
     }
   };
 }

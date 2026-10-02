@@ -18,7 +18,7 @@ export const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
 // Session creation accepts a body far larger than a navigation label. Bound
 // the source before any replace/split/normalization so a persisted large prompt
 // cannot amplify memory or CPU on every client render.
-const PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS = 4_096;
+export const PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS = 4_096;
 
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

@@ -41,7 +41,7 @@ export function startTurnFinalizationMonitor(input: {
   observability: Observability;
   details: TurnHeartbeatDetails;
   heartbeat: (details: TurnHeartbeatDetails) => void;
-  terminateWorker: () => void;
+  requestWorkerDrain: () => void;
   timeoutMs?: number;
   slowAfterMs?: number;
 }) {
@@ -93,10 +93,9 @@ export function startTurnFinalizationMonitor(input: {
             // Diagnostic failure must never disable physical containment.
           }
         },
-        terminateWorker: input.terminateWorker,
+        terminateWorker: input.requestWorkerDrain,
       });
-      // Record the precursor while the process remains scrapeable. A counter
-      // increment immediately before process.exit can never reach Prometheus.
+      // Record the precursor while the process remains scrapeable.
       slowTimer = setTimeout(
         () =>
           diagnose(() => {

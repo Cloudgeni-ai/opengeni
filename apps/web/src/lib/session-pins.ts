@@ -1,8 +1,9 @@
+import type { Session as SessionDetails } from "@/types";
 // Cross-tab invalidation for personal session pins. Postgres remains truth;
 // this message carries only workspace/session ids and tells sibling tabs to
 // re-read. Cross-device clients reconcile through the normal page refresh/poll.
 
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 const SESSION_PIN_CHANNEL_PREFIX = "opengeni.session-pins";
 const SESSION_PIN_STORAGE_PREFIX = "opengeni.session-pins.changed";
@@ -562,10 +563,10 @@ function mergeTreeStats(
  * route projection. Lifecycle and event-driven session fields remain owned by
  * the route/SSE reducer and cannot be regressed by a slower list poll.
  */
-export function applySessionPinProjection(
-  current: Session | null,
+export function applySessionPinProjection<T extends Session>(
+  current: T | null,
   projected: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion">,
-): Session | null {
+): T | null {
   if (!current || current.id !== projected.id || current.workspaceId !== projected.workspaceId) {
     return current;
   }
@@ -591,10 +592,10 @@ export function applySessionPinProjection(
 }
 
 /** Merge the list-owned project filing without replacing route/SSE content. */
-export function applySessionChannelProjection(
-  current: Session | null,
+export function applySessionChannelProjection<T extends Session>(
+  current: T | null,
   projected: Pick<Session, "id" | "workspaceId" | "channelId">,
-): Session | null {
+): T | null {
   if (!current || current.id !== projected.id || current.workspaceId !== projected.workspaceId) {
     return current;
   }
@@ -609,11 +610,11 @@ export function applySessionChannelProjection(
  * contributes personal pin fields and the project filing.
  */
 export function mergeSessionContextProjection(
-  current: Session | null,
-  projected: Session | null,
+  current: SessionDetails | null,
+  projected: SessionDetails | null,
   channelAuthority: SessionChannelProjectionAuthority,
   source: "detail" | "live",
-): Session | null {
+): SessionDetails | null {
   if (!projected) {
     return null;
   }
@@ -631,12 +632,12 @@ export function mergeSessionContextProjection(
  * its transient owner evidence) has unmounted.
  */
 export function mergeSessionDetailReadProjection(
-  current: Session | null,
-  projected: Session,
+  current: SessionDetails | null,
+  projected: SessionDetails,
   channelAuthority: SessionChannelProjectionAuthority,
   readGeneration: number,
   accepted: boolean,
-): Session | null {
+): SessionDetails | null {
   const authoritative = accepted ? projected : channelAuthority.project(projected, readGeneration);
   if (!accepted && authoritative === projected && !channelAuthority.owns(projected)) {
     return current;
@@ -654,11 +655,11 @@ export function mergeSessionDetailReadProjection(
  * Creation ordering also keeps the list's exact SQL timestamp; route/lineage
  * Date hydration can discard the microseconds that distinguish adjacent rows.
  */
-export function applySessionRailProjection(
-  current: Session,
+export function applySessionRailProjection<T extends Session>(
+  current: T,
   projected: Session,
   options: { channelOwned?: boolean } = {},
-): Session {
+): T {
   const activity =
     current.updatedAt === projected.updatedAt && current.createdAt === projected.createdAt
       ? current
@@ -687,10 +688,20 @@ export function applySessionRailProjection(
  * operation. Any intervening poll, mutation, or device response wins instead.
  */
 export function reconcileFailedSessionPin(
+  current: SessionDetails | null,
+  optimistic: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion"> | null,
+  authoritative: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion">,
+): SessionDetails | null;
+export function reconcileFailedSessionPin(
   current: Session | null,
   optimistic: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion"> | null,
   authoritative: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion">,
-): Session | null {
+): Session | null;
+export function reconcileFailedSessionPin<T extends Session>(
+  current: T | null,
+  optimistic: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion"> | null,
+  authoritative: Pick<Session, "id" | "workspaceId" | "pinned" | "pinnedAt" | "pinVersion">,
+): T | null {
   if (
     !current ||
     !optimistic ||

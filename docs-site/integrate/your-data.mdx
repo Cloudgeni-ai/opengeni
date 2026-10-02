@@ -69,6 +69,10 @@ Provider credentials must be independently scoped, not ordinary host login JWTs 
 
 Test the real middleware: the provider token permits only the intended operation on an owned record and is rejected by ordinary account/password/admin APIs, foreign records and extra write fields; a normal login token is rejected by the bridge. Also test expiry, issuer/audience and operation scope. Reuse authorized business logic, not the ordinary login credential.
 
+Reload current enabled-user and membership/record-owner policy on every call: an old valid token must not retain authority after disablement or role downgrade. Token claims are only a ceiling; writes need current authorization at the transaction boundary. Test revoked/downgraded users and existing sessions, not just token expiry.
+
+For reports, authorize the stored scope on list/summary/detail/export routes. A website-share token is not permission for team-report summaries, even if that team contains the shared website; deliberate signed-in team sharing uses its own membership policy. Enforce advertised date windows in server/provider queries, not just prompts. Reopened report headers/session mappings must follow the current report. Generated provenance comes from trusted backend session/job receipts, never an editor-submitted flag or forged origin metadata. The full [client Skill](/reference/opengeni-client-skill) includes tested live-policy, website-share and window guards using host-owned adapter fields.
+
 To require human approval before a tool runs, set `requireApproval: true` on the server, or list specific tool names. See [Approvals & questions](/integrate/approvals-and-questions).
 
 ## OpenAPI Integration

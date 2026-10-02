@@ -118,6 +118,16 @@ on every deployment that never opted in, so never read it as "the trial is live"
 
 ## Meaningful child attention (0503)
 
+`0585_session_attention_cursor.sql` persists the newest meaningful attention
+sequence in the narrow event cursor. Stop the declared application login roles
+for this maintenance migration: it backfills one indexed history probe per
+existing cursor and restores FORCE RLS in the same transaction. Cursor-backed
+readers must start after the migration commits. Older writers remain compatible
+because the existing event-insert trigger advances the raw and meaningful
+frontiers together; the change does not alter personal acknowledgements or
+rewrite event history. The current partial attention index remains available
+for exact content and lifecycle evidence reads.
+
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
@@ -1389,16 +1399,16 @@ and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For the **fleet permission-on** cutover, rolling migration
+For the **fleet activation** cutover, rolling migration
 `0583_session_tenancy_operator_permission.sql` is inert preparation only. It
 adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
 it neither activates organizations nor changes sessions. The CLI additionally
 requires the separately reviewed maintenance marker
-`0584_private_sessions_fleet_activation.sql` before accepting:
+`0586_private_sessions_fleet_activation.sql` before accepting:
 
 ```bash
 bun run db:activate-session-tenancy -- \
-  --all-organizations --enable-organization-private-sessions \
+  --all-organizations \
   --activated-by '<bounded-operator-identity>'
 ```
 
@@ -1411,15 +1421,37 @@ activation witness. Before a witness, an unwind additionally requires verified
 zero activation receipts; after one, recovery is forward-only.
 
 The fleet command freezes `managed_accounts`, preflights pending activations,
-then writes receipts and enables the preference for **every** frozen account,
-including already-activated accounts with missing/false settings, in one
-transaction. It checks final receipt plus enabled coverage before committing.
-Preference changes are audited as `service:session-tenancy-activation`, with no
-invented human membership; already-enabled accounts are no-ops. No existing
-session visibility, chat default, credential owner, or authority is changed.
-The single-organization command below retains its original preference-neutral
-behavior. Marker ordinal references must follow the project renumber command
+then writes receipts for pending accounts in one transaction. It checks final
+receipt coverage before committing. Both activation scopes preserve all
+existing organization preferences byte-identically, including missing settings
+and explicit OFF or ON choices. The fleet command rejects the retired
+`--enable-organization-private-sessions` override and never invokes the 0583
+preference-enable helper. After activation, an organization owner or admin opts
+in separately through organization settings; shared-workspace Only me remains
+unavailable while that setting is OFF. No existing session visibility, chat
+default, credential owner, or authority is changed. Marker ordinal references
+must follow the project renumber command
 if newer main migrations claim these ordinals.
+
+The CLI validates every supplied runtime identity as an existing restricted
+database login (no superuser or BYPASSRLS), clears PostgreSQL's transaction-cached
+activity snapshot before its initial drain check and each guarded activation,
+then clears and checks again after receipt coverage while source locks remain
+held, before commit. A late application reconnect rejects and rolls back the
+entire transaction. The already-activated replay-only fleet must pass the same
+fresh initial and final drain checks; it never uses preference enablement as a
+drain mechanism.
+
+The activation CLI's migration-owner connection carries the same canonical
+`application_name` protocol identity as `createDb`, including through a
+transaction pooler. Before connecting, it replaces only `application_name` in
+the migration URL's query parameters: a legacy operator Job tag must not
+override the current protocol identity. Credentials, multi-host authority,
+schema, TLS, timeout budgets, and all other URL options are preserved. This
+normalization applies only to activation, not ordinary migration steps.
+An unversioned raw connection is not a supported operator
+substitute: the current sessions policy rejects it even when the backfill
+receipts and parity evidence are ready.
 
 For each subsequent single-organization activation:
 
@@ -1500,6 +1532,35 @@ For each subsequent single-organization activation:
 After the activation migration commits, rollback to an earlier application image
 is forbidden, and setting the switch back to `false` is not a rollback - it
 cannot restore the legacy authority. Remain in maintenance and fix forward.
+
+### Production all-organization Only me availability cutover
+
+Migration `0586_private_sessions_fleet_activation.sql` is a maintenance-classified
+release marker, not an activation shortcut. The protected production release
+parks application database clients, applies the candidate migrations, then runs
+`db:activate-session-tenancy -- --all-organizations --activated-by
+production-release:<source-sha>` in its migration Job. The command takes a
+fixed snapshot of `managed_accounts`, checks the required migration, inventory,
+parity and six backfill receipt families for every not-yet-activated account,
+and calls the existing guarded SQL activation for each. All receipts commit in
+**one transaction**, including final coverage verification. An unready
+organization fails the entire Job without activating any new organization; do
+not bypass this gate or insert activation rows by hand. The maintenance lease
+owns forward recovery once the migration Job is authorized.
+An empty fleet also fails: without an initial activation receipt, migration
+0349 has no witness to auto-activate the first future signup.
+
+Before admitting that release, prepare and retain per-organization evidence
+using the fresh-key membership, resource, connection and final session
+backfills and the parity/RLS/revocation checks in
+[`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation).
+Fix unresolved cases first. The migration Job's 40-minute deadline is not a
+substitute for this preflight; a large fleet may require a deliberately budgeted
+maintenance window. The protected Helm reconciliation enables
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` on the new runtime
+and preserves it for later releases. Existing organizations' independent
+`organization_private_session_settings` remain disabled until their owner or
+admin opts in; this cutover makes that toggle available, not automatically on.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the

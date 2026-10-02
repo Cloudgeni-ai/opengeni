@@ -78,7 +78,8 @@ describe("organization usage HTTP actor binding", () => {
               workspace = String(params[1]);
             }
             if (sql.includes("set_config('opengeni.subject_id'")) subject = String(params[0]);
-            if (sql.includes("opengeni.initiating_human_subject_id")) human = String(params[1]);
+            if (/\bset_config\(\s*'opengeni\.initiating_human_subject_id'/.test(sql))
+              human = String(params[1]);
             if (sql.includes("current_setting('opengeni.account_id'"))
               return [{ account_id: account, workspace_id: workspace }];
             if (sql.includes("current_setting('opengeni.subject_id'"))

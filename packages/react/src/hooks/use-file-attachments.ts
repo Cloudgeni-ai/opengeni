@@ -4,6 +4,7 @@ import {
   useEmbeddedFileAttachments,
   type EmbeddedFileAttachmentClientOverride,
 } from "../session-context";
+import { useErrorMessage } from "../lib/error-message";
 
 export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
   /**
@@ -31,6 +32,8 @@ export type FileAttachment = {
   /** Stable SDK failure code for UI behavior that must not parse error copy. */
   errorCode?: "secure_context_required" | undefined;
   error?: string | undefined;
+  /** Original diagnostic failure; presentation copy is kept separately in `error`. */
+  errorCause?: unknown;
 };
 
 export type UseFileAttachmentsResult = {
@@ -120,6 +123,7 @@ export function useFileAttachments(
   options: UseFileAttachmentsOptions = {},
 ): UseFileAttachmentsResult {
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
+  const formatError = useErrorMessage();
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const attachmentsRef = useRef(attachments);
@@ -234,6 +238,7 @@ export function useFileAttachments(
                     sizeBytes: asset.sizeBytes,
                     errorCode: undefined,
                     error: undefined,
+                    errorCause: undefined,
                   }
                 : attachment,
             ),
@@ -248,14 +253,15 @@ export function useFileAttachments(
                     ...attachment,
                     status: "failed",
                     errorCode: secureContextRequiredErrorCode(error),
-                    error: error instanceof Error ? error.message : String(error),
+                    error: formatError(error),
+                    errorCause: error,
                   }
                 : attachment,
             ),
           );
         });
     },
-    [client, workspaceId, options.scope],
+    [client, workspaceId, options.scope, formatError],
   );
 
   const addFiles = useCallback(
@@ -291,7 +297,13 @@ export function useFileAttachments(
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.id === id
-            ? { ...attachment, status: "uploading", errorCode: undefined, error: undefined }
+            ? {
+                ...attachment,
+                status: "uploading",
+                errorCode: undefined,
+                error: undefined,
+                errorCause: undefined,
+              }
             : attachment,
         ),
       );
@@ -343,6 +355,7 @@ export function useFileAttachments(
                 file,
                 errorCode: undefined,
                 error: undefined,
+                errorCause: undefined,
               }
             : {
                 id: `restored:${file.id}`,

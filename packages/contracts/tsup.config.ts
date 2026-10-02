@@ -31,6 +31,7 @@ export default defineConfig({
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",
+    "src/session-list-entries.ts",
     "src/organization-model-usage.ts",
     "src/session-final-reply.ts",
     "src/site-session-http.ts",

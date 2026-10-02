@@ -12,6 +12,7 @@ import {
 } from "@opengeni/sdk";
 
 import type { Session } from "@/types";
+import type { RailSession } from "./session-list-entry";
 
 /** The maximum length a session title may be renamed to. */
 export const SESSION_TITLE_MAX_LENGTH = 200;
@@ -22,8 +23,8 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * pending. Mirrors the rail list and the header so every surface reads
  * identically.
  */
-export function sessionDisplayTitle(session: Session): string {
-  return deriveSessionDisplayTitle(session);
+export function sessionDisplayTitle(session: RailSession): string {
+  return "displayTitle" in session ? session.displayTitle : deriveSessionDisplayTitle(session);
 }
 
 /**
@@ -32,7 +33,8 @@ export function sessionDisplayTitle(session: Session): string {
  * UUID-derived reference remains an empty draft rather than becoming an
  * accidental rename.
  */
-export function renameSeedValue(session: Session): string {
+export function renameSeedValue(session: RailSession): string {
+  if ("renameSeed" in session) return session.renameSeed;
   if (!sessionTitleIsPending(session)) {
     return session.title?.trim() || "";
   }
@@ -69,7 +71,7 @@ type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promi
  * and tests can assert — the persist semantics without a DOM.
  */
 export async function performRename(
-  session: Session,
+  session: RailSession,
   draft: string,
   onRename: RenameFn,
 ): Promise<Session | null> {
@@ -104,7 +106,7 @@ export interface InlineRename {
  * the commit/cancel logic; the host renders the input (and whatever trigger
  * opens it) and wires the handlers. Used by the header editor and the rail row.
  */
-export function useInlineRename(session: Session, onRename: RenameFn): InlineRename {
+export function useInlineRename(session: RailSession, onRename: RenameFn): InlineRename {
   const display = sessionDisplayTitle(session);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(display);

@@ -85,6 +85,7 @@ import {
   combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
+  createWorkerCleanupContainment,
   type WorkerServiceLifecycle,
   type WorkerRunTarget,
 } from "./worker-service-lifecycle";
@@ -271,10 +272,20 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         },
       ),
     async (connection) => {
+      let turnWorker: Worker | undefined;
+      let cleanupDrainRequested = false;
       const activityDependencies = {
         ...options.activityDependencies,
         settings,
         observability,
+        requestWorkerDrain:
+          options.activityDependencies?.requestWorkerDrain ??
+          (() => {
+            if (cleanupDrainRequested) return;
+            if (!turnWorker) throw new Error("turn worker lifecycle is not initialized");
+            turnWorker.shutdown();
+            cleanupDrainRequested = true;
+          }),
       };
       const activities =
         options.activities ??
@@ -323,6 +334,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
           : turnConcurrency!.options),
       });
       if (options.role !== "control") {
+        turnWorker = worker;
         turnConcurrency?.admission?.finalizeStartupBaseline();
         return { worker, connection };
       }
@@ -822,6 +834,9 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
 
 export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
+  /** Host-owned final containment after a stalled cleanup has drained peers.
+   * The standalone process exits; embedded hosts own their termination policy. */
+  terminateWorker?: () => void;
   /**
    * Exact catalog posture required by the standalone runtime. Embedded hosts
    * may omit this when they own an equivalent database isolation contract.
@@ -878,6 +893,7 @@ export async function createOpenGeniWorkerService(
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   let lifecycle: WorkerServiceLifecycle | undefined;
+  let cleanupContainment: ReturnType<typeof createWorkerCleanupContainment> | undefined;
   let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
   let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
@@ -957,6 +973,10 @@ export async function createOpenGeniWorkerService(
         signalCodexCapacityWorkflow,
         startSandboxReaperWorkflow,
         startVideoGenerationWorkflow,
+        requestWorkerDrain: () => {
+          if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
+          cleanupContainment.request();
+        },
       },
     });
 
@@ -1018,18 +1038,15 @@ export async function createOpenGeniWorkerService(
     }
 
     if (options.http !== false) {
-      const databaseReady = dbReadyCheck(
-        options.http?.readinessDb ?? options.activityDependencies.db,
-        options.databasePosture,
-      );
+      const readinessDb = options.http?.readinessDb ?? options.activityDependencies.db;
+      const databaseReady = dbReadyCheck(readinessDb, options.databasePosture, async () => {
+        await resolveCatalogSettings(readinessDb, settings);
+      });
       httpServer = startWorkerHttpServer({
         settings,
         observability,
         checks: {
-          db: async () => {
-            await databaseReady();
-            await resolveCatalogSettings(options.activityDependencies.db, settings);
-          },
+          db: databaseReady,
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },
@@ -1056,9 +1073,21 @@ export async function createOpenGeniWorkerService(
     throw new Error("OpenGeni worker service initialization did not complete");
   }
 
+  cleanupContainment = createWorkerCleanupContainment({
+    drain: () => lifecycle?.drain("stalled turn finalization") ?? false,
+    ...(options.terminateWorker ? { terminate: options.terminateWorker } : {}),
+    observability,
+  });
+  const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
     role: options.role,
-    worker: activeWorkerBundle.worker,
+    worker: {
+      shutdown: () => activeWorkerBundle.worker.shutdown(),
+      run: async () => {
+        await activeWorkerBundle.worker.run();
+        activeCleanupContainment.finished();
+      },
+    },
     observability,
     closeOwnedResources: async () => {
       memoryPressureGuard?.close();
@@ -1210,6 +1239,7 @@ export async function startWorker() {
     );
     await runOpenGeniWorker({
       role,
+      terminateWorker: () => process.exit(1),
       settings,
       databasePosture,
       http: { readinessDb: readinessDbClient.db },

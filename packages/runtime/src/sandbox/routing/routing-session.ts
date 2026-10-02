@@ -41,6 +41,7 @@ import {
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -281,6 +282,12 @@ export interface RoutingSandboxSessionDeps {
     process: RoutingRetainedProcess;
     proof: RoutingRetainedProcessTerminalProof;
   }) => Promise<void>;
+  /** Read terminal truth for this exact copied process/backend. Missing rows,
+   * failed observations and active rows must never count as physical proof. */
+  isProcessSettled?: (input: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }) => Promise<boolean>;
   /** A terminal result is being returned to the model, not merely drained by
    * control/reaper work. Never invoke this for a running receipt. */
   observeProcessTerminal?: (input: {
@@ -1236,6 +1243,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         write.call(record.backend.session, args),
       );
     } catch (error) {
+      let inputUnknown = false;
+      try {
+        inputUnknown = error instanceof ProviderCommandInputOutcomeUnknownError;
+      } catch {
+        // An unreadable provider graph cannot manufacture typed input proof.
+      }
       if (this.deps.afterProcessMutation) {
         const pending: PendingProcessMutationSettlement = {
           op,
@@ -1250,10 +1263,27 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           record.pendingMutationSettlement = pending;
           throw new RoutingMutationOutcomeUnknownError(
             op,
-            `Retained-process stdin rejected at the provider but lost durable settlement; it was not replayed`,
-            { cause: settlementError },
+            inputUnknown
+              ? "Retained-process stdin acknowledgement and durable settlement unavailable; input may have been accepted. Do not resend stdin."
+              : "Retained-process stdin rejected at the provider but lost durable settlement; it was not replayed",
+            inputUnknown
+              ? {
+                  cause: new AggregateError([error, settlementError]),
+                  retainedProcess: record.process,
+                }
+              : { cause: settlementError },
           );
         }
+      }
+      if (inputUnknown) {
+        // Preserve native input proof across the retained route, including its
+        // genuine byte-range cause and exact locator. Both SDK-facing rendering
+        // and direct tool faults must forbid input replay.
+        throw new RoutingMutationOutcomeUnknownError(
+          op,
+          "Provider stdin acknowledgement unavailable; input may have been accepted and was not resent. Do not resend stdin.",
+          { cause: error, retainedProcess: record.process },
+        );
       }
       throw error;
     }
@@ -2131,7 +2161,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writeStdin(args: unknown): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId !== null && this.retainedProcesses.has(providerSessionId)) {
-      return await this.dispatchProcessMutation(args);
+      try {
+        return await this.dispatchProcessMutation(args);
+      } catch (error) {
+        // The SDK's write_stdin tool has no configurable errorFunction. Render
+        // genuine routing uncertainty here, before its generic retry advice.
+        // Direct/control methods still throw; this is not an output receipt or
+        // terminal proof and cannot acknowledge bytes or release the writer.
+        if (isRoutingMutationOutcomeUnknownError(error))
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        throw error;
+      }
     }
     return this.dispatch("writeStdin", true, async (s) => {
       if (!s.writeStdin) {
@@ -2156,6 +2196,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       positiveProviderSessionId(providerSessionId) !== null &&
       this.retainedProcesses.has(providerSessionId)
     );
+  }
+
+  /** A reaper may have settled the command while a local capture/control receipt
+   * remained pending. Cleanup may consume that same durable proof without
+   * replaying a provider operation or accepting pending output into the model. */
+  async reconcileRetainedProcess(providerSessionId: number): Promise<boolean> {
+    const record = this.retainedProcesses.get(providerSessionId);
+    if (!record || !this.deps.isProcessSettled) return false;
+    if (!(await this.deps.isProcessSettled({ backend: record.backend, process: record.process })))
+      return false;
+    // Do not erase a rival route installed while the durable read was pending.
+    if (this.retainedProcesses.get(providerSessionId) !== record) return false;
+    this.retainedProcesses.delete(providerSessionId);
+    return true;
   }
 
   /** Local, Docker, and OpenSandbox process ids address an in-memory table on one worker
@@ -2854,7 +2908,8 @@ async function streamPlacementPrivateFile(
   input: ReturnType<typeof placementPrivateWrite>,
   backendKind: string,
 ): Promise<void> {
-  if (!session.exec || !session.writeStdin) {
+  const exec = session.exec?.bind(session) ?? session.execCommand?.bind(session);
+  if (!exec || !session.writeStdin) {
     throw new RoutingUnsupportedError("writePlacementPrivate", backendKind);
   }
   const bytes = typeof input.content === "string" ? Buffer.from(input.content) : input.content;
@@ -2865,7 +2920,7 @@ async function streamPlacementPrivateFile(
     ...(input.createParents ? [`install -d -m 0700 -- ${shellSingleQuote(parent)}`] : []),
   ];
   if (bytes.byteLength === 0) {
-    const result = await session.exec({
+    const result = await exec({
       cmd: [
         ...prelude,
         `: > ${shellSingleQuote(input.path)}`,
@@ -2893,7 +2948,7 @@ async function streamPlacementPrivateFile(
     `chmod 0600 -- ${shellSingleQuote(input.path)}`,
     `printf %s ${shellSingleQuote(marker)}`,
   ].join("; ");
-  const started = await session.exec({
+  const started = await exec({
     cmd: command,
     ...(input.runAs ? { runAs: input.runAs } : {}),
     yieldTimeMs: 250,
