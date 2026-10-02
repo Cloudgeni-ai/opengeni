@@ -1,9 +1,11 @@
+import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
 } from "@opengeni/config";
 import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import { sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { connections } from "./schema";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
 import {
   listXaiSubscriptionAccountsMetadata,
@@ -13,6 +15,32 @@ import {
 import { connectionModelAllowed } from "./model-connection-access";
 
 export type ConnectionModelRestrictions = Record<string, string[] | null>;
+
+/** Metadata-only read under the caller's workspace and subject RLS scope. */
+async function listDirectModelConnections(db: Database, workspaceId: string, subjectId: string) {
+  return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) =>
+    tx
+      .select({
+        id: connections.id,
+        version: connections.version,
+        subjectId: connections.subjectId,
+        kind: connections.kind,
+        status: connections.status,
+        providerDomain: connections.providerDomain,
+        metadata: connections.metadata,
+      })
+      .from(connections)
+      .where(
+        and(
+          eq(connections.workspaceId, workspaceId),
+          isNull(connections.subjectId),
+          eq(connections.kind, "api_key"),
+          eq(connections.status, "active"),
+          sql`${connections.metadata}->>'credentialRole' IN ('direct_openai', 'direct_azure_openai')`,
+        ),
+      ),
+  );
+}
 
 /** Public model-id restrictions only. Never returns connection or private owner identifiers. */
 export async function getWorkspaceConnectionModelRestrictions(
@@ -85,6 +113,10 @@ export async function getWorkspaceConnectionModelRestrictions(
     );
     for (const row of rows) restrictions[row.prefix] = row.allowedModelIds;
   });
+  for (const connection of await listDirectModelConnections(db, workspaceId, subjectId)) {
+    const spec = directModelConnectionSpec(connection);
+    if (spec) restrictions[`${spec.providerId}/`] = [spec.modelId];
+  }
   return restrictions;
 }
 
@@ -110,6 +142,21 @@ export async function assertModelConnectionAllowsTurn(
 ): Promise<void> {
   const model = input.modelId;
   let query;
+  if (isDirectModelId(model)) {
+    const connection = (
+      await listDirectModelConnections(db, input.workspaceId, input.subjectId)
+    ).find(
+      (candidate) =>
+        directModelConnectionSpec(candidate)?.modelId === model &&
+        (!input.workspaceProviderConnectionId ||
+          candidate.id === input.workspaceProviderConnectionId),
+    );
+    if (!connection)
+      throw new Error(
+        "This OpenAI or Azure OpenAI connection is no longer available; reconnect and select its model",
+      );
+    return;
+  }
   if (model.startsWith("codex/") || model.startsWith("supergrok/")) {
     const codex = model.startsWith("codex/");
     const id = codex ? input.codexCredentialId : input.xaiCredentialId;

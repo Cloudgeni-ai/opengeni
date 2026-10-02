@@ -2396,16 +2396,19 @@ export function RootRouteComponent() {
   }
 
   async function handleManagedSignOut() {
-    invalidatePrincipalWorkspaceState();
+    // Unmount authenticated readers before sign-out can invalidate their
+    // cookie. Keep the neutral surface until an ambiguous response is
+    // reconciled against the authoritative session.
+    flushSync(() => {
+      invalidatePrincipalWorkspaceState();
+      setAuthSession(undefined);
+      setAccessContext(null);
+      setWorkspaces([]);
+      setAccessError(null);
+    });
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
-    // Keep the authenticated tree hidden until an ambiguous response has been
-    // reconciled against the authoritative cookie session.
-    setAuthSession(undefined);
-    setAccessContext(null);
-    setWorkspaces([]);
-    setAccessError(null);
     const reconciliation = await runCurrentTransitionInvocation({
       isCurrent: ownsInvocation,
       request: async () =>

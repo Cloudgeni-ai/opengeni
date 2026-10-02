@@ -216,6 +216,8 @@ function BillingOverview({
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
+        successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success`,
+        cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
       });
       if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
@@ -278,7 +280,7 @@ function BillingOverview({
               <SettingRowGroup>
                 <SettingRow
                   label="Add credits"
-                  description="Minimum $5.00. You pay in Stripe."
+                  description="Minimum $5.00. Enter a gift code in Stripe Checkout. You receive the selected credit amount, including when the coupon covers the full price."
                   controlWidth="auto"
                   control={
                     <div className="flex items-center gap-2">

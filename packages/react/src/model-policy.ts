@@ -47,6 +47,11 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
     return "organization_byok";
   }
+  if (
+    model.provider?.startsWith("workspace-openai-") ||
+    model.provider?.startsWith("workspace-azure-openai-")
+  )
+    return "byok";
   if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
     return "byok";
   }
