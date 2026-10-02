@@ -565,7 +565,12 @@ export function ComputerViewer({
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}>
+    <div
+      className={cn(
+        "@container/computer-viewer flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-og-bg",
+        className,
+      )}
+    >
       <ComputerToolbar
         sessions={liveSessions}
         relevantSessionIds={currentIds}
@@ -625,7 +630,7 @@ export function ComputerViewer({
                 .catch((cause) => notifyError(cause, "Could not switch desktop views."))
             }
           />
-          <div className="flex min-h-0 flex-1">
+          <div className="flex min-h-0 flex-1 flex-col @xl/computer-viewer:flex-row">
             {rfbStream ? (
               <div className="relative min-h-0 flex-1 bg-black" onCopyCapture={copyFromRfb}>
                 <DesktopViewer
@@ -1523,7 +1528,7 @@ function ComputerViewport(props: {
         </div>
       ) : null}
       {showCanvas && (!rawInputEnabled || !props.pointerInput || !props.keyboardInput) ? (
-        <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
+        <div className="absolute bottom-3 left-1/2 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
           <span>
             {!rawInputEnabled && (props.pointerInput || props.keyboardInput)
               ? "Background view · use native controls"
@@ -1538,7 +1543,7 @@ function ComputerViewport(props: {
               type="button"
               disabled={props.mutating}
               onClick={() => enqueue({ type: "focus", targetId: props.target!.id }, null)}
-              className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
+              className="shrink-0 whitespace-nowrap rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
             >
               Control directly
             </button>
@@ -1645,7 +1650,7 @@ function ComputerSemanticPanel(props: {
 }) {
   const nodes = semanticNodes(props.observation).slice(0, 100);
   return (
-    <aside className="w-64 shrink-0 overflow-y-auto border-l border-og-border bg-og-surface-1 p-2">
+    <aside className="max-h-[40%] w-full shrink-0 overflow-y-auto border-t border-og-border bg-og-surface-1 p-2 @xl/computer-viewer:max-h-none @xl/computer-viewer:w-64 @xl/computer-viewer:border-t-0 @xl/computer-viewer:border-l">
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
         <KeyboardIcon className="size-3" /> Native controls
       </div>
