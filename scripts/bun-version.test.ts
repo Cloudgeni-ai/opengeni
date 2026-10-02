@@ -42,11 +42,24 @@ describe("canonical Bun version contract", () => {
     ).not.toThrow();
     expect(() =>
       verifyWorkflowBunSetup(
+        "registry-guard.yml",
+        [
+          "steps:",
+          "  - name: Set up registry export guard Bun",
+          "    uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .ci/registry-export-guard/.bun-version",
+          "  - run: cd .ci/registry-export-guard && bun test",
+        ].join("\n"),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyWorkflowBunSetup(
         "floating.yml",
         ["steps:", "  - uses: oven-sh/setup-bun@v2", "  - run: bun test"].join("\n"),
       ),
     ).toThrow(
-      "floating.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+      "floating.yml setup-bun step must read the canonical source, retained-controller, or registry-guard .bun-version file",
     );
 
     expect(() =>
@@ -60,7 +73,7 @@ describe("canonical Bun version contract", () => {
         ].join("\n"),
       ),
     ).toThrow(
-      "source-data.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+      "source-data.yml setup-bun step must read the canonical source, retained-controller, or registry-guard .bun-version file",
     );
 
     expect(() =>
@@ -75,7 +88,25 @@ describe("canonical Bun version contract", () => {
         ].join("\n"),
       ),
     ).toThrow(
-      "mixed.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+      "mixed.yml setup-bun step must read the canonical source, retained-controller, or registry-guard .bun-version file",
+    );
+  });
+
+  test("rejects arbitrary tooling Bun version files outside the canonical owners", () => {
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "arbitrary-tooling.yml",
+        [
+          "steps:",
+          "  - name: Set up arbitrary tooling Bun",
+          "    uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .ci/arbitrary-tooling/.bun-version",
+          "  - run: cd .ci/arbitrary-tooling && bun test",
+        ].join("\n"),
+      ),
+    ).toThrow(
+      "arbitrary-tooling.yml setup-bun step must read the canonical source, retained-controller, or registry-guard .bun-version file",
     );
   });
 
