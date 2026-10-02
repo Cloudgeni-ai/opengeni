@@ -10113,9 +10113,28 @@
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.requestRestrictions": "array?",
+        "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
+        "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageRequestStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.observedAt": "string!",
+        "$.overageResetsAt": "string! null",
+        "$.overageStatus": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.representativeClaim": "ref(ClaudeUsageWindowId)! null",
+        "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.upstreamModelId": "string! null"
       }
     },
     "ClaudeUsageWindow": {
@@ -10127,6 +10146,7 @@
         "$.id": "ref(ClaudeUsageWindowId)!",
         "$.observedAt": "string!",
         "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
         "$.usedPercent": "number! null"
       }
@@ -24927,6 +24947,7 @@
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
