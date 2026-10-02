@@ -186,7 +186,7 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
   summary: "Use models through your OpenRouter account, billed to OpenRouter.",
   keyHelp: "Create one on openrouter.ai under Keys.",
   billingDescription:
-    "Use models through this workspace's OpenRouter account. The workspace's OpenRouter account is billed directly. This is separate from deployment-provided OpenRouter models, including free models and models funded by deployment credits.",
+    "Use models through this workspace's OpenRouter account. The workspace's OpenRouter account is billed directly. This is separate from any OpenRouter models this deployment provides.",
   connectionManagerDescription:
     "Members with connection-management access manage this workspace OpenRouter connection.",
   keyAriaLabel: "OpenRouter API key",
