@@ -2672,7 +2672,7 @@
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
-      "when": "ownership=user for machine-secret configuration",
+      "when": "ownership=personal for machine-secret configuration",
       "class": "delegable_to_user",
       "reason": "Only the exact verified owning person may configure their personal connection; organization machine-secret administration does not imply personal ownership."
     },
