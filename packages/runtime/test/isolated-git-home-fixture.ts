@@ -164,12 +164,12 @@ export function hostShellSession(home: string, options: HostShellSessionOptions 
       let cmd = options.rewriteCommand ? options.rewriteCommand(args.cmd) : args.cmd;
       // Lifecycle hooks can transport scripts as base64 chunks. Map virtual
       // paths in the decoded program too, before executing it on the host.
-      const stagedScript = cmd.match(/^exec \/bin\/sh '(\/tmp\/opengeni\/[^']+\.sh)'$/u);
+      const stagedScript = cmd.match(/exec \/bin\/sh '(\/tmp\/opengeni\/[^']+\.sh)'/u);
       if (stagedScript && options.rewriteCommand) {
         const path = stagedScript[1]!;
         writeFileSync(path, options.rewriteCommand(readFileSync(path, "utf8")));
         if (options.shell === "bash") {
-          cmd = cmd.replace("exec /bin/sh ", "exec bash --noprofile --norc ");
+          cmd = cmd.replaceAll("exec /bin/sh ", "exec bash --noprofile --norc ");
         }
       }
       const child = Bun.spawn(
