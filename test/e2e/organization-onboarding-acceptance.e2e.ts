@@ -1170,8 +1170,29 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       .getByRole("heading", { name: `This invitation is for ${registeredEmail}` })
       .waitFor();
     await alternatePage.getByText(`You're signed in as ${alternateOwnerEmail}`).waitFor();
+    // Capture the exact credential-mutation dispatch, before React can flush a
+    // batched reset after fetch has already started. The authenticated workspace
+    // tree must be gone before sign-out can revoke its background reads.
+    await alternatePage.evaluate(() => {
+      const checks: boolean[] = [];
+      const checkedWindow = window as Window & { workspaceTreeAtSignOut?: boolean[] };
+      checkedWindow.workspaceTreeAtSignOut = checks;
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        if (url.pathname === "/v1/auth/sign-out") {
+          checks.push(document.querySelector('a[href^="/workspaces/"]') !== null);
+        }
+        return nativeFetch(input, init);
+      };
+    });
     await alternatePage.getByRole("button", { name: "Switch account" }).click();
     await alternatePage.getByRole("heading", { name: "Sign in" }).waitFor();
+    expect(
+      await alternatePage.evaluate(
+        () => (window as Window & { workspaceTreeAtSignOut?: boolean[] }).workspaceTreeAtSignOut,
+      ),
+    ).toEqual([false]);
     const invitedEmailInput = alternatePage.getByLabel("Email");
     expect(await invitedEmailInput.inputValue()).toBe(registeredEmail);
     expect(await invitedEmailInput.isEditable()).toBe(false);
