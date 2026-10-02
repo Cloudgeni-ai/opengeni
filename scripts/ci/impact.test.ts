@@ -56,6 +56,7 @@ const TIMELINE_EXCHANGE_FOLD_BROWSER_E2E = "test/e2e/timeline-exchange-fold.brow
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
+const ERROR_BRANDING_E2E = "test/e2e/error-branding.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
@@ -180,6 +181,28 @@ describe("fail-closed change impact", () => {
     expect(unrelated.e2eTests).not.toContain(PREVIEW_LOADING_E2E);
   });
 
+  test("error branding follows its React harness and shared dependencies without widening leaf plans", () => {
+    expect(discoverTestFiles().e2e).toContain(ERROR_BRANDING_E2E);
+    expect(usesBrowserRunner(ERROR_BRANDING_E2E)).toBe(true);
+    for (const path of [
+      ERROR_BRANDING_E2E,
+      "packages/react/demo/error-branding-test.html",
+      "packages/react/demo/error-branding-test-harness.tsx",
+      "packages/react/src/index.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(ERROR_BRANDING_E2E);
+      expect(plan.unitTests, path).not.toContain(ERROR_BRANDING_E2E);
+      expect(plan.integrationTests, path).not.toContain(ERROR_BRANDING_E2E);
+    }
+    const unrelated = createImpactPlan(["packages/browserd/src/index.ts"]);
+    expect(unrelated.mode).toBe("focused");
+    expect(unrelated.e2eTests).not.toContain(ERROR_BRANDING_E2E);
+  });
+
   test("release-owned CLI delivery follows the runtime build dependency closure", () => {
     // ogtool is no longer an independent leaf: runtime builds its managed
     // client asset from the CLI source, including its transitive dependencies.
@@ -302,6 +325,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      ERROR_BRANDING_E2E,
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -846,6 +870,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      ERROR_BRANDING_E2E,
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
