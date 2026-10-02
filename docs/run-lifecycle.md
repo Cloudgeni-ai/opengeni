@@ -1058,10 +1058,12 @@ Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
 258,400-token effective input ceiling (95%), and automatic compaction at
 244,800 tokens (90%, reached with `>=`). Local checkpoint replacement retains
-only the newest real user messages that fit one cumulative 20,000-token budget,
-then appends the summary; internal resume notices are never retained as user
-intent. Automatic compaction uses provider-reported usage only: the durable
-prior-call input count at a turn boundary, or the immediately preceding
+the newest user messages and system-role machine-input batches that fit one
+cumulative 20,000-token budget, then appends the summary. Retained machine inputs
+keep their original role and accepted goal snapshot, never become user intent,
+and are never requeued. Remote v2 also retains these system messages within its
+existing shared 64,000-token budget. Automatic compaction uses provider-reported
+usage only: the durable prior-call input count at a turn boundary, or the immediately preceding
 same-activity provider total plus bounded newly appended input. With no bound
 provider count, OpenGeni sends the request and recovers from a genuine provider
 context overflow instead of compacting from a whole-request approximation.

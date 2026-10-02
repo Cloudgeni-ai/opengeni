@@ -126,7 +126,8 @@ Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares prepared prefixes with both Responses compaction modes; Chat retains
-its transcript adapter.
+its transcript adapter. Both modes retain recent system-role input batches
+within existing budgets, preserving chronological accepted goal snapshots.
 
 Failed-session retry is not Pause/Resume or prompt admission:
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
