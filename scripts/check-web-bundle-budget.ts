@@ -482,6 +482,12 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Media prompt-module metadata adds 33 raw bytes to the shared inspector
+    // projection. Bun 1.4 macOS/arm64 measures base 15234d2e1 at 2,587,867
+    // bytes (already above the previous cap) and this graph at 2,587,900,
+    // matching Linux/x64 CI. Preserve the established 1.5 KiB allowance;
+    // compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_587_900, 1.5 * kib),
     // Custom MCP OAuth endpoint discovery and isolated popup completion:
     // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
     // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.

@@ -8176,7 +8176,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
