@@ -1,6 +1,7 @@
 import type {
   SessionBackgroundCommand,
   SessionBackgroundCommandActivity,
+  SessionBackgroundCommandReconciliation,
 } from "@opengeni/contracts";
 import { SessionCommandFailure } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
@@ -83,22 +84,47 @@ function commandPreview(value: string): string {
 }
 
 const commandObservationUnavailable = sql<boolean>`
-  ${schema.sessionBackgroundCommands.state} in ('running','stopping') and exists (
-    select 1 from sandbox_retained_processes process
-    where process.id = ${schema.sessionBackgroundCommands.retainedProcessId}
-      and process.account_id = ${schema.sessionBackgroundCommands.accountId}
-      and process.workspace_id = ${schema.sessionBackgroundCommands.workspaceId}
-      and process.session_id = ${schema.sessionBackgroundCommands.sessionId}
-      and process.state = 'active'
-      and process.last_reconcile_outcome in ('process_observation_unavailable',
-        'quarantined_process_observation_unavailable', 'provider_binding_missing',
-        'quarantined_provider_binding_missing', 'provider_binding_mismatch',
-        'quarantined_provider_binding_mismatch'))`;
+  ${schema.sessionBackgroundCommands.state} in ('running','stopping') and (
+    (${schema.sessionBackgroundCommands.provider} = 'connected_machine'
+      and coalesce(${schema.sessionBackgroundCommands.lastReconcileOutcome}
+        in ('provider_offline', 'provider_error'), false))
+    or exists (
+      select 1 from sandbox_retained_processes process
+      where process.id = ${schema.sessionBackgroundCommands.retainedProcessId}
+        and process.account_id = ${schema.sessionBackgroundCommands.accountId}
+        and process.workspace_id = ${schema.sessionBackgroundCommands.workspaceId}
+        and process.session_id = ${schema.sessionBackgroundCommands.sessionId}
+        and process.state = 'active'
+        and process.last_reconcile_outcome in ('process_observation_unavailable',
+          'quarantined_process_observation_unavailable', 'provider_binding_missing',
+          'quarantined_provider_binding_missing', 'provider_binding_mismatch',
+          'quarantined_provider_binding_mismatch')))`;
 
 const commandReadColumns = {
   ...getTableColumns(schema.sessionBackgroundCommands),
   observationUnavailable: commandObservationUnavailable,
 };
+
+function connectedCommandReconciliation(
+  row: typeof schema.sessionBackgroundCommands.$inferSelect,
+): SessionBackgroundCommandReconciliation {
+  const outcome = row.lastReconcileOutcome;
+  const observedAt = row.reconcileProofObservedAt?.toISOString();
+  return {
+    // Legacy diagnostic text is not a public message or a routing locator.
+    lastOutcome:
+      outcome === null ? null : /^[a-z][a-z0-9_]{0,63}$/.test(outcome) ? outcome : "unknown",
+    attempts: row.reconcileAttempts,
+    dueAt: row.reconcileAfter.toISOString(),
+    claimedAt: row.reconcileClaimedAt?.toISOString() ?? null,
+    terminalProof:
+      observedAt && row.reconcileProofOutcome === "exited" && row.reconcileProofExitCode !== null
+        ? { outcome: "exited", exitCode: row.reconcileProofExitCode, observedAt }
+        : observedAt && row.reconcileProofOutcome === "lost"
+          ? { outcome: "lost", exitCode: null, observedAt }
+          : null,
+  };
+}
 
 function mapCommand(
   row: typeof schema.sessionBackgroundCommands.$inferSelect & { observationUnavailable?: boolean },
@@ -139,6 +165,9 @@ function mapCommand(
     state: row.state,
     ...(!terminal && row.observationUnavailable
       ? { observationStatus: "unavailable" as const }
+      : {}),
+    ...(row.provider === "connected_machine"
+      ? { reconciliation: connectedCommandReconciliation(row) }
       : {}),
     commandPreview: row.commandPreview,
     ...(row.commandText !== null ? { commandText: row.commandText } : {}),
