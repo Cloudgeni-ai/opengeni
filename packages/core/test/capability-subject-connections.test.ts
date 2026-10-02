@@ -137,56 +137,6 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
-  test("session-page policy resolves current workspace defaults and installations together", async () => {
-    if (!available) throw new Error("Real PostgreSQL fixture required");
-    const workspace = await freshWorkspace();
-    const otherWorkspace = await freshWorkspace();
-    const policySettings = {
-      ...settings,
-      mcpServers: ["opengeni", "docs", "example"].map((id) => ({
-        id,
-        url: `https://${id}.example.test/mcp`,
-        cacheToolsList: false,
-      })),
-    };
-    const capabilityId = `mcp:policy-${crypto.randomUUID()}`;
-    await createMcpCapability(workspace, capabilityId, {
-      endpointUrl: "https://connector.example.test/mcp",
-      authModel: null,
-    });
-    await enableCapabilityInstallation(db, {
-      ...workspace,
-      capabilityId,
-      kind: "mcp",
-      metadata: { mcpConnectivity: { status: "ok" } },
-    });
-    const runtimeId = (await listEnabledMcpCapabilityServers(db, workspace.workspaceId))[0]!.id;
-    await updateWorkspaceSettings(db, workspace.workspaceId, {
-      sessionToolDefaults: {
-        mcpServerIds: ["example", "removed"],
-        inheritConnectedMcpServers: false,
-      },
-    });
-    const read = (workspaceId: string) =>
-      workspaceSessionToolPolicyContext(db, workspaceId, policySettings, "subject-alice");
-    expect(await read(workspace.workspaceId)).toEqual({
-      workspaceServerIds: ["docs", "example", runtimeId, "opengeni"].sort(),
-      workspaceDefaultServerIds: ["example"],
-    });
-    expect(await read(otherWorkspace.workspaceId)).toEqual({
-      workspaceServerIds: ["docs", "example", "opengeni"],
-      workspaceDefaultServerIds: ["docs", "example"],
-    });
-    await disableCapabilityInstallation(db, workspace.workspaceId, capabilityId);
-    await updateWorkspaceSettings(db, workspace.workspaceId, {
-      sessionToolDefaults: { mcpServerIds: ["docs"], inheritConnectedMcpServers: false },
-    });
-    expect(await read(workspace.workspaceId)).toEqual({
-      workspaceServerIds: ["docs", "example", "opengeni"],
-      workspaceDefaultServerIds: ["docs"],
-    });
-  });
-
   test("new Slack catalog selectors survive enable/storage/projection and admit workspace plus only the sender's accounts", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();
@@ -1233,6 +1183,55 @@ describe("subject-owned capability connection references", () => {
       providerDomain: "slack.com",
       kind: "app_install",
       subjectScope: "workspace",
+    });
+  });
+  test("session-page policy resolves current workspace defaults and installations together", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const otherWorkspace = await freshWorkspace();
+    const policySettings = {
+      ...settings,
+      mcpServers: ["opengeni", "docs", "example"].map((id) => ({
+        id,
+        url: `https://${id}.example.test/mcp`,
+        cacheToolsList: false,
+      })),
+    };
+    const capabilityId = `mcp:policy-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://connector.example.test/mcp",
+      authModel: null,
+    });
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    const runtimeId = (await listEnabledMcpCapabilityServers(db, workspace.workspaceId))[0]!.id;
+    await updateWorkspaceSettings(db, workspace.workspaceId, {
+      sessionToolDefaults: {
+        mcpServerIds: ["example", "removed"],
+        inheritConnectedMcpServers: false,
+      },
+    });
+    const read = (workspaceId: string) =>
+      workspaceSessionToolPolicyContext(db, workspaceId, policySettings, "subject-alice");
+    expect(await read(workspace.workspaceId)).toEqual({
+      workspaceServerIds: ["docs", "example", runtimeId, "opengeni"].sort(),
+      workspaceDefaultServerIds: ["example"],
+    });
+    expect(await read(otherWorkspace.workspaceId)).toEqual({
+      workspaceServerIds: ["docs", "example", "opengeni"],
+      workspaceDefaultServerIds: ["docs", "example"],
+    });
+    await disableCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    await updateWorkspaceSettings(db, workspace.workspaceId, {
+      sessionToolDefaults: { mcpServerIds: ["docs"], inheritConnectedMcpServers: false },
+    });
+    expect(await read(workspace.workspaceId)).toEqual({
+      workspaceServerIds: ["docs", "example", "opengeni"],
+      workspaceDefaultServerIds: ["docs"],
     });
   });
 });
