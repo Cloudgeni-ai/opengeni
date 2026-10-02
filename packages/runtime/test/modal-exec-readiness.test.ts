@@ -341,10 +341,11 @@ function foregroundTools(f: ReturnType<typeof fixture>) {
   let stored: ModalRouterProviderCommand;
   let adoptions = 0;
   let retained = true;
+  let cleanupHelpers = 0;
   const fence = createTurnToolCancellationController();
   const invoke = async (_context: unknown, input: string) => {
     const args = JSON.parse(input);
-    stored = await f.control.start({ cmd: args.cmd }, AbortSignal.timeout(2_000));
+    stored = await f.control.start({ cmd: args.cmd, tty: args.tty }, AbortSignal.timeout(2_000));
     f.session.bindProviderCommand!(73, stored, {
       load: async () => stored,
       acknowledge: async (command) => command,
@@ -380,10 +381,15 @@ function foregroundTools(f: ReturnType<typeof fixture>) {
       },
       writeStdinForProcessRead: (args) => f.session.writeStdin!(args),
       writeStdinForProcessMutation: (args) => f.session.writeStdin!(args),
-      cancelSupervisedCommand: async () => {
+      cancelSupervisedCommand: async () => false,
+      execCommandForProcessControl: async (handle) => {
+        expect(handle).toBe(73);
+        cleanupHelpers++;
         foregroundPollPending = false;
         foregroundPollFailure = false;
-        return true;
+        // Physical helper behavior is independently exercised by the real
+        // local-process cancellation suite; this fixture owns the RPC abort.
+        return "Chunk ID: cleanup\nWall time: 0 seconds\nProcess exited with code 0\nOutput:\n";
       },
       writeStdinForProcessControl: async (args) => {
         const result = await f.session.writeStdin!(args);
@@ -400,28 +406,34 @@ function foregroundTools(f: ReturnType<typeof fixture>) {
     fence,
     adoptions: () => adoptions,
     stored: () => stored,
+    cleanupHelpers: () => cleanupHelpers,
   };
 }
 
-test("post-start real gRPC UNAVAILABLE retries only the exact foreground read", async () => {
-  const f = fixture();
-  const tools = foregroundTools(f);
-  foregroundReadFailures = 1;
-  try {
-    const result = await tools.exec.invoke(
-      {},
-      JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
-    );
-    expect(result).toContain("Process exited with code 0");
-    expect(result).toContain("initial");
-    expect(starts).toHaveLength(1);
-    expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
-    expect(tools.stored().streams.stdout.eof).toBe(true);
-    expect(tools.adoptions()).toBe(0);
-  } finally {
-    await f.close();
-  }
-});
+test.each([true, false])(
+  "post-start real gRPC UNAVAILABLE retries only the exact unsupervised foreground read (PTY=%s)",
+  async (tty) => {
+    const f = fixture();
+    const tools = foregroundTools(f);
+    foregroundReadFailures = 1;
+    try {
+      const result = await tools.exec.invoke(
+        {},
+        JSON.stringify({ cmd: "work", tty, yield_time_ms: 1_000 }),
+      );
+      expect(result).toContain("Process exited with code 0");
+      expect(result).toContain("initial");
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+      expect(tools.stored().streams.stdout.eof).toBe(true);
+      expect(tools.stored().pty).toBe(tty ? true : undefined);
+      expect(tools.stored().supervision).toBeUndefined();
+      expect(tools.adoptions()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test("foreground stdin read failure does not resend nonempty input", async () => {
   const f = fixture();
@@ -503,6 +515,7 @@ test("foreground cancellation aborts an already-in-flight exact poll", async () 
     await tools.fence.waitForQuiescence();
     expect(performance.now() - began).toBeLessThan(500);
     expect(foregroundPollCancelled).toBeGreaterThan(0);
+    expect(tools.cleanupHelpers()).toBe(1);
     expect(starts).toHaveLength(1);
   } finally {
     await f.close();
