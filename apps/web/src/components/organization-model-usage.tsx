@@ -5,7 +5,7 @@ import type {
 } from "@opengeni/contracts/organization-model-usage";
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { ErrorMessage } from "@/components/ui/error-message";
@@ -203,6 +203,10 @@ const MODEL_COLUMNS: RowListColumn[] = [
 
 const PAYER_MONOGRAM = { opengeni_credits: "C", subscription: "S", own_key: "K" } as const;
 
+const PAID_WITH_DESCRIPTION =
+  "Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is a list-price estimate.";
+const BY_MODEL_DESCRIPTION = "Every workspace, private chats included.";
+
 function Quiet(props: { children: string }) {
   return <span className="text-fg-muted tabular-nums">{props.children}</span>;
 }
@@ -263,8 +267,35 @@ export function OrganizationModelUsagePanel(props: {
       </Section>
     );
   }
-  // The usage section above already says when a period is loading or empty.
-  if (!data || data.billing.length === 0) return null;
+  // Loading keeps the final layout; an empty period says so in the usage
+  // section above, so this panel then shows nothing.
+  if (!data) {
+    return (
+      <>
+        <Section title="Paid with" description={PAID_WITH_DESCRIPTION}>
+          <RowList
+            variant="table"
+            label="Loading spend by who pays"
+            nameLabel="Paid with"
+            columns={PAYER_COLUMNS}
+          >
+            <ListRowSkeleton count={3} />
+          </RowList>
+        </Section>
+        <Section title="By model" description={BY_MODEL_DESCRIPTION}>
+          <RowList
+            variant="table"
+            label="Loading spend by model"
+            nameLabel="Model"
+            columns={MODEL_COLUMNS}
+          >
+            <ListRowSkeleton count={3} />
+          </RowList>
+        </Section>
+      </>
+    );
+  }
+  if (data.billing.length === 0) return null;
   const total = summarizeModelUsage(data.billing);
   const coverage = ledgerCoverageNote(props.ledgerCreditMicros, total.creditMicros);
   const payers = organizationPayerRows(
@@ -272,10 +303,7 @@ export function OrganizationModelUsagePanel(props: {
   );
   return (
     <>
-      <Section
-        title="Paid with"
-        description="Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is a list-price estimate."
-      >
+      <Section title="Paid with" description={PAID_WITH_DESCRIPTION}>
         {coverage ? (
           <Notice tone="waiting" title="Some charges aren't broken down yet">
             {coverage}
@@ -316,7 +344,7 @@ export function OrganizationModelUsagePanel(props: {
         description={
           data.modelsTruncated
             ? "The 50 models that used the most tokens in every workspace."
-            : "Every workspace, private chats included."
+            : BY_MODEL_DESCRIPTION
         }
       >
         <RowList variant="table" label="Spend by model" nameLabel="Model" columns={MODEL_COLUMNS}>
