@@ -1526,6 +1526,10 @@ exit requires both streams' EOF. Fixed native lease-readiness probes share the
 pre-dispatch guard; uncertain Starts observe their exact invocation within the
 existing readiness budget.
 
+Post-start recovery preserves IDs/cursors, budgets and writer fences.
+Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
+helper UUID/cursors.
+
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
