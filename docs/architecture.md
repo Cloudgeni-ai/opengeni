@@ -950,11 +950,6 @@ The closed always-visible first-request local tool set is `exec_command`,
 [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
 require progressive search.
 
-Configured agents always receive discovery mechanics; `media` gates image/video
-guidance. An unmatched literal `tool_list.namePrefix` preserves the empty page
-and may suggest bounded authorized descriptors. Suggestions neither load schemas
-nor grant execution; exact `tool_search` resolves them.
-
 Repository descriptors use sandbox-bound `repository_skill_read`, separate
 from managed `skill_read`: [run lifecycle](run-lifecycle.md).
 
@@ -985,6 +980,11 @@ Canonical: [`model-providers.md`](model-providers.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
 [`connected-machines.md`](connected-machines.md). Variable Set lifecycle and
 ordering are canonical in [`variable-sets.md`](variable-sets.md).
+
+Configured agents always receive discovery mechanics; `media` gates image/video
+guidance. An unmatched literal `tool_list.namePrefix` preserves the empty page
+and may suggest bounded authorized descriptors. Suggestions neither load schemas
+nor grant execution; exact `tool_search` resolves them.
 
 ### 5.6 Files, knowledge, and artifacts
 
