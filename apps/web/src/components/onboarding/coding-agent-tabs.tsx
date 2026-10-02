@@ -50,7 +50,7 @@ export function CodingAgentTabs({
                 copyAnalytics={analyticsAction("copy_coding_agent_setup")}
               />
             ))}
-            <p className="text-xs leading-4.5 text-fg-muted">{guide.note}</p>
+            {guide.note ? <p className="text-xs leading-4.5 text-fg-muted">{guide.note}</p> : null}
           </LineTabsContent>
         ))}
       </LineTabs>

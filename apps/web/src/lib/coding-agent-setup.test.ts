@@ -111,3 +111,18 @@ describe("the prompt for a coding agent", () => {
     expect(isAppCreatedSession({ createdBy: null })).toBe(false);
   });
 });
+
+describe("one setup block for a coding agent", () => {
+  test("holds the plugin install, the prompt and where the key goes", async () => {
+    const { codingAgentSetupBlock } = await import("./coding-agent-setup");
+    const block = codingAgentSetupBlock({ prompt: "Build it.", apiKey: "ogk_secret" });
+    expect(block).toContain("claude plugin marketplace add Cloudgeni-ai/opengeni");
+    expect(block).toContain("Build it.");
+    expect(block).toContain("OPENGENI_API_KEY=ogk_secret");
+    expect(block.indexOf("claude plugin")).toBeLessThan(block.indexOf("Build it."));
+    // Without a key of their own, it says who has one; it never invents one.
+    expect(codingAgentSetupBlock({ prompt: "Build it.", apiKey: null })).toContain(
+      "OPENGENI_API_KEY=<ask an organization owner for an API key>",
+    );
+  });
+});

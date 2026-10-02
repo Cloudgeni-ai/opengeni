@@ -432,24 +432,14 @@ describe("Get started page", () => {
     const { container, unmount } = await mount(
       <GetStartedRoute workspaceId={DEVELOPMENT} step="product" />,
     );
+    const writeText = mock(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     try {
-      expect(container.textContent).toContain("1. Add the Opengeni skills to your coding agent");
-      // No hand-written code to paste: tabs per agent, then a prompt.
-      expect(container.textContent).not.toContain("@opengeni/sdk/chat");
-      expect(
-        Array.from(container.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent),
-      ).toEqual(["Claude Code", "Codex", "Cursor", "VS Code", "Other"]);
-      // The skills-only developer plugin: no MCP sign-in needed.
-      expect(container.textContent).toContain(
-        "claude plugin install opengeni-developer@opengeni-developer-plugins --scope user",
-      );
-      expect(container.textContent).not.toContain("/mcp");
-      const prompt = Array.from(container.querySelectorAll("pre")).find((pre) =>
-        pre.textContent?.includes("opengeni-client"),
-      )!.textContent!;
-      expect(prompt).toContain("Use the opengeni-setup and opengeni-client skills");
-      expect(prompt).toContain(`workspace ${DEVELOPMENT} in organization ${ORG}`);
-      expect(prompt).toContain("I'll paste the API key into .env as OPENGENI_API_KEY.");
+      // One action and one line; the details wait, closed.
+      expect(button(container, "Copy setup for my coding agent")).toBeTruthy();
+      expect(container.textContent).toContain("Paste it into Claude Code, Codex or Cursor.");
+      expect(button(container, "Show details").getAttribute("aria-expanded")).toBe("false");
+      expect(container.textContent).not.toContain("Installs the Opengeni Developer plugin");
       // The chat that app created marks the path's success.
       expect(listSessions).toHaveBeenCalledWith(DEVELOPMENT, { limit: 25 });
       expect(container.textContent).toContain(
@@ -457,20 +447,39 @@ describe("Get started page", () => {
       );
       expect(container.querySelector('a[href*="/sessions/"]')?.textContent).toBe("Open the chat");
       expect(journeys.readOnboardingJourney(KEY)!.marks.first_api_session).toBeString();
-      await act(async () => button(container, "Create API key").click());
+      // One click: the key is created (shown once) and one block is copied.
+      await act(async () => button(container, "Copy setup for my coding agent").click());
       await flush();
       expect(createOrganizationApiKey).toHaveBeenCalledWith(ORG, {
         name: "My first agent",
         description: "Created while building your first agent",
       });
+      const copied = writeText.mock.calls.at(-1)![0];
+      expect(copied).toContain(
+        "claude plugin install opengeni-developer@opengeni-developer-plugins --scope user",
+      );
+      expect(copied).toContain("Use the opengeni-setup and opengeni-client skills");
+      expect(copied).toContain(`workspace ${DEVELOPMENT} in organization ${ORG}`);
+      expect(copied).toContain("OPENGENI_API_KEY=ogk_hello");
       expect(container.textContent).toContain(
         "Copy this API key now. You won't be able to see it again.",
       );
-      expect(container.textContent).toContain(
-        "Paste it into your product's .env as OPENGENI_API_KEY.",
-      );
-      expect(container.textContent).toContain("ogk_hello");
+      // Never persisted: the journey holds marks, not the key.
+      expect(JSON.stringify(journeys.readOnboardingJourney(KEY))).not.toContain("ogk_hello");
+      expect(localStorage.getItem(KEY) ?? "").not.toContain("ogk_hello");
       expect(journeys.readOnboardingJourney(KEY)!.marks.api_key).toBeString();
+      // A second copy reuses the same key.
+      const created = createOrganizationApiKey.mock.calls.length;
+      await act(async () => button(container, "Copied").click());
+      await flush();
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(created);
+      // Show details: the agent tabs, the prompt and the guides.
+      await act(async () => button(container, "Show details").click());
+      expect(
+        Array.from(container.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent),
+      ).toEqual(["Claude Code", "Codex", "Cursor", "VS Code", "Other"]);
+      expect(container.textContent).not.toContain("/mcp");
+      expect(container.textContent).toContain("Developer plugin");
     } finally {
       await unmount();
     }
@@ -488,6 +497,7 @@ describe("Get started page", () => {
       <GetStartedRoute workspaceId={DEVELOPMENT} step="product" />,
     );
     try {
+      await act(async () => button(container, "Show details").click());
       expect(container.textContent).toContain(
         "claude plugin marketplace add Cloudgeni-ai/opengeni",
       );

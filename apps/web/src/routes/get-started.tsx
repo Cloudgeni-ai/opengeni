@@ -24,7 +24,7 @@ import {
   type CodingAgentSetup,
 } from "@/lib/coding-agent-setup";
 import { queueComposerPrefill } from "@/lib/composer-prefill";
-import { composeCodingAgentPrompt, hasProductDetails } from "@/lib/first-agent";
+import { composeCodingAgentPrompt, hasAnyProductAnswer } from "@/lib/first-agent";
 import {
   onboardingIntentsLabel,
   type GetStartedItem,
@@ -337,7 +337,6 @@ function GitHubStep({
  * app's first chat here, which is the Build path's success.
  */
 function ProductStep({ state }: { state: GetStartedState }) {
-  const context = useAppContext();
   const workspaceId = state.developmentWorkspaceId;
   const organizationId = state.organizationId;
   if (!organizationId) return null;
@@ -351,25 +350,18 @@ function ProductStep({ state }: { state: GetStartedState }) {
     );
   const apiOrigin = apiOriginFor(apiBaseUrl, window.location.origin);
   const answers = state.journey?.firstAgent ?? null;
-  const fromAnswers = Boolean(answers && answers.use === "product" && hasProductDetails(answers));
+  const fromAnswers = Boolean(answers && answers.use === "product" && hasAnyProductAnswer(answers));
   const prompt =
     answers && fromAnswers
       ? composeCodingAgentPrompt(answers, { apiOrigin, organizationId, workspaceId })
       : buildWithOpengeniPrompt({ apiOrigin, organizationId, workspaceId });
-  const workspaceName =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "Development";
   return (
     <OwnAgentSetup
-      className="mt-4 flex min-w-0 flex-col gap-8"
+      className="mt-4 flex min-w-0 flex-col gap-4"
       organizationId={organizationId}
       workspaceId={workspaceId}
       canCreateApiKeys={state.canCreateApiKeys}
       prompt={prompt}
-      promptDescription={
-        fromAnswers
-          ? `It uses what you told us about your product. Each chat your product starts shows up in ${workspaceName}.`
-          : `It builds a small web app on your computer with an Opengeni agent chat, and each chat shows up in ${workspaceName}.`
-      }
       mcpUrl={state.codingAgent.oauth ? state.codingAgent.mcpUrl : null}
       firstSessionSeen={Boolean(state.journey?.marks.first_api_session)}
       onMark={state.mark}

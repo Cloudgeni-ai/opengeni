@@ -113,15 +113,13 @@ export function developerPluginGuides({
             ]
           : []),
       ],
-      note: mcpUrl
-        ? "Installs the Opengeni Developer plugin: two skills, opengeni-setup and opengeni-client. The second line adds this workspace's MCP server; run /mcp in Claude Code to sign in."
-        : "Installs the Opengeni Developer plugin: two skills, opengeni-setup and opengeni-client. No API access or MCP server.",
+      note: mcpUrl ? "Then run /mcp in Claude Code to sign in." : "",
     },
     {
       agent: "codex",
       label: "Codex",
       blocks: [{ label: "Run in your terminal", code: DEVELOPER_PLUGIN_INSTALL.codex.join("\n") }],
-      note: "Installs the Opengeni Developer plugin. You can also find it under /plugins in Codex.",
+      note: "",
     },
     {
       agent: "cursor",
@@ -209,4 +207,32 @@ export function isAppCreatedSession(session: {
 }): boolean {
   const subject = session.createdBy?.subjectId ?? "";
   return subject.startsWith("api_key:") || subject.startsWith("external_user:");
+}
+
+/**
+ * The one block "Copy setup for my coding agent" copies: the Opengeni
+ * Developer plugin install for Claude Code, the prompt, and where the key
+ * goes. The key is only ever in this copied text (and the page's memory),
+ * never stored.
+ */
+export function codingAgentSetupBlock({
+  prompt,
+  apiKey,
+}: {
+  prompt: string;
+  /** The key just created here, or null when this person can't create one. */
+  apiKey: string | null;
+}): string {
+  return [
+    "# 1. Install the Opengeni Developer plugin (Claude Code; Codex and Cursor: see Show details)",
+    ...DEVELOPER_PLUGIN_INSTALL.claude,
+    "",
+    "# 2. Then give your coding agent this prompt",
+    prompt,
+    "",
+    "# 3. The API key goes in your product's server .env, never in client code",
+    apiKey
+      ? `${API_KEY_ENV_VAR}=${apiKey}`
+      : `${API_KEY_ENV_VAR}=<ask an organization owner for an API key>`,
+  ].join("\n");
 }

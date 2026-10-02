@@ -1,9 +1,18 @@
 import { OpenGeniProvider } from "@opengeni/react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { directModelConnectionSpec, type CreateConnectionRequest } from "@opengeni/contracts";
-import { ChevronsUpDownIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  ChevronDownIcon,
+  ChevronsUpDownIcon,
+  FolderIcon,
+  MicIcon,
+  PlusIcon,
+  SparklesIcon,
+} from "lucide-react";
 import { createContext, lazy, Suspense, useContext, useState, type ReactNode } from "react";
 
+import { NewSessionStarters } from "@/components/new-session-starters";
 import { GetStartedCard } from "@/components/onboarding/get-started-card";
 import { OnboardingFrame } from "@/components/onboarding/onboarding-frame";
 import { Button } from "@/components/ui/button";
@@ -670,8 +679,14 @@ function AppFixture({ children }: { children: (workspaceId: string) => ReactNode
   );
 }
 
-/** The new-chat page's column, with the checklist where the suggestions go. */
+/**
+ * The new-chat page's column as the real page draws it: the composer (static
+ * here, with the model new chats start on), the starter suggestions, then the
+ * Get started card.
+ */
 function ChecklistPreview() {
+  const params = usePreviewParams();
+  const noModel = params.get("model") === "none" && params.get("credits") !== "trial";
   return (
     <AppFixture>
       {(workspaceId) => (
@@ -680,15 +695,44 @@ function ChecklistPreview() {
             <h1 className="text-center text-3xl font-semibold tracking-tight text-fg">
               What should the agent do?
             </h1>
-            <div
-              className="mt-8 h-32 rounded-[14px] border border-border bg-surface"
-              aria-hidden="true"
-            />
+            <StaticComposer model={noModel ? null : "GPT-6 Luna"} />
+            <NewSessionStarters onSelect={() => undefined} />
             <GetStartedCard workspaceId={workspaceId} onPrefill={() => undefined} />
           </div>
         </main>
       )}
     </AppFixture>
+  );
+}
+
+/** A picture of the new-chat composer for previews: nothing in it works. */
+function StaticComposer({ model }: { model: string | null }) {
+  return (
+    <div
+      aria-hidden="true"
+      className="mt-8 rounded-[14px] border border-border-strong bg-surface shadow-xs"
+    >
+      <div className="flex items-center border-b border-border px-4 py-3">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-xs font-medium text-fg-label">
+          <FolderIcon className="size-3.5" /> Default
+          <ChevronDownIcon className="size-3 text-fg-subtle" />
+        </span>
+      </div>
+      <p className="px-4 pt-3 pb-6 text-base text-fg-subtle">Describe a task for the agent...</p>
+      <div className="flex items-center gap-2 px-3 pb-3">
+        <PlusIcon className="size-4 text-fg-muted" />
+        <MicIcon className="ml-2 size-4 text-fg-muted" />
+        <span className="ml-2 inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-fg">
+          <SparklesIcon className="size-3.5" />
+          {model ?? "Connect a model"}
+          {model ? <span className="text-fg-muted">Extra high</span> : null}
+          <ChevronDownIcon className="size-3 text-fg-subtle" />
+        </span>
+        <span className="ml-auto grid size-8 place-items-center rounded-full border border-border text-fg-subtle">
+          <ArrowUpIcon className="size-4" />
+        </span>
+      </div>
+    </div>
   );
 }
 
