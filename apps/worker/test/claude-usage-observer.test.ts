@@ -147,7 +147,7 @@ test("a late authentication failure belongs to its dispatched token, not a concu
       await old;
     },
     (id, headers) =>
-      observe.prepareRequest(id, headers, async () => ({
+      observe.prepareRequestWithObserver(id, headers, async () => ({
         token,
         connectionId: "original",
         credentialVersion: 7,
