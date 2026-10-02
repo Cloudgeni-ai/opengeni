@@ -482,6 +482,10 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Removed-model recovery (composer notice, catalog check, default
+    // preselection, refusal copy): Linux/x64 Bun 1.4 measures 2,590,762 raw.
+    // Retain the established 1.5 KiB allowance; compressed caps stay fixed.
+    wholeKibEnvelope(2_590_762, 1.5 * kib),
     // Custom MCP OAuth endpoint discovery and isolated popup completion:
     // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
     // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.

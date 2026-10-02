@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
   CREDIT_EXHAUSTION_MESSAGE,
   composerSubmissionErrorMessage,
   composerSubmissionCanRetry,
   formatClockTime,
+  isModelUnavailableSubmissionError,
   formatRelativeTime,
   humanizeFailureReason,
   presentFailure,
@@ -172,6 +174,57 @@ describe("composerSubmissionErrorMessage", () => {
     expect(composerSubmissionCanRetry(error)).toBe(false);
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("free");
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE).not.toContain("Codex");
+  });
+
+  test("a model removed from the catalog asks for another model instead of a retry", () => {
+    const error = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        error: {
+          status: 422,
+          code: "validation_failed",
+          message: "model is not available: openrouter/vendor/retired-model:free",
+          retryable: false,
+          requestId: "req-model-unavailable",
+          details: { code: "model_unavailable", modelId: "openrouter/vendor/retired-model:free" },
+        },
+      }),
+      { mutation: true },
+    );
+    expect(error.details).toEqual({
+      code: "model_unavailable",
+      modelId: "openrouter/vendor/retired-model:free",
+    });
+    expect(isModelUnavailableSubmissionError(error)).toBe(true);
+    expect(composerSubmissionErrorMessage(error)).toBe(COMPOSER_MODEL_UNAVAILABLE_MESSAGE);
+    expect(composerSubmissionErrorMessage(error)).not.toMatch(/422|Reference|retired-model/);
+    expect(composerSubmissionCanRetry(error)).toBe(false);
+
+    // Only the stored text survives a reload, and older APIs omit the detail code.
+    for (const text of [
+      COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+      "OpenGeni API 422: model is not available: gpt-old Reference: abc.",
+    ]) {
+      expect(composerSubmissionErrorMessage(new Error(text))).toBe(
+        COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+      );
+      expect(composerSubmissionCanRetry(new Error(text))).toBe(false);
+    }
+
+    // Other validation failures keep their text and stay retryable.
+    const other = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        error: {
+          status: 422,
+          code: "validation_failed",
+          message: "text too long",
+          retryable: false,
+        },
+      }),
+    );
+    expect(isModelUnavailableSubmissionError(other)).toBe(false);
+    expect(composerSubmissionCanRetry(other)).toBe(true);
   });
 
   test("passes unrelated submission errors through", () => {

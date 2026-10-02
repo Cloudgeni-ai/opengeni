@@ -580,6 +580,33 @@ async function installApi(
     if (path.endsWith("/models") || path.endsWith("/model-catalog"))
       return json({
         models: [
+          // The unsupported lane's session model is absent from the catalog,
+          // exactly as for a model removed from it; other lanes list it.
+          ...(unsupported
+            ? []
+            : [
+                {
+                  id: "gpt-5.6-sol",
+                  label: "GPT-5.6 Sol",
+                  provider: "openai",
+                  providerLabel: "OpenAI",
+                  api: "responses",
+                  source: "opengeni",
+                  cost: "credits",
+                  credentialReadiness: {
+                    status: "ready",
+                    reason: null,
+                    basis: "configuration",
+                    checkedAt: null,
+                  },
+                  availability: {
+                    status: "available",
+                    selectable: true,
+                    reason: null,
+                    checkedAt: null,
+                  },
+                },
+              ]),
           {
             id: "supported-model",
             label: "Supported model",
