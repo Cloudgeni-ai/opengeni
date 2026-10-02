@@ -81,4 +81,6 @@ export const embeddingMigrationTail = [
   "0584_agent_instruction_size_parity.sql",
   // Extends the cursor table and meaningful index withheld by these fixtures.
   "0585_session_attention_cursor.sql",
+  // Extends the containment reason installed by withheld 0547; replay after it.
+  "0586_quiescence_command_containment.sql",
 ];

@@ -1290,6 +1290,7 @@ export function recordSandboxDeadlineRotationsRequested(
 export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
   "idle_enrolled",
   "deadline_enrolled",
+  "quiescence_enrolled",
   "resumed_enrolled",
   "not_eligible",
   "inspection_failed",
