@@ -64,6 +64,11 @@ let foregroundPollFailure = false;
 let foregroundPollPending = false;
 let foregroundPollCancelled = 0;
 let foregroundWrites = 0;
+let fixtureSequence = 0;
+let fixtureToken = "test-token";
+function currentFixture(call: { metadata: { get(key: string): unknown[] } }): boolean {
+  return call.metadata.get("authorization")[0] === `Bearer ${fixtureToken}`;
+}
 beforeAll(async () => {
   directory = mkdtempSync(join(tmpdir(), "opengeni-readiness-"));
   const key = join(directory, "server.key"),
@@ -101,7 +106,11 @@ beforeAll(async () => {
     } as ServiceDefinition,
     {
       start(call: any, callback: any) {
-        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        if (!currentFixture(call)) {
+          callback(null, {});
+          return;
+        }
+        expect(call.metadata.get("authorization")).toEqual([`Bearer ${fixtureToken}`]);
         starts.push(call.request);
         callback(
           mode === "rejected"
@@ -121,6 +130,13 @@ beforeAll(async () => {
         );
       },
       read(call: any) {
+        // A client's cancelled promise may settle before the server receives
+        // its queued stream. Never let an older fixture consume this one's
+        // failure counter or satisfy its poll/cancellation synchronization.
+        if (!currentFixture(call)) {
+          call.end();
+          return;
+        }
         observations.push(call.request.execId);
         if (foregroundReadFailures > 0) {
           foregroundReadFailures--;
@@ -133,6 +149,10 @@ beforeAll(async () => {
         } else call.end();
       },
       poll(call: any, callback: any) {
+        if (!currentFixture(call)) {
+          callback(null, { code: 0 });
+          return;
+        }
         observations.push(call.request.execId);
         if (foregroundPollPending) {
           call.on("cancelled", () => foregroundPollCancelled++);
@@ -144,12 +164,20 @@ beforeAll(async () => {
         }
         callback(null, { code: mode === "nonzero" ? 127 : 0 });
       },
-      write(_call: any, callback: any) {
+      write(call: any, callback: any) {
+        if (!currentFixture(call)) {
+          callback(null, {});
+          return;
+        }
         foregroundWrites++;
         callback(null, {});
       },
       preparation(call: any, callback: any) {
-        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        if (!currentFixture(call)) {
+          callback(null, {});
+          return;
+        }
+        expect(call.metadata.get("authorization")).toEqual([`Bearer ${fixtureToken}`]);
         preparations.push(call.request.taskId);
         completePreparation = () => callback(null, {});
         preparationEntered();
@@ -179,6 +207,8 @@ function fixture(
   url = endpoint,
   preparation?: { stage: "task" | "access"; pending?: boolean },
 ) {
+  const token = `test-token-${++fixtureSequence}`;
+  fixtureToken = token;
   mode = selected;
   starts = [];
   observations = [];
@@ -202,7 +232,7 @@ function fixture(
       cpClient: {
         taskGetCommandRouterAccess: async () => ({
           url: "https://task-readiness.invalid",
-          jwt: "test-token",
+          jwt: token,
         }),
       },
     } as never,
@@ -225,11 +255,11 @@ function fixture(
     modal: { version: () => "0.9.0" },
     app: {},
   } as never);
-  const wire = new ModalCommandRouterWire({ url, jwt: "test-token" }, certificate);
+  const wire = new ModalCommandRouterWire({ url, jwt: token }, certificate);
   const prepare = async (stage: "task" | "access", signal?: AbortSignal): Promise<void> => {
     signal?.throwIfAborted();
     const metadata = new Metadata();
-    metadata.set("authorization", "Bearer test-token");
+    metadata.set("authorization", `Bearer ${token}`);
     await new Promise<void>((resolve, reject) => {
       const client = (wire as any).client;
       const call = client.makeUnaryRequest(
@@ -265,7 +295,7 @@ function fixture(
           options: { signal?: AbortSignal },
         ) => {
           await prepare("access", options?.signal);
-          return { url, jwt: "test-token" };
+          return { url, jwt: token };
         },
       },
     } as never,
