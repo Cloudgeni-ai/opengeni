@@ -115,10 +115,6 @@ Before changes, 137 installed-SDK/native fault tests passed across eight files,
 exhaustion case passed. The four new desired-recovery counterexamples failed.
 Final validation is recorded in the implementing PR.
 
-[OPE-640](https://linear.app/cloudgeni/issue/OPE-640/recover-fixed-modal-probes-and-contain-ambiguous-stdin)
-owns these focused corrections.
-[OPE-641](https://linear.app/cloudgeni/issue/OPE-641/resume-modal-connectivity-waits-automatically-and-checkpoint)
-records the durable eventual-continuity requirement under
-[OPE-618](https://linear.app/cloudgeni/issue/OPE-618/modal-taskexecstart-name-resolution-failed-ends-the-turn-instead-of).
-The existing OPE-618 owner retains its broader rollout and live capture diagnosis.
-The DNS root-cause investigation remains separate under OPE-13.
+The implementing PR records the focused correction's validation and ownership.
+Durable eventual continuity is tracked separately from the existing rollout and
+live capture diagnosis. The DNS root-cause investigation also remains separate.
