@@ -98,7 +98,7 @@ describe("OpenGeniProvider deployment contract", () => {
       "[data-opengeni-api-contract-mismatch]",
     );
     expect(screen).not.toBeNull();
-    expect(screen?.textContent).toContain("OpenGeni updated");
+    expect(screen?.textContent).toContain("Opengeni updated");
     expect(screen?.textContent).toContain(`Client ${OPENGENI_API_CONTRACT_REVISION}`);
     expect(screen?.textContent).toContain(`API ${actual}`);
     expect(workspaceReads).toBe(0);

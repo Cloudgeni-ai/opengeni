@@ -49,7 +49,7 @@ const siteClient = {
   tools: { forWorkspace: () => ({}) },
 };
 const accessContext = {
-  workspaceGrants: [{ workspaceId, permissions: ["artifacts:publish"] }],
+  workspaceGrants: [{ workspaceId, permissions: ["artifacts:read", "artifacts:publish"] }],
 };
 
 mock.module("@/context", () => ({
@@ -77,7 +77,9 @@ mock.module("@/components/artifacts/site-conversations", () => ({
   SiteConversations: () => createElement("button", { type: "button" }, "Conversations"),
 }));
 
-mock.module("@/components/artifacts/artifact-sandbox", () => ({
+const actualArtifacts = await import("@opengeni/react/artifacts");
+mock.module("@opengeni/react/artifacts", () => ({
+  ...actualArtifacts,
   ArtifactSandbox: ({ children }: { children?: ReactNode }) =>
     createElement("div", { "data-testid": "site-sandbox" }, children),
 }));
@@ -132,12 +134,12 @@ function hasAction(container: HTMLElement, label: string) {
   });
 }
 
-test("loaded Site keeps Archive and Edit with Geni behind permission checks", async () => {
+test("loaded Site keeps Archive and Edit with Opengeni behind permission checks", async () => {
   loadError = null;
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(true);
-    expect(hasAction(container, "Edit with Geni")).toBe(true);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
   } finally {
     await act(async () => root.unmount());
@@ -145,12 +147,12 @@ test("loaded Site keeps Archive and Edit with Geni behind permission checks", as
   }
 });
 
-test("missing Site hides Archive and Edit with Geni", async () => {
+test("missing Site hides Archive and Edit with Opengeni", async () => {
   loadError = new OpenGeniApiError(404, "", { correlationId: "corr-missing-site" });
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site isn't available");
     expect(container.textContent).toContain("Reference: corr-missing-site");
     expect(container.textContent).not.toContain("OpenGeni API 404");
@@ -167,7 +169,7 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
@@ -181,7 +183,7 @@ test("malformed Site id hides mutation actions", async () => {
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site link isn't valid");
   } finally {
     await act(async () => root.unmount());
@@ -194,11 +196,38 @@ test("transient Site load failure offers retry without mutation actions", async 
   const { container, root } = await renderDetail();
   try {
     expect(hasArchive(container)).toBe(false);
-    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(hasAction(container, "Retry")).toBe(true);
     expect(container.textContent).toContain("Couldn't load this Site");
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("Site read refusal explains missing artifact access instead of removal", async () => {
+  const permissions = accessContext.workspaceGrants[0]!.permissions;
+  for (const [error, grant] of [
+    // The server refused the read.
+    [new OpenGeniApiError(403, "", { correlationId: "corr-denied-site" }), permissions],
+    // The viewer's own grant (for example the pre-0555 Member role) lacks artifacts:read.
+    [new OpenGeniApiError(404, "", { correlationId: "corr-member-site" }), ["sessions:read"]],
+  ] as const) {
+    loadError = error;
+    accessContext.workspaceGrants[0]!.permissions = [...grant];
+    const { container, root } = await renderDetail();
+    try {
+      expect(container.textContent).toContain("You can't open this Site");
+      expect(container.textContent).toContain(
+        "You need access to artifacts in this workspace. Ask a workspace admin.",
+      );
+      expect(container.textContent).not.toContain("may have been removed");
+      expect(hasAction(container, "Retry")).toBe(false);
+      expect(hasArchive(container)).toBe(false);
+    } finally {
+      accessContext.workspaceGrants[0]!.permissions = permissions;
+      await act(async () => root.unmount());
+      container.remove();
+    }
   }
 });

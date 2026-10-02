@@ -1,21 +1,18 @@
 // Workspace settings pages, rendered inside the settings shell
 // (components/settings/workspace-settings-shell.tsx): General, Access,
-// Models and API keys. The org/billing console lives at
-// Organization settings.
+// API keys and Developer. Models lives in Organization settings (a
+// workspace's Models URL redirects there), as does the org/billing console.
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
 import { lazy, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { WorkspaceModelsPage } from "@/components/models/workspace-models-page";
 import { AgentActivityRow } from "@/components/settings/agent-activity";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
-import {
-  WorkspaceDeveloperSettings,
-  WorkspaceSandboxImageRow,
-} from "@/components/workspace-developer-settings";
+import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
+import { WorkspaceSandboxImageRow } from "@/components/workspace-sandbox-image-row";
 import {
   WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
@@ -28,14 +25,20 @@ import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { Button } from "@/components/ui/button";
 import { CopyField } from "@/components/ui/copy-field";
 import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { DisabledReasonTooltip, SettingRow, SettingRowSkeleton } from "@/components/ui/setting-row";
+import {
+  DisabledReasonTooltip,
+  SettingNavRow,
+  SettingRow,
+  SettingRowSkeleton,
+} from "@/components/ui/setting-row";
+import { workspaceAgentDefaultsSummary } from "@/lib/agent-defaults-summary";
 import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
-import type { ModelsView } from "@/lib/models-route";
+import { userErrorText } from "@/lib/api-error";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
 import { orgLabel } from "@/lib/org";
 import { useOrganizationName } from "@/lib/use-organization-name";
@@ -46,22 +49,24 @@ import {
 } from "@/lib/workspace-deletion";
 import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
+import type { DeveloperLocation } from "@/lib/developer-route";
+import { hasAccountPermission } from "@/lib/permissions";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
   section,
-  modelsAccount,
-  modelsView,
+  generalView,
   apiKey,
+  developer,
   access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
-  /** Settings > Models: the account page that is open. */
-  modelsAccount?: string | undefined;
-  /** Settings > Models: the form page that is open. */
-  modelsView?: ModelsView | undefined;
+  /** Settings > General: the Agent defaults page, when open. */
+  generalView?: "agent-defaults" | undefined;
+  /** Settings > Developer: the webhook or provider page, or form, that is open. */
+  developer?: DeveloperLocation | undefined;
   /** Settings > API keys: `new` or the key whose page is open. */
   apiKey?: string | undefined;
   /** Settings > Access: Add people or one person's custom permissions. */
@@ -83,9 +88,9 @@ export function WorkspaceSettingsRoute({
     <OperationalWorkspaceSettingsRoute
       workspaceId={workspaceId}
       section={section}
-      modelsAccount={modelsAccount}
-      modelsView={modelsView}
+      generalView={generalView}
       apiKey={apiKey}
+      developer={developer}
       access={access}
     />
   );
@@ -108,19 +113,20 @@ function useAccessNavigation(workspaceId: string, access: AccessSearch | undefin
 function OperationalWorkspaceSettingsRoute({
   workspaceId,
   section,
-  modelsAccount,
-  modelsView,
+  generalView,
   apiKey,
+  developer,
   access,
 }: {
   workspaceId: string;
   section: WorkspaceSettingsSection;
-  modelsAccount?: string | undefined;
-  modelsView?: ModelsView | undefined;
+  generalView?: "agent-defaults" | undefined;
   apiKey?: string | undefined;
+  developer?: DeveloperLocation | undefined;
   access?: AccessSearch | undefined;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const accessNavigation = useAccessNavigation(workspaceId, access);
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -128,12 +134,12 @@ function OperationalWorkspaceSettingsRoute({
   const organizationRole =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId)?.role ??
     null;
-  const canManageOrganizationModels =
+  const administersOrganization =
     (context.clientConfig.auth.mode === "managedSession" ||
       context.clientConfig.productAccessMode === "local") &&
     (organizationRole === "owner" || organizationRole === "admin");
   // The real name when known (an admin reads it from the organization overview).
-  const organizationName = useOrganizationName(accountId, canManageOrganizationModels);
+  const organizationName = useOrganizationName(accountId, administersOrganization);
   const organizationLabel = accountId
     ? (organizationName ?? orgLabel(accountId, context.accessContext.accountGrants))
     : "Organization";
@@ -148,29 +154,43 @@ function OperationalWorkspaceSettingsRoute({
     workspaceId,
     "members:manage",
   );
-  const canManageConnections = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "connections:write",
-  );
   const canAdministerWorkspace = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "workspace:admin",
   );
-  // canManageOrganizationModels (above) is the same rule as Organization settings >
-  // Models: owners and admins in an organization administrator session (or the single
-  // local user).
-  const [gatewayRevision, setGatewayRevision] = useState(0);
+  // Connections change on Organization > Models now; General reads them fresh on open.
+  const gatewayRevision = 0;
+  // The organization integration routes' rule: an administrator in a managed or
+  // single-user session.
+  const canManageOrganizationIntegrations =
+    administersOrganization &&
+    hasAccountPermission(context.accessContext, accountId, "account:admin");
 
   return (
     <WorkspaceSettingsContent>
-      {section === "general" ? (
+      {section === "general" && generalView === "agent-defaults" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading agent defaults" />}>
+          <LazySessionDefaultsPage
+            key={workspaceId}
+            workspaceId={workspaceId}
+            canManage={canManageSettings}
+            onClose={() =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "general" },
+              })
+            }
+          />
+        </Suspense>
+      ) : section === "general" ? (
         <WorkspaceGeneralSettings
           workspaceId={workspaceId}
           organizationLabel={organizationLabel}
           personal={personal}
           canManageSettings={canManageSettings}
+          canAddAccounts={administersOrganization}
           gatewayRevision={gatewayRevision}
         />
       ) : null}
@@ -189,20 +209,21 @@ function OperationalWorkspaceSettingsRoute({
         )
       ) : null}
 
-      {section === "models" ? (
-        <WorkspaceModelsPage
-          key={`models:${workspaceId}`}
-          workspaceId={workspaceId}
-          workspaceName={activeWorkspace?.name ?? "this workspace"}
-          organizationId={accountId}
-          organizationName={organizationName ?? "your organization"}
-          canManageSettings={canManageSettings}
-          canManageConnections={canManageConnections}
-          canManageOrganizationModels={canManageOrganizationModels}
-          account={modelsAccount}
-          view={modelsView}
-          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-        />
+      {section === "usage" ? (
+        personal ? (
+          <Notice tone="muted" title="Budgets apply to shared workspaces">
+            Your Personal workspace uses {organizationLabel}'s credits without a monthly budget.
+          </Notice>
+        ) : (
+          <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
+            <LazyWorkspaceUsagePage
+              key={workspaceId}
+              workspaceId={workspaceId}
+              workspaceName={activeWorkspace?.name ?? "this workspace"}
+              organizationId={accountId}
+            />
+          </Suspense>
+        )
       ) : null}
 
       {section === "api-keys" ? (
@@ -210,11 +231,32 @@ function OperationalWorkspaceSettingsRoute({
       ) : null}
 
       {section === "developer" ? (
-        <WorkspaceDeveloperSettings
-          client={context.client}
-          workspaceId={workspaceId}
-          canManage={canAdministerWorkspace}
-        />
+        <Suspense fallback={<SettingsRowsFallback label="Loading developer settings" />}>
+          <LazyWorkspaceDeveloperSettings
+            client={context.client}
+            workspaceId={workspaceId}
+            canManage={canAdministerWorkspace}
+            personal={personal}
+            location={developer}
+            onNavigate={(next) =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "developer", ...next },
+              })
+            }
+            onOpenOrganizationSettings={
+              canManageOrganizationIntegrations
+                ? () =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: { section: "developer" },
+                    })
+                : undefined
+            }
+          />
+        </Suspense>
       ) : null}
     </WorkspaceSettingsContent>
   );
@@ -229,12 +271,15 @@ function WorkspaceGeneralSettings({
   organizationLabel,
   personal,
   canManageSettings,
+  canAddAccounts,
   gatewayRevision,
 }: {
   workspaceId: string;
   organizationLabel: string;
   personal: boolean;
   canManageSettings: boolean;
+  /** Organization owners and admins: the only people who add model accounts. */
+  canAddAccounts: boolean;
   gatewayRevision: number;
 }) {
   const context = useAppContext();
@@ -297,29 +342,33 @@ function WorkspaceGeneralSettings({
 
   return (
     <SectionStack>
-      <Section aria-label="Workspace">
+      <Section title="Details">
         <SettingRow
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
           control={
-            <DisabledReasonTooltip
-              reason={canRename ? undefined : "Only workspace admins can rename it."}
-            >
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-disabled={canRename ? undefined : "true"}
-                aria-label={`Rename workspace ${activeWorkspace.name}`}
-                onClick={() => {
-                  if (canRename) setRenaming(true);
-                }}
-                className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+            // A Personal workspace keeps its name: no button that could only
+            // say it isn't allowed.
+            personal ? undefined : (
+              <DisabledReasonTooltip
+                reason={canRename ? undefined : "Only workspace admins can rename it."}
               >
-                <PencilIcon aria-hidden="true" />
-                Rename
-              </Button>
-            </DisabledReasonTooltip>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-disabled={canRename ? undefined : "true"}
+                  aria-label={`Rename workspace ${activeWorkspace.name}`}
+                  onClick={() => {
+                    if (canRename) setRenaming(true);
+                  }}
+                  className={canRename ? "pointer-coarse:h-11" : "opacity-50 pointer-coarse:h-11"}
+                >
+                  <PencilIcon aria-hidden="true" />
+                  Rename
+                </Button>
+              </DisabledReasonTooltip>
+            )
           }
         />
         <SettingRow
@@ -384,17 +433,38 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
+        {context.clientConfig.agentConfig?.enabled ? (
+          <SettingNavRow
+            label="Agent"
+            description="What agents can do and who they are."
+            value={workspaceAgentDefaultsSummary(
+              activeWorkspace.settings,
+              context.clientConfig.agentConfig,
+            )}
+            onOpen={() =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "general", view: "agent-defaults" },
+              })
+            }
+          />
+        ) : null}
+        <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
           workspaceId={workspaceId}
           canManage={canManageSettings}
           refreshKey={gatewayRevision}
-          onConnectGateway={() =>
-            void navigate({
-              to: "/workspaces/$workspaceId/settings",
-              params: { workspaceId },
-              search: { section: "models", view: "connect:vercel" },
-            })
+          onConnectGateway={
+            canAddAccounts
+              ? () =>
+                  void navigate({
+                    to: "/workspaces/$workspaceId/organization",
+                    params: { workspaceId },
+                    search: { section: "models", workspace: workspaceId, view: "connect:vercel" },
+                  })
+              : undefined
           }
         />
         <WorkspaceSandboxImageRow
@@ -408,12 +478,16 @@ function WorkspaceGeneralSettings({
 
       <NativeIdentityLinkAccounts workspaceId={workspaceId} />
 
-      <DangerZone
-        workspaceName={activeWorkspace.name}
-        canDelete={canDeleteWorkspace}
-        isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
-        onDelete={deleteWorkspace}
-      />
+      {/* A personal workspace belongs to its person's membership and is never
+          deleted from here, so its settings show no delete section at all. */}
+      {personal ? null : (
+        <DangerZone
+          workspaceName={activeWorkspace.name}
+          canDelete={canDeleteWorkspace}
+          isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
+          onDelete={deleteWorkspace}
+        />
+      )}
     </SectionStack>
   );
 }
@@ -606,12 +680,9 @@ export function DangerZone(props: {
       }
       return ok;
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? `Couldn't delete the workspace: ${error.message}`
-          : "Couldn't delete the workspace. Try again.",
-        { cause: error },
-      );
+      throw new Error(`Couldn't delete the workspace. ${userErrorText(error, "Try again.")}`, {
+        cause: error,
+      });
     } finally {
       deleteInFlight.current = false;
     }
@@ -625,17 +696,20 @@ export function DangerZone(props: {
         `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
       }
       action={
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={Boolean(disabledReason)}
-          onClick={() => setOpen(true)}
-          className="text-danger hover:text-danger pointer-coarse:h-11"
-        >
-          <Trash2Icon aria-hidden="true" />
-          Delete
-        </Button>
+        // When something blocks the delete, the description says what and who
+        // can fix it; a ghosted button next to it would only read as broken.
+        disabledReason ? undefined : (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setOpen(true)}
+            className="text-danger hover:bg-danger/10 hover:text-danger pointer-coarse:h-11"
+          >
+            <Trash2Icon aria-hidden="true" />
+            Delete
+          </Button>
+        )
       }
     >
       {disabledReason ? null : (
@@ -695,12 +769,9 @@ function OrganizationManagedWorkspaceSettings({
       refresh();
       return true;
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? `Couldn't rename the workspace: ${error.message}`
-          : "Couldn't rename the workspace. Try again.",
-        { cause: error },
-      );
+      throw new Error(`Couldn't rename the workspace. ${userErrorText(error, "Try again.")}`, {
+        cause: error,
+      });
     }
   }
 
@@ -730,15 +801,13 @@ function OrganizationManagedWorkspaceSettings({
       });
       if (followUp.status === "failed") {
         toast.warning("Workspace deleted, but the page may be out of date", {
-          description: `${
-            followUp.error instanceof Error ? followUp.error.message : String(followUp.error)
-          }. Reload to refresh your workspace access.`,
+          description: "Reload to refresh your workspace access.",
         });
       }
       return true;
     } catch (error) {
-      toast.error("Couldn't delete workspace", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't delete the workspace", {
+        description: userErrorText(error),
       });
       return false;
     }
@@ -767,7 +836,7 @@ function OrganizationManagedWorkspaceSettings({
       {accessNavigation.view ? null : <div className="mb-6">{scopeNotice}</div>}
       {section === "general" ? (
         <SectionStack>
-          <Section aria-label="Workspace">
+          <Section title="Details">
             <SettingRow
               label="Name"
               description={<RowValue>{workspace.name}</RowValue>}
@@ -825,6 +894,22 @@ function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: str
     </Notice>
   );
 }
+
+const LazySessionDefaultsPage = lazy(async () => {
+  const module = await import("@/components/settings/session-defaults-page");
+  return { default: module.SessionDefaultsPage };
+});
+
+// Usage reads load only on their page, never with the rest of settings.
+const LazyWorkspaceUsagePage = lazy(async () => {
+  const module = await import("@/components/usage/workspace-usage-page");
+  return { default: module.WorkspaceUsagePage };
+});
+
+const LazyWorkspaceDeveloperSettings = lazy(async () => {
+  const module = await import("@/components/workspace-developer-settings");
+  return { default: module.WorkspaceDeveloperSettings };
+});
 
 const LazyMembersSection = lazy(async () => {
   const module = await import("./workspace-members-section");

@@ -19,6 +19,10 @@ import {
   createDb,
   createScheduledTask,
   createSession,
+  createOrganizationModelProviderCustomModel,
+  upsertOrganizationModelProviderConnection,
+  getWorkspaceProviderApiKeyConnectionMetadata,
+  loadWorkspaceProviderApiKey,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
   upsertWorkspaceModelPolicy,
@@ -50,6 +54,8 @@ let publicRouteDeps: ApiRouteDeps | null = null;
 let grant: Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number] | null = null;
 
 const settings = testSettings({
+  claudeSubscriptionEnabled: true,
+  environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
   productAccessMode: "managed",
   delegationSecret: SECRET,
 });
@@ -120,6 +126,13 @@ beforeAll(async () => {
     subjectId: "user:gateway-custom-admin",
   });
   grant = access.workspaceGrants[0]!;
+  const [personal] = await shared.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${grant.accountId}, 'Model admission test personal workspace') returning id`;
+  await shared.admin`
+    insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${grant.accountId}, ${grant.subjectId}, 'owner', 'active', ${personal!.id})
+    on conflict (account_id, subject_id) do update set role = 'owner', status = 'active'`;
   await createConnection(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -241,6 +254,253 @@ async function callMcpTool(
 }
 
 describe("workspace Gateway custom model API", () => {
+  for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+    test(`workspace ${providerKind} models enforce admission, replay, access and retirement`, async () => {
+      if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+      await createConnection(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: null,
+        providerDomain: "api.anthropic.com",
+        kind: "api_key",
+        credentialEncrypted: "metadata-only-fixture",
+        metadata: { credentialRole: providerKind },
+        createdBySubjectId: grant.subjectId,
+      });
+      const path = `/model-providers/${providerKind}/custom-models`;
+      const upstreamModelId = "claude-workspace-fixture";
+      const payload = { operationId: crypto.randomUUID(), upstreamModelId };
+      expect(
+        (
+          await request(
+            path,
+            { method: "POST", permissions: ["workspace:read"], body: payload },
+            publicApp,
+          )
+        ).status,
+      ).toBe(403);
+      const added = await request(path, { method: "POST", body: payload }, publicApp);
+      expect(added.status).toBe(201);
+      const model = await added.json();
+      const replay = await request(path, { method: "POST", body: payload }, publicApp);
+      expect(replay.status).toBe(201);
+      expect((await replay.json()).id).toBe(model.id);
+      expect(
+        (
+          await request(
+            path,
+            { method: "POST", body: { ...payload, upstreamModelId: "other" } },
+            publicApp,
+          )
+        ).status,
+      ).toBe(409);
+      const productId = `workspace-${providerKind === "anthropic" ? "anthropic" : "claude-subscription"}/${upstreamModelId}`;
+      const catalog = await (await request("/model-catalog", {}, publicApp)).json();
+      expect(
+        catalog.models.find((row: { id: string }) => row.id === productId)?.availability.selectable,
+      ).toBe(true);
+      const accessPath = `/model-connections/${providerKind}/current/access`;
+      const access = await request(accessPath, {}, publicApp);
+      expect(access.status).toBe(200);
+      const accessBody = await access.json();
+      expect(accessBody.models.some((row: { id: string }) => row.id === productId)).toBe(true);
+      expect(
+        accessBody.models.every((row: { id: string }) => row.id.startsWith("workspace-")),
+      ).toBe(true);
+      const session = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Metadata-only admission test",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(session.status).toBe(202);
+      expect((await session.json()).model).toBe(productId);
+      const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
+      expect(
+        (
+          await request(
+            `${path}/${model.id}`,
+            { method: "DELETE", body: { ...removal, expectedVersion: model.version + 1 } },
+            publicApp,
+          )
+        ).status,
+      ).toBe(409);
+      expect(
+        (await request(`${path}/${model.id}`, { method: "DELETE", body: removal }, publicApp))
+          .status,
+      ).toBe(204);
+      expect(
+        (await request(`${path}/${model.id}`, { method: "DELETE", body: removal }, publicApp))
+          .status,
+      ).toBe(204);
+      const retired = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Cannot admit retired model",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(retired.status).toBe(422);
+    });
+  }
+  for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+    test(`workspace ${providerKind} credential rotation, replay, stale writes and revocation`, async () => {
+      if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+      if (
+        !(await getWorkspaceProviderApiKeyConnectionMetadata(
+          client.db,
+          grant.workspaceId,
+          providerKind,
+        ))
+      )
+        await createConnection(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: null,
+          providerDomain: "api.anthropic.com",
+          kind: "api_key",
+          credentialEncrypted: "metadata-only-fixture",
+          metadata: { credentialRole: providerKind },
+          createdBySubjectId: grant.subjectId,
+        });
+      const current = await getWorkspaceProviderApiKeyConnectionMetadata(
+        client.db,
+        grant.workspaceId,
+        providerKind,
+      );
+      expect(current).not.toBeNull();
+      const credential =
+        providerKind === "anthropic"
+          ? "sk-ant-api03-local-fixture"
+          : JSON.stringify({
+              version: 1,
+              token: "sk-ant-oat01-local-fixture",
+              identity: {
+                accountUuid: "10000000-0000-4000-8000-000000000001",
+                deviceId: "a".repeat(64),
+              },
+            });
+      const path = `/connections/${current!.connectionId}`;
+      const body = {
+        credential: { apiKey: credential },
+        expectedVersion: current!.version,
+        operationId: crypto.randomUUID(),
+      };
+      const permissions: Permission[] = ["connections:read", "connections:write"];
+      const rotated = await request(path, { method: "PATCH", permissions, body }, publicApp);
+      expect(rotated.status).toBe(200);
+      const publicBody = await rotated.json();
+      expect(JSON.stringify(publicBody)).not.toContain("local-fixture");
+      expect(JSON.stringify(publicBody)).not.toContain("10000000-0000-4000-8000-000000000001");
+      expect(
+        await loadWorkspaceProviderApiKey(client.db, settings, grant.workspaceId, providerKind),
+      ).toBe(credential);
+      expect((await request(path, { method: "PATCH", permissions, body }, publicApp)).status).toBe(
+        200,
+      );
+      expect(
+        (
+          await request(
+            path,
+            { method: "PATCH", permissions, body: { ...body, operationId: crypto.randomUUID() } },
+            publicApp,
+          )
+        ).status,
+      ).toBe(409);
+      const live = await getWorkspaceProviderApiKeyConnectionMetadata(
+        client.db,
+        grant.workspaceId,
+        providerKind,
+      );
+      expect(publicBody.connection.id).not.toBe(current!.connectionId);
+      expect(JSON.stringify(publicBody)).not.toContain("CredentialOperation");
+      const removed = await request(
+        `/connections/${live!.connectionId}?expectedVersion=${live!.version}`,
+        { method: "DELETE", permissions },
+        publicApp,
+      );
+      expect({
+        status: removed.status,
+        ...(removed.status !== 200 ? { body: await removed.json() } : {}),
+      }).toEqual({ status: 200 });
+      expect(
+        await loadWorkspaceProviderApiKey(client.db, settings, grant.workspaceId, providerKind),
+      ).toBeNull();
+    });
+  }
+  test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {
+    if (!publicApp) throw new Error("Real database fixture required");
+    settings.claudeSubscriptionEnabled = false;
+    try {
+      expect(
+        (await request("/model-providers/claude_subscription/custom-models", {}, publicApp)).status,
+      ).toBe(404);
+      expect(
+        (await request("/model-connections/claude_subscription/current/access", {}, publicApp))
+          .status,
+      ).toBe(404);
+      expect(
+        (await request("/model-providers/anthropic/custom-models", {}, publicApp)).status,
+      ).toBe(200);
+    } finally {
+      settings.claudeSubscriptionEnabled = true;
+    }
+  });
+
+  for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+    test(`admits an organization ${providerKind} model through the public session boundary`, async () => {
+      if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+      await upsertOrganizationModelProviderConnection(client.db, {
+        organizationId: grant.accountId,
+        actorSubjectId: grant.subjectId,
+        providerKind,
+        credentialEncrypted: "metadata-only-test-credential",
+        credentialDigest: "metadata-only-test-digest",
+        operationId: crypto.randomUUID(),
+      });
+      await createOrganizationModelProviderCustomModel(client.db, {
+        organizationId: grant.accountId,
+        actorSubjectId: grant.subjectId,
+        providerKind,
+        upstreamModelId: "claude-opus-5-5",
+        operationId: crypto.randomUUID(),
+      });
+      const model = `${providerKind === "anthropic" ? "organization-anthropic" : "organization-claude-subscription"}/claude-opus-5-5`;
+      const response = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Local admission regression; no inference",
+            model,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      const body = await response.json();
+      expect(response.status).toBe(202);
+      expect(body.model).toBe(model);
+    });
+  }
+
   test("requires workspace admin and rejects invalid or curated-collision inputs", async () => {
     if (!app || !grant) return;
 

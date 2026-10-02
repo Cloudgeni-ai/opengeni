@@ -49,7 +49,7 @@ export function WorkspaceUnavailableRoute(props: {
       title="Workspace unavailable"
       description="You don't have access to this workspace. It may no longer exist, and no authorized equivalent destination was found."
       action={
-        <Button asChild type="button" variant="secondary">
+        <Button asChild type="button" variant="outline">
           <a href="/">Open default workspace</a>
         </Button>
       }

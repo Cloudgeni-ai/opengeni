@@ -1,5 +1,11 @@
 # @opengeni/connect
 
+## 0.3.1
+
+### Patch Changes
+
+- d9ec660: Avoid browser warnings when an isolated sign-in window cannot be closed, and clarify the Claude authorization-code handoff.
+
 ## 0.3.0
 
 ### Minor Changes

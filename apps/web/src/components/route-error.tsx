@@ -28,11 +28,11 @@ export function RouteErrorPanel({ error, reload = reloadDocument }: RouteErrorPa
   const updated = hasObservedChunkLoadFailure() || isChunkLoadError(error);
   return (
     <ProblemPanel
-      title={updated ? "OpenGeni has been updated" : "Something went wrong"}
+      title={updated ? "Opengeni has been updated" : "Something went wrong"}
       description={
         <>
           {updated
-            ? "This tab is running an older version of OpenGeni. Reload to continue with the latest version."
+            ? "This tab is running an older version of Opengeni. Reload to continue with the latest version."
             : "This page hit an unexpected error. Reloading usually fixes it. If it keeps happening, go back to your workspace and try again."}
           {import.meta.env.DEV && error instanceof Error ? (
             <span className="mt-3 block rounded-md bg-muted p-2 text-left font-mono text-xs break-words text-fg-muted">
@@ -46,7 +46,7 @@ export function RouteErrorPanel({ error, reload = reloadDocument }: RouteErrorPa
           <Button type="button" onClick={reload}>
             {updated ? "Reload to update" : "Reload page"}
           </Button>
-          <Button asChild variant="secondary">
+          <Button asChild variant="outline">
             <a href="/">Go home</a>
           </Button>
         </div>
@@ -74,7 +74,7 @@ export function NotFoundPanel() {
       title="Page not found"
       description="This page doesn't exist or has moved. Go back to your workspace to continue."
       action={
-        <Button asChild variant="secondary">
+        <Button asChild variant="outline">
           <Link to="/">Go home</Link>
         </Button>
       }

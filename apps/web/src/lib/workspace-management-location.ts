@@ -1,12 +1,17 @@
+import { parseOrganizationSection, type OrganizationAdminSection } from "@/lib/organization-admin";
+
 /**
  * Workspace settings pages, addressed by `?section=` on `/settings`. Settings
  * hold configuration only: the settings rail also links to the Agents and
  * Insights dashboards and the runtime pages, which open as their own pages.
+ * Organization settings (`/organization?section=`) share the same settings
+ * rail, under its Organization section.
  */
 export type WorkspaceSettingsSection =
   | "general"
   | "access"
   | "models"
+  | "usage"
   | "api-keys"
   | "developer"
   | "learning";
@@ -21,13 +26,13 @@ export const WORKSPACE_SETTINGS_SECTIONS: readonly WorkspaceSettingsSection[] = 
   "general",
   "access",
   "models",
+  "usage",
   "api-keys",
   "developer",
   "learning",
 ];
 
 const WORKSPACE_PAGE_TARGETS = [
-  "/workspaces/$workspaceId/agents",
   "/workspaces/$workspaceId/insights",
   "/workspaces/$workspaceId/variable-sets",
   "/workspaces/$workspaceId/rigs",
@@ -38,7 +43,9 @@ export type WorkspacePageTarget = (typeof WORKSPACE_PAGE_TARGETS)[number];
 export type WorkspaceManagementLocation =
   /** `section` is null when the URL asks for the settings list itself. */
   | { kind: "settings"; section: WorkspaceSettingsSection | null }
-  | { kind: "page"; target: WorkspacePageTarget };
+  | { kind: "page"; target: WorkspacePageTarget }
+  /** `section` is null when the URL names no (or an unknown) organization page. */
+  | { kind: "organization"; section: OrganizationAdminSection | null };
 
 /** Parses `?section=`, mapping older names to the page that holds them now. */
 export function workspaceSettingsSectionFromSearch(
@@ -68,6 +75,9 @@ export function workspaceManagementLocation(
       kind: "settings",
       section: workspaceSettingsSectionFromSearch(settingsSection),
     };
+  }
+  if (pathname === `${base}/organization`) {
+    return { kind: "organization", section: parseOrganizationSection(settingsSection) ?? null };
   }
 
   for (const target of WORKSPACE_PAGE_TARGETS) {

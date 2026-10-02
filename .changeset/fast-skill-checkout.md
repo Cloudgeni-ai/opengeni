@@ -1,6 +1,0 @@
----
-"@opengeni/runtime": minor
-"@opengeni/worker-bundle": patch
----
-
-Make `skill_checkout` fast. The worker now writes a Skill's files through one Channel-A `fsWriteFiles` batch, normally a single sandbox command with one workspace mutation admission and one `fs.changed` event, instead of about five sandbox commands per file. On a real Docker sandbox an 11-file, 31 KB Skill went from 61 sandbox commands, 35 mutation admissions, and 13 events (about 4 s) to 1 command, 1 admission, and 1 event (about 0.1 to 0.2 s). Checkout never overwrites: files already holding the same bytes are kept and reported `unchanged`, and any different existing entry fails before anything is written, so repeating a checkout into the same directory is safe. New optional `paths` copies exactly those files, for example one script to run. Only a complete checkout that created its directory returns the `skill_publish` base; other results say `publishable: false`. The default `skill_read` also returns a bounded `scripts` index (path and first usage line) so commands are visible without a checkout. The worker records `opengeni_skill_checkouts_total`, `opengeni_skill_checkout_duration_seconds{phase}`, and `opengeni_skill_checkout_files_total`. `@opengeni/runtime` exports `SandboxChannelAService.fsWriteFiles`, `FsWriteFilesRequest`, `FsWriteFilesResponse`, and `skillScriptIndex`.

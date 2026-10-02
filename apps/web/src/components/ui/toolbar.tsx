@@ -9,6 +9,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -211,9 +212,6 @@ export function toggleFilter(
 
 // The highlighted item is a surface-2 fill, like the other menus; the global
 // focus outline would draw a second ring on it.
-const MENU_ITEM_CLASS =
-  "min-h-8 rounded-[10px] outline-none! focus:bg-surface-2 focus:text-fg data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
-
 export interface ToolbarFilterMenuProps {
   groups: ToolbarFilterGroup[];
   value: ToolbarFilterValue;
@@ -257,16 +255,11 @@ export function ToolbarFilterMenu({
           ) : null}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align={align}
-        className="w-60 rounded-[16px] border-border bg-surface p-1.5 text-fg shadow-og-md"
-      >
+      <DropdownMenuContent align={align} className="w-60">
         {groups.map((group, index) => (
           <DropdownMenuGroup key={group.id}>
             {index > 0 ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuLabel className="px-2 pt-1.5 pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
-              {group.label}
-            </DropdownMenuLabel>
+            <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
             {group.options.map((option) => {
               const checked = (value[group.id] ?? []).includes(option.id);
               return (
@@ -278,11 +271,10 @@ export function ToolbarFilterMenu({
                   onCheckedChange={(next) =>
                     onValueChange(toggleFilter(value, group.id, option.id, next === true))
                   }
-                  className={MENU_ITEM_CLASS}
                 >
                   <span className="min-w-0 flex-1 truncate">{option.label}</span>
                   {option.count === undefined ? null : (
-                    <span className="text-xs text-fg-subtle tabular-nums">{option.count}</span>
+                    <DropdownMenuMeta>{option.count}</DropdownMenuMeta>
                   )}
                 </DropdownMenuCheckboxItem>
               );
@@ -292,12 +284,7 @@ export function ToolbarFilterMenu({
         {active > 0 ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() => onValueChange({})}
-              className={cn(MENU_ITEM_CLASS, "text-fg-muted")}
-            >
-              Clear filters
-            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onValueChange({})}>Clear filters</DropdownMenuItem>
           </>
         ) : null}
       </DropdownMenuContent>

@@ -552,7 +552,7 @@ function paintSelection(context: CanvasRenderingContext2D, input: SpreadsheetCan
   const bottom =
     input.columnHeaderHeight + input.rows.offsetAt(selection.bottom + 1) - input.logicalScrollTop;
   context.save();
-  setFill(context, input.theme.accent, "#3b82f6");
+  setFill(context, input.theme.accent, "#545454");
   context.globalAlpha = 0.1;
   context.fillRect(left, top, right - left, bottom - top);
   context.restore();
@@ -564,7 +564,7 @@ function paintSelection(context: CanvasRenderingContext2D, input: SpreadsheetCan
   const activeWidth = input.columns.sizeAt(selection.focusColumn);
   const activeHeight = input.rows.sizeAt(selection.focusRow);
   context.save();
-  setStroke(context, input.theme.accent, "#3b82f6");
+  setStroke(context, input.theme.accent, "#545454");
   context.lineWidth = 2;
   context.strokeRect(
     activeLeft + 1,

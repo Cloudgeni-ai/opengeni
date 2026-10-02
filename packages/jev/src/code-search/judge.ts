@@ -107,6 +107,24 @@ export const PROMPTS = {
   leadQuestion: (id: string, name: string, q: string) =>
     `Would reading where \`${name}\` (\`leads.${id}\`) is defined help answer the question${q}? Apply \`criteria\`.`,
 
+  symbolTask:
+    "Symbol follow-up for a question about a software repository. Files already judged relevant declare, import, call or render the identifiers in `symbols`. Each entry shows the identifier and one place it occurs. Reading its definition or the other places that use it may reveal code the question depends on (the implementation behind an import, other callers of a function, sibling code paths that must change together).",
+  symbolCriteria: {
+    yes: "Its definition or its other usages likely implement, decide, configure or must change together with the asked behavior (for example the hook or function behind the data, other places that mutate the same state, or other entry points to the same outcome).",
+    no: "It is a generic helper, UI primitive, type plumbing, logging, formatting or error handling, or it is unrelated to the question.",
+  },
+  symbolQuestion: (id: string, name: string, q: string) =>
+    `Would reading where \`${name}\` (\`symbols.${id}\`) is defined or used help answer the question${q}? Apply \`criteria\`.`,
+
+  changeTask:
+    "Change planning for a request about a software repository. A developer asked `question`. `declarations` lists functions, handlers, hooks and components declared in files already judged relevant, each with where it is declared and its first lines. Beyond the code that directly answers the question, a correct change often has to touch or re-check sibling code: other places that mutate or invalidate the same state, other entry points to the same outcome, callers that must pass something new.",
+  changeCriteria: {
+    yes: "A correct answer or change must also read or change this declaration: it mutates, invalidates, produces or consumes the same state or data, it is another entry point or sibling path for the same behavior, or it is where the change itself goes.",
+    no: "It is unrelated to the asked behavior, or it is a generic helper, formatting or UI plumbing that the change would not touch.",
+  },
+  changeQuestion: (id: string, name: string, q: string) =>
+    `Must a developer who answers or implements the question${q} also read or change \`${name}\` (\`declarations.${id}\`)? Apply \`criteria\`.`,
+
   statusTask:
     "Sufficiency check. `evidence` is a set of verbatim excerpts of repository files (with original line numbers) collected to answer `question`.",
   statusQuestion: (q: string) =>
@@ -211,6 +229,38 @@ export function buildLeadRequest(items: LeadItem[], ctx: JudgeContext, cfg: Code
   };
   const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
     items.map((l) => [l.id, noul(PROMPTS.leadQuestion(l.id, l.name, q))]),
+  );
+  return { state, questions };
+}
+
+export function buildSymbolRequest(items: LeadItem[], ctx: JudgeContext, cfg: CodeSearchConfig) {
+  const q = inlineQ(ctx.question, cfg.jev.inlineQuestionMaxChars);
+  const state = {
+    task: PROMPTS.symbolTask,
+    question: ctx.question,
+    ...withSubs(ctx),
+    criteria: PROMPTS.symbolCriteria,
+    symbols: Object.fromEntries(items.map((l) => [l.id, `${l.name}  (${l.context})`])),
+  };
+  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
+    items.map((l) => [l.id, noul(PROMPTS.symbolQuestion(l.id, l.name, q))]),
+  );
+  return { state, questions };
+}
+
+export function buildChangeRequest(items: LeadItem[], ctx: JudgeContext, cfg: CodeSearchConfig) {
+  const q = inlineQ(ctx.question, cfg.jev.inlineQuestionMaxChars);
+  const state = {
+    task: PROMPTS.changeTask,
+    question: ctx.question,
+    ...withSubs(ctx),
+    criteria: PROMPTS.changeCriteria,
+    declarations: Object.fromEntries(
+      items.map((l) => [l.id, `${l.name}  (${l.seenAt})\n${l.context}`]),
+    ),
+  };
+  const questions: Record<string, JevNoulQuestion> = Object.fromEntries(
+    items.map((l) => [l.id, noul(PROMPTS.changeQuestion(l.id, l.name, q))]),
   );
   return { state, questions };
 }
@@ -392,6 +442,26 @@ export class JevJudge {
       chunk(items, 250),
       (b) => buildLeadRequest(b, ctx, this.o.config),
       (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), l.lex)]),
+    );
+  }
+
+  async scoreSymbols(items: LeadItem[], ctx: JudgeContext): Promise<Map<string, number>> {
+    if (!items.length) return new Map();
+    return this.stage(
+      "symbols",
+      chunkEven(items, 120),
+      (b) => buildSymbolRequest(b, ctx, this.o.config),
+      (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), l.lex)]),
+    );
+  }
+
+  async scoreChange(items: LeadItem[], ctx: JudgeContext): Promise<Map<string, number>> {
+    if (!items.length) return new Map();
+    return this.stage(
+      "change",
+      chunkEven(items, 80),
+      (b) => buildChangeRequest(b, ctx, this.o.config),
+      (b, a) => b.map((l) => [l.id, orLex(noulOf(a[l.id]), 0)]),
     );
   }
 

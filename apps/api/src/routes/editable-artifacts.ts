@@ -11,6 +11,9 @@ import {
   editableArtifactScope,
   hasPermission,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
+  requirePermission,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -25,12 +28,13 @@ import {
   type EditableArtifactPinnedVersion,
   type EditableArtifactModality,
 } from "@opengeni/core";
-import { listEditableArtifactIdsForSession } from "@opengeni/db";
+import { hasEditableArtifactSessionLink, listEditableArtifactIdsForSession } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 
 export const EDITABLE_ARTIFACT_HTTP_REQUEST_MAX_BYTES = 4 * 1024;
 export const EDITABLE_ARTIFACT_EXPORT_REQUEST_MAX_BYTES = 260 * 1024;
@@ -78,6 +82,7 @@ const ListEditableArtifactsQuery = z
 
 const MintEditableArtifactLiveTicketRequest = z
   .object({
+    sourceSessionId: SessionId.optional(),
     replicaId: ReplicaId,
     modality: z.enum(["document", "spreadsheet", "presentation"]),
     liveProtocolVersion: PositiveProtocolVersion,
@@ -472,7 +477,13 @@ export function registerEditableArtifactRoutes(
 
     // Workspace authentication precedes path/body parsing. Exact artifact
     // permission is intentionally enforced inside the injected application.
-    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:read",
+    );
+    const grant = authorization.grant;
     const artifactId = editableArtifactId(parseArtifactId(context.req.param("artifactId")));
     const body = await parseBoundedTicketRequest(context);
     const actor = editableArtifactActorForGrant(grant, body.replicaId);
@@ -480,6 +491,18 @@ export function registerEditableArtifactRoutes(
       accountId: grant.accountId,
       workspaceId,
     });
+    if (body.sourceSessionId) {
+      requirePermission(grant, "sessions:read");
+      await withAccessGrantSessionRlsContext(deps, grant, async () => {
+        await authorizeSourceSession(deps, grant, body.sourceSessionId!);
+        if (
+          !(await hasEditableArtifactSessionLink(deps.db, scope, body.sourceSessionId!, artifactId))
+        ) {
+          throw applicationHttpError("not_found");
+        }
+      });
+    }
+    const externalContinuation = externalActorContinuationForAuthorization(authorization);
 
     let rawTicket: MintEditableArtifactLiveTicketOutput;
     try {
@@ -495,6 +518,44 @@ export function registerEditableArtifactRoutes(
         commandProtocolVersion: body.commandProtocolVersion,
         committedTransactionProtocolVersion: body.committedTransactionProtocolVersion,
         allowEdit: hasPermission(grant.permissions, "artifacts:publish"),
+        ...(body.sourceSessionId
+          ? {
+              sourceSessionAuthority: {
+                sessionId: body.sourceSessionId,
+                grant: {
+                  accountId: grant.accountId,
+                  workspaceId: grant.workspaceId,
+                  subjectId: grant.subjectId,
+                  ...(grant.principalKind ? { principalKind: grant.principalKind } : {}),
+                  ...(grant.metadata
+                    ? {
+                        metadata: Object.fromEntries(
+                          Object.entries(grant.metadata).filter(([key]) =>
+                            [
+                              "externalActor",
+                              "delegated",
+                              "sessionId",
+                              "turnId",
+                              "attemptId",
+                              "executionGeneration",
+                            ].includes(key),
+                          ),
+                        ),
+                      }
+                    : {}),
+                  // Bind only editor capabilities, not a broad delegated wildcard.
+                  permissions: [
+                    "sessions:read",
+                    "artifacts:read",
+                    ...(hasPermission(grant.permissions, "artifacts:publish")
+                      ? ["artifacts:publish" as const]
+                      : []),
+                  ],
+                },
+                ...(externalContinuation ? { externalContinuation } : {}),
+              },
+            }
+          : {}),
       });
     } catch (error) {
       throw editableArtifactHttpError(error);
@@ -1068,7 +1129,7 @@ export function editableArtifactHttpError(error: unknown): unknown {
       case "unsupported_format":
         return new ApiHttpError(422, {
           code: "validation_failed",
-          message: "Editable artifact format is not available for this artifact.",
+          message: error.message,
         });
       case "not_ready":
         return new ApiHttpError(409, {

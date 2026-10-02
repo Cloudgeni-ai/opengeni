@@ -43,15 +43,31 @@ beforeAll(async () => {
       );
     const manifest = JSON.parse(
       await readFile(`${repo}/apps/web/dist/.vite/manifest.json`, "utf8"),
-    ) as Record<string, { file: string; name?: string }>;
+    ) as Record<string, { file: string; name?: string; imports?: string[]; isEntry?: boolean }>;
     const questionEntry = Object.entries(manifest).find(
       ([key, entry]) =>
         key.endsWith("/hooks/latest-question.ts") || entry.name === "session-question-navigation",
     );
-    assert.ok(questionEntry, "Latest question must retain its optional production chunk");
+    assert.ok(
+      questionEntry,
+      "The public newest-message hook retains its optional production chunk",
+    );
     questionAsset = questionEntry[1].file;
     composerMenuAsset = manifest["src/components/composer-mobile-plus-panel.tsx"]!.file;
     assert.ok(composerMenuAsset, "Composer menu must retain its optional production chunk");
+    const eager = new Set<string>();
+    const visit = (key: string) => {
+      if (eager.has(key)) return;
+      eager.add(key);
+      for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
+    };
+    for (const [key, entry] of Object.entries(manifest))
+      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+    assert.equal(
+      eager.has("src/components/composer-mobile-plus-panel.tsx"),
+      false,
+      "Composer menu must remain outside the eager production graph",
+    );
     workspaceFilesAsset = manifest["../../packages/react/src/components/sandbox-files.tsx"]!.file;
     assert.ok(workspaceFilesAsset, "Files must retain its optional production chunk");
     const port = await freePort();
@@ -92,6 +108,28 @@ beforeAll(async () => {
   }
 }, 210_000);
 afterAll(cleanup);
+
+async function controlIdlePreloads(page: Page) {
+  // DESIGN warms menus during browser idle time. Control that scheduling so the
+  // cold boundary and idle preload are both asserted rather than raced against
+  // the browser's first idle period. Interaction-triggered preloads stay real.
+  await page.addInitScript(() => {
+    let nextId = 0;
+    const pending = new Map<number, IdleRequestCallback>();
+    window.requestIdleCallback = (callback) => {
+      pending.set(++nextId, callback);
+      return nextId;
+    };
+    window.cancelIdleCallback = (id) => {
+      pending.delete(id);
+    };
+    window.addEventListener("test:run-idle-preloads", () => {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      for (const callback of callbacks) callback({ didTimeout: false, timeRemaining: () => 50 });
+    });
+  });
+}
 
 function gate() {
   let release!: () => void;
@@ -682,6 +720,9 @@ for (const width of [1280, 390]) {
       for (const phase of ["config", "access", "detail", "history"] as const) {
         await state.gates[phase].entered;
         await page.locator("[data-page-loading]").waitFor();
+        // Compare the same font metrics across staged API transitions. A cold
+        // font swap can otherwise move the first anchor before any transition.
+        if (anchor === null) await page.evaluate(() => document.fonts.ready.then(() => {}));
         const loading = page.locator("[data-page-loading]");
         const box = await loading.boundingBox();
         assert(box);
@@ -1050,7 +1091,7 @@ for (const width of [1280, 390]) {
     }, 90_000);
   }
 
-  test(`production Latest question focuses only the saved queued row at ${width}px`, async () => {
+  test(`production contextual prompt navigation ignores the saved queued row at ${width}px`, async () => {
     const context = await browser.newContext({
       viewport: { width, height: 900 },
       reducedMotion: "reduce",
@@ -1128,8 +1169,10 @@ for (const width of [1280, 390]) {
     await installApi(page, state);
     const queueWrites: string[] = [];
     let questionAssetRequested = false;
+    let globalQuestionLookups = 0;
     let composerMenuRequested = false;
     const menuLoad = gate();
+    await controlIdlePreloads(page);
     await page.route(`**/${composerMenuAsset}`, async (route) => {
       composerMenuRequested = true;
       await menuLoad.wait();
@@ -1137,6 +1180,12 @@ for (const width of [1280, 390]) {
     });
     page.on("request", (request) => {
       if (new URL(request.url()).pathname === `/${questionAsset}`) questionAssetRequested = true;
+      const url = new URL(request.url());
+      if (
+        url.pathname.endsWith("/events") &&
+        url.searchParams.get("includeTypes")?.split(",").includes("user.message")
+      )
+        globalQuestionLookups++;
       if (
         request.method() !== "GET" &&
         /\/(queue|turns)(\/|$)/.test(new URL(request.url()).pathname)
@@ -1144,7 +1193,7 @@ for (const width of [1280, 390]) {
         queueWrites.push(`${request.method()} ${request.url()}`);
     });
     const capture = (name: string) => page.screenshot({ path: `${output}/${width}-${name}.png` });
-    const latest = page.getByRole("button", { name: "Latest question", exact: true });
+    const latest = page.getByRole("button", { name: "Back to your message", exact: true });
     const row = page.locator(`[data-queue-turn-id="${queuedId}"]`);
     const collapseQueue = async () => {
       if (await page.locator('[data-og-session-chrome-panel="queue"]').count())
@@ -1161,35 +1210,68 @@ for (const width of [1280, 390]) {
     };
     try {
       await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
-      await row.waitFor();
+      await page.getByRole("button", { name: /1 queued prompt/ }).waitFor();
       await collapseQueue();
       await latest.waitFor();
-      assert.equal(composerMenuRequested, false, "optional composer menu must not load with chat");
+      assert.equal(
+        composerMenuRequested,
+        false,
+        "optional composer menu must wait for idle or interaction",
+      );
       const composerActions = page.getByRole("button", {
         name: "More composer actions",
         exact: true,
       });
-      await composerActions.click();
+      await page.evaluate(() => window.dispatchEvent(new Event("test:run-idle-preloads")));
       await menuLoad.entered;
-      await page.getByRole("status").filter({ hasText: "Loading actions…" }).waitFor();
+      assert.equal(await composerActions.getAttribute("aria-expanded"), "false");
+      assert.equal(await latest.isVisible(), true, "idle preload must not replace the chat");
+      await composerActions.click();
+      const loading = page.getByRole("status", { name: "Loading composer actions", exact: true });
+      await loading.waitFor();
+      assert.equal(await loading.locator(':scope > [aria-hidden="true"]').count(), 4);
+      assert.equal(await loading.innerText(), "", "the cold menu uses skeletons, not loading copy");
       await capture("composer-menu-loading");
       menuLoad.release();
       await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
       await capture("composer-menu-ready");
       await page.getByRole("menuitem", { name: "Repositories", exact: true }).click();
-      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Back", exact: true }).click();
       await page.getByRole("menuitem", { name: "Connectors", exact: true }).waitFor();
       await page.keyboard.press("Escape");
       await page.waitForFunction(
         () => document.activeElement?.getAttribute("aria-label") === "More composer actions",
       );
       assert.equal(questionAssetRequested, false, "optional navigation must not load with chat");
+      await capture("contextual-older-answer");
       await latest.click();
       await page.waitForFunction(
-        (id) => document.activeElement?.closest(`[data-queue-turn-id="${id}"]`) !== null,
-        queuedId,
+        (text) =>
+          document.activeElement?.hasAttribute("data-og-prompt") === true &&
+          document.activeElement.textContent?.includes(text),
+        state.session.initialMessage,
       );
-      assert.equal(questionAssetRequested, true, "Latest question loads its resolver on demand");
+      assert.equal(
+        questionAssetRequested,
+        false,
+        "contextual navigation never loads the global resolver",
+      );
+      assert.equal(
+        globalQuestionLookups,
+        0,
+        "contextual navigation never queries a global destination",
+      );
+      const destination = await page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+        return {
+          top:
+            document.activeElement!.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top,
+          following: scroller.dataset.ogBottomFollow,
+        };
+      });
+      assert.ok(Math.abs(destination.top - 12) <= 2);
+      assert.equal(destination.following, "false");
       assert.equal(
         await page
           .locator('[data-testid="timeline-user"]')
@@ -1197,89 +1279,23 @@ for (const width of [1280, 390]) {
           .count(),
         0,
       );
-      await capture("queued-question-focused");
-
-      await collapseQueue();
-      state.nextQueueTransition = "fail";
-      await latest.click();
-      await page.waitForFunction(() =>
-        document
-          .querySelector("[data-og-jump-to-question]")
-          ?.getAttribute("title")
-          ?.includes("Could not load"),
-      );
-      await assertNotFocused();
-      await capture("queued-question-refresh-error");
-
-      state.failQueue = false;
-      state.nextQueueTransition = "hold";
-      await latest.click();
-      await state.gates.queue.entered;
-      await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
-      await page
-        .getByRole("searchbox", { name: "Find in conversation", exact: true })
-        .fill(state.session.initialMessage);
-      await page.locator('[data-og-search-sequence="1"]').first().waitFor();
-      await page.getByRole("button", { name: "Close conversation search", exact: true }).click();
-      state.deferQueue = false;
-      state.gates.queue.release();
-      await page.waitForFunction(
-        () =>
-          document.querySelector("[data-og-jump-to-question]")?.getAttribute("aria-busy") !==
-          "true",
-      );
+      await latest.waitFor({ state: "hidden" });
+      await capture("contextual-prompt-destination");
       await assertNotFocused();
       assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
-      await capture("queued-question-history-navigation");
-      await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
-        node.scrollTop = node.scrollHeight;
-      });
-      await latest.waitFor();
-      state.nextQueueTransition = "withdraw";
-      await latest.click();
+      // The separate live-bottom action still works and does not consume queue state.
+      await page.locator("[data-og-jump-to-latest]").click();
       await page.waitForFunction(
         () =>
-          document.querySelector("[data-og-jump-to-question]")?.getAttribute("aria-busy") !==
-          "true",
+          document
+            .querySelector("[data-og-timeline-scroller]")
+            ?.getAttribute("data-og-bottom-follow") === "true",
       );
-      await assertNotFocused();
-      await row.waitFor({ state: "hidden" });
-      await capture("queued-question-withdrawn");
-
-      const replacementId = crypto.randomUUID();
-      const replacementEventId = crypto.randomUUID();
-      state.turns = [{ ...queued, id: replacementId, triggerEventId: replacementEventId }];
-      state.session.queueVersion += 1;
-      state.session.lastSequence = 7;
-      state.events.push(
-        {
-          id: replacementEventId,
-          workspaceId,
-          sessionId,
-          turnId: replacementId,
-          sequence: 6,
-          type: "user.message",
-          payload: { text: prompt, resources: [], routing: "queued_for_execution" },
-          occurredAt: state.session.updatedAt,
-        },
-        {
-          id: crypto.randomUUID(),
-          workspaceId,
-          sessionId,
-          turnId: replacementId,
-          sequence: 7,
-          type: "turn.queued",
-          payload: { triggerEventId: replacementEventId, turnId: replacementId },
-          occurredAt: state.session.updatedAt,
-        },
-      );
-      await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
-        node.scrollTop = node.scrollHeight;
-      });
-      state.gates.queue = gate();
-      state.nextQueueTransition = "hold";
+      await latest.waitFor();
       await latest.click();
-      await state.gates.queue.entered;
+      await assertNotFocused();
+      assert.equal(questionAssetRequested, false);
+      assert.equal(globalQuestionLookups, 0);
       if (width < 1024)
         await page.getByRole("button", { name: "Open navigation", exact: true }).click();
       await page.locator(`a[data-session-row="${otherSessionId}"]:visible`).click();
@@ -1287,18 +1303,12 @@ for (const width of [1280, 390]) {
         .getByRole("textbox", { name: /Message|Prompt/i })
         .first()
         .waitFor();
-      state.deferQueue = false;
-      state.gates.queue.release();
       await assertNotFocused();
       assert.equal(await row.count(), 0);
       assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
       await capture("queued-question-session-switch");
       assert.deepEqual(queueWrites, []);
-      assert.equal(
-        state.turns[0]?.id,
-        replacementId,
-        "navigation must not consume the saved prompt",
-      );
+      assert.equal(state.turns[0]?.id, queuedId, "navigation must not consume the saved prompt");
     } catch (error) {
       await capture("queued-question-failure");
       throw new Error(`${width}px queued question: ${await page.locator("body").innerText()}`, {
@@ -1317,6 +1327,7 @@ for (const width of [1280, 390]) {
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
+    await controlIdlePreloads(page);
     const state = fixtures();
     for (const name of ["config", "access", "detail", "history"] as const)
       state.gates[name].release();

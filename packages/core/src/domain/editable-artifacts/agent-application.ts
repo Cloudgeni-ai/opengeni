@@ -26,10 +26,10 @@ import {
   type SpreadsheetArtifactKernelQuery,
 } from "@opengeni/contracts/editable-artifacts";
 
-import type {
-  EditableArtifactDurableExportService,
-  EditableArtifactMaterializationFormat,
-  EditableArtifactMaterializationJob,
+import {
+  type EditableArtifactDurableExportService,
+  type EditableArtifactMaterializationFormat,
+  type EditableArtifactMaterializationJob,
 } from "./durable-export";
 import {
   EditableArtifactDomainError,
@@ -192,6 +192,9 @@ export type EditableArtifactAgentApplicationDependencies = Readonly<{
  * not another artifact engine: every mutation terminates at EditableArtifactService.
  */
 export class EditableArtifactAgentApplication {
+  describeExportFormats(): string {
+    return this.dependencies.exports.describeFormats();
+  }
   constructor(private readonly dependencies: EditableArtifactAgentApplicationDependencies) {}
 
   async list(
@@ -472,6 +475,12 @@ export class EditableArtifactAgentApplication {
       scope: context.scope,
       actor: context.actor,
       artifactId,
+    });
+    // Refuse before pinning a version: the agent learns what does exist.
+    await this.dependencies.exports.preflight({
+      modality: artifact.modality,
+      format: input.format,
+      ...(input.options ? { options: input.options } : {}),
     });
     const version = await this.dependencies.exports.pinVersion({
       scope: context.scope,

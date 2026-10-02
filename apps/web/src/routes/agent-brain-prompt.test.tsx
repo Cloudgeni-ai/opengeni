@@ -93,7 +93,7 @@ describe("resolveAgentBrainPromptModel", () => {
     ).toEqual({
       model: "gpt-5.6-sol",
       label: "gpt-5.6-sol",
-      paymentSource: "OpenGeni credits",
+      paymentSource: "Opengeni credits",
       reasoningEffort: "low",
       latencyMode: "standard",
     });
@@ -148,7 +148,7 @@ describe("resolveAgentBrainPromptModel", () => {
     );
 
     expect(free?.paymentSource).toBe("Free in this deployment");
-    expect(credits?.paymentSource).toBe("OpenGeni credits");
+    expect(credits?.paymentSource).toBe("Opengeni credits");
   });
 
   test("falls back when the preferred model is absent from the catalog", () => {
@@ -452,7 +452,7 @@ describe("AgentKnowledgePrompt", () => {
     await setValue(textarea, "Lead with the outcome.");
     expect(button.disabled).toBe(true);
     expect(container.textContent).toContain(
-      "Could not resolve an allowed workspace model: catalog unavailable. Retry before creating with OpenGeni.",
+      "Could not resolve an allowed workspace model: catalog unavailable. Retry before creating with Opengeni.",
     );
     expect(container.textContent).not.toContain("No model is available");
 

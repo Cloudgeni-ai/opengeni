@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 import type {
   CodexAccount,
   CodexConnectPoll,
@@ -10,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { codexAccountName, planLabel } from "@/components/codex-connection";
+import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
 
 // The organization's shared Codex (ChatGPT) accounts: the data and every
 // mutation. Organization settings > Models presents them with the same rows
@@ -20,12 +22,15 @@ export type OrganizationCodexSubscriptions = ReturnType<typeof useOrganizationCo
 export function useOrganizationCodexSubscriptions({
   organizationId,
   client,
+  enabled = true,
 }: {
   organizationId: string;
   client: OpenGeniBrowserClient;
+  /** False for people who can't read the organization's accounts: nothing is read. */
+  enabled?: boolean;
 }) {
   const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<string | null>(null);
@@ -37,6 +42,7 @@ export function useOrganizationCodexSubscriptions({
   const pollAbort = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
+    if (!enabled) return;
     setLoadError(null);
     try {
       const result = await client.requestJson<OrganizationCodexAccountsResponse>(
@@ -47,24 +53,26 @@ export function useOrganizationCodexSubscriptions({
     } catch (error) {
       if (cancelled.current) return;
       setData(null);
-      setLoadError(error instanceof Error ? error.message : "Failed to load subscriptions");
+      // Shown under "Couldn't load ..." as what to do; never the raw API message.
+      setLoadError(apiErrorAdvice(error));
     } finally {
       if (!cancelled.current) setLoading(false);
     }
-  }, [client, organizationId]);
+  }, [client, organizationId, enabled]);
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(true);
+    setLoading(enabled);
     void refresh();
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
     };
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {
+      const recordOutcome = beginModelConnectJourney("codex", "device_code");
       setBusy(true);
       try {
         const start = await client.requestJson<CodexConnectStart>(
@@ -94,10 +102,12 @@ export function useOrganizationCodexSubscriptions({
             if (!result || controller.signal.aborted || cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
+              recordOutcome("expired");
               toast.error("The code expired before it was used. Try again.");
               return;
             }
             if (result.status === "connected") {
+              recordOutcome("connected");
               toast.success(
                 `Codex connected for the organization${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
               );
@@ -110,15 +120,17 @@ export function useOrganizationCodexSubscriptions({
             }
           })
           .catch((error) => {
+            recordOutcome("outcome_unknown");
             if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
-            toast.error(
-              error instanceof Error ? error.message : "Couldn't confirm the ChatGPT sign-in",
-            );
+            toast.error("Couldn't confirm the ChatGPT sign-in", {
+              description: userErrorText(error),
+            });
           });
       } catch (error) {
+        recordOutcome("outcome_unknown");
         setPending(null);
-        toast.error(error instanceof Error ? error.message : "Couldn't start the ChatGPT sign-in");
+        toast.error("Couldn't start the ChatGPT sign-in", { description: userErrorText(error) });
       } finally {
         setBusy(false);
       }
@@ -134,7 +146,7 @@ export function useOrganizationCodexSubscriptions({
       await refresh();
       toast.success(success);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Couldn't update Codex");
+      toast.error("Couldn't update Codex", { description: userErrorText(error) });
     } finally {
       setBusy(false);
       setWorking(null);
@@ -165,7 +177,7 @@ export function useOrganizationCodexSubscriptions({
         : "New work uses the organization's primary account only",
     );
 
-  /** Throws with a user-facing message so the prompt can show it. */
+  /** Throws so the rename prompt can say what to do (API facts go in Technical details). */
   const rename = async (account: CodexAccount, label: string): Promise<void> => {
     setBusy(true);
     setWorking(`rename:${account.id}`);
@@ -178,17 +190,16 @@ export function useOrganizationCodexSubscriptions({
       await refresh();
       toast.success("Name saved");
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message ? error.message : "Couldn't save the name.",
-        { cause: error },
-      );
+      throw error instanceof Error && error.message
+        ? error
+        : new Error("Couldn't save the name.", { cause: error });
     } finally {
       setBusy(false);
       setWorking(null);
     }
   };
 
-  /** Throws with a user-facing message so the confirm dialog can show it. */
+  /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
   const disconnect = async (account: CodexAccount): Promise<void> => {
     setBusy(true);
     setWorking(`disconnect:${account.id}`);
@@ -201,12 +212,11 @@ export function useOrganizationCodexSubscriptions({
       await refresh();
       toast.success(`Disconnected ${codexAccountName(account)}`);
     } catch (error) {
-      throw new Error(
-        error instanceof Error && error.message
-          ? error.message
-          : `Couldn't disconnect ${codexAccountName(account)}. Try again.`,
-        { cause: error },
-      );
+      throw error instanceof Error && error.message
+        ? error
+        : new Error(`Couldn't disconnect ${codexAccountName(account)}. Try again.`, {
+            cause: error,
+          });
     } finally {
       setBusy(false);
       setWorking(null);

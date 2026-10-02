@@ -68,6 +68,7 @@ import {
   type ApiKeyPresetId,
   type ApiKeyStatus,
 } from "@/lib/api-key-presets";
+import { apiErrorDetails, userErrorText, userErrorTextWithoutReference } from "@/lib/api-error";
 import { NEW_API_KEY } from "@/lib/api-keys-route";
 import { delegableApiKeyPermissions, hasWorkspacePermission } from "@/lib/permissions";
 import type { ApiKey } from "@/types";
@@ -81,19 +82,28 @@ const COLUMNS: RowListColumn[] = [
   { id: "expires", label: "Expires", width: 116 },
 ];
 
-function errorText(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+/** What happened, then what to do. Never the raw API error string. */
+function failureText(what: string, error: unknown): string {
+  return `${what} ${userErrorText(error, "Try again.")}`;
 }
 
 /* ----------------------------------------------------------------------------
    Data.
    -------------------------------------------------------------------------- */
 
+/** Nobody administers a Personal workspace, so none of its pages offer keys. */
+const PERSONAL_UNAVAILABLE = {
+  title: "API keys aren't available in Personal workspaces",
+  description: "Create a key in a shared workspace, where workspace admins manage them.",
+} as const;
+
 interface Keys {
   keys: ApiKey[];
   loaded: boolean;
   error: Error | null;
   canManage: boolean;
+  /** A Personal workspace has no admins, so it has no API keys at all. */
+  personal: boolean;
   delegable: Set<string>;
   refresh: () => Promise<void>;
   /** Adds or replaces one key in the list. */
@@ -113,6 +123,8 @@ function useWorkspaceApiKeys(workspaceId: string): Keys {
   const client = context.client;
   const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "api_keys:manage");
+  const personal =
+    context.workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
   const workspaceGrant =
     context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ??
     null;
@@ -187,7 +199,7 @@ function useWorkspaceApiKeys(workspaceId: string): Keys {
       revoked = await client.deleteApiKey(workspaceId, key.id);
     } catch (caught) {
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return false;
-      throw new Error(errorText(caught, `Couldn't revoke ${key.name}. Try again.`), {
+      throw new Error(failureText(`Couldn't revoke ${key.name}.`, caught), {
         cause: caught,
       });
     }
@@ -196,7 +208,7 @@ function useWorkspaceApiKeys(workspaceId: string): Keys {
     return true;
   };
 
-  return { keys, loaded, error, canManage, delegable, refresh, upsert, create, revoke };
+  return { keys, loaded, error, canManage, personal, delegable, refresh, upsert, create, revoke };
 }
 
 /* ----------------------------------------------------------------------------
@@ -269,8 +281,8 @@ function KeyRows({
             key={key.id}
             leading={<KeyTile />}
             title={key.name}
-            titleAddon={
-              live ? null : (
+            status={
+              live ? undefined : (
                 <StatusBadge status={status} variant="dot">
                   {statusLabel(key, status)}
                 </StatusBadge>
@@ -334,8 +346,12 @@ function KeyList({
       <EmptyState
         variant="page"
         icon={<KeyRoundIcon />}
-        title="API keys are managed by workspace admins"
-        description="Ask a workspace admin to create a key for your script or app."
+        {...(data.personal
+          ? PERSONAL_UNAVAILABLE
+          : {
+              title: "API keys are managed by workspace admins",
+              description: "Ask a workspace admin to create a key for your script or app.",
+            })}
       />
     );
   } else if (!data.loaded) {
@@ -351,14 +367,14 @@ function KeyList({
         align="center"
         title="Couldn't load API keys."
         announce
-        details={[{ label: "Error", value: errorText(data.error, "Unknown error") }]}
+        {...apiErrorDetails(data.error)}
         action={
           <Button type="button" variant="outline" size="sm" onClick={() => void data.refresh()}>
             Try again
           </Button>
         }
       >
-        Check your connection and try again. Your keys keep working.
+        {userErrorTextWithoutReference(data.error)} Your keys keep working.
       </ErrorMessage>
     );
   } else if (empty) {
@@ -473,14 +489,20 @@ function KeyPage({
           variant="page"
           icon={<KeyRoundIcon />}
           title={
-            data.canManage ? "This key isn't here" : "API keys are managed by workspace admins"
+            data.canManage
+              ? "This key isn't here"
+              : data.personal
+                ? PERSONAL_UNAVAILABLE.title
+                : "API keys are managed by workspace admins"
           }
           description={
             data.error
               ? "Couldn't load API keys. Go back and try again."
               : data.canManage
                 ? "It may belong to another workspace, or the link is wrong."
-                : "Ask a workspace admin about this key."
+                : data.personal
+                  ? PERSONAL_UNAVAILABLE.description
+                  : "Ask a workspace admin about this key."
           }
           action={
             <Button type="button" variant="outline" onClick={onBack}>
@@ -511,7 +533,6 @@ function KeyPage({
     <Button
       type="button"
       size="sm"
-      variant="outline"
       onClick={() => onReplace(apiKey)}
       className="rounded-[10px] pointer-coarse:h-11"
     >
@@ -711,7 +732,7 @@ function CustomPermissions({
       <div className="grid min-w-0 gap-x-6 gap-y-6 @[34rem]/permissions:grid-cols-2">
         {WORKSPACE_KEY_PERMISSION_GROUPS.map((group) => (
           <fieldset key={group.label} className="m-0 min-w-0 border-0 p-0">
-            <legend className="mb-2 p-0 text-xs leading-4.5 font-medium text-fg-muted">
+            <legend className="mb-2 p-0 text-xs leading-4.5 font-medium text-fg">
               {group.label}
             </legend>
             <div className="flex min-w-0 flex-col gap-3">
@@ -768,6 +789,16 @@ function CreateKeyPage({
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // A preset must still describe its full selection after live access changes.
+    if (access !== "custom" && !fullyDelegable(presetById(access).permissions, data.delegable)) {
+      setCustom(
+        presetById(access).permissions.filter((permission) => data.delegable.has(permission)),
+      );
+      setAccess("custom");
+    }
+  }, [access, data.delegable]);
+
+  useEffect(() => {
     // On the one-time step focus moves to Copy, so a second Enter can't leave it unseen.
     if (created) {
       rootRef.current?.querySelector<HTMLElement>("[data-slot=form-body] button")?.focus();
@@ -783,17 +814,20 @@ function CreateKeyPage({
         <EmptyState
           variant="page"
           icon={<KeyRoundIcon />}
-          title="Only workspace admins can create API keys"
-          description="Ask a workspace admin to create a key for your script or app."
+          {...(data.personal
+            ? PERSONAL_UNAVAILABLE
+            : {
+                title: "Only workspace admins can create API keys",
+                description: "Ask a workspace admin to create a key for your script or app.",
+              })}
         />
       </DetailPage>
     );
   }
 
-  const permissions =
-    access === "custom"
-      ? custom
-      : presetById(access).permissions.filter((permission) => data.delegable.has(permission));
+  const permissions = (access === "custom" ? custom : presetById(access).permissions).filter(
+    (permission) => data.delegable.has(permission) && isWorkspaceKeyPermission(permission),
+  );
   const expiresOn = expiryDate(expiry);
 
   const presetOptions: SelectOption<ApiKeyPresetId>[] = apiKeyPresets().map((preset) => {
@@ -874,7 +908,7 @@ function CreateKeyPage({
           try {
             return await submit();
           } catch (caught) {
-            throw new Error(errorText(caught, "Couldn't create the key. Try again."), {
+            throw new Error(failureText("Couldn't create the key.", caught), {
               cause: caught,
             });
           }
@@ -919,6 +953,7 @@ function CreateKeyPage({
               options={presetOptions}
               value={access}
               onChange={(next) => {
+                if (next === "custom" && access !== "custom") setCustom([...permissions]);
                 setAccess(next);
                 setErrors((current) => ({ ...current, permissions: undefined }));
               }}

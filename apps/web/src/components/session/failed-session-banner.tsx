@@ -1,10 +1,15 @@
 import { AlertTriangleIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import type { ComponentProps } from "react";
+import { useEffect, useRef, type ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
 import { analyticsAction } from "@/lib/analytics-actions";
+import {
+  noteTurnFailureAction,
+  turnFailureClass,
+  turnFailureJourney,
+} from "@/lib/turn-failure-analytics";
 import type { ConnectableSubscriptions } from "@/lib/deployment-free-model";
 import { freeModelConnectRemedy, freeModelDailyLimitReason } from "@/lib/free-model-limit-copy";
 import { FailedSessionActions } from "./failed-session-actions";
@@ -29,8 +34,11 @@ export function FailedSessionBanner({
   hasModelPicker,
   actions,
   sandboxRecovery,
+  analyticsKey,
 }: {
   failure: SessionFailureSummary;
+  /** Stable identity of this failure for the consent-gated recovery journey. */
+  analyticsKey?: string;
   creditExhausted?: boolean;
   workspaceId?: string;
   canBuyCredits?: boolean;
@@ -52,6 +60,7 @@ export function FailedSessionBanner({
     "structuralFailure" | "children" | "retryActions"
   >;
 }) {
+  useTurnFailureJourney(analyticsKey, turnFailureClass(failure, creditExhausted), modelChanged);
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
@@ -78,11 +87,18 @@ export function FailedSessionBanner({
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
+  const trackedActions = actions && {
+    ...actions,
+    onRetry: () => {
+      noteTurnFailureAction("retry");
+      return actions.onRetry();
+    },
+  };
   const retryActions =
-    actions &&
+    trackedActions &&
     !failure.safetyRefusal &&
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
-      <FailedSessionActions {...actions} />
+      <FailedSessionActions {...trackedActions} />
     ) : null;
   return (
     <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
@@ -110,7 +126,9 @@ export function FailedSessionBanner({
         ) : null}
         {freeModelLimit && !modelChanged && workspaceId ? (
           <>
-            {offerCredits ? <BuyCreditsLink workspaceId={workspaceId} /> : null}
+            {offerCredits ? (
+              <BuyCreditsLink workspaceId={workspaceId} primary={!offerConnect} />
+            ) : null}
             {offerConnect ? (
               <ConnectModelLink
                 workspaceId={workspaceId}
@@ -121,7 +139,7 @@ export function FailedSessionBanner({
         ) : null}
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
-            <BuyCreditsLink workspaceId={workspaceId} />
+            <BuyCreditsLink workspaceId={workspaceId} primary />
           ) : workspaceId && canConnectModel ? (
             <ConnectModelLink workspaceId={workspaceId} label="Connect a model" />
           ) : null
@@ -141,13 +159,15 @@ export function FailedSessionBanner({
   );
 }
 
-function BuyCreditsLink({ workspaceId }: { workspaceId: string }) {
+/** The banner's one unblocking action is the primary; next to Connect it is the outline. */
+function BuyCreditsLink({ workspaceId, primary }: { workspaceId: string; primary: boolean }) {
   return (
-    <Button asChild size="sm" variant="ghost">
+    <Button asChild size="sm" variant={primary ? "default" : "outline"}>
       <Link
         to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
         search={{ section: "billing" }}
+        onClick={() => noteTurnFailureAction("buy_credits")}
         {...analyticsAction("buy_credits")}
       >
         Buy credits
@@ -158,15 +178,36 @@ function BuyCreditsLink({ workspaceId }: { workspaceId: string }) {
 
 function ConnectModelLink({ workspaceId, label }: { workspaceId: string; label: string }) {
   return (
-    <Button asChild size="sm" variant="ghost">
+    <Button asChild size="sm">
       <Link
-        to="/workspaces/$workspaceId/settings"
+        to="/workspaces/$workspaceId/organization"
         params={{ workspaceId }}
-        search={{ section: "models" }}
+        search={{ section: "models", workspace: workspaceId }}
+        onClick={() => noteTurnFailureAction("connect_model")}
         {...analyticsAction("connect_model")}
       >
         {label}
       </Link>
     </Button>
   );
+}
+
+/** Report the banner's failure once and the person's first next step. */
+function useTurnFailureJourney(
+  key: string | undefined,
+  failureClass: ReturnType<typeof turnFailureClass>,
+  modelChanged: boolean,
+) {
+  useEffect(() => {
+    if (!key) return;
+    const journey = turnFailureJourney();
+    journey.viewed(key, failureClass);
+    return () => journey.dismissed(key);
+  }, [key, failureClass]);
+  // Choosing another model in the composer is a recovery step of its own.
+  const previousModelChanged = useRef(modelChanged);
+  useEffect(() => {
+    if (modelChanged && !previousModelChanged.current) noteTurnFailureAction("switch_model");
+    previousModelChanged.current = modelChanged;
+  }, [modelChanged]);
 }

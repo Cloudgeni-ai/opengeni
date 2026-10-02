@@ -174,8 +174,9 @@ is a legacy command or that the rotation has already failed.
 
 The Modal checkpoint fallback panel and
 `OpenGeniModalCheckpointFallbackSelected` warning read the separate
-`opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome="selected"}`
-counter. A selection is recorded after a durable authorization receipt and
+`opengeni_sandbox_checkpoint_fallback_total{backend="modal",outcome=~"selected|selected_shared"}`
+counter (`selected_shared` when the whole sandbox group received the
+checkpoint). A selection is recorded after a durable authorization receipt and
 before restore; it remains an operator signal even if the session later
 continues successfully. It is not proof of restore success or of complete
 file recovery. Both loss and fallback panels retain namespace/release/environment
@@ -186,6 +187,15 @@ The separate durable observations panel reads a fresh, release-scoped count
 from committed audit receipts over the same 30-minute window. It keeps the
 operator alert visible if a worker exits after committing recovery but before
 its process-local counter can be scraped.
+
+The Modal empty-workspace continuity panel and
+`OpenGeniModalFreshWorkspaceContinuity` warning read the same counter with
+`outcome="fresh_workspace"`, plus the durable `fresh_workspace_selected`
+observation kind. It fires when a definitively lost group had no usable
+checkpoint and continued on a new empty workspace after every member received
+its warning receipt. It is an operator signal, not a failure: investigate why no
+restorable checkpoint existed (capture cadence, deadline rotation, restore
+failures); the lost archive and checkpoint references remain on the lease.
 
 > `machine.link.*` and `machine.op.*` are session-scoped **timeline events**, not
 > Prometheus series — a machine's link history lives in the session timeline (which

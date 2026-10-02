@@ -1,5 +1,6 @@
+import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { RowButton } from "@/components/ui/page-actions";
@@ -11,6 +12,12 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import { analyticsAction } from "@/lib/analytics-actions";
+import {
+  apiErrorAdvice,
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+} from "@/lib/api-error";
 import { entitlementEntries, validTopupAmount } from "@/lib/format";
 import {
   beginOrganizationAdminOperation,
@@ -24,19 +31,69 @@ import {
 } from "@/lib/organization-admin";
 import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
 
+// Budgets load only on this page: they never join the session or rail graphs.
+const WorkspaceBudgetsSection = lazy(() =>
+  import("@/components/usage/workspace-budgets-section").then((module) => ({
+    default: module.WorkspaceBudgetsSection,
+  })),
+);
+const WorkspaceBudgetPage = lazy(() =>
+  import("@/components/usage/workspace-budget-page").then((module) => ({
+    default: module.WorkspaceBudgetPage,
+  })),
+);
+
 /* ----------------------------------------------------------------------------
    Organization settings > Billing & usage: the credit balance and top-ups,
-   plan limits, and usage by workspace.
+   plan limits, workspace budgets, and usage by workspace. A workspace's budget
+   page (`?section=billing&workspace=<id>`) opens from the budgets list.
    -------------------------------------------------------------------------- */
 
 export function OrganizationBillingPage({
-  identity,
-  canReadBilling,
-  canManageBilling,
+  budgetWorkspaceId,
+  ...props
 }: {
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  /** The workspace whose budget page is open. */
+  budgetWorkspaceId?: string | undefined;
+}) {
+  const navigate = useNavigate();
+  const anchorWorkspaceId = props.identity.workspaceId;
+  const openBudget = useCallback(
+    (workspace: string | undefined) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId: anchorWorkspaceId },
+        search: workspace ? { section: "billing", workspace } : { section: "billing" },
+      }),
+    [anchorWorkspaceId, navigate],
+  );
+  if (budgetWorkspaceId) {
+    return (
+      <Suspense fallback={null}>
+        <WorkspaceBudgetPage
+          key={budgetWorkspaceId}
+          workspaceId={budgetWorkspaceId}
+          onBack={() => openBudget(undefined)}
+        />
+      </Suspense>
+    );
+  }
+  return <BillingOverview {...props} onOpenBudget={openBudget} />;
+}
+
+function BillingOverview({
+  identity,
+  canReadBilling,
+  canManageBilling,
+  onOpenBudget,
+}: {
+  identity: OrganizationAdminIdentity;
+  canReadBilling: boolean;
+  canManageBilling: boolean;
+  onOpenBudget: (workspaceId: string) => void;
 }) {
   const client = useAppContext().client;
   const accountId = identity.organizationId;
@@ -164,9 +221,7 @@ export function OrganizationBillingPage({
       window.location.assign(session.url);
     } catch (error) {
       if (!ownsBillingOperation(operation)) return;
-      toast.error("Checkout failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't open checkout", { description: userErrorText(error) });
     } finally {
       if (ownsBillingOperation(operation)) setBusy(false);
     }
@@ -185,9 +240,7 @@ export function OrganizationBillingPage({
       window.location.assign(session.url);
     } catch (error) {
       if (!ownsBillingOperation(operation)) return;
-      toast.error("Couldn't open Stripe billing", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      toast.error("Couldn't open Stripe billing", { description: userErrorText(error) });
     } finally {
       if (ownsBillingOperation(operation)) setBusy(false);
     }
@@ -214,14 +267,12 @@ export function OrganizationBillingPage({
               hasError={Boolean(visibleBillingError)}
             />
             {visibleBillingError ? (
-              <ErrorMessage
-                variant="inline"
+              <BillingLoadFailure
                 title="Couldn't load the billing balance"
-                announce
-                action={<RowButton onClick={() => void refreshBilling()}>Try again</RowButton>}
-              >
-                {visibleBillingError.message}
-              </ErrorMessage>
+                denied="You can't see the billing balance. Ask an organization owner for access."
+                error={visibleBillingError}
+                onRetry={() => void refreshBilling()}
+              />
             ) : null}
             {stripe && canManageBilling ? (
               <SettingRowGroup>
@@ -253,6 +304,7 @@ export function OrganizationBillingPage({
                         />
                       </div>
                       <RowButton
+                        variant="default"
                         {...analyticsAction("buy_credits")}
                         disabled={visibleBusy || !validTopupAmount(topupAmount)}
                         onClick={() => void startCheckout(Number(topupAmount))}
@@ -293,12 +345,42 @@ export function OrganizationBillingPage({
         onRetry={() => void refreshEntitlements()}
       />
 
+      <Suspense fallback={null}>
+        <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
+      </Suspense>
+
       <OrganizationUsageDashboard
         key={identityKey}
         accountId={accountId}
         enabled={canReadBilling && Boolean(accountId)}
       />
     </SectionStack>
+  );
+}
+
+/**
+ * A billing read that failed: a calm line without Try again when the viewer
+ * lacks the permission, otherwise what happened and what to do.
+ */
+function BillingLoadFailure(props: {
+  title: string;
+  denied: string;
+  error: Error;
+  onRetry: () => void;
+}) {
+  if (isPermissionDenied(props.error)) {
+    return <p className="text-xs leading-[18px] text-fg-muted">{props.denied}</p>;
+  }
+  return (
+    <ErrorMessage
+      variant="inline"
+      title={props.title}
+      announce
+      action={<RowButton onClick={props.onRetry}>Try again</RowButton>}
+      {...apiErrorDetails(props.error)}
+    >
+      {apiErrorAdvice(props.error)}
+    </ErrorMessage>
   );
 }
 
@@ -323,14 +405,12 @@ function EntitlementsSection(props: {
   if (props.error) {
     return (
       <Section title="Plan limits">
-        <ErrorMessage
-          variant="inline"
+        <BillingLoadFailure
           title="Couldn't load the plan's limits"
-          announce
-          action={<RowButton onClick={props.onRetry}>Try again</RowButton>}
-        >
-          {props.error.message}
-        </ErrorMessage>
+          denied="You can't see the plan's limits. Ask an organization owner for access."
+          error={props.error}
+          onRetry={props.onRetry}
+        />
       </Section>
     );
   }

@@ -7,6 +7,10 @@ import {
   createSession,
   ensureManagedAccessForUser,
   getSessionForSubject,
+  importArchivedSession,
+  createFileUpload,
+  completeFileUpload,
+  withSessionRlsActorContext,
   SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
@@ -20,6 +24,7 @@ import {
 import type { AccessGrantAuthorization } from "../src/access";
 import { HTTPException } from "hono/http-exception";
 import { SessionAuthorizationDeniedError } from "../src/session-authorization";
+import { readSessionAttachmentFiles } from "../src/domain/session-file-access";
 import {
   forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
@@ -52,6 +57,90 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session tenancy application service", () => {
+  test("imported originals use the normal core attachment read path and forks fail with the typed read-only error", async () => {
+    if (!shared || !client) return;
+    const userId = crypto.randomUUID();
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Imported attachment owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    await shared.admin`insert into session_tenancy_activations(account_id,activation_version,inventory_digest,parity_digest,activated_by) values(${grant.accountId},1,${"0".repeat(64)},${"1".repeat(64)},'core-archive')`;
+    const owner = { subjectId: grant.subjectId, privateFileOwnerSubjectId: grant.subjectId };
+    const imported = await withSessionRlsActorContext(owner, async () => {
+      const upload = await createFileUpload(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        privateOwnerSubjectId: grant.subjectId,
+        fileId: crypto.randomUUID(),
+        filename: "history.png",
+        safeFilename: "history.png",
+        contentType: "image/png",
+        sizeBytes: 3,
+        bucket: "test",
+        objectKey: crypto.randomUUID(),
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const file = await completeFileUpload(client!.db, grant.workspaceId, upload.uploadId);
+      const result = await importArchivedSession(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        fileOwnerSubjectId: grant.subjectId,
+        requireLiveSubject: true,
+        createdBy: { kind: "subject", subjectId: grant.subjectId },
+        payload: {
+          importId: "core-file",
+          title: "Imported file",
+          createdAt: "2019-01-01T00:00:00Z",
+          events: [
+            {
+              type: "user.message",
+              createdAt: "2019-01-01T00:00:00Z",
+              payload: { resources: [{ kind: "file", fileId: file.id }] },
+            },
+          ],
+        },
+      });
+      return { result, file };
+    });
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    const deps = { db: client.db, bus: new MemoryEventBus(), sessionAuthorization };
+    expect(
+      (
+        await readSessionAttachmentFiles(
+          deps,
+          { ...grant, subjectId: "user:archive-viewer" },
+          imported.result.session.id,
+          [imported.file.id],
+        )
+      ).map((file) => file.id),
+    ).toEqual([imported.file.id]);
+    await expect(
+      forkManagedHumanSession(
+        deps,
+        {
+          grant,
+          accountGrant: access.accountGrants[0] ?? null,
+          authenticatedSubjectId: grant.subjectId,
+          contextIntegrity: true,
+          canonicalManagedHumanSession: true,
+        },
+        grant.workspaceId,
+        imported.result.session.id,
+        {
+          idempotencyKey: "core-no-import-fork",
+          visibility: "shared",
+          workspaceSharedAcknowledged: false,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "SESSION_IMPORTED_READ_ONLY" });
+  });
+
   test("reports private-create availability to members only after organization enablement", async () => {
     if (!shared || !client) return;
     const userId = `core-private-create-${crypto.randomUUID()}`;

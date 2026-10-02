@@ -32,8 +32,18 @@ const frameSource = await Bun.file(
 const settingsNavSource = await Bun.file(
   `${import.meta.dir}/components/ui/settings-nav.tsx`,
 ).text();
-const shellSource = await Bun.file(
-  `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
+// Organization pages sit in the Organization section of the one settings rail.
+const shellSource = [
+  await Bun.file(`${import.meta.dir}/components/settings/settings-rail.tsx`).text(),
+  await Bun.file(`${import.meta.dir}/components/settings/organization-settings-pages.ts`).text(),
+].join("\n");
+const workspaceShellSource = await Bun.file(
+  `${import.meta.dir}/components/settings/workspace-settings-shell.tsx`,
+).text();
+const workspacesLibSource = await Bun.file(`${import.meta.dir}/lib/workspaces.ts`).text();
+// Which organization pages a person can use: one rule for the rail and the route.
+const accessSource = await Bun.file(
+  `${import.meta.dir}/lib/organization-settings-access.ts`,
 ).text();
 const apiKeySource = await Bun.file(
   `${import.meta.dir}/components/organization-api-keys-section.tsx`,
@@ -51,8 +61,12 @@ const workspaceCodexSource = await Bun.file(
   `${import.meta.dir}/components/models/codex-models.tsx`,
 ).text();
 const organizationModelsSource = await Bun.file(
-  `${import.meta.dir}/components/models/organization-models-page.tsx`,
+  `${import.meta.dir}/components/models/workspace-models-page.tsx`,
 ).text();
+const organizationCodexModelsSource = await Bun.file(
+  `${import.meta.dir}/components/models/organization-codex-models.tsx`,
+).text();
+const appSource = await Bun.file(`${import.meta.dir}/App.tsx`).text();
 const providerPageSource = await Bun.file(
   `${import.meta.dir}/components/ai-gateway-connection.tsx`,
 ).text();
@@ -69,9 +83,14 @@ const tenancyDocs = await Bun.file(
 
 describe("organization administration surface", () => {
   test("manages Gateway and OpenRouter as peer organization BYOK providers", () => {
-    expect(routeSource).toContain("<OrganizationModelsPage");
-    expect(organizationModelsSource).toContain('providerKind: "vercel_gateway"');
-    expect(organizationModelsSource).toContain('providerKind: "openrouter"');
+    // One Models page, in Organization settings: a workspace's old Models URL
+    // redirects to that workspace's page there.
+    expect(routeSource).toContain("<OrganizationModelsSectionWithName");
+    expect(appSource).toContain("workspaceModelsRedirect(");
+    expect(organizationModelsSource).toContain("useOrganizationProviderConnection(");
+    expect(organizationModelsSource).toContain('vercel: "vercel_gateway"');
+    expect(organizationModelsSource).toContain('openrouter: "openrouter"');
+    expect(organizationCodexModelsSource).toContain("export function OrgCodexAccountPage");
     for (const method of [
       "getOrganizationModelProviderConnection",
       "upsertOrganizationModelProviderConnection",
@@ -91,8 +110,13 @@ describe("organization administration surface", () => {
   });
 
   test("routes accessible general, people, workspaces, identity, security, developer, and billing sections", () => {
-    expect(routeSource).toContain("<OrganizationSettingsShell");
-    expect(shellSource).toContain('label="Organization settings"');
+    // The route renders inside the shared settings shell, under its Organization section.
+    expect(routeSource).not.toContain("SettingsShell");
+    expect(routeSource).toContain("<PageHeader");
+    expect(workspaceShellSource).toContain('label="Settings"');
+    expect(shellSource).toContain('label: "Organization"');
+    expect(routeSource).toContain("organizationSettingsAccess({");
+    expect(shellSource).toContain("organizationSettingsAccess({");
     // The SettingsShell names the settings rail from `label`; NavItem marks the current page.
     expect(frameSource).toContain("aria-label={label}");
     expect(settingsNavSource).toContain('aria-current={active && !disabled ? "page" : undefined}');
@@ -122,26 +146,29 @@ describe("organization administration surface", () => {
     expect(securitySource).toContain("<RetentionRow");
     expect(identitySource).toContain("<OrganizationKnowledgePrompt");
     expect(identitySource).toContain("<AgentChangesSection");
-    expect(routeSource).toContain('context.clientConfig.productAccessMode === "local"');
+    expect(accessSource).toContain('input.clientConfig.productAccessMode === "local"');
     expect(routeSource).toContain("organizationAdministratorSession");
     expect(routeSource).toContain("singleUser={singleUser}");
-    expect(routeSource).toContain('actorRole === "owner" || actorRole === "admin"');
-    // Models is shown only to organization administrators.
-    expect(routeSource).toMatch(/if \(administrator\) \{[^}]*visible\.add\("models"\)/u);
+    // Owners and admins in an administrator session: one rule, shared with the picker.
+    expect(accessSource).toContain("administersOrganization(input)");
+    expect(workspacesLibSource).toContain('role === "owner" || role === "admin"');
+    // Models is an organization page for owners, admins and workspace admins.
+    expect(accessSource).toContain('visible.add("models")');
+    expect(accessSource).toContain("administeredWorkspaceIds.length > 0");
     expect(organizationCodexSource).toContain("setLoadError(");
-    expect(organizationModelsSource).toContain("<ErrorMessage");
-    expect(organizationModelsSource).toContain("Try again");
+    expect(workspaceCodexSource).toContain("Couldn't load the organization's Codex accounts.");
+    expect(workspaceCodexSource).toContain("Try again");
     // Workspace Codex: no source control; one line says which pool new work uses, with
-    // "Use automatically" for a saved explicit choice. The only link to organization
-    // settings is on a shared account's page, for org admins.
+    // "Use automatically" for a saved explicit choice. Organization admins open a
+    // shared account's own page on the same Models page.
     expect(workspaceCodexSource).not.toContain('label="Subscriptions from"');
     expect(workspaceCodexSource).toContain("export function CodexPoolNotice");
     expect(workspaceCodexSource).toContain("Use automatically");
-    expect(workspaceCodexSource).toContain("Manage in organization settings");
-    expect(workspaceCodexSource).toContain("manageInOrganization");
+    expect(workspaceCodexSource).not.toContain("Manage in organization settings");
+    expect(workspaceCodexSource).toContain("organization.openAccount(account.id)");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
-    expect(routeSource).toContain('accountGrant?.role === "owner"');
-    expect(routeSource).toContain('"account:admin"');
+    expect(accessSource).toContain('accountGrant?.role === "owner"');
+    expect(accessSource).toContain('"account:admin"');
     expect(identitySource).toContain("client.getCompanyProfileAgentPolicy(");
     expect(identitySource).toContain("client.updateCompanyProfileAgentPolicy(");
     expect(identitySource).toContain('label: "Automatic"');

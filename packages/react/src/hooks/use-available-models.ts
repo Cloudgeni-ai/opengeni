@@ -72,7 +72,7 @@ export function useWorkspaceModelCatalog(
       }
       const [catalog, config] = await Promise.all([
         client.getWorkspaceModelCatalog(options.workspaceId, { signal }),
-        client.getClientConfig({ signal }),
+        client.getClientConfig({ signal, workspaceId: options.workspaceId }),
       ]);
       return {
         models: catalog.models,

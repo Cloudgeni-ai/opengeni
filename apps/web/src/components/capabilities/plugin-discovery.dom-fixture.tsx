@@ -340,6 +340,29 @@ test("installed attention state remains textual and management uses the exact in
   }
 });
 
+test("an API install failure says what to do instead of the raw API string", async () => {
+  const { api, calls } = client();
+  calls.installPlugin.mockImplementation(async () => {
+    throw Object.assign(
+      new Error("OpenGeni API 409: plugin_manifest_changed Reference: req-plugin-install."),
+      { status: 409 },
+    );
+  });
+  const rendered = await render(
+    <PluginDiscovery client={api} workspaceId="workspace" query="" canManage />,
+  );
+  try {
+    await openDiscovery(rendered.container);
+    await act(async () => button("Install plugin")!.click());
+    expect(document.querySelector('[data-capability-page] [role="alert"]')?.textContent).toBe(
+      "It changed since this page loaded. Reload the page and try again. Reference: req-plugin-install.",
+    );
+    expect(document.body.textContent).not.toContain("OpenGeni API");
+  } finally {
+    await rendered.unmount();
+  }
+});
+
 test("install errors remain on the page and do not mark discovery as installed", async () => {
   const { api, calls } = client();
   calls.installPlugin.mockImplementation(async () => {

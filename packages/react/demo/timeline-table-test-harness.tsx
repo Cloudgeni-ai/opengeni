@@ -2,6 +2,7 @@ import { MessageTimeline, type TimelineItem } from "@opengeni/react";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import { TableHistoryHarness } from "./timeline-table-history-harness";
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
@@ -29,7 +30,7 @@ const verified = [
   "| --- | --- | --- |",
   "| EU PostHog | `OpenDemo`, project `123456` | UTC; accessible; events ingested |",
   "| EU PostHog | `CloudDemo`, project `654321` | Europe/Oslo; accessible; events ingested |",
-  "| Grafana Production | `OpenDemo Managed Analytics` | Read-only PostgreSQL datasource, production database |",
+  "| Grafana Production | `OpenDemo Managed Analytics` | Read-only PostgreSQL datasource for production analytics and retained event history |",
   "| Grafana Production | `analytics.product_user_identities` | Present and queryable |",
   "| Grafana Production | Agent/runtime telemetry | Managed analytics facts and Prometheus metrics queryable |",
 ].join("\n");
@@ -114,4 +115,6 @@ function Harness() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Harness />);
+createRoot(document.getElementById("root")!).render(
+  new URLSearchParams(location.search).has("reading") ? <TableHistoryHarness /> : <Harness />,
+);

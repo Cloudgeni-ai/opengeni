@@ -40,3 +40,28 @@ test("native credential headers reject case-insensitive duplicates and excessive
   );
   expect(() => normalizedCredentialHeaders(excessive)).toThrow("invalid header count");
 });
+
+test("brokered api_key bundles must say where the secret goes", async () => {
+  const { brokeredCredentialBundleProblem } = await import("../src/connection-token-resolver");
+  expect(brokeredCredentialBundleProblem({ headers: { Authorization: "Token synthetic" } })).toBe(
+    null,
+  );
+  expect(
+    brokeredCredentialBundleProblem({
+      placements: [{ carrier: "query", name: "api_key", value: "synthetic" }],
+    }),
+  ).toBe(null);
+  const bare = brokeredCredentialBundleProblem({ apiKey: "Token synthetic" });
+  expect(bare).toContain('"apiKey" are never sent');
+  expect(bare).toContain("headers");
+  expect(bare).not.toContain("synthetic");
+  expect(brokeredCredentialBundleProblem({ headers: { Authorization: 42 } })).toContain(
+    "string values",
+  );
+  expect(brokeredCredentialBundleProblem({ headers: {} })).toContain("invalid header count");
+  expect(
+    brokeredCredentialBundleProblem({
+      placements: [{ carrier: "body", name: "key", value: "synthetic" }],
+    }),
+  ).toContain("invalid credential placements");
+});

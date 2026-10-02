@@ -4,11 +4,70 @@ import {
   AutomationNormalizedEvent,
   AutomationSessionTemplate,
   SignedJsonAutomationEnvelope,
+  readTurnExecutionPolicyV1,
+  type AccessGrant,
+  type Permission,
   type AutomationAdapterId,
   type AutomationSource,
   type AutomationTrigger,
 } from "@opengeni/contracts";
+import { getSession, getSessionTurnForAttempt, type Database } from "@opengeni/db";
+import { HTTPException } from "hono/http-exception";
+import { isDeveloperSetupGrant, isDeveloperSetupDelegatedPermissionAllowed } from "../access";
+import { creationInitiatorForGrant } from "./sessions";
 import { prReviewAutomationAdapter } from "./pr-review";
+
+/** Canonical authenticated grant or exact server-owned originating policy only. */
+export async function automationCredentialRestrictionForGrant(
+  db: Database,
+  grant: AccessGrant,
+): Promise<AutomationSessionTemplate["credentialRestriction"]> {
+  if (isDeveloperSetupGrant(grant)) return "developer_setup";
+  const actor = creationInitiatorForGrant(grant).actor;
+  if (!actor) return undefined;
+  const turn = await getSessionTurnForAttempt(
+    db,
+    grant.workspaceId,
+    actor.sessionId,
+    actor.attemptId,
+  );
+  const session = await getSession(db, grant.workspaceId, actor.sessionId);
+  if (!turn || turn.id !== actor.turnId || !session || session.accountId !== grant.accountId) {
+    throw new HTTPException(403, {
+      message: "the creating automation agent attempt is not available",
+    });
+  }
+  for (const metadata of [turn.metadata, session.metadata]) {
+    let policy: ReturnType<typeof readTurnExecutionPolicyV1>;
+    try {
+      policy = readTurnExecutionPolicyV1(metadata);
+    } catch {
+      throw new HTTPException(409, {
+        message: "The frozen automation creator credential ceiling is invalid",
+      });
+    }
+    if (policy.kind === "valid" && policy.policy.credentialRestriction === "developer_setup") {
+      return "developer_setup";
+    }
+  }
+  return undefined;
+}
+
+/** Explicit delegated scopes must stay within the frozen setup ceiling. */
+export function requireAutomationCredentialRestrictionPermissions(
+  restriction: AutomationSessionTemplate["credentialRestriction"],
+  permissions: readonly Permission[],
+): void {
+  if (restriction !== "developer_setup") return;
+  const forbidden = permissions.find(
+    (permission) => !isDeveloperSetupDelegatedPermissionAllowed(permission),
+  );
+  if (forbidden) {
+    throw new HTTPException(403, {
+      message: `Developer setup cannot delegate automation permission: ${forbidden}`,
+    });
+  }
+}
 
 export type AutomationAdapterRenderResult = {
   initialMessage: string;
@@ -147,7 +206,19 @@ export function buildAutomationAcceptedExecution(input: {
   eventId: string;
   event: AutomationNormalizedEvent;
   render: AutomationAdapterRenderResult;
+  /** Trusted caller restriction from the immutable stored event, not adapter JSON. */
+  credentialRestriction?: "developer_setup";
 }): AutomationAcceptedExecution {
+  // Adapter output is a rendering, not authority. Reattach the immutable
+  // trigger/event marker even if an adapter rebuilds or strips its template.
+  const { credentialRestriction: _renderRestriction, ...renderTemplate } =
+    AutomationSessionTemplate.parse(input.render.sessionTemplate);
+  const credentialRestriction =
+    input.trigger.sessionTemplate.credentialRestriction ?? input.credentialRestriction;
+  requireAutomationCredentialRestrictionPermissions(
+    credentialRestriction,
+    renderTemplate.firstPartyMcpPermissions,
+  );
   return AutomationAcceptedExecution.parse({
     version: 1,
     accountId: input.accountId,
@@ -160,7 +231,10 @@ export function buildAutomationAcceptedExecution(input: {
     adapterId: input.event.adapterId,
     occurrenceKey: input.event.occurrenceKey,
     initialMessage: input.render.initialMessage,
-    sessionTemplate: input.render.sessionTemplate,
+    sessionTemplate: {
+      ...renderTemplate,
+      ...(credentialRestriction ? { credentialRestriction } : {}),
+    },
     serviceSubjectId: `automation:${input.trigger.id}`,
     serviceLabel: `OpenGeni automation: ${input.trigger.name}`,
     provenance: {

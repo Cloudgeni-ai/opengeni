@@ -2,6 +2,7 @@ import type { Agent } from "@openai/agents";
 import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   approvalIdentifier,
+  withPublicApprovalFields,
   type HumanInputResponse,
   type SessionEvent,
 } from "@opengeni/contracts";
@@ -380,7 +381,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
         ? [
             {
               type: "session.requiresAction" as const,
-              payload: { approvals: requiresActionApprovals },
+              payload: { approvals: requiresActionApprovals.map(withPublicApprovalFields) },
             },
           ]
         : []),

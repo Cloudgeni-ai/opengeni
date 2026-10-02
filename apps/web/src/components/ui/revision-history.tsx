@@ -18,7 +18,12 @@ import { ChevronRightIcon, LoaderCircleIcon, RotateCcwIcon } from "lucide-react"
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { DiffView, type DiffFormat } from "@/components/ui/diff-view";
+import {
+  DiffView,
+  failedLoadParts,
+  type DiffFormat,
+  type FailedLoad,
+} from "@/components/ui/diff-view";
 import { DisabledReason } from "@/components/ui/disabled-reason";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { MetaChip } from "@/components/ui/meta-chip";
@@ -59,7 +64,7 @@ export interface RevisionHistoryProps {
   label?: string;
   loading?: boolean;
   /** What happened, what to do next, and an optional retry. */
-  error?: { message: string; detail?: ReactNode; onRetry?: () => void };
+  error?: FailedLoad;
   className?: string;
 }
 
@@ -353,9 +358,11 @@ export function RevisionHistory(props: RevisionHistoryProps) {
       </div>
     );
   } else if (error) {
+    const failure = failedLoadParts(error);
     body = (
       <ErrorMessage
         title={error.message}
+        details={failure.details}
         action={
           error.onRetry ? (
             <Button
@@ -370,7 +377,7 @@ export function RevisionHistory(props: RevisionHistoryProps) {
           ) : undefined
         }
       >
-        {error.detail}
+        {failure.detail}
       </ErrorMessage>
     );
   } else if (revisions.length === 0) {

@@ -16,7 +16,12 @@ import {
   type CodexLeaseAccountStatus,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { maxTurnsExceededRunState } from "@opengeni/runtime";
+import {
+  maxTurnsExceededRunState,
+  isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
+} from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
   authoritativeCodexCapacityResetAt,
@@ -335,6 +340,69 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // back to the workflow-claimed turn when the local lookup had not
   // finished yet.
   const recoveryTurnId = attempt.turnId;
+  // Unlike proven pre-dispatch failure, a genuine SDK Start/Wait uncertainty
+  // cannot reconstruct setup on a replacement attempt. The exact command and
+  // writer remain retained by sandbox-runtime; the logical turn is parked as
+  // recovering with a durable no-replay marker, not failed or completed.
+  const observationUnavailable = isProviderCommandObservationUnavailableError(error);
+  if (
+    (isModalCommandStartOutcomeUnknownError(error) || observationUnavailable) &&
+    recoveryTurnId &&
+    attempt.triggerEventId &&
+    attempt.executionGeneration > 0
+  ) {
+    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    try {
+      if (eventing.turnStartedPublished) {
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ requireDurable: true });
+      }
+      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: input.attemptId,
+        reason: observationUnavailable
+          ? "sandbox_command_observation_unavailable"
+          : "sandbox_command_start_outcome_unknown",
+        sandboxSetupOutcomeUnknown: true,
+        detail: {
+          code: observationUnavailable
+            ? "sandbox_command_observation_unavailable"
+            : "sandbox_command_start_outcome_unknown",
+          retryable: false,
+          setupOutcome: "unknown",
+          replay: "blocked",
+          providerRecoveryCount: attempt.providerRecoveryCount,
+        },
+      });
+    } catch (checkpointError) {
+      const databaseRecovery = postClaimDatabaseRecoveryFailure({
+        error: checkpointError,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        executionGeneration: attempt.executionGeneration,
+        sandboxSetupOutcomeUnknown: true,
+      });
+      if (!databaseRecovery) throw checkpointError;
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      throw databaseRecovery;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    acknowledgeRecoveryQuiescence();
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    control.activityStatus = "recovering";
+    control.turnMetricOutcome = "recovering";
+    control.activityError = error;
+    return claimedResult({ status: "recovering", deferredUntilWake: true });
+  }
   // A true epoch supersession and a provider lifecycle transition are both
   // recoverable control-plane states, never session failures. A rotation
   // persists an exact group/epoch wait marker so the workflow parks before
@@ -1536,12 +1604,16 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     if (
       !(await eventing.settle!({
         events: [
+          ...(error.allowance
+            ? [{ type: "usage.exhausted" as const, payload: error.allowance }]
+            : []),
           {
             type: "turn.completed",
             payload: {
               output: "",
               segmentLimit: "budget_exhausted",
               detail: error.message,
+              ...(error.allowance ?? {}),
             },
           },
           { type: "session.status.changed", payload: { status: "idle" } },
@@ -1549,6 +1621,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        ...(error.allowance ? { allowanceGoalPause: { rationale: error.allowance.message } } : {}),
       }))
     ) {
       return claimedResult({ status: "cancelled" });
@@ -1655,6 +1728,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     !!attempt.turnId &&
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
+  const earlyCommandStartUnavailable =
+    isModalTaskExecStartPreDispatchUnavailableError(error) &&
+    !attempt.modelRequestStarted &&
+    !eventing.turnStartedPublished &&
+    !!attempt.turnId &&
+    !!attempt.triggerEventId &&
+    attempt.executionGeneration > 0;
+  const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
   let failure = (
     earlyDefinitionMismatch
       ? { error: error.message, code: error.code, retryable: true }
@@ -1665,7 +1746,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   ) as ReturnType<typeof agentRunFailurePayload>;
   if (
     attempt.turnId &&
-    (earlyDefinitionMismatch ||
+    (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
     const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
@@ -1676,7 +1757,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     });
     try {
       if (recoveryResult.status === "recovering") {
-        if (!earlyDefinitionMismatch) {
+        if (!earlyRecoverableSetup) {
           await flushRuntimeBatcher();
           await historySink.reconcileConversationTruth({ requireDurable: true });
         }
@@ -1707,15 +1788,19 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
-      if (earlyDefinitionMismatch) {
+      if (earlyRecoverableSetup) {
         // Setup has no eventing sink yet. Carry only the fixed, safe diagnostic
         // through Temporal into exact-attempt workflow failure settlement.
         control.activityStatus = "failed";
         control.turnMetricOutcome = "failed";
         control.activityError = error;
         throw ApplicationFailure.create({
-          message: `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`,
-          type: "TurnExecutionPolicyDefinitionMismatchError",
+          message: earlyDefinitionMismatch
+            ? `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`
+            : failure.error,
+          type: earlyDefinitionMismatch
+            ? "TurnExecutionPolicyDefinitionMismatchError"
+            : "SandboxCommandStartUnavailableError",
           nonRetryable: true,
         });
       }

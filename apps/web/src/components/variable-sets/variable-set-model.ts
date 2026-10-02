@@ -1,4 +1,5 @@
 import type { ConfirmDependency } from "@/components/ui/destructive-confirm";
+import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import type { Rig, ScheduledTask, Session, WorkspaceVariableSet } from "@/types";
 
@@ -202,26 +203,23 @@ export interface ErrorParts {
   reference?: string;
 }
 
-/** Splits "OpenGeni API 409: ... Reference: abc." into its parts. */
+/**
+ * Splits "OpenGeni API 409: ... Reference: abc." into its parts. `message` is
+ * the server's own sentence, for Technical details; show `userFacingError`'s
+ * text to people.
+ */
 export function errorParts(error: unknown): ErrorParts {
-  const raw = error instanceof Error ? error.message : String(error ?? "");
-  const withStatus = error as { status?: unknown; correlationId?: unknown } | null;
-  const status = typeof withStatus?.status === "number" ? withStatus.status : undefined;
-  let reference =
-    typeof withStatus?.correlationId === "string" ? withStatus.correlationId : undefined;
-  let message = raw;
-  const referenceMatch = / Reference: ([^\s]+?)\.?$/u.exec(message);
-  if (referenceMatch) {
-    reference ??= referenceMatch[1];
-    message = message.slice(0, referenceMatch.index);
-  }
-  message = message.replace(/^OpenGeni API \d{3}:\s*/u, "").trim();
+  const { status, reference, serverMessage } = apiErrorFacts(error);
+  let message = serverMessage ?? "";
   if (message && !/[.!?]$/u.test(message)) message = `${message}.`;
   if (message) message = message.charAt(0).toUpperCase() + message.slice(1);
   return { message: message || "Something went wrong. Try again.", status, reference };
 }
 
-/** A user-facing error for a form or dialog, keeping the original as its cause. */
-export function userFacingError(error: unknown, message = errorParts(error).message): Error {
+/**
+ * A user-facing error for a form or dialog, keeping the original as its cause.
+ * An API error becomes what to do next, never its raw "OpenGeni API ..." text.
+ */
+export function userFacingError(error: unknown, message = userErrorText(error)): Error {
   return new Error(message, { cause: error });
 }

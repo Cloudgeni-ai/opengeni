@@ -13,7 +13,7 @@ Use this to develop against OpenGeni or to evaluate it before self-hosting. For 
 - Git and curl.
 - For source-build fallback only: [rustup](https://rustup.rs) and a C build toolchain (Xcode Command Line Tools on macOS, or `build-essential` on Debian/Ubuntu). Startup prefers a source-matched verified runtime; if it must compile, it uses the checked-in Rust toolchain without changing your default.
 - Docker with a running daemon, or the native service prerequisites described in [Local development](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/local-development.md). A Docker client without a working daemon is not sufficient. The default agent sandbox is `local` (this machine).
-- Model credentials are needed for agent execution, not application startup. Connect a model in Settings → Models after opening the app, or configure a deployment key.
+- Model credentials are needed for agent execution, not application startup. Connect a model in Organization settings → Models after opening the app, or configure a deployment key.
 
 ## Start the stack
 
@@ -66,6 +66,8 @@ Wait for `OpenGeni dev stack ready` before opening the printed web URL. Infrastr
 | `OPENGENI_MODEL_PROVIDERS_JSON`         | Additional OpenAI-compatible providers and their model catalogs                           |
 | `OPENGENI_SANDBOX_BACKEND`              | Where sessions run: `local` (default), `docker`, `modal`, `none`, or a cloud provider     |
 | `OPENGENI_SANDBOX_PREPARATION_PROFILES` | Opt-in profiles such as `azure` or `github` that pre-authenticate CLIs inside the sandbox |
+
+Connect Anthropic API keys from **Organization settings → Models** (owners and admins), available in every workspace or only the ones you choose. Claude subscription sign-in is separately available when the operator enables `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true` (default off). Choose **Sign in to Claude**, approve access on Claude's page, then paste the authorization code. This enables usage checks, reset times and automatic token renewal. **Use a setup token** is an optional fallback with usage readings after model calls and manual token replacement. Subscriptions use your Claude plan limits; Anthropic API keys use API billing. Connecting makes no model calls.
 
 Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
 

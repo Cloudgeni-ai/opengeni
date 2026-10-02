@@ -847,6 +847,10 @@ describe("turn exact-content boundaries", () => {
       "await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);",
       streamCompletionAuthority,
     );
+    const drainedWaitReceipts = source.indexOf(
+      "await eventing.preparedTools?.inputWaitYield?.drainForHandoff(runtimeCancellationSignal);",
+      streamCompletionAuthority,
+    );
     const postCompactionRecovery = source.indexOf(
       "throw new PostCompactionContinuationEmptyError();",
       streamCompletionAuthority,
@@ -870,14 +874,19 @@ describe("turn exact-content boundaries", () => {
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
     expect(streamCompletionAuthority).toBeGreaterThan(-1);
     expect(sealedWaitAdmission).toBeGreaterThan(streamCompletionAuthority);
-    expect(postCompactionRecovery).toBeGreaterThan(sealedWaitAdmission);
+    expect(drainedWaitReceipts).toBeGreaterThan(streamCompletionAuthority);
+    expect(postCompactionRecovery).toBeGreaterThan(drainedWaitReceipts);
     expect(source).toContain("eventing.preparedTools?.inputWaitYield?.yielded === true");
     expect(source).toContain(
       "options.requireTerminalModelResponse &&\n      !eventing.preparedTools?.inputWaitYield?.yielded &&",
     );
-    expect(source).not.toContain("eventing.preparedTools?.inputWaitYield?.requested === true");
+    // Receipt acceptance exempts a handoff but never asserts a yielded final.
+    expect(source).toContain(
+      "requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded)",
+    );
     expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
     expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
+    expect(sealedWaitAdmission).toBeGreaterThan(interruptionPath);
     expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
@@ -3205,6 +3214,15 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "none" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, hasRepositoryResources: false })).toBe(false);
+    // A committed post-loss recovery decision rematerializes without waiting
+    // for the first tool call, still only for managed on-demand turns.
+    const recovering = { ...base, hasRepositoryResources: false, automaticRecoveryPending: true };
+    expect(shouldPrefetchManagedSandbox(recovering)).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, machinePrimary: true })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, establishPolicy: "eager" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, groupBoxBackend: "selfhosted" })).toBe(
+      false,
+    );
   });
 
   test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
@@ -6656,6 +6674,21 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
+  });
+
+  test("passes stable session identity to native Claude without enabling unknown registry wires", () => {
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "claude-subscription-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "anthropic-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "anthropic-messages"))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 });
 

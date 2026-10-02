@@ -60,10 +60,13 @@ Skill was installed or explicitly checked out to the filesystem.
    re-inspect and recompute; never force a stale rewrite.
 5. Use real paragraphs, styles, tables, sections, page breaks, comments, and
    tracked changes—not spaces, Unicode bullets, or flattened screenshots.
-6. Export only when the user needs DOCX/PDF/image delivery or visual QA.
-   `opengeni__editable_artifact_export_status` returns a durable workspace
-   `fileId`; it does not write into the sandbox. Download that file only if
-   local bytes are needed.
+6. Share the result as the live artifact's `artifactReference` link. Export
+   only formats the `opengeni__editable_artifact_export` tool description lists
+   (current deployments serve spreadsheet XLSX only, so no document DOCX/PDF/
+   image export); never attempt or promise an unlisted format. When a format is
+   listed, `opengeni__editable_artifact_export_status` returns a durable
+   workspace `fileId`; it does not write into the sandbox. Download that file
+   only if local bytes are needed.
 
 ## Fidelity and safety
 

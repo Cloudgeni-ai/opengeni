@@ -44,6 +44,19 @@ export const SESSION_TURN_SURFACES = [
 export const SessionTurnSurface = z.enum(SESSION_TURN_SURFACES);
 export type SessionTurnSurface = z.infer<typeof SessionTurnSurface>;
 
+/**
+ * Request header the first-party web console sends while its tab is visible
+ * and the person interacted with it in the last few minutes. The API records
+ * server-side presence (`opengeni_active_users`, `user.active`) only for
+ * canonical managed browser sessions carrying this exact value, so an idle open
+ * tab, background polling and stream re-authorization never count as activity.
+ * Analytics only: it never grants or narrows access.
+ */
+export const OPENGENI_USER_ACTIVITY_HEADER = "x-opengeni-user-activity";
+export const OPENGENI_USER_ACTIVITY_ACTIVE = "active";
+/** Interaction recency, in milliseconds, behind the activity header. */
+export const OPENGENI_USER_ACTIVITY_WINDOW_MS = 5 * 60_000;
+
 /** Parse a stored value; anything outside the fixed list is treated as absent. */
 export function sessionTurnSurfaceOrNull(value: unknown): SessionTurnSurface | null {
   const parsed = SessionTurnSurface.safeParse(value);

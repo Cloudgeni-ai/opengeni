@@ -13,6 +13,7 @@ import {
   createSession,
   createWorkspaceInstructionPolicyDraft,
   deactivatePreferenceRegistry,
+  getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   getCurrentPreferenceRegistryGovernanceMetadata,
@@ -22,6 +23,7 @@ import {
   initializeSessionStartAtomically,
   migrate,
   provisionRoles,
+  resolveCompanyBrainContextSelection,
   withWorkspaceRls,
   type DbClient,
   type Database,
@@ -236,6 +238,56 @@ async function activatePolicy(
   return revision;
 }
 
+async function recoverAttempt(previous: AttemptFixture): Promise<AttemptFixture> {
+  const attemptId = crypto.randomUUID();
+  const executionGeneration = previous.executionGeneration + 1;
+  await shared!.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.session_inference_claim', '1', true)`;
+    await tx`update session_turn_attempts set state='closed',
+      outcome='interrupted_recoverable', closed_at=now()
+      where id=${previous.attemptId}`;
+    await tx`update session_turns set execution_generation=${executionGeneration},
+      active_attempt_id=${attemptId}, status='running' where id=${previous.turnId}`;
+    await tx`insert into session_turn_attempts (
+      id,account_id,workspace_id,session_id,turn_id,execution_generation,state,
+      temporal_workflow_id,temporal_workflow_run_id,temporal_activity_id,
+      verified_control_revision,mcp_approval_policies
+    ) values (${attemptId},${previous.accountId},${previous.workspaceId},
+      ${previous.sessionId},${previous.turnId},${executionGeneration},'running',
+      ${`policy-snapshot-${previous.turnId}`},${`run-${attemptId}`},
+      ${`activity-${attemptId}`},0,'{}'::jsonb)`;
+  });
+  return { ...previous, attemptId, executionGeneration };
+}
+
+async function recoveryFixture() {
+  const workspace = await freshWorkspace("preference-recovery");
+  const subjectId = "preference-recovery-human";
+  const skill = await saveSnapshotSkill(client!.db, {
+    ...workspace,
+    actorSubjectId: subjectId,
+    principalKind: "human_session",
+    scope: "user",
+    stableKey: "accepted-review-style",
+    title: "Accepted review style",
+    description: "Keep accepted recovery evidence stable.",
+    content: "Use the accepted evidence.",
+    precedenceRank: 0,
+    conflictStrategy: "override",
+    conflictsWith: [],
+    provenanceSource: "human",
+    provenanceSourceId: null,
+    expiresAt: null,
+  });
+  const session = await createPolicySession(workspace, { label: "preference recovery" });
+  const attempt = await seedAttempt(workspace, session.id, subjectId);
+  await getOrCreateCompanyProfileSnapshot(client!.db, attempt);
+  await getOrCreateWorkspaceInstructionPolicySnapshot(client!.db, attempt);
+  const snapshot = await getOrCreatePreferenceRegistrySnapshot(client!.db, attempt);
+  const selection = await resolveCompanyBrainContextSelection(client!.db, attempt);
+  return { workspace, subjectId, skill, attempt, snapshot, selection };
+}
+
 async function expectSqlState(operation: () => Promise<unknown>, expectedCode: string) {
   let caught: unknown;
   try {
@@ -247,6 +299,122 @@ async function expectSqlState(operation: () => Promise<unknown>, expectedCode: s
 }
 
 describe("migration 0157 session policy role and exact-attempt snapshots", () => {
+  test("recovery replays accepted descriptors after permanent Skill removal without restoring content", async () => {
+    if (!shared || !client) return;
+    const f = await recoveryFixture();
+    await applySkillLifecycle(
+      client.db,
+      {
+        ...f.workspace,
+        actor: { kind: "human", principalKind: "human_session", subjectId: f.subjectId },
+      },
+      {
+        operation: "remove",
+        operationId: crypto.randomUUID(),
+        skillId: f.skill.id,
+        expectedRevisionId: f.snapshot.descriptors[0]!.revisionId,
+        expectedScopeVersion: 1,
+        reason: "Remove the source after the turn was accepted",
+      },
+    );
+    const recovered = await recoverAttempt(f.attempt);
+    await getOrCreateCompanyProfileSnapshot(client.db, recovered);
+    await getOrCreateWorkspaceInstructionPolicySnapshot(client.db, recovered);
+    const snapshot = await getOrCreatePreferenceRegistrySnapshot(client.db, recovered);
+    expect(snapshot.attemptId).toBe(recovered.attemptId);
+    expect(snapshot.executionGeneration).toBe(2);
+    expect(snapshot.descriptorHash).toBe(f.snapshot.descriptorHash);
+    expect(snapshot.descriptors).toEqual(f.snapshot.descriptors);
+    expect(snapshot.truncated).toBe(f.snapshot.truncated);
+    const selection = await resolveCompanyBrainContextSelection(client.db, recovered);
+    expect(selection.receipt.id).toBe(f.selection.receipt.id);
+    await expect(
+      getPreferenceRegistryFullContent(
+        client.db,
+        recovered,
+        snapshot.descriptors[0]!.retrievalHandle,
+      ),
+    ).rejects.toThrow("Preference revision was not found");
+    await expect(getOrCreatePreferenceRegistrySnapshot(client.db, f.attempt)).rejects.toThrow();
+    const freshSession = await createPolicySession(f.workspace, { label: "fresh acceptance" });
+    const freshAttempt = await seedAttempt(f.workspace, freshSession.id, f.subjectId);
+    expect(
+      (await getOrCreatePreferenceRegistrySnapshot(client.db, freshAttempt)).descriptors,
+    ).toEqual([]);
+  });
+
+  test("recovery preserves the accepted descriptor encoding across renderer changes", async () => {
+    if (!shared || !client) return;
+    const f = await recoveryFixture();
+    const [row] = await shared.admin<{ definition: string }[]>`
+      select pg_get_functiondef('preference_registry_canonical_snapshot_at(uuid,uuid,text,timestamptz)'::regprocedure) as definition`;
+    const original = row!.definition;
+    const changed = original.replace(
+      "'title', revision.title,",
+      "'title', revision.title || ' (new renderer)',",
+    );
+    expect(changed).not.toBe(original);
+    try {
+      await shared.admin.unsafe(changed);
+      const recovered = await recoverAttempt(f.attempt);
+      await getOrCreateCompanyProfileSnapshot(client.db, recovered);
+      await getOrCreateWorkspaceInstructionPolicySnapshot(client.db, recovered);
+      const snapshot = await getOrCreatePreferenceRegistrySnapshot(client.db, recovered);
+      expect(snapshot.descriptorHash).toBe(f.snapshot.descriptorHash);
+      expect(snapshot.descriptors).toEqual(f.snapshot.descriptors);
+      expect((await resolveCompanyBrainContextSelection(client.db, recovered)).receipt.id).toBe(
+        f.selection.receipt.id,
+      );
+    } finally {
+      await shared.admin.unsafe(original);
+    }
+  });
+
+  test("recovery rejects forged descriptors and retains private helper and exact-attempt fences", async () => {
+    if (!shared || !client || !app) return;
+    const f = await recoveryFixture();
+    const recovered = await recoverAttempt(f.attempt);
+    const descriptor = { ...f.snapshot.descriptors[0]!, title: "Forged accepted title" };
+    await expectSqlState(async () => {
+      await shared!.admin`insert into preference_registry_snapshots (
+        account_id,workspace_id,session_id,turn_id,attempt_id,execution_generation,
+        initiating_human_subject_id,descriptors,descriptor_hash,truncated
+      ) select ${recovered.accountId},${recovered.workspaceId},${recovered.sessionId},
+        ${recovered.turnId},${recovered.attemptId},${recovered.executionGeneration},
+        ${f.subjectId},value,encode(sha256(convert_to(value::text,'UTF8')),'hex'),false
+        from (select ${shared!.admin.json([descriptor])}::jsonb as value) candidate`;
+    }, "23514");
+    await expectSqlState(async () => {
+      await app!`select * from preference_registry_accepted_snapshot_for_recovery(
+        ${recovered.accountId}::uuid,${recovered.workspaceId}::uuid,
+        ${recovered.sessionId}::uuid,${recovered.turnId}::uuid,2,${f.subjectId},now())`;
+    }, "42501");
+    await expect(
+      getOrCreatePreferenceRegistrySnapshot(client.db, {
+        ...recovered,
+        executionGeneration: 1,
+      }),
+    ).rejects.toThrow();
+    const foreign = await freshWorkspace("foreign-recovery");
+    await expect(
+      getOrCreatePreferenceRegistrySnapshot(client.db, {
+        ...recovered,
+        accountId: foreign.accountId,
+        workspaceId: foreign.workspaceId,
+      }),
+    ).rejects.toThrow();
+    const snapshots = await Promise.all([
+      getOrCreatePreferenceRegistrySnapshot(client.db, recovered),
+      getOrCreatePreferenceRegistrySnapshot(client.db, recovered),
+    ]);
+    expect(snapshots[0]!.id).toBe(snapshots[1]!.id);
+    expect(snapshots[0]!.descriptorHash).toBe(f.snapshot.descriptorHash);
+    const next = await recoverAttempt(recovered);
+    expect((await getOrCreatePreferenceRegistrySnapshot(client.db, next)).descriptorHash).toBe(
+      f.snapshot.descriptorHash,
+    );
+  });
+
   test("declares the bounded rolling boundary without membership, document, or knowledge authority", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");

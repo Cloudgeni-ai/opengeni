@@ -203,6 +203,30 @@ describe("SDK-backed editable presentation", () => {
     await rendered.unmount();
   });
 
+  test("a replaced session never waits on the previous session's pending load", async () => {
+    const stalled = new FakePresentationSession();
+    // The first session's Worker never answers its projection query.
+    stalled.queryPresentation = () => new Promise<never>(() => undefined);
+    const healthy = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface
+        session={stalled as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    await flush(10);
+    expect(rendered.container.querySelector('[role="application"]')).toBeNull();
+    await rendered.rerender(
+      <EditablePresentationArtifactSurface
+        session={healthy as unknown as EditableArtifactSession}
+        title="Deck"
+      />,
+    );
+    await flush(30);
+    expect(rendered.container.querySelector('[role="application"]')).not.toBeNull();
+    await rendered.unmount();
+  });
+
   test("composes catalog/editor-slide ABI while preserving hierarchy and inheritance", async () => {
     const composed = await composePresentationEditorProjection(
       new FakePresentationSession() as unknown as EditableArtifactSession,

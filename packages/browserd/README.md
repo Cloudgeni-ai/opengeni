@@ -56,11 +56,32 @@ They retain separate tabs and selection instead of failing the entire restore.
 Ordinary URLs and durable profile data restore normally; the immutable source
 checkpoint is unchanged. This does not turn other navigation failures into success.
 
+Profile capture closes Chromium to archive its on-disk state, then restarts it
+when requested. It preserves durable site data, not the live page's DOM or
+JavaScript heap. Unsubmitted form values may be lost during both save-and-restart
+and suspend/resume. The viewer explains this beside profile Save. Automatic
+idle cleanup must not treat a successful profile capture as proof that unfinished
+page work is recoverable. `test/state-restore.e2e.test.ts` exercises this boundary
+with real browser input as well as cookies, local storage and IndexedDB.
+On macOS, capture omits the root `RunningChromeVersion` symlink generated for
+Chrome app shims. It never follows that link; same-named nested files remain
+profile data, and other symlinks still fail capture.
+
 A batch is not a transaction. If an action completes and a later action has a
 definite failure, its receipt remains `outcome_unknown` and reports the completed
 action count and later error code; this is not evidence of controller loss.
 Re-observe the target before continuing, and do not replay the batch. A definite
 failure on the first action still returns `failed` with its original error code.
+
+Chromium `upload` accepts either a file input or the visible control that opens
+its native file picker. Files remain workspace-staged and selection uses the
+browser's native input/change events. Picker interception lasts only for that
+serialized action, stays within the control's frame, and refuses selection if
+that document changes. A single-file input rejects multiple files; directory
+pickers are unsupported. If a click produces no picker or opens a JavaScript
+dialog, its receipt reports `outcome_unknown`, not controller loss: inspect the
+page and do not replay the click. Lightpanda retains direct file-input uploads;
+attached-browser upload availability still follows the placement capability.
 
 For custom listboxes, `press` with a locator explicitly focuses that element
 before sending the key. After opening a menu, omit the locator to navigate its

@@ -1,3 +1,11 @@
+import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+export { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import {
+  beginIntegrationConnect,
+  integrationConnectErrorOutcome,
+  modelConnectionClass,
+} from "@/lib/integration-connect-analytics";
+import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
   OrganizationModelProviderKind as ProviderKind,
@@ -8,81 +16,38 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import type {
-  ProviderConnectionView,
-  ProviderPresentation,
-} from "@/components/ai-gateway-connection";
+import type { ProviderConnectionView } from "@/components/ai-gateway-connection";
+import { useClaudeUsage } from "@/components/models/claude-usage";
+import { userErrorText } from "@/lib/api-error";
 
 // Organization API-key providers (Vercel AI Gateway, OpenRouter) shared with
 // the organization's workspaces. Returns the same view as the workspace hook,
 // so Organization settings > Models reuses the row and the provider's page.
 
-const META: Record<ProviderKind, ProviderPresentation & { shortName: string }> = {
-  vercel_gateway: {
-    title: "Vercel AI Gateway",
-    shortName: "Gateway",
-    provider: "vercel",
-    billedTo: "The organization's Vercel account",
-    summary:
-      "Use models through the organization's Vercel account in shared workspaces, billed to Vercel.",
-    keyHelp: "Create one in Vercel under AI Gateway, then API keys.",
-    keyAriaLabel: "Organization Vercel AI Gateway API key",
-    customModelsHeading: "Custom models",
-    customModelsDescription:
-      "Exact Vercel model slugs shared workspaces can pick. Workspace Allowed models can limit them further.",
-    customModelInputAriaLabel: "Vercel AI Gateway organization model slug",
-    customModelPlaceholder: "anthropic/claude-sonnet-4.6",
-    emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",
-    readyModelDescription: "Ready in shared workspaces",
-    waitingModelDescription: "Waiting for a Gateway key",
-    unavailableModelDescription: "Connection status unavailable",
-    modelToastName: "Vercel AI Gateway model",
-    connectionManagerDescription: "",
-  },
-  openrouter: {
-    title: "OpenRouter",
-    shortName: "OpenRouter",
-    provider: "openrouter",
-    billedTo: "The organization's OpenRouter account",
-    summary:
-      "Use models through the organization's OpenRouter account in shared workspaces, billed to OpenRouter.",
-    keyHelp: "Create one on openrouter.ai under Keys.",
-    keyAriaLabel: "Organization OpenRouter API key",
-    customModelsHeading: "Custom models",
-    customModelsDescription:
-      "Exact OpenRouter model slugs shared workspaces can pick. Separate from deployment-provided OpenRouter models.",
-    customModelInputAriaLabel: "OpenRouter organization model slug",
-    customModelPlaceholder: "anthropic/claude-sonnet-4.6",
-    emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",
-    readyModelDescription: "Ready in shared workspaces",
-    waitingModelDescription: "Waiting for an OpenRouter key",
-    unavailableModelDescription: "Connection status unavailable",
-    modelToastName: "OpenRouter model",
-    connectionManagerDescription: "",
-  },
-};
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** A failed read, kept whole so the page can show advice and its API facts. */
+function readError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export function useOrganizationProviderConnection({
   organizationId,
   providerKind,
   client,
+  enabled = true,
 }: {
   organizationId: string;
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
+  enabled?: boolean;
 }): ProviderConnectionView {
-  const meta = META[providerKind];
+  const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const [connection, setConnection] = useState<Connection | null>(null);
   const [models, setModels] = useState<CustomModel[]>([]);
   const [slug, setSlug] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<Error | null>(null);
+  const [modelsError, setModelsError] = useState<Error | null>(null);
   const [connectionBusy, setConnectionBusy] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -111,6 +76,7 @@ export function useOrganizationProviderConnection({
   }, []);
 
   const connected = connection?.status === "active";
+
   const slugValid =
     slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(slug);
@@ -125,6 +91,7 @@ export function useOrganizationProviderConnection({
         : `Add models now; they become selectable after ${meta.shortName} is connected.`;
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
+    if (!enabled) return undefined;
     const generation = ++connectionGenerationRef.current;
     try {
       const result = await client.getOrganizationModelProviderConnection(
@@ -138,13 +105,25 @@ export function useOrganizationProviderConnection({
       return result;
     } catch (error) {
       if (!activeRef.current || generation !== connectionGenerationRef.current) return undefined;
-      setConnectionError(errorText(error));
+      setConnectionError(readError(error));
       setLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind]);
+  }, [client, organizationId, providerKind, enabled]);
+
+  const claudeUsage = useClaudeUsage({
+    client,
+    scope: "organization",
+    scopeId: organizationId,
+    enabled: enabled && providerKind === "claude_subscription",
+    connected,
+    credentialVersion: connection?.version,
+    canManage: true,
+    onCredentialChanged: refreshConnection,
+  });
 
   const refreshModels = useCallback(async (): Promise<CustomModel[] | undefined> => {
+    if (!enabled) return undefined;
     const generation = ++modelsGenerationRef.current;
     try {
       const result = await client.listOrganizationProviderCustomModels(
@@ -158,11 +137,11 @@ export function useOrganizationProviderConnection({
       return result.models;
     } catch (error) {
       if (!activeRef.current || generation !== modelsGenerationRef.current) return undefined;
-      setModelsError(errorText(error));
+      setModelsError(readError(error));
       setModelsLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind]);
+  }, [client, organizationId, providerKind, enabled]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshModels()]);
@@ -173,15 +152,20 @@ export function useOrganizationProviderConnection({
   async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
     if (!key || connectionBusy) return false;
+    const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
     const operationId =
-      pending?.key === key && pending.version === version
+      pending?.key === credentialIdentity && pending.version === version
         ? pending.operationId
         : crypto.randomUUID();
-    pendingSaveRef.current = { key, version, operationId };
+    pendingSaveRef.current = { key: credentialIdentity, version, operationId };
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
+    const journey = beginIntegrationConnect(
+      modelConnectionClass(providerKind) ?? "other",
+      "api_key",
+    );
     const mutate = () =>
       client.upsertOrganizationModelProviderConnection(organizationId, providerKind, {
         operationId,
@@ -189,6 +173,7 @@ export function useOrganizationProviderConnection({
         apiKey: key,
       });
     const commit = (saved: Connection) => {
+      journey.finish("connected");
       pendingSaveRef.current = null;
       setConnection(saved);
       setConnectionError(null);
@@ -210,14 +195,12 @@ export function useOrganizationProviderConnection({
           finalError = retryError;
         }
       }
-      const reconciled = await refreshConnection();
-      if (reconciled?.status === "active" && reconciled.version > version) {
-        pendingSaveRef.current = null;
-        toast.success(`${meta.title} connected for shared workspaces`);
-        return true;
-      }
+      // A newer version can belong to another administrator. Only the mutation's
+      // idempotent receipt proves that this token and identity were committed.
+      journey.finish(integrationConnectErrorOutcome(finalError));
+      await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
-        description: errorText(finalError),
+        description: userErrorText(finalError),
       });
       return false;
     } finally {
@@ -254,7 +237,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't disconnect ${meta.title}`, {
-        description: errorText(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -262,9 +245,16 @@ export function useOrganizationProviderConnection({
     }
   }
 
-  async function addModel(): Promise<void> {
-    if (!slugValid || slugExists || modelBusy) return;
-    const submittedSlug = slug;
+  async function addModel(upstreamModelId?: string): Promise<void> {
+    const submittedSlug = upstreamModelId ?? slug;
+    if (
+      modelBusy ||
+      !submittedSlug ||
+      submittedSlug.length > WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH ||
+      !/^[!-{}-~]+$/.test(submittedSlug) ||
+      models.some((model) => model.upstreamModelId === submittedSlug)
+    )
+      return;
     const pending = pendingCreateRef.current;
     const operationId = pending?.slug === submittedSlug ? pending.operationId : crypto.randomUUID();
     pendingCreateRef.current = { slug: submittedSlug, operationId };
@@ -274,6 +264,10 @@ export function useOrganizationProviderConnection({
       client.createOrganizationProviderCustomModel(organizationId, providerKind, {
         operationId,
         upstreamModelId: submittedSlug,
+        ...((providerKind === "anthropic" || providerKind === "claude_subscription") &&
+        claudeModelLabel(submittedSlug) !== submittedSlug
+          ? { label: claudeModelLabel(submittedSlug) }
+          : {}),
       });
     const commit = (saved: CustomModel) => {
       pendingCreateRef.current = null;
@@ -307,7 +301,7 @@ export function useOrganizationProviderConnection({
       if (committed) commit(committed);
       else
         toast.error(`Couldn't add ${meta.title} model`, {
-          description: errorText(error),
+          description: userErrorText(error),
         });
     } finally {
       if (activeRef.current) {
@@ -349,7 +343,7 @@ export function useOrganizationProviderConnection({
         return true;
       }
       toast.error(`Couldn't remove ${meta.title} model`, {
-        description: errorText(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -362,15 +356,16 @@ export function useOrganizationProviderConnection({
     scopeLabel: "Organization",
     organization: true,
     accessTarget: { client, organizationId, kind: providerKind, connectionId: "current" },
-    canManageConnection: true,
-    canManageCustomModels: true,
+    canManageConnection: enabled,
+    canManageCustomModels: enabled,
     connected,
-    settled: loaded && modelsLoaded,
-    hidden: false,
+    settled: !enabled || (loaded && modelsLoaded),
+    hidden: !enabled,
     error: connectionError,
     customModelsError: modelsError,
     customModels: models,
     customModelsLoaded: modelsLoaded,
+    claudeUsage: providerKind === "claude_subscription" ? claudeUsage : undefined,
     busy: connectionBusy,
     modelSlug: slug,
     modelBusy,

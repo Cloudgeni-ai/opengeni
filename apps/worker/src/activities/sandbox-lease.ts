@@ -41,6 +41,8 @@ import {
   deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   listCreditBalancesByAccount,
+  countActiveUsers,
+  readCreditGrantTotals,
   readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
@@ -150,7 +152,9 @@ import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-re
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
+  recordActiveUserGauges,
   recordCreditBalanceGauges,
+  recordCreditGrantGauges,
   recordCreditMicros,
   recordExpiredDrainingSandboxLeaseGauges,
   recordOpenSandboxKubernetesInventoryGauges,
@@ -321,6 +325,8 @@ export type RetainedProcessProbeResult =
         | "provider_binding_missing"
         | "provider_binding_mismatch"
         | "process_observation_unavailable";
+      /** A running command whose last read still returned a large backlog. */
+      outputBacklog?: boolean;
     };
 
 export type RetainedProcessProbeFn = (
@@ -335,7 +341,11 @@ export type RetainedProcessProbeFn = (
     streamFidelity?: "separate" | "merged",
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
+  drainBudget?: RetainedProcessDrainBudget,
 ) => Promise<RetainedProcessProbeResult>;
+
+/** Shared wall-clock bound on output draining within one reconciliation sweep. */
+export type RetainedProcessDrainBudget = { until: number };
 
 export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
 
@@ -347,6 +357,16 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+/** Bounds on reading a command's output backlog: per claim, and across one
+ * reconciliation sweep so the reaper activity stays well inside its timeout.
+ * Each read returns up to one provider page per stream. */
+export const RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS = 8;
+export const RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS = 10_000;
+export const RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS = 60_000;
+/** A live process whose read returned at least this much output left a backlog
+ * behind it. A server or watcher that only trickles output stays on ordinary
+ * backoff; a process the provider reports exited is always read to EOF. */
+export const RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES = 256 * 1024;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
 export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
@@ -1444,6 +1464,9 @@ async function reconcileTerminalRetainedProcesses(
     return;
   }
 
+  const drainBudget: RetainedProcessDrainBudget = {
+    until: Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_SWEEP_BUDGET_MS,
+  };
   for (const claim of claims) {
     let process = claim.process;
     const expected = retainedProcessSettlementIdentity(process);
@@ -1672,6 +1695,7 @@ async function reconcileTerminalRetainedProcesses(
                     .catch(() => undefined);
               },
               commandPersistence,
+              drainBudget,
             ).then(
               (value) => ({ ok: true as const, value }),
               (error: unknown) => ({ ok: false as const, error }),
@@ -1740,6 +1764,7 @@ async function reconcileTerminalRetainedProcesses(
           expected,
           claim.claimId,
           observation.reason,
+          observation.outputBacklog === true,
         );
         continue;
       }
@@ -1820,8 +1845,9 @@ async function deferRetainedProcessClaim(
   expected: ReturnType<typeof retainedProcessSettlementIdentity>,
   claimId: string,
   outcome: RetainedProcessDeferralOutcome,
+  outputBacklog = false,
 ): Promise<void> {
-  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome);
+  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome, outputBacklog);
   try {
     // A healthy long-lived command can already be on a five-minute backoff
     // when rotation becomes due. Wake it at the lead boundary, then at the
@@ -1858,6 +1884,7 @@ export function retainedProcessReconciliationDeferral(
   settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
   process: Pick<SandboxRetainedProcess, "reconcileAttempts">,
   outcome: RetainedProcessDeferralOutcome,
+  outputBacklog = false,
 ): {
   durableOutcome: string;
   metricOutcome: RetainedProcessReconciliationOutcome;
@@ -1882,11 +1909,14 @@ export function retainedProcessReconciliationDeferral(
       quarantined: true,
     };
   }
-  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
-  const retryAfterMs = Math.min(
-    5 * 60_000,
-    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
-  );
+  const baseRetryMs = Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000);
+  // A backlog still being drained is progress, not an unhealthy provider:
+  // come back at the reaper cadence, without backoff.
+  const exponent =
+    outcome === "provider_running" && outputBacklog
+      ? 0
+      : Math.min(4, Math.max(0, process.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(5 * 60_000, baseRetryMs * 2 ** exponent);
   return {
     durableOutcome: outcome,
     metricOutcome: outcome,
@@ -1912,6 +1942,77 @@ type RetainedProcessProbeSession = ProviderCommandSession & {
 };
 
 const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
+
+/** A command's exit is reported only after both output streams reach EOF, so a
+ * finished command with a large backlog looks running until it is read. While a
+ * backlog remains, keep reading within the per-claim and per-sweep budgets, so
+ * it settles in this claim instead of one page per backoff step. Every page,
+ * including `first`, is captured here. */
+export async function drainRetainedCommandBacklog(
+  session: RetainedProcessProbeSession,
+  providerSessionId: number,
+  first: unknown,
+  capturePage: (value: unknown) => Promise<void>,
+  budget?: RetainedProcessDrainBudget,
+): Promise<RetainedProcessProbeResult> {
+  // Measure before capture: capturing a byte-offset page consumes its receipt.
+  let backlog = retainedBacklogRemains(session, first);
+  await capturePage(first);
+  let observation = classifyRetainedProcessPollResult(first, providerSessionId, session);
+  if (typeof session.writeStdin !== "function") return observation;
+  const until = Math.min(
+    Date.now() + RETAINED_PROCESS_OUTPUT_DRAIN_BUDGET_MS,
+    budget?.until ?? Number.POSITIVE_INFINITY,
+  );
+  for (
+    let reads = 0;
+    backlog &&
+    observation.status === "deferred" &&
+    observation.reason === "provider_running" &&
+    reads < RETAINED_PROCESS_OUTPUT_DRAIN_MAX_READS &&
+    Date.now() < until;
+    reads++
+  ) {
+    let next: unknown;
+    try {
+      next = await withRetainedProcessProbeTimeout(
+        session.writeStdin({
+          sessionId: providerSessionId,
+          chars: "",
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 2_000,
+        }),
+      );
+    } catch {
+      // The observation already made stays authoritative; the next sweep
+      // classifies any provider failure through the ordinary path.
+      break;
+    }
+    backlog = retainedBacklogRemains(session, next);
+    await capturePage(next);
+    observation = classifyRetainedProcessPollResult(next, providerSessionId, session);
+  }
+  return backlog && observation.status === "deferred" && observation.reason === "provider_running"
+    ? { ...observation, outputBacklog: true }
+    : observation;
+}
+
+/** Whether a byte-offset page leaves a backlog worth reading now: the provider
+ * reports the process exited but its output is not yet read to EOF, or a live
+ * process produced a large page. Must run before the page is captured, which
+ * consumes its receipt. Supervised commands are left to their proof path. */
+function retainedBacklogRemains(session: RetainedProcessProbeSession, result: unknown): boolean {
+  const page = session.getProviderCommandOutput?.(result);
+  if (!page?.expected || page.command.kind !== "modal-router-v1") return false;
+  if (page.command.supervision || page.exitCode !== null) return false;
+  if (page.providerExited) return true;
+  const { command, expected } = page;
+  return (["stdout", "stderr"] as const).some(
+    (stream) =>
+      command.streams[stream].byteOffset - expected.streams[stream].byteOffset >=
+      RETAINED_PROCESS_OUTPUT_BACKLOG_BYTES,
+  );
+}
 
 async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1961,6 +2062,7 @@ export async function probeRetainedProcessAtProvider(
     streamFidelity?: "separate" | "merged",
   ) => Promise<void>,
   providerPersistence?: ProviderCommandPersistence,
+  drainBudget?: RetainedProcessDrainBudget,
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -2183,8 +2285,15 @@ export async function probeRetainedProcessAtProvider(
     }
     return { status: "deferred", reason: "provider_error" };
   }
-  await capturePage(result);
-  const observation = classifyRetainedProcessPollResult(result, process.providerSessionId, session);
+  // Cancellation keeps draining with empty reads too: a stopped command's exit
+  // is also reported only after its unread output reaches EOF.
+  const observation = await drainRetainedCommandBacklog(
+    session,
+    process.providerSessionId,
+    result,
+    capturePage,
+    drainBudget,
+  );
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
@@ -2416,6 +2525,24 @@ async function refreshQueueLeaseAndCreditGauges(
         recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
       } catch (error) {
         observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        recordActiveUserGauges(observability, await countActiveUsers(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: active-user gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        recordCreditGrantGauges(observability, await readCreditGrantTotals(db));
+      } catch (error) {
+        observability.warn("sandbox reaper: credit-grant gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }

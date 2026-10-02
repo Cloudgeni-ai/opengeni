@@ -87,7 +87,10 @@ describe("turn sandbox-tool cancellation boundary", () => {
           });
         },
       });
-      expect(await tool.invoke({} as never, JSON.stringify({ cmd: "true" }))).toContain(details);
+      const output = await tool.invoke({} as never, JSON.stringify({ cmd: "true" }));
+      expect(output).toContain("outcome unknown");
+      expect(output).toContain("Do not blindly retry");
+      expect(output).not.toContain("Please try again");
       expect(calls).toBe(1);
     } finally {
       wire.close();

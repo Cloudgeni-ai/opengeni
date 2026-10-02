@@ -17,6 +17,7 @@ import {
   type EnvRow,
 } from "@/components/ui/secret-field";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import { userErrorText } from "@/lib/api-error";
 import type { WorkspaceVariableSet } from "@/types";
 
 import { joinAnd, scopeHint, scopeLocked, type VariableSetScope } from "./variable-set-model";
@@ -271,9 +272,7 @@ export function AddVariableRow({
       setTried(false);
       requestAnimationFrame(() => nameRef.current?.focus());
     } catch (error) {
-      setServerError(
-        error instanceof Error && error.message ? error.message : "Couldn't add it. Try again.",
-      );
+      setServerError(userErrorText(error, "Couldn't add it. Try again."));
     } finally {
       setPending(false);
     }

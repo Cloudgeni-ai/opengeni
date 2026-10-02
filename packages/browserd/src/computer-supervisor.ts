@@ -106,7 +106,7 @@ export class ComputerSupervisor {
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly ending = new Map<string, Promise<void>>();
-  private displaceGate: Promise<void> = Promise.resolve();
+  private displaceGate: Promise<void> | null = null;
   private closed = false;
 
   private constructor(options: ComputerSupervisorOptions) {
@@ -168,7 +168,7 @@ export class ComputerSupervisor {
       return await this.describe(runtime);
     }
     if (this.displaceExistingSessions) {
-      const displaced = this.displaceGate.then(async () => {
+      const displaced = (this.displaceGate ?? Promise.resolve()).then(async () => {
         const current = this.sessions.get(options.computerSessionId);
         if (current) {
           this.assertSameBinding(current, options);
@@ -183,10 +183,25 @@ export class ComputerSupervisor {
         await this.displaceOtherSessions(options.computerSessionId);
         return await this.installSession(options);
       });
-      this.displaceGate = displaced.then(() => undefined).catch(() => undefined);
-      return await displaced;
+      const gate = displaced.then(() => undefined).catch(() => undefined);
+      this.displaceGate = gate;
+      try {
+        return await displaced;
+      } finally {
+        if (this.displaceGate === gate) this.displaceGate = null;
+      }
     }
     return await this.installSession(options);
+  }
+
+  /** A queued shared-seat create owns work before its runtime exists. */
+  isIdle(): boolean {
+    return (
+      this.displaceGate === null &&
+      this.sessions.size === 0 &&
+      this.creating.size === 0 &&
+      this.ending.size === 0
+    );
   }
 
   listSessions(): Array<
@@ -308,6 +323,7 @@ export class ComputerSupervisor {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    await this.displaceGate;
     await Promise.allSettled([...this.creating.values()]);
     const results = await Promise.allSettled(
       [...this.sessions.values()].map(async (runtime) => await this.endSession(binding(runtime))),

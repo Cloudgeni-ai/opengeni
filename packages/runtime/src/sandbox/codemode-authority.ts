@@ -13,6 +13,7 @@ export type SandboxCodemodeAuthority = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
+  credentialRestriction?: "developer_setup";
 };
 
 export type MintedSandboxCodemodeToken = {
@@ -45,6 +46,9 @@ export async function mintSandboxCodemodeToken(
     turnId: authority.turnId,
     attemptId: authority.attemptId,
     executionGeneration: authority.executionGeneration,
+    ...(authority.credentialRestriction
+      ? { credentialRestriction: authority.credentialRestriction }
+      : {}),
     principalKind: "agent_attempt",
     exp: expiresAtSeconds,
   });

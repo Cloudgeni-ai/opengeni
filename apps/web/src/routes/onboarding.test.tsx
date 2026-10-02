@@ -5,6 +5,27 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { OrganizationInvitation } from "@/types";
 
+/**
+ * Onboarding connects Codex for the organization: its start and poll go
+ * through the organization routes, answered here by the same fixture mocks.
+ */
+function withOrganizationCodex<T extends object>(client: T) {
+  const codex = client as unknown as {
+    codexConnectStart: () => Promise<unknown>;
+    codexConnectPoll: (workspaceId: string, state: string) => Promise<unknown>;
+  };
+  const requestJson = mock(async (_method: string, path: string, body?: { state?: string }) => {
+    if (path === "/v1/organizations/organization-a/codex/connect/start") {
+      return codex.codexConnectStart();
+    }
+    if (path === "/v1/organizations/organization-a/codex/connect/poll") {
+      return codex.codexConnectPoll("organization-a", body?.state ?? "");
+    }
+    throw new Error(`Unexpected request ${path}`);
+  });
+  return { ...client, requestJson };
+}
+
 const completeSetup = mock(
   async (_input: { token: string; name: string; password: string; operationId: string }) => ({
     status: "complete" as const,
@@ -423,7 +444,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Choose how to power your chats");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(container.textContent).toContain("Use Opengeni credits");
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () =>
@@ -519,8 +540,8 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("SuperGrok onboarding starts an actor-private connection", async () => {
-    const supergrokConnectStart = mock(async () => ({
+  test("SuperGrok onboarding connects for the whole organization", async () => {
+    const organizationSupergrokConnectStart = mock(async (_organizationId: string) => ({
       state: "state-a",
       userCode: "CODE-1234",
       verificationUri: "https://example.test/authorize",
@@ -530,8 +551,8 @@ describe("organization onboarding UI", () => {
       scope: "user" as const,
     }));
     const client = {
-      supergrokConnectStart,
-      supergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
+      organizationSupergrokConnectStart,
+      organizationSupergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
     };
     const priorOpen = window.open;
     window.open = mock(() => null) as typeof window.open;
@@ -556,7 +577,8 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       await flush();
-      expect(supergrokConnectStart).toHaveBeenCalledWith("personal-workspace", "user");
+      // Not the Personal workspace's "Only me" scope, which the API refuses there.
+      expect(organizationSupergrokConnectStart).toHaveBeenCalledWith("organization-a");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -572,7 +594,7 @@ describe("organization onboarding UI", () => {
       intervalSeconds: 60,
     }));
     const codexConnectPoll = mock(async () => ({ status: "pending" as const }));
-    const client = { codexConnectStart, codexConnectPoll };
+    const client = withOrganizationCodex({ codexConnectStart, codexConnectPoll });
     const onComplete = mock(() => undefined);
     const priorOpen = window.open;
     window.open = mock(() => null) as typeof window.open;
@@ -596,14 +618,23 @@ describe("organization onboarding UI", () => {
       );
       await flush();
       expect(codexConnectStart).toHaveBeenCalledTimes(1);
-      expect(container.textContent).toContain("Waiting for authorization");
-      expect(container.textContent).toContain("Settings → Security");
-      expect(container.textContent).toContain("workspace admin");
+      // For the organization its creator owns, not the Personal workspace.
+      expect(client.requestJson).toHaveBeenCalledWith(
+        "POST",
+        "/v1/organizations/organization-a/codex/connect/start",
+        {},
+      );
+      // One calm step: the code, its two actions and one waiting line. The
+      // ChatGPT setting that can block it shows only once it takes long.
+      expect(container.textContent).toContain("Enter this code on the ChatGPT page that opened.");
+      expect(container.textContent?.split("Waiting for you to sign in").length).toBe(2);
+      expect(container.textContent).toContain("Open sign-in page");
+      expect(container.textContent).not.toContain("Still waiting?");
       expect(
         container.querySelector<HTMLAnchorElement>(
           'a[href="https://chatgpt.com/#settings/Security"]',
         ),
-      ).not.toBeNull();
+      ).toBeNull();
       expect(
         Array.from(container.querySelectorAll("button")).find(
           (button) => button.textContent?.trim() === "Skip for now",
@@ -615,7 +646,7 @@ describe("organization onboarding UI", () => {
           .find((button) => button.textContent?.trim() === "Cancel")!
           .click(),
       );
-      expect(container.textContent).not.toContain("Waiting for authorization");
+      expect(container.textContent).not.toContain("Waiting for you to sign in");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(onComplete).not.toHaveBeenCalled();
       expect(codexConnectPoll).not.toHaveBeenCalled();
@@ -628,7 +659,7 @@ describe("organization onboarding UI", () => {
 
   test("a long device login shows troubleshooting and Skip leaves while it is pending", async () => {
     const client = {
-      supergrokConnectStart: mock(async () => ({
+      organizationSupergrokConnectStart: mock(async () => ({
         state: "state-a",
         userCode: "CODE-1234",
         verificationUri: "https://example.test/authorize",
@@ -637,7 +668,7 @@ describe("organization onboarding UI", () => {
         expiresInSeconds: 600,
         scope: "user" as const,
       })),
-      supergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
+      organizationSupergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
     };
     const onComplete = mock(() => undefined);
     const priorOpen = window.open;
@@ -708,7 +739,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.textContent).toContain("Want a more capable model? (optional)");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(container.textContent).toContain("Use Opengeni credits");
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find(
         (button) => button.textContent?.trim() === "Start chatting for free",
@@ -727,7 +758,7 @@ describe("organization onboarding UI", () => {
 
   test("connecting Codex selects the Codex model, not the free default, for the next chat", async () => {
     const saveNewSessionDraft = mock(async () => undefined);
-    const client = {
+    const client = withOrganizationCodex({
       codexConnectStart: mock(async () => ({
         state: "state-a",
         userCode: "CODE-1234",
@@ -770,7 +801,7 @@ describe("organization onboarding UI", () => {
         options: {},
       })),
       saveNewSessionDraft,
-    };
+    });
     const onComplete = mock(() => undefined);
     const priorOpen = window.open;
     const priorSetTimeout = globalThis.setTimeout;
@@ -904,9 +935,9 @@ describe("organization onboarding UI", () => {
         ),
       );
       expect(container.querySelector("h1")!.textContent).toBe(
-        "Start chatting with OpenGeni credits",
+        "Start chatting with Opengeni credits",
       );
-      expect(container.textContent).toContain("$7.25 of OpenGeni credits included.");
+      expect(container.textContent).toContain("$7.25 of Opengeni credits included.");
       expect(container.textContent).toContain(
         "New chats use Credits Model with extra high reasoning.",
       );
@@ -917,7 +948,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).not.toContain("free to use. No card");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(container.querySelector('button[aria-label="Connect OpenRouter"]')).not.toBeNull();
-      expect(container.textContent).toContain("Buy more OpenGeni credits");
+      expect(container.textContent).toContain("Buy more Opengeni credits");
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
       const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
@@ -952,7 +983,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.textContent).toContain("OpenGeni credits are included with your account.");
+      expect(container.textContent).toContain("Opengeni credits are included with your account.");
       expect(container.textContent).toContain("New chats use Credits Model.");
       // Without a free default there is nothing to name for after the credits.
       expect(container.textContent).not.toContain("When your credits run out");
@@ -997,7 +1028,7 @@ describe("organization onboarding UI", () => {
         modelDefaults: freeModelDefaults,
         defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
         balanceMicros: 10_000_000,
-        heading: "Start chatting with OpenGeni credits",
+        heading: "Start chatting with Opengeni credits",
         billingRead: true,
       },
       {
@@ -1084,8 +1115,8 @@ describe("organization onboarding UI", () => {
         } else {
           expect(getBilling).not.toHaveBeenCalled();
         }
-        if (scenario.heading === "Start chatting with OpenGeni credits") {
-          expect(container.textContent).toContain("$10.00 of OpenGeni credits included.");
+        if (scenario.heading === "Start chatting with Opengeni credits") {
+          expect(container.textContent).toContain("$10.00 of Opengeni credits included.");
           expect(container.textContent).toContain(
             "New chats use Credits Model with low reasoning.",
           );
@@ -1094,9 +1125,9 @@ describe("organization onboarding UI", () => {
           );
         } else if (scenario.heading === "Start chatting for free") {
           expect(container.textContent).toContain("Free Model is set up and free to use");
-          expect(container.textContent).not.toContain("of OpenGeni credits included");
+          expect(container.textContent).not.toContain("of Opengeni credits included");
         } else {
-          expect(container.textContent).not.toContain("of OpenGeni credits included");
+          expect(container.textContent).not.toContain("of Opengeni credits included");
           expect(container.textContent).not.toContain("free to use");
         }
       } finally {
@@ -1111,7 +1142,7 @@ describe("organization onboarding UI", () => {
     const saveNewSessionDraft = mock(
       () => new Promise<void>((resolve) => (releaseSave = () => resolve())),
     );
-    const client = {
+    const client = withOrganizationCodex({
       codexConnectStart: mock(async () => ({
         state: "state-a",
         userCode: "CODE-1234",
@@ -1145,7 +1176,7 @@ describe("organization onboarding UI", () => {
         options: {},
       })),
       saveNewSessionDraft,
-    };
+    });
     const onComplete = mock(() => undefined);
     const priorOpen = window.open;
     const priorSetTimeout = globalThis.setTimeout;
@@ -1712,7 +1743,7 @@ describe("organization onboarding UI", () => {
         expect.objectContaining({ token: "signed-in-token" }),
       );
       expect(container.textContent).toContain("Invitation accepted");
-      expect(container.textContent).toContain("Open OpenGeni");
+      expect(container.textContent).toContain("Open Opengeni");
     } finally {
       currentAuthSession = null;
       await act(async () => root.unmount());

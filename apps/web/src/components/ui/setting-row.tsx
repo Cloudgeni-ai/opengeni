@@ -134,7 +134,14 @@ export interface SettingRowProps extends Omit<ComponentProps<"div">, "title" | "
   hint?: ReactNode;
   /** What went wrong and what to do. Linked to the control with `aria-describedby`. */
   error?: ReactNode;
-  /** Conditional sub-rows (more SettingRows). Render them only when they apply. */
+  /**
+   * Dependent rows (more SettingRows) that apply only while this row's setting
+   * is on: a sub-selection indented under this row, with no hairline between
+   * the parent and its children or between the children, and no guide line.
+   * They keep the ordinary row type (title, description, control on the
+   * right) with tighter spacing, and the next hairline comes after the whole
+   * group. Render them only while the parent is on.
+   */
   children?: ReactNode;
 }
 
@@ -306,13 +313,14 @@ export function SettingRow({
           <SettingRowDepthContext.Provider value={depth + 1}>
             <div
               data-slot="setting-row-children"
+              // One group with the parent: indented, no hairlines inside it and
+              // no guide line; the next hairline follows the whole group.
               className={cn(
-                "mb-3 min-w-0",
+                "-mt-1 mb-2 flex min-w-0 flex-col",
                 variant === "control-left"
                   ? // Line up with the parent's label, past the switch column.
                     "pl-12"
-                  : // A 24px indent with a quiet guide line.
-                    "ml-[7px] border-l border-border pl-4",
+                  : "pl-5",
               )}
             >
               {children}
@@ -324,7 +332,7 @@ export function SettingRow({
   );
 }
 
-/** Rows of one section, split by hairlines. No box: sections stay open. */
+/** Rows of one section, split by hairlines. The Section variant decides whether they sit in a card. */
 export function SettingRowGroup({ className, ...props }: ComponentProps<"div">) {
   return (
     <div

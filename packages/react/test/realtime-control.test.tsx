@@ -363,6 +363,7 @@ describe("ordinary session Codex realtime control", () => {
     // Idle primary control is a ghost icon (no border/surface box).
     expect(start?.className).not.toMatch(/(?:^|\s)border(?:\s|$)/);
     expect(start?.className).not.toContain("bg-og-accent");
+    expect(start?.className).not.toContain("bg-og-primary");
     expect(start?.className).toContain("text-og-fg-muted");
     const voiceOptions = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Choose voice model and options"]',
@@ -414,7 +415,7 @@ describe("ordinary session Codex realtime control", () => {
       'button[aria-label="End voice conversation"]',
     );
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Listening");
-    expect(stop?.className).toContain("bg-og-accent");
+    expect(stop?.className).toContain("bg-og-primary");
     const muteCluster = container.querySelector('[data-testid="realtime-mute-controls"]');
     expect(muteCluster).not.toBeNull();
     expect(muteCluster?.className).not.toContain("max-sm:hidden");

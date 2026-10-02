@@ -21,6 +21,7 @@
 // `createEditor` for text when `exec` is absent.
 
 import { createHash } from "node:crypto";
+import { confinedFileReadCommand, parseConfinedFileRead } from "./confined-file-read";
 import { constants as zlibConstants, createGunzip } from "node:zlib";
 import type {
   FileSystemRouteIdentity,
@@ -62,6 +63,7 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import { CODE_SEARCH_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
 import type { ProviderCommandSession } from "./provider-command-session";
 import {
   connectedMachinePathWithinRoot,
@@ -176,6 +178,7 @@ export type ChannelASession = ProviderCommandSession & {
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
@@ -389,6 +392,29 @@ const CODE_SEARCH_RG_STORE_FAILED =
 const CODE_SEARCH_KINDS_BEGIN = "__OPENGENI_CODE_SEARCH_KINDS_BEGIN__";
 const CODE_SEARCH_KINDS_END = "__OPENGENI_CODE_SEARCH_KINDS_END__";
 
+/** ripgrep excludes for the credential directories; appended last, so they win over any engine glob. */
+const CODE_SEARCH_CREDENTIAL_EXCLUDES = CODE_SEARCH_CREDENTIAL_DIRS.flatMap((dir) => [
+  "-g",
+  `!**/${dir.join("/")}/**`,
+]);
+
+/** Whether a relative path names a credential directory (or something inside one), in any case. */
+function isCodeSearchCredentialPath(path: string): boolean {
+  // `a/./b` and `a//b` name `a/b`
+  const segs = path
+    .toLowerCase()
+    .split("/")
+    .filter((seg) => seg !== "" && seg !== ".");
+  return CODE_SEARCH_CREDENTIAL_DIRS.some((dir) =>
+    segs.some((_, i) => dir.every((d, j) => segs[i + j] === d)),
+  );
+}
+
+/** `case` pattern matching a lowercased `/path/` inside a credential directory. */
+const CODE_SEARCH_CREDENTIAL_CASE = CODE_SEARCH_CREDENTIAL_DIRS.map(
+  (dir) => `*/${dir.join("/")}/*`,
+).join("|");
+
 export type CodeSearchRipgrepOutcome = {
   /** False when ripgrep is not installed on the box. */
   available: boolean;
@@ -452,12 +478,17 @@ export function validateCodeSearchRipgrepArgs(
   if (index >= args.length || paths.length === 0) {
     throw new ChannelAValidationError("ripgrep arguments must end with -- and paths");
   }
-  out.push("--");
+  // ripgrep searches an explicitly named path even when a glob excludes it
+  out.push(...CODE_SEARCH_CREDENTIAL_EXCLUDES, "--");
   for (const path of paths) {
     if (path.includes(NUL) || path.startsWith("-") || path.startsWith("/")) {
       throw new ChannelAValidationError(`ripgrep path is not allowed: ${path}`);
     }
-    out.push(assertSafeRelPathOrRoot(path, workspaceRoot) || ".");
+    const safe = assertSafeRelPathOrRoot(path, workspaceRoot) || ".";
+    if (isCodeSearchCredentialPath(safe)) {
+      throw new ChannelAValidationError(`ripgrep path is not allowed: ${path}`);
+    }
+    out.push(safe);
   }
   return ["--no-config", ...out];
 }
@@ -882,6 +913,33 @@ export class SandboxChannelAService {
 
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
     this.assertFileSystemRoute(req.route);
+    if (req.workspaceOnly) {
+      const canonical = assertSafeRelPath(req.path, this.workspaceRoot);
+      const relative = isConnectedMachineAbsolutePath(canonical)
+        ? relativeConnectedMachinePath(this.workspaceRoot, canonical)
+        : canonical;
+      if (!relative || /[\u0000-\u001f\u007f\\]/u.test(relative)) {
+        throw new ChannelAValidationError("invalid workspace file path");
+      }
+      const result = await this.runReadOnly({
+        cmd: confinedFileReadCommand(this.workspaceRoot, relative, req.maxBytes),
+        login: false,
+        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1024,
+      });
+      if (result.exitCode === 66) throw new ChannelANotFoundError("workspace file not found");
+      if (result.exitCode === 67) {
+        throw new ChannelAValidationError("workspace file path must not contain symlinks");
+      }
+      const bytes =
+        result.sessionId === undefined && result.exitCode === 0
+          ? parseConfinedFileRead(result.stdout, req.maxBytes)
+          : null;
+      if (!bytes)
+        throw new ChannelAUnavailableError(
+          "Confined workspace reads are unavailable on this provider.",
+        );
+      return this.shapeRead(canonical, Buffer.from(bytes), req);
+    }
     const path =
       this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(req.path)
         ? resolveConnectedMachinePath(this.workspaceRoot, req.path)
@@ -1064,6 +1122,7 @@ export class SandboxChannelAService {
   }
 
   private shapeRead(path: string, bytes: Buffer, req: FsReadRequest): FsReadResponse {
+    bytes = bytes.subarray(0, req.maxBytes);
     const truncated = bytes.byteLength >= req.maxBytes;
     const isBinary = sniffBinary(bytes);
     const encoding = req.encoding === "base64" || isBinary ? "base64" : "utf8";
@@ -2989,9 +3048,29 @@ export class SandboxChannelAService {
       return assertSafeRelPathOrRoot(path, this.workspaceRoot) || ".";
     });
     if (checked.length === 0) return {};
+    // A path that resolves, through any symlink, into a credential directory is
+    // reported missing: ripgrep follows a symlink named as a search root, so the
+    // engine's own checks on the relative path cannot see it. `phys` fails when
+    // it cannot resolve a path safely: without `realpath` (macOS before 13) a
+    // directory is resolved with `pwd -P` and a symlinked file is refused.
     const script = [
+      "phys() {",
+      '  if command -v realpath >/dev/null 2>&1; then realpath "$1" 2>/dev/null; return 0; fi',
+      '  if [ -d "$1" ]; then (cd "$1" 2>/dev/null && pwd -P); return 0; fi',
+      '  if [ -L "$1" ]; then return 1; fi',
+      '  d=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) && printf %s "$d/$(basename "$1")"',
+      "  return 0",
+      "}",
+      "denied() {",
+      '  r=$(phys "$1") || return 0',
+      '  for c in "/$1/" "$r/"; do',
+      "    c=$(printf %s \"$c\" | tr '[:upper:]' '[:lower:]')",
+      `    case "$c" in ${CODE_SEARCH_CREDENTIAL_CASE}) return 0 ;; esac`,
+      "  done",
+      "  return 1",
+      "}",
       `printf '${CODE_SEARCH_KINDS_BEGIN}'`,
-      'for p in "$@"; do if [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
+      'for p in "$@"; do if denied "$p"; then printf m; elif [ -d "$p" ]; then printf d; elif [ -e "$p" ]; then printf f; else printf m; fi; done',
       `printf '${CODE_SEARCH_KINDS_END}'`,
     ].join("\n");
     const { stdout } = await this.runReadOnly({

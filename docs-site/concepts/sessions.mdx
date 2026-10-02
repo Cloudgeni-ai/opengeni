@@ -43,22 +43,7 @@ When a session is waiting on you (a tool approval or a structured question), a n
 
 ## Recovering unavailable workspace files
 
-If a managed Modal workspace is unavailable but an older registered checkpoint
-remains, an authorized signed-in human can review and explicitly restore that
-checkpoint in the same chat. This is available only when the session is the sole
-member of its sandbox group and has no unsettled work.
-
-The confirmation identifies the checkpoint time. Newer filesystem changes are
-unavailable; the conversation stays intact and external effects are not undone.
-The displayed generation gap is not a count of lost files or edits. Accepting
-consent is not proof of completion: restoration must pass verification before the
-UI reports it restored. The agent receives a persistent filesystem warning before
-later inference. No failed command is automatically retried. Pause and Cancel
-remain separate controls, and changing models cannot repair missing files.
-
-Shared groups, other providers, previous/unregistered checkpoints, and empty
-workspace resets are not supported by this recovery action. If recovery is blocked,
-the UI explains the blocker instead of promising a fresh sandbox with intact files.
+If a managed sandbox's files are unavailable but an earlier checkpoint exists, a signed-in member can review and restore that checkpoint in the same chat. The conversation stays intact; changes made after the checkpoint are lost, and external effects are not undone. The chat explains when recovery is not possible.
 
 ## Attached context
 
@@ -126,7 +111,7 @@ is not clear from your request—especially for actions that send or change data
 
 The more restrictive side wins across trees. Children inherit the parent's scope and can only narrow it. These rules do not make product-created chats invisible to authorized human workspace members or organization API keys. The product backend must still authorize each user's requests.
 
-The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Knowledge](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Integrate your product](/guides/integrate-your-product#choose-agent-access-and-memory).
+The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Knowledge](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Users, tenants & privacy](/integrate/users-and-tenants#choose-what-each-conversation-shares).
 
 ## Browsing and archiving
 

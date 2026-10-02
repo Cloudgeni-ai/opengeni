@@ -4,11 +4,14 @@ import type { AccessContext, Workspace } from "@/types";
 
 import {
   isAuthorizedWorkspaceId,
+  organizationWorkspacePreferenceStorageId,
   parseRootWorkspaceSearch,
   readLastWorkspaceId,
+  readLastWorkspaceIdsByOrganization,
   resolveLandingWorkspaceId,
   workspaceNavigationPreferenceStorageId,
   writeLastWorkspaceId,
+  writeLastWorkspaceIdForOrganization,
 } from "./workspace-navigation-preference";
 
 function memoryStorage(): Pick<Storage, "getItem" | "setItem"> {
@@ -201,5 +204,53 @@ describe("workspace navigation preference", () => {
         }),
       }),
     ).toBeNull();
+  });
+});
+
+describe("last workspace per organization", () => {
+  test("remembers one workspace per organization, per subject", () => {
+    const storage = memoryStorage();
+    const alex = organizationWorkspacePreferenceStorageId("user:alex");
+    const sam = organizationWorkspacePreferenceStorageId("user:sam");
+    writeLastWorkspaceIdForOrganization(alex, "acme", "ws-design", storage);
+    writeLastWorkspaceIdForOrganization(alex, "northwind", "ws-general", storage);
+    writeLastWorkspaceIdForOrganization(alex, "acme", "ws-production", storage);
+    expect(readLastWorkspaceIdsByOrganization(alex, storage)).toEqual({
+      northwind: "ws-general",
+      acme: "ws-production",
+    });
+    expect(readLastWorkspaceIdsByOrganization(sam, storage)).toEqual({});
+  });
+
+  test("ignores malformed or blocked storage", () => {
+    const storage = memoryStorage();
+    const id = organizationWorkspacePreferenceStorageId("user:alex");
+    storage.setItem(id, "not json");
+    expect(readLastWorkspaceIdsByOrganization(id, storage)).toEqual({});
+    storage.setItem(id, JSON.stringify({ acme: 42, northwind: "ws-general", "": "ws-x" }));
+    expect(readLastWorkspaceIdsByOrganization(id, storage)).toEqual({ northwind: "ws-general" });
+    const blocked = {
+      getItem: () => {
+        throw new Error("blocked");
+      },
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    };
+    expect(readLastWorkspaceIdsByOrganization(id, blocked)).toEqual({});
+    expect(() => writeLastWorkspaceIdForOrganization(id, "acme", "ws", blocked)).not.toThrow();
+    expect(readLastWorkspaceIdsByOrganization(id, null)).toEqual({});
+  });
+
+  test("keeps a bounded number of organizations, dropping the least recent", () => {
+    const storage = memoryStorage();
+    const id = organizationWorkspacePreferenceStorageId("user:alex");
+    for (let index = 0; index < 55; index += 1) {
+      writeLastWorkspaceIdForOrganization(id, `org-${index}`, `ws-${index}`, storage);
+    }
+    const remembered = readLastWorkspaceIdsByOrganization(id, storage);
+    expect(Object.keys(remembered)).toHaveLength(50);
+    expect(remembered["org-0"]).toBeUndefined();
+    expect(remembered["org-54"]).toBe("ws-54");
   });
 });

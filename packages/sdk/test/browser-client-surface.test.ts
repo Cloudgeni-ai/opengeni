@@ -14,6 +14,8 @@ const legacyBrowserUnusedMethods = [
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
   "browseAtlassianSources",
+  // Only the removed Agents page cancelled sessions from the web client.
+  "cancelSession",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
@@ -67,6 +69,7 @@ const legacyBrowserUnusedMethods = [
   "undoGovernedLearningActivation",
   "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
+  // The session agent-configuration panel (web milestone M5) adopts this.
   "verifyPersonalGitHubRepositorySelections",
 ];
 

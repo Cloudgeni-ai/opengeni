@@ -1,7 +1,7 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
-import { OpenGeniProvider } from "@opengeni/react";
+import { OpenGeniProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -26,8 +26,10 @@ import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary"
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
+import { userErrorText } from "@/lib/api-error";
 import { isAbortError } from "@/lib/session-tools";
 import { orgLabel } from "@/lib/org";
+import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
@@ -179,7 +181,7 @@ export function WorkspaceShellRouteContent({
     (operation: WorkspaceOperationIdentity): boolean => {
       if (!ownsSlackOperation(operation)) return false;
       toast.success("Slack identity linked", {
-        description: "You can return to Slack and invoke OpenGeni again.",
+        description: "You can return to Slack and invoke Opengeni again.",
       });
       clearSlackLinkContinuation();
       revalidatePrincipalAccess();
@@ -199,7 +201,7 @@ export function WorkspaceShellRouteContent({
         if (ownsSlackOperation(operation)) {
           updateSlackAccess(workspaceId, (current) => ({
             ...current,
-            error: error instanceof Error ? error.message : String(error),
+            error: userErrorText(error),
           }));
         }
         return null;
@@ -242,7 +244,7 @@ export function WorkspaceShellRouteContent({
         if (disposed || !ownsSlackOperation(operation)) return;
         updateSlackAccess(workspaceId, (current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: userErrorText(error),
         }));
       });
     return () => {
@@ -291,7 +293,7 @@ export function WorkspaceShellRouteContent({
       if (ownsSlackOperation(operation)) {
         updateSlackAccess(workspaceId, (current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: userErrorText(error),
         }));
       }
     } finally {
@@ -330,7 +332,7 @@ export function WorkspaceShellRouteContent({
       if (ownsSlackOperation(operation)) {
         updateSlackAccess(workspaceId, (current) => ({
           ...current,
-          error: error instanceof Error ? error.message : String(error),
+          error: userErrorText(error),
         }));
       }
     } finally {
@@ -357,8 +359,8 @@ export function WorkspaceShellRouteContent({
     void refreshPersonalGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!abortController.signal.aborted && !isAbortError(error)) {
-        toast.error("Failed to load workspace MCP tools", {
-          description: String(error),
+        toast.error("Couldn't load workspace MCP tools", {
+          description: userErrorText(error),
         });
       }
     });
@@ -398,6 +400,7 @@ export function WorkspaceShellRouteContent({
             workspaceId={workspaceId}
             workspaceName={administration.workspace.name}
             organizationName={administration.overview.organization.name}
+            organizationId={administration.organizationId}
             organizationSettingsWorkspaceId={
               context.workspaces.find(
                 (candidate) => candidate.accountId === administration.organizationId,
@@ -475,7 +478,7 @@ export function WorkspaceShellRouteContent({
                   ) : null}
                   <Button
                     type="button"
-                    variant="secondary"
+                    variant="outline"
                     disabled={slackAccessBusy}
                     onClick={() => void cancelSlackAccess()}
                   >
@@ -489,7 +492,7 @@ export function WorkspaceShellRouteContent({
               title="Slack link unavailable"
               description={slackAccessError ?? terminalGuidance}
               action={
-                <Button asChild type="button" variant="secondary">
+                <Button asChild type="button" variant="outline">
                   <Link to="/" onClick={context.clearSlackLinkContinuation}>
                     Open default workspace
                   </Link>
@@ -526,8 +529,6 @@ function AuthorizedWorkspaceShell({
   onMount?: () => void;
 }) {
   const location = useRouterState({ select: (state) => state.location });
-  const organizationPath = `/workspaces/${encodeURIComponent(workspaceId)}/organization`;
-  const usesOrganizationShell = location.pathname === organizationPath;
   const managementLocation = workspaceManagementLocation(
     location.pathname,
     workspaceId,
@@ -553,12 +554,11 @@ function AuthorizedWorkspaceShell({
         }
       }}
     >
-      {/* Settings mode swaps the rail: organization settings and the workspace
-          management shell draw the settings rail, and "Back to sessions"
-          returns to the main rail. */}
-      {usesOrganizationShell ? (
-        children
-      ) : managementLocation ? (
+      <WorkspaceStreamHealth />
+      {/* Settings mode swaps the rail: workspace and organization settings
+          share one settings shell that draws the settings rail, and "Back to
+          sessions" returns to the main rail. */}
+      {managementLocation ? (
         <WorkspaceManagementShell
           workspaceId={workspaceId}
           workspaceName={activeWorkspace?.name}
@@ -574,6 +574,13 @@ function AuthorizedWorkspaceShell({
       )}
     </OpenGeniProvider>
   );
+}
+
+/** Content-free workspace live-stream health; see lib/stream-health.ts. */
+function WorkspaceStreamHealth(): null {
+  const { workspaceControlConnectionState } = useOpenGeni();
+  useStreamHealthTelemetry("workspace", workspaceControlConnectionState);
+  return null;
 }
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {

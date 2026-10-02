@@ -19,6 +19,57 @@ import {
 } from "../src";
 
 describe("BrowserSupervisor", () => {
+  test("protects creation and pending shutdown even when active inventory is empty", async () => {
+    const directory = await mkdtemp("/tmp/ogb-update-idle-");
+    const started = deferred(),
+      startGate = deferred(),
+      ending = deferred(),
+      endGate = deferred();
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: join(directory, "sockets"),
+      createDriver: async (context) => {
+        const driver = fakeDriver(context);
+        return {
+          ...driver,
+          async start(url) {
+            started.resolve();
+            await startGate.promise;
+            return await driver.start(url);
+          },
+          async close() {
+            ending.resolve();
+            await endGate.promise;
+            await driver.close();
+          },
+        };
+      },
+    });
+    try {
+      expect(supervisor.isIdle()).toBe(true);
+      const creating = supervisor.createSession({ ...reference(45), headed: false });
+      expect(supervisor.isIdle()).toBe(false);
+      await started.promise;
+      expect(supervisor.listSessions()).toEqual([]);
+      expect(supervisor.isIdle()).toBe(false);
+      startGate.resolve();
+      await creating;
+      expect(supervisor.isIdle()).toBe(false);
+      const closing = supervisor.endSession(reference(45));
+      await ending.promise;
+      expect(supervisor.listSessions()).toEqual([]);
+      expect(supervisor.isIdle()).toBe(false);
+      endGate.resolve();
+      await closing;
+      expect(supervisor.isIdle()).toBe(true);
+    } finally {
+      startGate.resolve();
+      endGate.resolve();
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects a managed socket root before accepting sessions when Unix sockets cannot fit",
     async () => {

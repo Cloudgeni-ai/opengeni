@@ -272,7 +272,10 @@ function failureDiagnostics(page: Page): string {
   return (failures.length > 0 ? failures : diagnostics).slice(-10).join(" | ");
 }
 
-/** Settings > Models: the Accounts section renders before the async account rows. */
+/** The shared workspace's page in Organization settings > Models names it in back links. */
+const WORKSPACE_NAME = "Codex quota workspace";
+
+/** A workspace's Models page: the Accounts section renders before the async account rows. */
 async function waitForAccountsSection(page: Page): Promise<void> {
   try {
     await page.getByRole("heading", { name: "Accounts", exact: true }).waitFor({ timeout: 20_000 });
@@ -308,9 +311,9 @@ async function openCodexAccount(page: Page, name: string, activation: "click" | 
   return page.locator('[data-slot="detail-page-body"]');
 }
 
-/** Back from an account page to the Models list. */
+/** Back from an account page to the workspace's Models page. */
 async function backToModels(page: Page, activation: "click" | "tap" = "click") {
-  const back = page.getByRole("button", { name: "Models", exact: true });
+  const back = page.getByRole("button", { name: WORKSPACE_NAME, exact: true });
   if (activation === "tap") await back.tap();
   else await back.click();
   await waitForAccountsSection(page);
@@ -318,7 +321,8 @@ async function backToModels(page: Page, activation: "click" | "tap" = "click") {
 
 async function openModels(page: Page): Promise<void> {
   await page.goto(
-    `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
+    // Every model setting lives on Organization settings > Models; this is the workspace's page there.
+    `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/organization?section=models&workspace=${workspaceId}`,
     {
       waitUntil: "domcontentloaded",
     },
@@ -459,7 +463,7 @@ beforeAll(async () => {
     headers: { cookie: OWNER_COOKIE, "content-type": "application/json" },
     body: JSON.stringify({
       accountId,
-      name: "Codex quota workspace",
+      name: WORKSPACE_NAME,
     }),
   });
   expect(workspace.status).toBe(201);
@@ -654,7 +658,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       ["Capped account", "ChatGPT returned fewer details than its count, so these are view only."],
       [
         "Unknown account",
-        "ChatGPT returned reset data OpenGeni doesn't recognize, so these are view only.",
+        "ChatGPT returned reset data Opengeni doesn't recognize, so these are view only.",
       ],
       ["Error account", "Couldn't check usage limit resets. Refresh usage to try again."],
     ];
@@ -772,7 +776,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await page.getByRole("button", { name: "Redeem Full reset" }).click();
     await dialog.getByRole("button", { name: "Redeem reset" }).click();
     await page
-      .getByText(/API 503|ambiguous/i)
+      .getByText(/The outcome is uncertain/i)
       .first()
       .waitFor({ timeout: 10_000 });
     expect(provider.consumeBodies).toHaveLength(1);

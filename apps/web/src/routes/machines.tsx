@@ -38,11 +38,12 @@ import {
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
-import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
+import { PageHeader } from "@/components/ui/page-header";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
   Dialog,
@@ -52,6 +53,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
+import {
+  apiErrorTechnicalFacts,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** Copy to the clipboard and toast the outcome. The shared helper falls back to
@@ -212,10 +218,10 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other OpenGeni workspaces or deployments already connected to the machine."
+        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other Opengeni workspaces or deployments already connected to the machine."
       />
 
-      <div className="mt-5">
+      <div className="pt-6">
         {!machines.canRead ? (
           <Notice tone="muted" title="Machines are managed by your workspace admin">
             You do not have permission to view connected machines in this workspace. Ask a workspace
@@ -279,8 +285,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                     if (!machine.enrollmentId) return;
                     void machines.updateAgent(machine.enrollmentId).then((result) => {
                       if (result?.accepted) {
-                        toast.success(`Updating ${machine.name}`, {
-                          description: `The agent will drain current work, install signed v${result.targetVersion}, and reconnect automatically.`,
+                        toast.success(`Update requested for ${machine.name}`, {
+                          description: `Installing v${result.targetVersion} requires an idle machine. If it is busy, retry after its work finishes.`,
                         });
                       }
                     });
@@ -300,7 +306,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
       {machines.mutationError && !removeTarget ? (
         <Notice tone="failed" title="Machine action failed">
-          {machines.mutationError.message}
+          <FailureText error={machines.mutationError} />
         </Notice>
       ) : null}
 
@@ -310,7 +316,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             <DialogTitle>Connect a machine</DialogTitle>
             <DialogDescription>
               Run one command to install or update the agent and add this workspace. Existing
-              OpenGeni connections stay intact.
+              Opengeni connections stay intact.
             </DialogDescription>
           </DialogHeader>
           {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)
@@ -404,20 +410,35 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             ) : null}
             {removeMoveError ? (
               <Notice tone="failed" title="Couldn't move every session">
-                {removeMoveError.message}
+                <FailureText error={removeMoveError} />
               </Notice>
             ) : null}
             {removeBlocked ? (
               <MachineRemovalBlockNotice workspaceId={workspaceId} result={removeBlocked} />
             ) : machines.mutationError ? (
               <Notice tone="failed" title="Removal failed">
-                {machines.mutationError.message}
+                <FailureText error={machines.mutationError} />
               </Notice>
             ) : null}
           </div>
         ) : null}
       </ConfirmDialog>
     </ContentPage>
+  );
+}
+
+/** What to do next, with an API error's status and reference behind Technical details. */
+function FailureText({ error }: { error: unknown }) {
+  const facts = apiErrorTechnicalFacts(error);
+  return (
+    <>
+      {userErrorTextWithoutReference(error)}
+      {facts.length > 0 ? (
+        <div className="mt-1">
+          <TechnicalDetails facts={facts} />
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -526,7 +547,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         if (seq !== mintSeq.current) {
           return;
         }
-        const message = err instanceof Error ? err.message : String(err);
+        const message = userErrorText(err);
         setError(message);
         setToken(null);
         toast.error("Could not create a connect command", { description: message });
@@ -664,13 +685,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
               {command}
             </pre>
           </div>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="w-full"
-            onClick={copyCommand}
-          >
+          <Button type="button" size="sm" className="w-full" onClick={copyCommand}>
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
             {copied ? "Copied" : "Copy connect command"}
           </Button>

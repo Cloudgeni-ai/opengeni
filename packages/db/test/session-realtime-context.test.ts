@@ -36,6 +36,7 @@ import {
   type SessionRealtimeInboundEntryInput,
 } from "../src/index";
 import * as schema from "../src/schema";
+import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -167,7 +168,11 @@ function transcript(
 async function runMode(
   value: Fixture,
   entries: SessionRealtimeInboundEntryInput[],
-  options: { providerStarted?: boolean; baseMs?: number } = {},
+  options: {
+    providerStarted?: boolean;
+    baseMs?: number;
+    accounts?: Awaited<ReturnType<typeof realtimeConnectionFixture>>;
+  } = {},
 ) {
   const baseMs = options.baseMs ?? Date.now();
   const owner = {
@@ -181,7 +186,12 @@ async function runMode(
     model: "gpt-live-1-boulder-alpha" as const,
   };
   const started = await transaction(value.workspaceId, (tx) =>
-    beginSessionRealtimeInTransaction(tx, { ...owner, now: new Date(baseMs), leaseMs: 120_000 }),
+    beginSessionRealtimeInTransaction(tx, {
+      ...owner,
+      ...options.accounts,
+      now: new Date(baseMs),
+      leaseMs: 120_000,
+    }),
   );
   const claimed = await transaction(value.workspaceId, (tx) =>
     claimSessionRealtimeConnectionInTransaction(tx, {
@@ -274,6 +284,37 @@ function sourceEntry(role: "user" | "assistant", text: string): SessionRealtimeC
 }
 
 describe("voice handoff execution policy", () => {
+  test("voice handoff retains the exact connector accounts frozen when voice started", async () => {
+    const value = await privateFixture();
+    const accounts = await realtimeConnectionFixture(client.db, {
+      ...value,
+      ownerSubjectId: value.subjectId,
+    });
+    const mode = await runMode(value, [transcript("user", "Read my connected account")], {
+      accounts,
+    });
+    const [handoff] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, value.workspaceId),
+            eq(schema.sessionTurns.sessionId, value.session.id),
+          ),
+        ),
+    );
+    expect(handoff).toMatchObject(accounts);
+    expect(handoff!.initiatingHumanSubjectId).toBe(value.subjectId);
+    const [lease] = await transaction(value.workspaceId, (tx) =>
+      tx
+        .select()
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.id, mode.started.mode.id)),
+    );
+    expect(lease).toMatchObject(accounts);
+  });
+
   test("inherits latest started model, effort and speed when voice ends", async () => {
     const value = await fixture();
     const [previous] = await transaction(value.workspaceId, (tx) =>

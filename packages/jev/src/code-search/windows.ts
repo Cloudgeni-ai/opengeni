@@ -442,6 +442,20 @@ export function buildFileWindows(
   cfg: CodeSearchConfig,
   render?: RenderOpts,
 ): Window[] {
+  return rankFileWindows(lines, hitLines, keywords, lang, cfg, render)
+    .slice(0, cfg.wave2.windowsPerFile)
+    .sort((a, b) => a.start - b.start);
+}
+
+/** Every hit window of a file, best score first (buildFileWindows keeps the first windowsPerFile). */
+export function rankFileWindows(
+  lines: string[],
+  hitLines: HitLine[],
+  keywords: KeywordInfo[],
+  lang: Lang,
+  cfg: CodeSearchConfig,
+  render?: RenderOpts,
+): Window[] {
   const w = cfg.wave2;
   const ro: RenderOpts = render ?? { maxLineChars: w.maxLineChars };
   // prose sections are long and their paragraphs independent: smaller sub-windows around each hit
@@ -483,10 +497,7 @@ export function buildFileWindows(
     .flatMap((x) => splitWindow(x, w.maxWindowLines))
     .flatMap((x) => splitByChars(lines, x, maxChars, ro));
   for (const x of merged) x.score = scoreWindow(lines, x, keywords, cfg.recall.hitCountWeight);
-  return merged
-    .sort((a, b) => b.score - a.score || a.start - b.start)
-    .slice(0, w.windowsPerFile)
-    .sort((a, b) => a.start - b.start);
+  return merged.sort((a, b) => b.score - a.score || a.start - b.start);
 }
 
 /** Window for a definition found at 1-based defLine (lead following). */
@@ -614,4 +625,166 @@ export function splitLines(text: string): string[] {
   const lines = text.split(/\r?\n/);
   if (lines.length && lines[lines.length - 1] === "") lines.pop();
   return lines;
+}
+
+/**
+ * Cover a whole file with consecutive windows cut at declaration boundaries (a tile ends at the first
+ * declaration after `tileTargetLines` lines, or is cut hard at maxWindowLines), so every function, handler
+ * and component of a small relevant file is judged, not only those around keyword hits. Tiles over the char
+ * cap are split like any window. Returned in line order; the caller caps the count and reports the rest.
+ */
+export function tileFile(
+  lines: string[],
+  hitLines: number[],
+  lang: Lang,
+  cfg: CodeSearchConfig,
+  render?: RenderOpts,
+): Window[] {
+  const n = lines.length;
+  if (!n) return [];
+  const w = cfg.wave2;
+  const target = w.tileTargetLines;
+  const hard = w.maxWindowLines;
+  const cuts: Array<[number, number]> = []; // 0-based inclusive
+  let s = 0;
+  // the outermost indentation seen in the current tile: a declaration nested deeper (a const inside a
+  // function body) is not a place to cut
+  let base = Infinity;
+  for (let i = 1; i < n; i++) {
+    const len = i - s;
+    const prev = lines[i - 1]!;
+    if (prev.trim()) base = Math.min(base, indentOf(prev));
+    if (
+      len >= target &&
+      lang !== "other" &&
+      isDeclLine(lines[i]!, lang) &&
+      indentOf(lines[i]!) <= base
+    ) {
+      const c = leadingComments(lines, i, lang);
+      if (c > s) {
+        cuts.push([s, c - 1]);
+        s = c;
+        base = Infinity;
+        continue;
+      }
+    }
+    if (len >= hard) {
+      // prefer a blank line in the last quarter of the tile
+      let c = i;
+      for (let j = i; j > s + Math.floor(hard * 0.75); j--)
+        if (!lines[j]!.trim()) {
+          c = j + 1;
+          break;
+        }
+      cuts.push([s, c - 1]);
+      s = c;
+      base = Infinity;
+    }
+  }
+  cuts.push([s, n - 1]);
+  // fold a tiny tail tile into its predecessor
+  const merged: Array<[number, number]> = [];
+  for (const c of cuts) {
+    const prev = merged[merged.length - 1];
+    if (prev && c[1] - c[0] + 1 < 8 && c[1] - prev[0] + 1 <= hard) prev[1] = c[1];
+    else merged.push([c[0], c[1]]);
+  }
+  const hits = [...new Set(hitLines)].sort((a, b) => a - b);
+  const ro: RenderOpts = render ?? { maxLineChars: w.maxLineChars };
+  const maxChars = lang === "markdown" ? w.maxProseWindowChars : w.maxWindowChars;
+  const out: Window[] = [];
+  for (const [a, b] of merged) {
+    if (!lines.slice(a, b + 1).some((l) => l.trim())) continue;
+    const label = isDeclLine(lines[a] ?? "", lang)
+      ? { line: a + 1, text: lines[a]!.trim().slice(0, 140) }
+      : lang === "other"
+        ? undefined
+        : nearestEnclosingLabel(lines, a, lang);
+    const win: Window = {
+      start: a + 1,
+      end: b + 1,
+      hits: hits.filter((h) => h >= a + 1 && h <= b + 1),
+      label,
+      kind: "hit",
+      score: 0,
+    };
+    // a tile over the char cap is walked in consecutive whole-line chunks
+    out.push(...tileSplit(lines, win, maxChars, ro));
+  }
+  return out;
+}
+
+/** A tile as consecutive whole-line chunks of at most maxChars rendered chars each. */
+function tileSplit(lines: string[], whole: Window, maxChars: number, o: RenderOpts): Window[] {
+  const out: Window[] = [];
+  let s = whole.start;
+  while (s <= whole.end) {
+    let e = s;
+    let used = renderedLineLength(lines, s, o);
+    while (e + 1 <= whole.end && used + renderedLineLength(lines, e + 1, o) <= maxChars)
+      used += renderedLineLength(lines, ++e, o);
+    out.push({ ...whole, start: s, end: e, hits: whole.hits.filter((h) => h >= s && h <= e) });
+    s = e + 1;
+  }
+  return out;
+}
+
+/** Name declared on a declaration line (function, class, const, method, property function), if any. */
+export function declName(line: string): string | undefined {
+  const m =
+    /\b(?:function\*?|class|interface|type|enum|namespace|struct|trait|fn|def|func|mod|const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(
+      line,
+    ) ??
+    /^\s*(?:(?:public|private|protected|static|async|readonly|override|get|set|export|default)\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>()]*>)?\s*[:=(]/.exec(
+      line,
+    ) ??
+    /^#{1,6}\s+(.{1,60})/.exec(line);
+  const name = m?.[1]?.trim();
+  return name && !CONTROL.has(name) ? name : undefined;
+}
+
+/**
+ * Declarations inside the given ranges (1-based, inclusive), outermost indentation first, then by line,
+ * at most max. Import lines and anonymous callbacks are skipped.
+ */
+export function outlineRanges(
+  lines: string[],
+  lang: Lang,
+  ranges: Array<[number, number]>,
+  max: number,
+): Array<{ name: string; line: number }> {
+  if (lang === "other" || max <= 0) return [];
+  const found: Array<{ name: string; line: number; indent: number }> = [];
+  for (const [a, b] of ranges) {
+    for (let i = a; i <= b && i <= lines.length; i++) {
+      const l = lines[i - 1]!;
+      if (/^\s*import\b/.test(l) || !isDeclLine(l, lang)) continue;
+      if (lang === "brace" && CALLBACK_OPEN.test(l)) continue;
+      // values (`const x = 1`, `const ctx = useAppContext()`) are not worth naming; functions and types are
+      if (
+        (lang === "brace" || lang === "indent") &&
+        /^\s*(?:export\s+)?(?:const|let|var)\s/.test(l) &&
+        !/=>|\bfunction\b|=\s*(?:async\s*)?\(\s*$|=\s*(?:memo|forwardRef|React\.memo)\(/.test(l)
+      )
+        continue;
+      // a call (`useEffect(() => {`, `formatSize(x),`) is not a declaration
+      if (
+        /^\s*[\w$.]+\s*\((?:.*=>|.*[),]\s*$)/.test(l) &&
+        !/\)\s*(?::[^={]+)?\{\s*$/.test(l.replace(/=>\s*\{\s*$/, ""))
+      )
+        continue;
+      const name = declName(l);
+      if (name) found.push({ name, line: i, indent: indentOf(l) });
+    }
+  }
+  const levels = [...new Set(found.map((f) => f.indent))].sort((x, y) => x - y);
+  const out: Array<{ name: string; line: number }> = [];
+  for (const lvl of levels) {
+    for (const f of found.filter((x) => x.indent === lvl)) {
+      if (out.length >= max) break;
+      out.push({ name: f.name, line: f.line });
+    }
+    if (out.length >= max) break;
+  }
+  return out.sort((x, y) => x.line - y.line);
 }

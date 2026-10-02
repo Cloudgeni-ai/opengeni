@@ -1,12 +1,13 @@
 ---
-title: "Quickstart"
-description: "Use OpenGeni as an agent harness and run your first session."
-icon: "rocket"
+title: "Use OpenGeni for your team"
+sidebarTitle: "Use OpenGeni for your team"
+description: "Sign in, connect a model, and run your first agent session in the web app."
+icon: "users"
 ---
 
-Use OpenGeni as an agent harness to give agents work, follow their progress, and steer their sessions from the app. This quickstart uses the managed service at [app.opengeni.ai](https://app.opengeni.ai), with nothing to deploy. You can also [self-host the same platform](/guides/self-host).
+Give agents work, follow their progress, and steer them from the OpenGeni web app. This quickstart uses the managed service at [app.opengeni.ai](https://app.opengeni.ai), with nothing to deploy. You can also [self-host the same platform](/guides/self-host).
 
-To add agent capabilities to your own app, start with [Integrate your product](/guides/integrate-your-product).
+To add agents to your own product instead, start with [Embed with your coding agent](/embed-with-a-coding-agent).
 
 <Steps>
   <Step title="Create an account and organization">
@@ -30,7 +31,7 @@ To add agent capabilities to your own app, start with [Integrate your product](/
     Describe the task. Optionally attach a repository, upload files, or pick the tools the agent may use. The session starts on a managed sandbox by default.
   </Step>
   <Step title="Follow and steer">
-    Progress updates and replies stay visible in the conversation. Compact work rows show elapsed time and rolling tool activity; open them for tool and command details. Later work does not hide earlier replies. Use **Latest question** to return to your most recent message. Messages you send while a turn is running queue behind it. Steer interrupts the running turn and delivers your message now. Pause holds the session, and Cancel ends it.
+    Follow progress updates as they arrive, with live activity underneath. When a turn finishes, its final reply stays visible; open **Worked for** to read its earlier updates and tool activity. Later turns do not hide earlier final replies. Use **Back to your message** to return to the message associated with the response you are reading, or **Jump to latest** to return to the live bottom. Messages you send while a turn is running queue behind it. Steer interrupts the running turn and delivers your message now. Pause holds the session, and Cancel ends it.
   </Step>
   <Step title="Answer the agent">
     When a tool needs approval, the session waits until you approve or reject it. When the agent asks a structured question, answer it in place and the same turn continues.
@@ -47,4 +48,4 @@ Enroll a laptop or server as a Connected Machine and target it when creating a s
 
 ## Call it from code
 
-Everything the web app does goes through the public API. See [Integrate your product](/guides/integrate-your-product) and the [SDK reference](/reference/sdk).
+Everything the web app does goes through the public API. See [Embed manually](/embed-manually) and the [SDK reference](/reference/sdk).

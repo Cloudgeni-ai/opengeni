@@ -15,7 +15,7 @@ The public documentation index is **https://docs.opengeni.ai/llms.txt**. Fetch
 it with the available web or HTTP tool, then read the relevant pages. Markdown
 pages are available by adding `.md`, for example:
 
-- Product integration: https://docs.opengeni.ai/guides/integrate-your-product.md
+- Product integration: https://docs.opengeni.ai/embed-manually.md
 - Authentication: https://docs.opengeni.ai/reference/authentication.md
 - SDK: https://docs.opengeni.ai/reference/sdk.md
 

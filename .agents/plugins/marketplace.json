@@ -1,0 +1,12 @@
+{
+  "name": "opengeni",
+  "interface": { "displayName": "OpenGeni" },
+  "plugins": [
+    {
+      "name": "opengeni",
+      "source": { "source": "local", "path": "./plugins/opengeni" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}

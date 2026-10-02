@@ -13,7 +13,7 @@ const headline = "The free model has reached its daily limit.";
 
 test("names the free model and every remedy the viewer can use", () => {
   expect(freeModelDailyLimitReason(all)).toBe(
-    `${headline} Buy OpenGeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.`,
+    `${headline} Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.`,
   );
 });
 
@@ -27,7 +27,7 @@ test("names only the subscriptions this deployment enables", () => {
   for (const [subscriptions, phrase, linkLabel] of cases) {
     expect(freeModelConnectRemedy(subscriptions)).toEqual({ phrase, linkLabel });
     expect(freeModelDailyLimitReason({ ...all, subscriptions })).toBe(
-      `${headline} Buy OpenGeni credits, ${phrase}, or pick another model to keep going.`,
+      `${headline} Buy Opengeni credits, ${phrase}, or pick another model to keep going.`,
     );
   }
   // Without either subscription, the connect remedy never names one.
@@ -46,7 +46,7 @@ test("lists only the remedies this viewer can act on", () => {
     `${headline} Connect ChatGPT or SuperGrok, or pick another model to keep going.`,
   );
   expect(freeModelDailyLimitReason({ ...all, canConnectModel: false })).toBe(
-    `${headline} Buy OpenGeni credits, or pick another model to keep going.`,
+    `${headline} Buy Opengeni credits, or pick another model to keep going.`,
   );
   expect(
     freeModelDailyLimitReason({

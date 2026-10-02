@@ -68,10 +68,13 @@ export function OpenGeniCreditsRow({
   credits,
   workspaceId,
   workspaceName,
+  scope,
 }: {
   credits: OpenGeniCredits;
   workspaceId: string;
   workspaceName: string;
+  /** "Everyone in Acme": credits belong to the whole organization. */
+  scope?: string | undefined;
 }) {
   const navigate = useNavigate();
   if (!credits.visible) return null;
@@ -86,9 +89,9 @@ export function OpenGeniCreditsRow({
     });
   return (
     <ListRow
-      leading={<LogoTile icon={<BrandMark className="text-fg" />} name="OpenGeni" />}
-      title="OpenGeni credits"
-      meta={["Pay as you go", credits.balanceLabel]}
+      leading={<LogoTile icon={<BrandMark className="text-fg" />} name="Opengeni" />}
+      title="Opengeni credits"
+      meta={[scope, "Pay as you go", credits.balanceLabel]}
       {...(credits.canOpenBilling ? { onOpen: openBilling, indicator: "open" as const } : {})}
     />
   );

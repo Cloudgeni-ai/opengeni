@@ -15,9 +15,12 @@ import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
+import { SectionFrameReset } from "@/components/ui/section-variant";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { AnalyticsAction } from "@/lib/analytics-actions";
+import { apiErrorTechnicalFacts, userErrorTextWithoutReference } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
 
 /* ----------------------------------------------------------------------------
@@ -103,8 +106,8 @@ export interface FormFrameProps {
   disabledReason?: ReactNode;
   /** Quiet content at the start of the footer, for example "Runs with your connected accounts." */
   footerStart?: ReactNode;
-  /** Replaces the Cancel and primary buttons entirely. */
-  footer?: ReactNode;
+  /** Replaces the Cancel and primary buttons entirely; false hides the footer (a step that waits). */
+  footer?: ReactNode | false;
   /** Close button in the header (dialog and sheet). Default true. */
   showClose?: boolean;
   /** Back link above the title (page only). */
@@ -119,9 +122,18 @@ export interface FormFrameProps {
   bodyClassName?: string;
 }
 
+/** What went wrong and what to do; an API error's status and reference go behind Technical details. */
 function errorMessage(error: unknown): ReactNode {
-  if (error instanceof Error && error.message) return error.message;
-  return "Something went wrong. Try again.";
+  const facts = apiErrorTechnicalFacts(error);
+  if (facts.length === 0) return userErrorTextWithoutReference(error);
+  return (
+    <>
+      {userErrorTextWithoutReference(error)}
+      <div className="mt-1">
+        <TechnicalDetails facts={facts} />
+      </div>
+    </>
+  );
 }
 
 const SUBMITTABLE =
@@ -258,49 +270,52 @@ export function FormFrame({
 
   const reason = submitDisabled && disabledReason && !pending ? disabledReason : null;
 
-  const actions = footer ?? (
-    <div
-      className={cn(
-        "flex shrink-0 items-center gap-2",
-        variant !== "inline" &&
-          "@max-[26rem]/form:w-full @max-[26rem]/form:flex-col-reverse @max-[26rem]/form:items-stretch",
-      )}
-    >
-      {cancelLabel !== null ? (
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={pending}
-          onClick={onCancel}
-          data-autofocus={initialFocus === "cancel" ? true : undefined}
-          className="pointer-coarse:h-11"
-        >
-          {cancelLabel}
-        </Button>
-      ) : null}
-      <Button
-        type="submit"
-        data-analytics-action={submitAnalyticsAction ?? undefined}
-        variant={tone === "destructive" ? "destructive" : "default"}
-        // Busy is not disabled: the primary keeps its colour and its focus while
-        // the spinner runs (a disabled button drops focus to the page), and a
-        // second press is ignored by the submit handler.
-        disabled={submitDisabled || loading}
-        aria-disabled={pending || undefined}
-        aria-describedby={reason ? reasonId : undefined}
-        className={cn("pointer-coarse:h-11", pending && "cursor-progress")}
-      >
-        {pending ? (
-          <>
-            <LoaderCircleIcon aria-hidden="true" className="motion-safe:animate-spin" />
-            {pendingLabel ?? submitLabel}
-          </>
-        ) : (
-          submitLabel
+  const actions =
+    footer || footer === false ? (
+      footer
+    ) : (
+      <div
+        className={cn(
+          "flex shrink-0 items-center gap-2",
+          variant !== "inline" &&
+            "@max-[26rem]/form:w-full @max-[26rem]/form:flex-col-reverse @max-[26rem]/form:items-stretch",
         )}
-      </Button>
-    </div>
-  );
+      >
+        {cancelLabel !== null ? (
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={pending}
+            onClick={onCancel}
+            data-autofocus={initialFocus === "cancel" ? true : undefined}
+            className="pointer-coarse:h-11"
+          >
+            {cancelLabel}
+          </Button>
+        ) : null}
+        <Button
+          type="submit"
+          data-analytics-action={submitAnalyticsAction ?? undefined}
+          variant={tone === "destructive" ? "destructive" : "default"}
+          // Busy is not disabled: the primary keeps its colour and its focus while
+          // the spinner runs (a disabled button drops focus to the page), and a
+          // second press is ignored by the submit handler.
+          disabled={submitDisabled || loading}
+          aria-disabled={pending || undefined}
+          aria-describedby={reason ? reasonId : undefined}
+          className={cn("pointer-coarse:h-11", pending && "cursor-progress")}
+        >
+          {pending ? (
+            <>
+              <LoaderCircleIcon aria-hidden="true" className="motion-safe:animate-spin" />
+              {pendingLabel ?? submitLabel}
+            </>
+          ) : (
+            submitLabel
+          )}
+        </Button>
+      </div>
+    );
 
   const start = reason ? (
     <p id={reasonId} className="flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-fg-muted">
@@ -435,43 +450,47 @@ export function FormFrame({
           </div>
         </div>
 
-        <footer
-          className={cn(
-            "flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-3 border-t border-border",
-            (variant === "dialog" || variant === "sheet") &&
-              "px-6 py-4 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch @max-[26rem]/form:px-5 max-sm:pb-[max(1rem,env(safe-area-inset-bottom))]",
-            variant === "page" && "sticky bottom-0 z-10 bg-bg",
-            variant === "inline" && "px-5 py-3",
-          )}
-        >
-          {variant === "page" ? (
-            <div className={cn(PAGE_FRAME, "py-4")}>
-              <div className="flex w-full max-w-[640px] flex-wrap items-center justify-end gap-x-4 gap-y-3 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch">
+        {footer === false ? null : (
+          <footer
+            className={cn(
+              "flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-x-4 gap-y-3 border-t border-border",
+              (variant === "dialog" || variant === "sheet") &&
+                "px-6 py-4 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch @max-[26rem]/form:px-5 max-sm:pb-[max(1rem,env(safe-area-inset-bottom))]",
+              // On a phone the stacked buttons would cover a fifth of the
+              // screen and the fields under them; there they follow the form.
+              variant === "page" && "sticky bottom-0 z-10 bg-bg max-sm:static",
+              variant === "inline" && "px-5 py-3",
+            )}
+          >
+            {variant === "page" ? (
+              <div className={cn(PAGE_FRAME, "py-4")}>
+                <div className="flex w-full max-w-[640px] flex-wrap items-center justify-end gap-x-4 gap-y-3 @max-[26rem]/form:flex-col @max-[26rem]/form:items-stretch">
+                  {start ? (
+                    <div className="min-w-0 flex-1 basis-48 @max-[26rem]/form:flex-none @max-[26rem]/form:basis-auto">
+                      {start}
+                    </div>
+                  ) : null}
+                  {actions}
+                </div>
+              </div>
+            ) : variant === "inline" ? (
+              // The buttons end where the field column ends, not at the panel edge.
+              <div className="flex w-full max-w-[560px] flex-wrap items-center justify-end gap-x-4 gap-y-3 mr-auto">
+                {start ? <div className="min-w-0 flex-1 basis-48">{start}</div> : null}
+                {actions}
+              </div>
+            ) : (
+              <>
                 {start ? (
                   <div className="min-w-0 flex-1 basis-48 @max-[26rem]/form:flex-none @max-[26rem]/form:basis-auto">
                     {start}
                   </div>
                 ) : null}
                 {actions}
-              </div>
-            </div>
-          ) : variant === "inline" ? (
-            // The buttons end where the field column ends, not at the panel edge.
-            <div className="flex w-full max-w-[560px] flex-wrap items-center justify-end gap-x-4 gap-y-3 mr-auto">
-              {start ? <div className="min-w-0 flex-1 basis-48">{start}</div> : null}
-              {actions}
-            </div>
-          ) : (
-            <>
-              {start ? (
-                <div className="min-w-0 flex-1 basis-48 @max-[26rem]/form:flex-none @max-[26rem]/form:basis-auto">
-                  {start}
-                </div>
-              ) : null}
-              {actions}
-            </>
-          )}
-        </footer>
+              </>
+            )}
+          </footer>
+        )}
       </form>
     </div>
   );
@@ -663,12 +682,14 @@ export function FormDialog({
           )}
         >
           <FormChromeContext.Provider value={DIALOG_CHROME}>
-            <FormFrame
-              variant="dialog"
-              {...frame}
-              {...overlay.frameProps}
-              className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
-            />
+            <SectionFrameReset>
+              <FormFrame
+                variant="dialog"
+                {...frame}
+                {...overlay.frameProps}
+                className={cn("flex-1 max-sm:rounded-b-none max-sm:border-b-0", className)}
+              />
+            </SectionFrameReset>
           </FormChromeContext.Provider>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>

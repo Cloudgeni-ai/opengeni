@@ -11,7 +11,23 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "session.status.changed",
   "session.requiresAction",
   "session.humanInput.requested",
+  "usage.threshold_reached",
+  "usage.exhausted",
+  "usage.period_reset",
 ] as const;
+
+/**
+ * Sent only when an administrator presses "Send test event". It is never a
+ * subscribable type: every endpoint can receive it, and a receiver that does
+ * not care acknowledges it with any 2xx.
+ */
+export const OPENGENI_WEBHOOK_TEST_EVENT_TYPE = "webhook.test";
+
+/**
+ * The session, turn and attempt ids of a credential-provider test request
+ * (`purpose: "test"`). A test is not a run, so no real ids exist.
+ */
+export const OPENGENI_TEST_REQUEST_NIL_ID = "00000000-0000-0000-0000-000000000000";
 
 export const OPENGENI_SIGNATURE_HEADER = "OpenGeni-Signature";
 export const OPENGENI_EVENT_ID_HEADER = "OpenGeni-Event-Id";

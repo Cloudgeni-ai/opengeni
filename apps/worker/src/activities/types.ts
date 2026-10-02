@@ -302,6 +302,8 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerRecoveryCount?: number;
   /** Safe classified provider cause paired with providerRecoveryCount. */
   providerFailureCode?: string;
+  /** Persist the no-replay setup marker, not a new provider/setup attempt. */
+  sandboxSetupOutcomeUnknown?: true;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
@@ -436,6 +438,7 @@ export type DispatchScheduledTaskRunInput = {
       triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
       agentRunUsageIdempotencyKey?: never;
       initiator?: never;
+      credentialRestriction?: never;
     }
   | {
       triggerType: Extract<
@@ -445,6 +448,8 @@ export type DispatchScheduledTaskRunInput = {
       agentRunUsageIdempotencyKey: string;
       /** Exact identity used by the API-side charge for this same trigger. */
       initiator: TurnInitiator;
+      /** Trusted API-side caller ceiling for this occurrence, not the schedule. */
+      credentialRestriction?: "developer_setup";
     }
 );
 
@@ -458,6 +463,7 @@ export type DispatchScheduledTaskRunResult =
       refusal?: import("@opengeni/contracts").ScheduledTaskAdmissionRefusal;
       reason:
         | "insufficient_credits"
+        | "allowance_exhausted"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
         | "malformed_manual_trigger"

@@ -289,13 +289,19 @@ export function ComputerViewer({
       : null;
   const rfbStream =
     frames.attachment?.stream.kind === "direct_rfb" ? frames.attachment.stream : null;
+  const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
+  // RFB has one combined input switch; partial native input stays view-only.
+  const rfbInputEnabled =
+    !machineLocked &&
+    computer.session?.capabilities?.pointerInput === true &&
+    computer.session?.capabilities?.keyboardInput === true;
   const rfbCapability = useMemo<DesktopStreamCapability | null>(() => {
     if (!rfbStream || !frames.attachment) return null;
     const bounds = computer.selectedTarget?.bounds;
     return {
       transport: "vnc-ws",
       client: "novnc",
-      mode: "interactive",
+      mode: rfbInputEnabled ? "interactive" : "read-only",
       url: rfbStream.url,
       token: null,
       expiresAt: frames.attachment.expiresAt,
@@ -307,8 +313,7 @@ export function ComputerViewer({
       sharedSessionIds: [],
       reason: null,
     };
-  }, [computer.selectedTarget?.bounds, frames.attachment, rfbStream]);
-  const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
+  }, [computer.selectedTarget?.bounds, frames.attachment, rfbInputEnabled, rfbStream]);
   const currentIds = useMemo(() => new Set(relevant.map((session) => session.id)), [relevant]);
 
   useEffect(() => {
@@ -452,7 +457,8 @@ export function ComputerViewer({
 
   const copyFromRfb = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
-      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return;
+      if (!rfbInputEnabled || !rfbStream || computer.session?.capabilities?.clipboard !== true)
+        return;
       event.preventDefault();
       event.stopPropagation();
       void perform({ type: "clipboard", operation: "copy" }, null)
@@ -464,12 +470,13 @@ export function ComputerViewer({
         })
         .catch((cause) => notifyError(cause, "Could not copy from the desktop."));
     },
-    [computer, notifyError, perform, rfbStream],
+    [computer, notifyError, perform, rfbInputEnabled, rfbStream],
   );
 
   const pasteIntoRfb = useCallback(
     (text: string): boolean => {
-      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return false;
+      if (!rfbInputEnabled || !rfbStream || computer.session?.capabilities?.clipboard !== true)
+        return false;
       // Keep paste on the canonical ComputerSession action path. RFB
       // ClientCutText synchronization varies by server and can acknowledge a
       // local paste without ever updating the remote graphical seat. These two
@@ -484,7 +491,7 @@ export function ComputerViewer({
       })().catch((cause) => notifyError(cause, "Could not paste into the desktop."));
       return true;
     },
-    [computer, notifyError, perform, rfbStream],
+    [computer, notifyError, perform, rfbInputEnabled, rfbStream],
   );
 
   const hideGenericCreate = suppressGenericCreate && liveRelevant.length === 0;
@@ -542,7 +549,7 @@ export function ComputerViewer({
               type="button"
               onClick={createError ? createComputer : () => void refreshRegistry()}
               disabled={creating || registry.refreshing}
-              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm bg-og-accent-deep px-3 text-og-control font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
+              className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 text-og-control font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
             >
               {creating || registry.refreshing ? (
                 <LoaderCircleIcon className="size-3.5 animate-spin" />
@@ -558,7 +565,12 @@ export function ComputerViewer({
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}>
+    <div
+      className={cn(
+        "@container/computer-viewer flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-og-bg",
+        className,
+      )}
+    >
       <ComputerToolbar
         sessions={liveSessions}
         relevantSessionIds={currentIds}
@@ -618,18 +630,23 @@ export function ComputerViewer({
                 .catch((cause) => notifyError(cause, "Could not switch desktop views."))
             }
           />
-          <div className="flex min-h-0 flex-1">
+          <div className="flex min-h-0 flex-1 flex-col @xl/computer-viewer:flex-row">
             {rfbStream ? (
               <div className="relative min-h-0 flex-1 bg-black" onCopyCapture={copyFromRfb}>
                 <DesktopViewer
                   capability={rfbCapability}
-                  interactive
+                  interactive={rfbInputEnabled}
                   showControlToggle={false}
                   webSocketProtocols={rfbStream.protocols}
                   onPasteText={pasteIntoRfb}
                   targetPlatform={computer.session?.platform ?? null}
                   className="h-full"
                 />
+                {!rfbInputEnabled ? (
+                  <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-black/70 px-3 py-1 text-[11px] text-white/80 backdrop-blur">
+                    View only · direct input unavailable
+                  </div>
+                ) : null}
               </div>
             ) : (
               <ComputerViewport
@@ -649,6 +666,8 @@ export function ComputerViewer({
                 backgroundActions={computer.session?.capabilities?.backgroundActions === true}
                 backgroundInput={computer.session?.capabilities?.backgroundInput === true}
                 clipboardEnabled={computer.session?.capabilities?.clipboard === true}
+                pointerInput={computer.session?.capabilities?.pointerInput === true}
+                keyboardInput={computer.session?.capabilities?.keyboardInput === true}
                 onAction={perform}
                 onReadClipboard={computer.readClipboard}
                 onReconnect={
@@ -677,7 +696,7 @@ export function ComputerViewer({
             connectionState={frames.state}
             refreshing={registry.refreshing}
             showControls={showControls}
-            controlCount={semanticNodes(computer.observation).length}
+            controlCount={semanticControls(computer.observation).length}
             onToggleControls={() => setShowControls((current) => !current)}
           />
         </>
@@ -1013,6 +1032,8 @@ function ComputerViewport(props: {
   backgroundActions: boolean;
   backgroundInput: boolean;
   clipboardEnabled: boolean;
+  pointerInput: boolean;
+  keyboardInput: boolean;
   onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
   onReadClipboard: () => Promise<ComputerClipboard>;
   onReconnect: () => void;
@@ -1074,6 +1095,9 @@ function ComputerViewport(props: {
     lastClickRef.current = null;
     if (inputRef.current) inputRef.current.value = "";
   }, []);
+
+  const pointerInputEnabled = rawInputEnabled && props.pointerInput;
+  const keyboardInputEnabled = rawInputEnabled && props.keyboardInput;
 
   const paintQueuedFrames = useCallback(() => {
     if (decodingFrameRef.current) return;
@@ -1164,11 +1188,11 @@ function ComputerViewport(props: {
   }, [clearBufferedInput, paintQueuedFrames, props.frame]);
 
   useLayoutEffect(() => {
-    if (!rawInputEnabled) {
+    if (!rawInputEnabled || !props.pointerInput || !props.keyboardInput) {
       actionQueueEpochRef.current += 1;
       clearBufferedInput();
     }
-  }, [clearBufferedInput, rawInputEnabled]);
+  }, [clearBufferedInput, props.keyboardInput, props.pointerInput, rawInputEnabled]);
 
   const enqueue = useCallback(
     (
@@ -1253,6 +1277,8 @@ function ComputerViewport(props: {
     if (!frame || props.mutating || !rawInputEnabled || event.button !== 0) return;
     // Preserve the keyboard sink's focus through the canvas pointer default action.
     event.preventDefault();
+    if (keyboardInputEnabled) inputRef.current?.focus({ preventScroll: true });
+    if (!pointerInputEnabled) return;
     flushPendingWheel();
     flushPendingText();
     pointerStartRef.current = {
@@ -1262,11 +1288,10 @@ function ComputerViewport(props: {
       frame,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    inputRef.current?.focus({ preventScroll: true });
   };
 
   const pointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!rawInputEnabled) return;
+    if (!pointerInputEnabled) return;
     const start = pointerStartRef.current;
     pointerStartRef.current = null;
     if (!start || start.pointerId !== event.pointerId) return;
@@ -1331,7 +1356,7 @@ function ComputerViewport(props: {
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
-    if (!rawInputEnabled) return;
+    if (!pointerInputEnabled) return;
     const frame = paintedFrameRef.current;
     if (!frame) return;
     flushPendingWheel();
@@ -1354,7 +1379,7 @@ function ComputerViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
-    if (!rawInputEnabled) return;
+    if (!pointerInputEnabled) return;
     const frame = paintedFrameRef.current;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
@@ -1382,7 +1407,7 @@ function ComputerViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!rawInputEnabled) return;
+    if (!keyboardInputEnabled) return;
     flushPendingWheel();
     const command = event.metaKey || event.ctrlKey;
     if (
@@ -1403,7 +1428,7 @@ function ComputerViewport(props: {
   };
 
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!props.clipboardEnabled || !rawInputEnabled) return;
+    if (!props.clipboardEnabled || !keyboardInputEnabled) return;
     event.preventDefault();
     flushPendingWheel();
     flushPendingText();
@@ -1420,7 +1445,7 @@ function ComputerViewport(props: {
   };
 
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!props.clipboardEnabled || !rawInputEnabled) return;
+    if (!props.clipboardEnabled || !keyboardInputEnabled) return;
     event.preventDefault();
     flushPendingWheel();
     flushPendingText();
@@ -1437,7 +1462,7 @@ function ComputerViewport(props: {
   };
 
   const input = (value: string) => {
-    if (!value || !rawInputEnabled) return;
+    if (!value || !keyboardInputEnabled) return;
     flushPendingWheel();
     flushPendingClick();
     const pending = pendingTextRef.current;
@@ -1467,7 +1492,7 @@ function ComputerViewport(props: {
         className={cn(
           "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           !showCanvas && "invisible",
-          !rawInputEnabled && "cursor-default",
+          !pointerInputEnabled && "cursor-default",
         )}
         onPointerDown={pointerDown}
         onPointerUp={pointerUp}
@@ -1490,7 +1515,7 @@ function ComputerViewport(props: {
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
-        disabled={!rawInputEnabled}
+        disabled={!keyboardInputEnabled}
       />
       {!showCanvas ? (
         <ComputerViewportFallback
@@ -1507,17 +1532,25 @@ function ComputerViewport(props: {
           <LoaderCircleIcon className="size-3 animate-spin" /> Acting
         </div>
       ) : null}
-      {showCanvas && !rawInputEnabled ? (
-        <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
-          <span>Background view · use native controls</span>
-          {props.target ? (
+      {showCanvas && (!rawInputEnabled || !props.pointerInput || !props.keyboardInput) ? (
+        <div className="absolute bottom-3 left-1/2 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
+          <span>
+            {!rawInputEnabled && (props.pointerInput || props.keyboardInput)
+              ? "Background view · use app controls"
+              : !props.pointerInput && !props.keyboardInput
+                ? "View only · mouse and keyboard unavailable"
+                : props.keyboardInput
+                  ? "Keyboard only · mouse unavailable"
+                  : "Mouse only · keyboard unavailable"}
+          </span>
+          {!rawInputEnabled && props.target && (props.pointerInput || props.keyboardInput) ? (
             <button
               type="button"
               disabled={props.mutating}
               onClick={() => enqueue({ type: "focus", targetId: props.target!.id }, null)}
-              className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
+              className="shrink-0 whitespace-nowrap rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
             >
-              Control directly
+              Bring to front
             </button>
           ) : null}
         </div>
@@ -1554,7 +1587,7 @@ function ComputerViewportFallback(props: {
     );
   }
   const controlFailure = interactionControlFailureFromError(props.error);
-  const interactive = semanticNodes(props.observation)
+  const interactive = semanticControls(props.observation)
     .filter((node) => semanticAction(node) !== null)
     .slice(0, 10);
   return (
@@ -1583,7 +1616,7 @@ function ComputerViewportFallback(props: {
         ) : null}
         {interactive.length > 0 ? (
           <div className="mt-3 border-t border-og-border pt-3">
-            <p className="mb-2 text-og-xs text-og-fg-subtle">Native controls remain available</p>
+            <p className="mb-2 text-og-xs text-og-fg-subtle">App controls remain available</p>
             <div className="flex flex-wrap gap-1.5">
               {interactive.map((node) => (
                 <button
@@ -1620,11 +1653,11 @@ function ComputerSemanticPanel(props: {
   mutating: boolean;
   onAction: (action: ComputerAction) => void;
 }) {
-  const nodes = semanticNodes(props.observation).slice(0, 100);
+  const nodes = semanticControls(props.observation).slice(0, 100);
   return (
-    <aside className="w-64 shrink-0 overflow-y-auto border-l border-og-border bg-og-surface-1 p-2">
+    <aside className="box-border max-h-[40%] w-full shrink-0 overflow-y-auto border-t border-og-border bg-og-surface-1 p-2 @xl/computer-viewer:max-h-none @xl/computer-viewer:w-64 @xl/computer-viewer:border-t-0 @xl/computer-viewer:border-l">
       <div className="mb-2 flex items-center gap-1.5 px-1 text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle">
-        <KeyboardIcon className="size-3" /> Native controls
+        <KeyboardIcon className="size-3" /> App controls
       </div>
       {nodes.length === 0 ? (
         <p className="px-1 py-2 text-og-control leading-5 text-og-fg-muted">
@@ -1742,7 +1775,7 @@ function ComputerStatusBar(props: {
           : props.session?.capabilities?.backgroundInput
             ? "Window · clicks and typing stay in the background"
             : props.session?.capabilities?.backgroundActions
-              ? "Window · semantic controls stay in the background"
+              ? "Window · app controls work in the background"
               : (props.target?.kind ?? "Desktop")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
@@ -1778,11 +1811,37 @@ function ComputerNotice(props: { icon: ReactNode; text: string; className?: stri
   );
 }
 
-function semanticNodes(observation: ComputerObservation | null): InteractionSemanticNode[] {
+const structuralRoles = new Set([
+  "frame",
+  "panel",
+  "section",
+  "document",
+  "document web",
+  "static",
+  "static text",
+  "heading",
+  "paragraph",
+  "notification",
+  "separator",
+  "tool bar",
+  "page tab list",
+]);
+
+function semanticControls(observation: ComputerObservation | null): InteractionSemanticNode[] {
   if (observation?.semantic?.kind !== "snapshot") return [];
   const result: InteractionSemanticNode[] = [];
   const visit = (node: InteractionSemanticNode) => {
-    result.push(node);
+    const role = node.role.trim().toLowerCase();
+    const label = node.name?.trim() || node.identifier?.trim();
+    if (
+      node.actions.includes("set_value") ||
+      (label &&
+        label.toLowerCase() !== role &&
+        !structuralRoles.has(role) &&
+        semanticAction(node) !== null)
+    ) {
+      result.push(node);
+    }
     node.children?.forEach(visit);
   };
   observation.semantic.roots.forEach(visit);

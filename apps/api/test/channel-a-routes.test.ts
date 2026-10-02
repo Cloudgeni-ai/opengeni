@@ -70,6 +70,11 @@ const CHANNEL_A_ROUTES: RouteSpec[] = [
     operation: "fs.read",
   },
   {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace",
+    permission: "files:read",
+    operation: "fs.read",
+  },
+  {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write",
     permission: "files:write",
     operation: "fs.write",
@@ -172,6 +177,17 @@ describe("P4.4 Channel-A route discipline", () => {
         `missing route ${route.path}`,
       ).toBe(true);
     }
+  });
+
+  test("workspace-only read forces confinement after authorization, even if the client opts out", () => {
+    const body = handlerBody(
+      sessionsRoute,
+      "post",
+      "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace",
+    );
+    expect(body).toContain("workspaceOnly: true");
+    expect(body.indexOf("channelAPreamble")).toBeLessThan(body.indexOf("parseChannelABody"));
+    expect(body).toContain("withChannelARead(");
   });
 
   for (const route of CHANNEL_A_ROUTES) {

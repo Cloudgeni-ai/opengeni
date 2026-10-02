@@ -17,6 +17,11 @@ import { useId, useState } from "react";
 import { CheckIcon, ChevronDownIcon, LoaderCircleIcon, LockIcon } from "lucide-react";
 import { RadioGroup as RadioGroupPrimitive, Select as SelectPrimitive } from "radix-ui";
 
+import {
+  MENU_CHECK_CLASS,
+  MENU_SEPARATOR_CLASS,
+  MENU_SURFACE_CLASS,
+} from "@/components/ui/menu-styles";
 import { cn } from "@/lib/utils";
 import { ReasonTooltip } from "@/components/ui/disabled-reason";
 import { FormDialog } from "@/components/ui/form-dialog";
@@ -113,13 +118,15 @@ export function needsEscalationConfirm<R extends string>(
   return Boolean(roles.find((role) => role.id === to)?.escalation);
 }
 
-// The same panel and options as the Select primitive (select-menu.tsx):
-// radius 16 panel, radius 10 options, brand tint and a check on the chosen one.
-const menuContent =
-  "z-50 max-h-(--radix-select-content-available-height) w-[min(19rem,calc(100vw-24px))] min-w-(--radix-select-trigger-width) overflow-hidden rounded-[16px] border border-border bg-surface text-fg shadow-og-md";
+// The one menu surface and option row (menu-styles.ts), as in select-menu.tsx:
+// the list carries the 6px inset, the chosen option a check on the right.
+const menuContent = cn(
+  MENU_SURFACE_CLASS,
+  "z-50 max-h-(--radix-select-content-available-height) w-[min(19rem,calc(100vw-24px))] min-w-(--radix-select-trigger-width) overflow-hidden p-0",
+);
 
 const menuItem =
-  "relative flex min-h-9 cursor-pointer flex-col items-start rounded-[10px] py-2 pr-9 pl-2.5 text-left outline-none select-none data-[disabled]:cursor-not-allowed data-[highlighted]:bg-surface-2 data-[state=checked]:bg-brand/5 data-[highlighted]:data-[state=checked]:bg-brand/10 pointer-coarse:min-h-11";
+  "relative flex min-h-8 cursor-pointer flex-col items-start rounded-[10px] py-1.5 pr-9 pl-2.5 text-left outline-none select-none data-[disabled]:cursor-not-allowed data-[highlighted]:bg-surface-2 pointer-coarse:min-h-11";
 
 // Field trigger: the Select primitive's look at 32px (rows) or 36px (forms).
 const fieldTrigger =
@@ -141,15 +148,13 @@ function MenuItem({
   return (
     <SelectPrimitive.Item value={value} disabled={disabled} className={menuItem}>
       <SelectPrimitive.ItemText>
-        <span
-          className={cn("text-sm font-medium", muted || disabled ? "text-fg-muted" : "text-fg")}
-        >
+        <span className={cn("text-sm", muted || disabled ? "text-fg-muted" : "text-fg")}>
           {label}
         </span>
       </SelectPrimitive.ItemText>
       <span className="mt-0.5 text-xs leading-4.5 text-fg-muted">{description}</span>
-      <SelectPrimitive.ItemIndicator className="absolute top-2.5 right-2.5">
-        <CheckIcon aria-hidden="true" className="size-4 text-brand" strokeWidth={2.25} />
+      <SelectPrimitive.ItemIndicator className="absolute top-2 right-2.5">
+        <CheckIcon aria-hidden="true" className={MENU_CHECK_CLASS} />
       </SelectPrimitive.ItemIndicator>
     </SelectPrimitive.Item>
   );
@@ -402,7 +407,7 @@ export function RoleSelect<R extends string>({
                     description={CUSTOM_ROLE_DESCRIPTION}
                     disabled
                   />
-                  <SelectPrimitive.Separator className="mx-1 my-1.5 h-px bg-border" />
+                  <SelectPrimitive.Separator className={MENU_SEPARATOR_CLASS} />
                 </>
               ) : null}
               {noAccessLabel ? (

@@ -55,6 +55,7 @@ import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
   EditableArtifactWebSocketTransport,
 } from "./editable-artifact-websocket";
+import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
@@ -235,6 +236,7 @@ export async function createTemporalWorkflowClient(
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
       initiator,
+      credentialRestriction,
       triggerType = "manual",
     }) => {
       // Deterministic workflowId (derived from the trigger token by the
@@ -255,6 +257,7 @@ export async function createTemporalWorkflowClient(
               triggerType,
               agentRunUsageIdempotencyKey,
               initiator,
+              ...(credentialRestriction ? { credentialRestriction } : {}),
             },
           ],
         });
@@ -449,7 +452,10 @@ export async function startApi(
       behavior: "http_and_websocket_fail_closed",
     });
   }
-  const artifactWebSockets = new EditableArtifactWebSocketTransport(routeDeps.editableArtifacts);
+  const artifactWebSockets = new EditableArtifactWebSocketTransport(
+    routeDeps.editableArtifacts,
+    editableArtifactSourceSessionAuthorizer(routeDeps),
+  );
   const interactionFrameProxies = new InteractionFrameProxyTransport(
     resolveFirstPartyDelegationSecret(settings),
   );
@@ -571,6 +577,8 @@ export async function startApi(
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await stopWorkspaceWebhookDispatchPump();
+      // Write queued presence before the database pool closes.
+      await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),

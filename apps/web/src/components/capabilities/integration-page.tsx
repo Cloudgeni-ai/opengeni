@@ -64,7 +64,7 @@ export function IntegrationPage({
       }
       title={model.name}
       status={model.chip.label}
-      meta={["Built by OpenGeni"]}
+      meta={["Built by Opengeni"]}
       actions={
         <IntegrationActions
           footer={model.footer}

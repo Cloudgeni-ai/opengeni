@@ -142,7 +142,7 @@ describe("Slack OAuth browser acceptance", () => {
       await waitForCondition(() => state.personalEnableRequests.length === 1);
       sheet = await openSlackSheet(page, "Connected");
       await expectText(sheet, "Your account");
-      await expectText(sheet, "What OpenGeni can see as you");
+      await expectText(sheet, "What Opengeni can see as you");
       await expectVisible(sheet.getByRole("button", { name: "Disconnect" }));
       expect(state.personalEnableRequests).toEqual([
         {
@@ -205,7 +205,7 @@ describe("Slack OAuth browser acceptance", () => {
       sheet = await openSlackSheet(page, "Connected");
       await expectText(sheet, "Installed");
       await expectText(sheet, "Slack Browser Workspace");
-      await expectText(sheet, "What OpenGeni can see");
+      await expectText(sheet, "What Opengeni can see");
       await expectText(sheet, "All public channels");
       expect(new URL(page.url()).search).toBe("");
       expect(state.connectionReads).toBeGreaterThanOrEqual(2);

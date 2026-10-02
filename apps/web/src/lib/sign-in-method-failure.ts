@@ -27,7 +27,7 @@ export function signInMethodFailure(error: unknown): {
   }
   const messages: Record<string, string> = {
     EMAIL_NOT_VERIFIED:
-      "Verify your OpenGeni account email before changing sign-in methods, then refresh this page.",
+      "Verify your Opengeni account email before changing sign-in methods, then refresh this page.",
     LAST_USABLE_METHOD:
       "You can't remove your last usable sign-in method. Connect another method or set a password first.",
     CURRENT_PASSWORD_REQUIRED:
@@ -37,7 +37,7 @@ export function signInMethodFailure(error: unknown): {
     PASSWORD_CHANGED:
       "Your password changed during this request. Sign in again with your current password before trying another change.",
     ACCOUNT_COLLISION:
-      "This provider account is connected to another OpenGeni account. Use a different provider account; accounts are not merged.",
+      "This provider account is connected to another Opengeni account. Use a different provider account; accounts are not merged.",
     ALREADY_CONNECTED:
       "This sign-in provider is already connected. Refresh to see your current methods.",
     NOT_CONNECTED:

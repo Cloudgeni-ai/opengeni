@@ -15,7 +15,9 @@ export { parseKnowledgeSearch } from "@/lib/knowledge-route";
    -------------------------------------------------------------------------- */
 
 export interface KnowledgeNavigation {
-  showTab: (tab: KnowledgeTab) => void;
+  showTab: (tab: KnowledgeTab, options?: { replace?: boolean }) => void;
+  /** Opens one change waiting in Review; `replace` moves on without a new history entry. */
+  openProposal: (key: string, options?: { replace?: boolean }) => void;
   /** Opens an entry's page; `from` is the tab its back link returns to. */
   openEntry: (entryId: string, options?: { revision?: string; from?: KnowledgeTab }) => void;
   openPage: (
@@ -40,7 +42,13 @@ export function useKnowledgeNavigation(workspaceId: string): KnowledgeNavigation
     [navigate, workspaceId],
   );
   const showTab = useCallback(
-    (tab: KnowledgeTab) => go(tab === "library" ? {} : { view: tab }),
+    (tab: KnowledgeTab, options: { replace?: boolean } = {}) =>
+      go(tab === "library" ? {} : { view: tab }, options.replace),
+    [go],
+  );
+  const openProposal = useCallback(
+    (proposal: string, options: { replace?: boolean } = {}) =>
+      go({ view: "review", proposal }, options.replace),
     [go],
   );
   const openEntry = useCallback(
@@ -65,7 +73,7 @@ export function useKnowledgeNavigation(workspaceId: string): KnowledgeNavigation
   const replace = useCallback((search: KnowledgeSearch) => go(search, true), [go]);
   // Stable across renders: pages depend on it in effects (legacy-link redirects).
   return useMemo(
-    () => ({ showTab, openEntry, openPage, replace }),
-    [showTab, openEntry, openPage, replace],
+    () => ({ showTab, openProposal, openEntry, openPage, replace }),
+    [showTab, openProposal, openEntry, openPage, replace],
   );
 }

@@ -15,7 +15,7 @@ The registry provides storage, service operations, HTTP and first-party MCP
 retrieval, SDK types, and isolation guarantees. Migration
 `0157_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
 at runtime and composes only bounded descriptors with workspace policy. Full
-content remains on-demand. The Agent Knowledge page provides a deliberately
+content remains on-demand. The Knowledge page provides a deliberately
 small human surface over these same governance routes: active Skill cards, an
 agent-assisted creation prompt, and a compact manual editor. It does not show
 inactive proposals, revision hashes, or lifecycle controls, and it does not add
@@ -186,8 +186,13 @@ A later correction, deactivation, expiry, or scope change cannot rewrite that
 snapshot or redirect its handle. Runtime reconstructs active state from the
 immutable lifecycle ledger at the logical turn's acceptance timestamp, so a
 turn queued before a later activation/deactivation retains its accepted
-descriptor set. Recovery attempts replay that same boundary. A new human turn,
-continuation, or compaction gets a new boundary and the then-current state.
+descriptor set. Recovery attempts copy the first immutable descriptor snapshot
+for that same turn and initiating human, including its exact encoding, hash,
+and truncation flag. Permanent Skill removal or a later descriptor-rendering
+change must not rebuild that accepted receipt. Removed revision content remains
+unavailable; snapshot replay never restores it or grants stale-attempt access.
+A new human turn, continuation, or compaction gets a new boundary and the
+then-current state.
 
 ## Runtime composition
 
@@ -220,7 +225,7 @@ expired rows that sort earlier.
 user-facing Skills surface. It lists active authorized records and permits a
 direct human to create and activate an explicit Skill. The full proposal and
 lifecycle API remains available for purpose-built governance clients, but is
-not presented in the default Agent Knowledge UI. Organization controls require
+not presented in the default Knowledge UI. Organization controls require
 the matching `account:admin` grant, workspace controls require
 `workspace:admin`, and personal controls remain self-only.
 

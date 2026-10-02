@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { DEVELOPER_SETUP_API_KEY_PRESET } from "@opengeni/contracts";
 import { CheckIcon, CopyIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -12,6 +13,7 @@ import { Disclosure } from "@/components/ui/disclosure";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
+import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
 import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
@@ -19,6 +21,12 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { StatusBadge } from "@/components/ui/status-badge";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
 import type { ApiKey } from "@/types";
 
@@ -39,9 +47,30 @@ export type OrganizationApiKeysSectionProps = {
    */
   view?: "new-key" | undefined;
   onViewChange?: (view: "new-key" | undefined) => void;
+  /** This server accepts agent settings: the quick start shows `agent`. */
+  agentSettings?: boolean;
 };
 
 const defaultKeyName = "Organization automation";
+
+type KeyAccessChoice = "full" | "read" | "developer_setup";
+const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
+  {
+    value: "full",
+    label: "Full access",
+    description: "Create, configure and run shared workspaces and manage their API keys.",
+  },
+  {
+    value: DEVELOPER_SETUP_API_KEY_PRESET.id,
+    label: DEVELOPER_SETUP_API_KEY_PRESET.label,
+    description: DEVELOPER_SETUP_API_KEY_PRESET.description,
+  },
+  {
+    value: "read",
+    label: "Read only",
+    description: "Read shared workspaces, sessions and files. Can't create or change anything.",
+  },
+];
 
 const COLUMNS: RowListColumn[] = [
   { id: "lastUsed", label: "Last used", width: 116 },
@@ -131,10 +160,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
       });
     } catch (error) {
       if (!mountedRef.current || mutationSequenceRef.current !== sequence) return;
-      throw new Error(
-        `Couldn't revoke ${apiKey.name}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
+      throw new Error(`Couldn't revoke ${apiKey.name}. ${userErrorText(error)}`, { cause: error });
     } finally {
       if (mountedRef.current && mutationSequenceRef.current === sequence) setBusyKeyId(null);
     }
@@ -157,7 +183,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
 
   const openCreate = () => setView("new-key");
   const createButton = (
-    <RowButton onClick={openCreate}>
+    <RowButton variant="default" onClick={openCreate}>
       <PlusIcon aria-hidden="true" />
       Create API key
     </RowButton>
@@ -166,7 +192,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
   const listed = canManage && apiKeysLoaded && !(apiKeysError && apiKeys.length === 0);
 
   let body;
-  if (!canManage) {
+  // A permission refusal reads the same as not having it: say who can, no Try again.
+  if (!canManage || (apiKeysError && apiKeys.length === 0 && isPermissionDenied(apiKeysError))) {
     body = (
       <Notice tone="muted" title="You can't manage organization API keys">
         Ask an organization owner to create or revoke them.
@@ -179,8 +206,9 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         title="Couldn't load organization API keys."
         announce
         action={<RowButton onClick={() => void refreshApiKeys()}>Try again</RowButton>}
+        {...apiErrorDetails(apiKeysError)}
       >
-        {apiKeysError.message}
+        {userErrorTextWithoutReference(apiKeysError)}
       </ErrorMessage>
     );
   } else if (!apiKeysLoaded) {
@@ -214,8 +242,9 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
             title="Couldn't refresh organization API keys."
             announce
             action={<RowButton onClick={() => void refreshApiKeys()}>Try again</RowButton>}
+            {...apiErrorDetails(apiKeysError)}
           >
-            {apiKeysError.message}
+            {userErrorTextWithoutReference(apiKeysError)}
           </ErrorMessage>
         ) : null}
         <RowList label="Organization API keys" columns={COLUMNS} nameLabel="Key" flush>
@@ -226,8 +255,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                 key={apiKey.id}
                 leading={<LogoTile icon={<KeyRoundIcon />} />}
                 title={apiKey.name}
-                titleAddon={
-                  keyStatus === "active" ? null : (
+                status={
+                  keyStatus === "active" ? undefined : (
                     <StatusBadge variant="dot" status={keyStatus}>
                       {keyStatus === "revoked" ? "Revoked" : "Expired"}
                     </StatusBadge>
@@ -283,7 +312,10 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         >
           {body}
         </Section>
-        <IntegrationGuide organizationId={props.organizationId} />
+        <IntegrationGuide
+          organizationId={props.organizationId}
+          agentSettings={props.agentSettings === true}
+        />
         <DestructiveConfirm
           open={revokingKey !== null}
           onOpenChange={(open) => {
@@ -320,6 +352,7 @@ function CreateApiKeyPage({
 }) {
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
+  const [access, setAccess] = useState<KeyAccessChoice>("full");
   const [nameError, setNameError] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -365,7 +398,7 @@ function CreateApiKeyPage({
         backLabel="Developer"
         onClose={onClose}
         title="Create API key"
-        description="For a server that creates and runs shared workspaces for your product. It can't open Personal workspaces or read secret values."
+        description="For server access to shared workspaces. It can't open Personal workspaces or read secret values."
         submitLabel="Create API key"
         pendingLabel="Creating…"
         onSubmit={async () => {
@@ -378,13 +411,14 @@ function CreateApiKeyPage({
             const created = await onCreate({
               name: trimmed,
               ...(description.trim() ? { description: description.trim() } : {}),
+              ...(access === "full" ? {} : { access }),
             });
             if (created === null) return false;
             setToken(created);
             return false;
           } catch (error) {
             throw new Error(
-              `The key wasn't created: ${error instanceof Error ? error.message : String(error)} Check your permission and plan limit, then try again.`,
+              `The key wasn't created. ${userErrorText(error, "Check your permission and plan limit, then try again.")}`,
               { cause: error },
             );
           }
@@ -412,6 +446,18 @@ function CreateApiKeyPage({
               onChange={(event) => setDescription(event.target.value)}
             />
           </Field>
+          <Field
+            label="Access"
+            hint={KEY_ACCESS_CHOICES.find((choice) => choice.value === access)?.description}
+          >
+            <SelectMenu
+              options={KEY_ACCESS_CHOICES}
+              value={access}
+              onValueChange={setAccess}
+              showMetaInTrigger={false}
+              className="w-full"
+            />
+          </Field>
         </FieldStack>
       </ModelsFormPage>
     </div>
@@ -419,8 +465,14 @@ function CreateApiKeyPage({
 }
 
 /** How an external product uses the key: collapsed, for the people who need it. */
-function IntegrationGuide({ organizationId }: { organizationId: string }) {
-  const quickStart = organizationQuickStart(organizationId);
+function IntegrationGuide({
+  organizationId,
+  agentSettings,
+}: {
+  organizationId: string;
+  agentSettings: boolean;
+}) {
+  const quickStart = organizationQuickStart(organizationId, agentSettings);
   const [copied, setCopied] = useState(false);
   return (
     <div className="min-w-0">
@@ -479,7 +531,35 @@ function IntegrationGuide({ organizationId }: { organizationId: string }) {
   );
 }
 
-function organizationQuickStart(organizationId: string): string {
+function organizationQuickStart(organizationId: string, agentSettings: boolean): string {
+  if (agentSettings) {
+    return `import { OpenGeniClient } from "@opengeni/sdk";
+
+const client = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
+
+const { workspace } = await client.ensureWorkspace({
+  accountId: "${organizationId}",
+  externalSource: "your-product",
+  externalId: tenant.id,
+  name: tenant.name,
+});
+
+const session = await client.createSession(workspace.id, {
+  initialMessage: userMessage,
+  idempotencyKey: productRequest.id,
+  agent: {
+    identity: "You are Acme's assistant. You help customers with their orders.",
+    // Start from nothing and turn on what this agent needs.
+    capabilities: { from: "none", webSearch: true, knowledge: true },
+  },
+  skills: selectedSkills,
+});
+
+// session.agent and session.effectiveTools show what it can do.`;
+  }
   return `import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({

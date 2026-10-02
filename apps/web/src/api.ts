@@ -8,10 +8,12 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
 } from "@opengeni/sdk/browser";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import { userActivityHeaders } from "./lib/user-activity";
 
 import type { AuthSession, ClientConfig } from "./types";
 import { beginAnalyticsRequest } from "./lib/analytics-observer";
 import { securityReauthenticationPath } from "./lib/sign-in-feedback";
+import { noteClientRequestFailure } from "./lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
@@ -182,7 +184,7 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBr
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
-    headers: () => authHeaders(),
+    headers: () => ({ ...authHeaders(), ...userActivityHeaders() }),
     fetch: async (input, init) => {
       const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
       if (actorBound) {
@@ -257,6 +259,9 @@ export async function managedActorFetch(
   init: RequestInit = {},
 ): Promise<Response> {
   let finishAnalytics: (status: number | null) => void = () => {};
+  // Same-origin API path, for the content-free failed-request signal.
+  let apiPathname: string | null = null;
+  let responseReceived = false;
   try {
     const requestUrl = new URL(
       typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
@@ -266,6 +271,7 @@ export async function managedActorFetch(
       init.credentials !== "omit" &&
       requestUrl.origin === new URL(apiBaseUrl || "/", window.location.origin).origin
     ) {
+      apiPathname = requestUrl.pathname;
       finishAnalytics = beginAnalyticsRequest(requestUrl.pathname, requestMethod(input, init));
     }
   } catch {
@@ -333,6 +339,7 @@ export async function managedActorFetch(
       headers,
       signal: controller.signal,
     });
+    responseReceived = true;
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -444,6 +451,7 @@ export async function managedActorFetch(
     );
   } catch (error) {
     finishAnalytics(null);
+    if (!responseReceived) noteClientRequestFailure(apiPathname, requestMethod(input, init), error);
     throw error;
   } finally {
     if (boundedRequestTimer !== null) clearTimeout(boundedRequestTimer);
@@ -833,6 +841,7 @@ export async function requestResponse(path: string, init?: RequestInit): Promise
       "content-type": "application/json",
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...authHeaders(),
+      ...userActivityHeaders(),
       ...init?.headers,
     },
   });
@@ -1169,17 +1178,17 @@ function showApiUpdateNotice(willReload: boolean): void {
   notice.id = "opengeni-api-update-notice";
   notice.setAttribute("role", "status");
   notice.textContent = willReload
-    ? "OpenGeni updated — reloading…"
-    : "OpenGeni updated. Reload this tab to continue.";
+    ? "Opengeni updated — reloading…"
+    : "Opengeni updated. Reload this tab to continue.";
   Object.assign(notice.style, {
     position: "fixed",
     inset: "16px 16px auto auto",
     zIndex: "2147483647",
-    border: "1px solid rgba(255,255,255,.14)",
+    border: "1px solid var(--og-color-border)",
     borderRadius: "10px",
-    background: "#17191d",
-    color: "#f5f7fa",
-    boxShadow: "0 12px 32px rgba(0,0,0,.35)",
+    background: "var(--og-color-surface-1)",
+    color: "var(--og-color-fg)",
+    boxShadow: "var(--og-shadow-lg)",
     font: "500 14px/1.4 Inter, system-ui, sans-serif",
     padding: "10px 14px",
   });

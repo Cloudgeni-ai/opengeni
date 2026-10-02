@@ -1,7 +1,7 @@
 import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
   assertOrganizationIntegrationAllowed,
-  type IntegrationSource,
+  type IntegrationSourceInput,
   type OrganizationIntegrationPolicy,
 } from "@opengeni/contracts";
 
@@ -10,10 +10,15 @@ import {
  */
 export function integrationSourceForOrganizationPolicy(
   policy: OrganizationIntegrationPolicy,
-  source: IntegrationSource,
-): IntegrationSource {
+  source: IntegrationSourceInput,
+): IntegrationSourceInput {
   const snapshot = structuredClone(source);
   if (policy.mode === "unrestricted") return snapshot;
+  // An inline document is a custom OpenAPI Integration under the same key.
+  if (snapshot.kind === "openapi_document") {
+    assertOrganizationIntegrationAllowed(policy, "custom:openapi");
+    return snapshot;
+  }
   if (snapshot.kind === "definition") {
     const definition = CORE_INTEGRATION_DEFINITIONS.find(
       (item) => item.id === snapshot.definitionId,

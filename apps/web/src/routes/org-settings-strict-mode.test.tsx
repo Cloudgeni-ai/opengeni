@@ -48,6 +48,8 @@ const getOrganizationUsageSummary = mock(
     buckets: [],
     workspaces: [],
     nextWorkspaceCursor: null,
+    personalWorkspaces: [],
+    personalWorkspaceCount: 0,
   }),
 );
 const getOrganizationUsageWorkspacePage = mock(
@@ -355,7 +357,7 @@ describe("organization billing StrictMode ownership", () => {
       period: "month",
       afterWorkspaceId: undefined,
     });
-    expect(container.textContent).toContain("No visible usage recorded in this period.");
+    expect(container.textContent).toContain("No usage recorded in this period.");
     expect(useBillingUsage).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Invoices and payment details");
     expect(container.textContent).not.toContain("OG-0042");
@@ -382,12 +384,17 @@ describe("organization billing StrictMode ownership", () => {
     await act(async () => period("This month").click());
     await flush();
     expect(usageSection.textContent).toContain("Couldn't load period usage");
-    expect(usageSection.textContent).not.toContain("No visible usage recorded");
+    expect(usageSection.textContent).toContain("Try again. If it keeps happening");
+    // The server's own message stays behind Technical details.
+    expect(usageSection.textContent!.split("Technical details")[0]).not.toContain(
+      "usage unavailable",
+    );
+    expect(usageSection.textContent).not.toContain("No usage recorded");
 
     await act(async () => button(container, "Add credits").click());
     await flush();
     expect(createBillingCheckout).toHaveBeenCalledTimes(1);
-    expect(toastError).toHaveBeenCalledWith("Checkout failed", {
+    expect(toastError).toHaveBeenCalledWith("Couldn't open checkout", {
       description: "bounded checkout failure",
     });
     expect(button(container, "Add credits").disabled).toBe(false);
@@ -422,6 +429,8 @@ describe("organization billing StrictMode ownership", () => {
       buckets: [],
       workspaces: [{ workspaceId, name: "First page workspace", totals: [total] }],
       nextWorkspaceCursor: workspaceId,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
     }));
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -431,7 +440,7 @@ describe("organization billing StrictMode ownership", () => {
     );
     await flush();
     expect(container.textContent).toContain("First page workspace");
-    await act(async () => button(container, "Next workspaces").click());
+    await act(async () => button(container, "Show more workspaces").click());
     await flush();
     expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
     expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
@@ -441,12 +450,13 @@ describe("organization billing StrictMode ownership", () => {
       until: timestamp,
       afterWorkspaceId: workspaceId,
     });
+    // More workspaces add to the list; the first page stays.
     expect(container.textContent).toContain("Second page workspace");
+    expect(container.textContent).toContain("First page workspace");
     // Amounts read in cents; a sliver under a cent says so instead of $0.00.
     expect(container.textContent).toContain("< $0.01");
     expect(container.textContent).not.toContain("$0.000100");
-    await act(async () => button(container, "First workspaces").click());
-    expect(container.textContent).toContain("First page workspace");
+    expect(container.textContent).not.toContain("Show more workspaces");
     expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
     expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
     await act(async () => root.unmount());
@@ -649,9 +659,11 @@ describe("organization billing StrictMode ownership", () => {
         root.render(<OrgSettingsRoute workspaceId={workspaceId} section="models" />),
       );
       // Models is hidden outside an organization administrator session, and a
-      // direct link lands on the first page this person can use.
-      expect(container.textContent).not.toContain("Models");
-      expect(container.textContent).toContain("Identity and mission");
+      // direct link says who manages models instead of opening another page.
+      expect(container.textContent).toContain(
+        "Only admins manage models. Ask an admin to add one.",
+      );
+      expect(container.textContent).not.toContain("Identity and mission");
       expect(container.textContent).not.toContain("Connect account");
       expect(container.querySelector("#organization-model-connections-heading")).toBeNull();
       expect(

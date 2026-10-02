@@ -59,16 +59,31 @@ Retries and errors work like this:
 ## code_search
 
 `runCodeSearch({question, keywords, subQuestions?, paths?, workspace, jev, signal?, budgetTokens?})`
-ports the validated research tool scout-0.3.1. The ranking, thresholds and defaults
-(`DEFAULT_CODE_SEARCH_CONFIG`) are unchanged. The pipeline has five stages:
+is scout-0.4. It keeps the recall, triage and verification defaults of the validated research tool
+scout-0.3.1, and adds the stages that let an agent read less irrelevant code without reading less relevant code.
+The pipeline:
 
 1. **Recall:** one ripgrep pass over the keyword variants, then IDF scoring per file.
 2. **Wave 1:** Jev triages the candidate files, with a lexical guard that keeps the top lexical files.
-3. **Wave 2:** Jev verifies line-numbered passages, including coverage of each sub-question.
-4. **Wave 3:** Jev scores one round of leads (definitions referenced by the evidence), and the chosen
-   definitions are verified the same way.
-5. **Pack:** the verified passages are packed within the token budget (12,000 by default), and one
-   Jev sufficiency check sets the status.
+3. **Symbols** (in parallel with wave 2): Jev judges a shortlist of the identifiers that the selected
+   files declare, import, call or render. For the chosen ones, one ripgrep pass finds definitions and
+   usages, and the files they lead to join the evidence.
+4. **Wave 2:** Jev verifies line-numbered passages, including coverage of each sub-question.
+   - The most relevant small files are tiled whole, so every declaration is judged.
+   - A "must change together" question covers up to 60 functions of the top files, each shown by its
+     signature and the calls it makes.
+5. **Wave 3:** Jev scores one round of leads (definitions named by the evidence). It verifies the chosen
+   definitions, up to 3 call sites per lead, and the symbol windows in one round.
+6. **Pack:** the verified passages are packed within the token budget (12,000 by default).
+   - Small relevant files are shown whole, and nearby passages are joined.
+   - Import-only spans rank lower.
+   - Each sub-question's best passage comes first, even when that sub-question is weak.
+   - One Jev check sets the evidence rating. A low rating follows more leads once, and a middling one
+     refills the budget.
+7. **Footer:** the relevant files with the line ranges and declarations the pack did not show, then every
+   limit that cut something (files, regions, passages, identifiers, call sites, the budget), then leads
+   not followed and keywords that matched nothing or only irrelevant files, with similar real
+   identifiers.
 
 `text` is the rendered pack. Its first line is a status header such as
 `code_search: evidence rating 0.55 (s1 0.81) | 9 passages from 6 files, ~7.9k tokens | 3.1s`.
@@ -118,6 +133,8 @@ The package exports the pieces the worker needs to register the tool:
 - `renderCodeSearchError`, which turns a failure into short model-facing text.
 
 ### Changes from scout-0.3.1
+
+- scout-0.4 adds symbol discovery, whole-file tiling, the change-together judgment, call sites of leads, the adaptive pack and the gap-reporting footer (above). `.opengeni/` sandbox state is never searched.
 
 - There is no lexical judge and no whole-run lexical fallback.
 - There are no Jev caches, file traces, CPU accounting or CLI. The optional `onStage` callback

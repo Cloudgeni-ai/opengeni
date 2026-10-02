@@ -1,3 +1,8 @@
+import {
+  getWorkspaceProviderApiKeyConnectionMetadata,
+  listWorkspaceProviderCustomModels,
+} from "@opengeni/db";
+import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
@@ -19,6 +24,7 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  AgentConfigError,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
   WorkspaceGatewayCustomModel,
@@ -36,6 +42,7 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
+import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   createWorkspace,
@@ -90,6 +97,8 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  requireApiKeyDelegationContext,
+  isDeveloperSetupApiKeyContext,
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
@@ -127,6 +136,7 @@ import {
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   sandboxImageAllowlist,
+  agentConfigDeploymentPolicy,
   type Settings,
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
@@ -257,6 +267,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(await requireAccessContext(c, deps));
   });
 
+  app.get("/v1/workspaces/:workspaceId/access/grant", async (c) => {
+    // Inventory may be empty for an external actor. Resolve the selected
+    // workspace through the canonical membership/key-ceiling boundary.
+    const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"));
+    c.header("cache-control", "private, no-store");
+    return c.json(grant);
+  });
+
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
     const externalWorkspaces = await listExternalActorWorkspaces(context, deps);
@@ -378,14 +396,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
-      await grantWorkspaceAccess(deps.db, {
-        accountId,
-        workspaceId: workspace.id,
-        subjectId: context.subjectId,
-        role: "owner",
-        permissions: allWorkspacePermissions,
-        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
-      });
+      // Setup keys already have canonical same-organization workspace access.
+      // Do not widen that ceiling with an all-permissions creator membership.
+      if (!isDeveloperSetupApiKeyContext(context)) {
+        await grantWorkspaceAccess(deps.db, {
+          accountId,
+          workspaceId: workspace.id,
+          subjectId: context.subjectId,
+          role: "owner",
+          permissions: allWorkspacePermissions,
+          ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        });
+      }
       return c.json(Workspace.parse(workspace), 201);
     } catch (error) {
       if (error instanceof WorkspaceLimitExceededError) {
@@ -457,6 +479,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid workspace settings patch",
       });
     }
+    if (
+      parsed.data.sessionAgentDefaults !== undefined &&
+      !agentConfigDeploymentPolicy(deps.settings).admissionEnabled
+    ) {
+      throw new AgentConfigError(
+        "agent_config_not_enabled",
+        "agent configuration is not enabled on this deployment",
+      );
+    }
     const requestedImage = parsed.data.defaultSandboxImage;
     if (requestedImage && !sandboxImageAllowlist(deps.settings).includes(requestedImage)) {
       throw new HTTPException(422, {
@@ -495,11 +526,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const catalogSettings = deps.resolveCatalogSettings();
     const [
       connectionModelRestrictions,
       resolvedCatalog,
       policy,
       codexSubscriptionActive,
+      codexModelAvailability,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
       workspaceGatewayCustomModels,
@@ -512,9 +545,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
-      deps.resolveCatalogSettings(),
+      catalogSettings,
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+      catalogSettings.then(({ settings }) =>
+        loadWorkspaceCodexModelAvailability(deps.db, settings, workspaceId),
+      ),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
       listWorkspaceGatewayCustomModels(deps.db, {
@@ -548,10 +584,42 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
+    const claudeConnections: ClaudeConnectionCatalog = {};
+    const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+    await Promise.all(
+      CLAUDE_CONNECTION_KINDS.map(async (kind) => {
+        if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled) return;
+        const [active, models] = await Promise.all([
+          organizationModelProviderConnectionActiveForWorkspace(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+        ]);
+        claudeConnections[kind] = { active, models };
+        const [metadata, workspaceModels] = await Promise.all([
+          getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, kind),
+          listWorkspaceProviderCustomModels(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKind: kind,
+          }),
+        ]);
+        workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
+      }),
+    );
     const selections = resolveWorkspaceModelSelection({
+      claudeConnections,
+      workspaceClaudeConnections,
       connectionModelRestrictions,
       settings: resolvedCatalog.settings,
       policy,
+      observations: codexModelAvailability,
       codexSubscriptionActive,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
@@ -1110,6 +1178,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     let candidates: WorkspaceMemberCandidate[];
     try {
       candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
@@ -1162,6 +1231,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {

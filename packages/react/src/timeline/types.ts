@@ -1,4 +1,5 @@
 import type {
+  AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
   MediaGenerationResult,
@@ -56,6 +57,7 @@ export type UserMessageItem = {
         state: "sending" | "queued" | "failed";
         error?: string | undefined;
         onRetry?: (() => void) | undefined;
+        onEdit?: (() => void) | undefined;
         onRemove?: (() => void) | undefined;
       }
     | undefined;
@@ -391,6 +393,12 @@ export type NoticeItem = {
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
+  /**
+   * A usage ceiling refused further work. `text` keeps the canonical sentence
+   * for plain-text consumers; `MessageTimeline` renders this structured row
+   * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
+   */
+  allowance?: AllowanceExhaustedRefusal;
   occurredAt: string;
 };
 
@@ -508,6 +516,8 @@ export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
   kind: "turn-end";
+  /** A durable Retry reopened this failed logical turn; its failure is history. */
+  resumedAt?: string;
   /** Keep an existing answer visible when a recorded input wait ends without final output. */
   preserveWaitResponse?: true;
   id: string;
@@ -565,7 +575,7 @@ export type TimelineGroup =
       items: ActivityItem[];
       outcome?: TurnOutcome;
       failureText?: string;
-      /** A single readable turn: only work and compacted context enter its details. */
+      /** One turn's chronological work history, including progress prose after settlement. */
       work?: {
         startedAt: string;
         endedAt?: string;

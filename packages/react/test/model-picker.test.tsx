@@ -166,7 +166,7 @@ describe("ModelPicker", () => {
         id: "gpt-5.6-sol",
         label: "Sol",
         billingClass: "opengeni_credits" as const,
-        billingClassLabel: "OpenGeni",
+        billingClassLabel: "Opengeni",
         selectable: true,
         unavailableReason: null,
         provider: "openai",
@@ -228,7 +228,7 @@ describe("ModelPicker", () => {
     );
     const select = picker(container)!;
     const groups = [...select.querySelectorAll("optgroup")];
-    expect(groups.map((group) => group.label)).toEqual(["OpenGeni", "Bring your own key"]);
+    expect(groups.map((group) => group.label)).toEqual(["Opengeni", "Bring your own key"]);
     const blocked = [...select.querySelectorAll("option")].find(
       (option) => option.value === "blocked",
     );

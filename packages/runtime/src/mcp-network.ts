@@ -1,3 +1,4 @@
+import { beginMcpPhase, traceparent } from "@opengeni/observability";
 import type { Settings } from "@opengeni/config";
 import { CODEMODE_ARGUMENTS_MAX_BYTES, MCP_MAX_CATALOG_TOOL_ENTRIES } from "@opengeni/contracts";
 import {
@@ -597,61 +598,94 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
       requireHttpsOutsideLocalTest: options.requireHttpsOutsideLocalTest ?? true,
     };
     let response: Response;
+    const observation = beginMcpPhase("network_headers");
+    // RequestInit headers replace Request headers in Fetch; do not accidentally
+    // restore a credential the caller deliberately omitted from an override.
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    headers.delete("traceparent");
+    headers.delete("tracestate");
+    headers.delete("baggage");
+    const parent = observation.traceContext && traceparent(observation.traceContext);
+    if (parent) headers.set("traceparent", parent);
+    const tracedInit = { ...init, headers };
     try {
       if (options.pinResolvedDestination === false) {
         await resolvePinnedDestination(input instanceof Request ? input.url : input, settings, {
           ...destinationOptions,
         });
-        response = await fetchImpl(input, { ...init, redirect: "manual" });
+        response = await observation.run(() =>
+          fetchImpl(input, { ...tracedInit, redirect: "manual" }),
+        );
       } else {
-        response = await pinnedFetch(input, init, settings, {
-          ...(options.usePinnedRequestTransport ? {} : { fetchImpl: fetchImpl as FetchLike }),
-          ...destinationOptions,
-        });
+        response = await observation.run(() =>
+          pinnedFetch(input, tracedInit, settings, {
+            ...(options.usePinnedRequestTransport ? {} : { fetchImpl: fetchImpl as FetchLike }),
+            ...destinationOptions,
+          }),
+        );
       }
+      observation.end(response.ok ? "completed" : "rejected");
     } catch (error) {
+      observation.end("failed");
       recordMcpTransportRequestFailure(error, {
         httpMethod,
         ...(rpcMethod ? { rpcMethod } : {}),
       });
       throw error;
     }
-    return boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES);
+    return observation.run(() =>
+      boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES),
+    );
   };
 }
 
 export function boundMcpResponseBody(response: Response, maxBytes: number): Response {
+  const observation = beginMcpPhase("network_body");
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    observation.end("rejected");
     void response.body?.cancel().catch(() => undefined);
     throw new McpPayloadTooLargeError("MCP response", declaredLength, maxBytes);
   }
   if (!response.body) {
+    observation.end();
     return response;
   }
 
-  const reader = response.body.getReader();
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = response.body.getReader();
+  } catch (error) {
+    observation.end("failed");
+    throw error;
+  }
   let receivedBytes = 0;
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const chunk = await reader.read();
         if (chunk.done) {
+          observation.end();
           controller.close();
           return;
         }
         receivedBytes += chunk.value.byteLength;
         if (receivedBytes > maxBytes) {
+          observation.end("rejected");
           await reader.cancel().catch(() => undefined);
           controller.error(new McpPayloadTooLargeError("MCP response", receivedBytes, maxBytes));
           return;
         }
         controller.enqueue(chunk.value);
       } catch (error) {
+        observation.end("failed");
         controller.error(error);
       }
     },
     async cancel(reason) {
+      observation.end("cancelled");
       await reader.cancel(reason).catch(() => undefined);
     },
   });

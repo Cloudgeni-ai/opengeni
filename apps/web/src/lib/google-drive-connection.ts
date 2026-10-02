@@ -12,10 +12,10 @@ export const GOOGLE_DRIVE_APP_DESCRIPTION =
   "Browse selected folders and Shared Drives for read-only knowledge sync.";
 
 export const GOOGLE_DRIVE_ACCESS_DISCLOSURE =
-  "For source sync, OpenGeni requests read-only Google Drive access to browse folders and Shared Drives and, only after you enable synchronization, import supported files within the boundaries you select. OAuth tokens stay encrypted on the server. Without separate publishing consent, OpenGeni cannot create, edit, or delete files in Drive.";
+  "For source sync, Opengeni requests read-only Google Drive access to browse folders and Shared Drives and, only after you enable synchronization, import supported files within the boundaries you select. OAuth tokens stay encrypted on the server. Without separate publishing consent, Opengeni cannot create, edit, or delete files in Drive.";
 
 export const GOOGLE_DRIVE_PUBLISHING_DISCLOSURE =
-  "Publishing is optional and requests separate drive.file consent. OpenGeni publishes only completed editable-artifact exports into the output folder you explicitly configure; connector actions ask before writing by default. This consent does not widen source-sync boundaries.";
+  "Publishing is optional and requests separate drive.file consent. Opengeni publishes only completed editable-artifact exports into the output folder you explicitly configure; connector actions ask before writing by default. This consent does not widen source-sync boundaries.";
 
 export const GOOGLE_DRIVE_SYNC_BEHAVIOR =
   "The first sync inventories existing supported files. Later scheduled runs rescan the selected boundaries and skip unchanged revisions; Google Changes API eventing is not enabled.";

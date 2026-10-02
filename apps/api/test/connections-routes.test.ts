@@ -608,6 +608,47 @@ describe("connections routes", () => {
     );
   });
 
+  test("a brokered api_key credential must carry headers or placements", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const create = (credential: Record<string, unknown>) =>
+      app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ providerDomain: "api.example.com", kind: "api_key", credential }),
+      });
+
+    const bare = await create({ apiKey: "Token fixture" });
+    expect(bare.status).toBe(422);
+    const bareText = await bare.text();
+    expect(bareText).toContain("headers");
+    expect(bareText).not.toContain("Token fixture");
+
+    const placed = await create({
+      placements: [
+        { carrier: "header", name: "Authorization", value: "fixture", prefix: "Token " },
+      ],
+    });
+    expect(placed.status).toBe(201);
+    const { connection } = (await placed.json()) as { connection: { id: string } };
+
+    const rotate = (credential: Record<string, unknown>) =>
+      app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ credential }),
+      });
+    expect((await rotate({ apiKey: "Token rotated" })).status).toBe(422);
+    expect((await rotate({ headers: { Authorization: "Token rotated" } })).status).toBe(200);
+  });
+
   test("the MCP OAuth callback refuses a legacy in-flight personal state", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

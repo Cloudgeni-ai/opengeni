@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AuthNeededItem } from "@opengeni/react";
 import { useAppContext } from "@/context";
+import { apiErrorFacts, userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,10 +111,13 @@ export function SessionCustomMcpCard({ item, workspaceId, onRegistered }: Props)
       } catch {
         // Preserve the uncertainty in the visible error below.
       }
+      // A refusal or a rejected field is final, so say what to change. Anything
+      // else (a lost response, a server failure) may have committed.
+      const status = apiErrorFacts(failure).status;
       setError(
-        failure instanceof Error
-          ? `${failure.message} Check Connections before trying again; the request may have succeeded.`
-          : "Could not verify setup. Check Connections before trying again.",
+        status !== undefined && status < 500
+          ? `Couldn't add this server. ${userErrorText(failure)}`
+          : "Couldn't confirm this server was added. Check Connections before trying again; the request may have succeeded.",
       );
     } finally {
       setBusy(false);

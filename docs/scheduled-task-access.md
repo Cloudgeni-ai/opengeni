@@ -17,6 +17,29 @@ tools are absent, or the account it chose was disconnected. This page describes
 how OpenGeni shows that, how the owner refreshes it, and how the owner learns
 that a run could not use a connector.
 
+## Changing model defaults without replacing configuration
+
+`scheduled_tasks_update`, the scheduled-task HTTP PATCH route and the SDK's
+`updateScheduledTask` accept `agentConfigPatch: { model?, reasoningEffort? }`.
+Supply at least one field. Omitted fields stay unchanged; null, unrelated fields,
+and combining the patch with a full `agentConfig` replacement are rejected.
+The server merges against the complete stored configuration. Never reconstruct
+`agentConfig` from `scheduled_tasks_get`: that tool returns bounded text and
+previews, not a lossless replacement document.
+
+The ordinary owner, model-policy, Variable Set and connection-authority checks
+still apply. A model-only patch does not refresh tool/account selections, rewrite
+prompts or metadata, unpause the task, or change its schedule. A concurrent
+execution-config edit returns 409 instead of overwriting it; read the task again
+before deciding whether to submit a new update.
+
+These are defaults for newly created sessions. An `existing_session` target or
+an already-created `reusable_session` retains its own model and reasoning;
+the MCP receipt warns about that. Change that session separately when intended.
+Already-admitted occurrences retain their frozen execution settings. Text in a
+launcher prompt naming a child model is also unchanged; editing that instruction
+is a separate content change, not an effect of changing these defaults.
+
 ## Who owns a schedule
 
 A schedule's owner is the person who saved it: a managed human (or a verified

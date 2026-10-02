@@ -9,6 +9,11 @@ import { Notice } from "@/components/ui/notice";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
+import {
+  apiErrorDetails,
+  isPermissionDenied,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "@/routes/workspace-state-loader";
 import type { CompanyProfileAgentPolicy, CompanyProfileAgentPolicyMode } from "@/types";
@@ -104,8 +109,9 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
             title="Couldn't load whether agents can change the identity."
             announce
             action={<RowButton onClick={() => void load()}>Try again</RowButton>}
+            {...apiErrorDetails(error)}
           >
-            {error.message}
+            {userErrorTextWithoutReference(error)}
           </ErrorMessage>
         ) : loading || !policy ? (
           <div role="status" aria-label="Loading agent changes…">
@@ -136,8 +142,13 @@ function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
               </Notice>
             ) : null}
             {error ? (
-              <ErrorMessage variant="inline" title="Couldn't save that." announce>
-                {error.message}
+              <ErrorMessage
+                variant="inline"
+                title="Couldn't save that."
+                announce
+                {...apiErrorDetails(error)}
+              >
+                {userErrorTextWithoutReference(error)}
               </ErrorMessage>
             ) : null}
             <p role="status" className="text-xs leading-[18px] text-fg-muted empty:hidden">
@@ -175,6 +186,12 @@ function CurrentIdentitySection({
         <SettingRowSkeleton />
       </div>
     );
+  } else if (inventory.error && !inventory.response && isPermissionDenied(inventory.error)) {
+    body = (
+      <Notice title="You can't see the organization identity.">
+        Ask an organization owner or admin for access.
+      </Notice>
+    );
   } else if (inventory.error && !inventory.response) {
     body = (
       <ErrorMessage
@@ -182,8 +199,9 @@ function CurrentIdentitySection({
         title="Couldn't load the organization identity."
         announce
         action={<RowButton onClick={() => void inventory.reload()}>Try again</RowButton>}
+        {...apiErrorDetails(inventory.error)}
       >
-        {inventory.error.message}
+        {userErrorTextWithoutReference(inventory.error)}
       </ErrorMessage>
     );
   } else if (!profile) {
@@ -193,7 +211,7 @@ function CurrentIdentitySection({
         title="No identity yet."
         description={
           canManage
-            ? "Describe the organization below and OpenGeni drafts a short version for you to check."
+            ? "Describe the organization below and Opengeni drafts a short version for you to check."
             : "An organization owner can add one."
         }
       />
@@ -234,8 +252,13 @@ function CurrentIdentitySection({
           </Notice>
         ) : null}
         {inventory.error && inventory.response ? (
-          <ErrorMessage variant="inline" title="Couldn't refresh the identity." announce>
-            {inventory.error.message}
+          <ErrorMessage
+            variant="inline"
+            title="Couldn't refresh the identity."
+            announce
+            {...apiErrorDetails(inventory.error)}
+          >
+            {userErrorTextWithoutReference(inventory.error)}
           </ErrorMessage>
         ) : null}
       </div>
@@ -261,9 +284,12 @@ export function OrganizationIdentityPage({
     <SectionStack>
       <CurrentIdentitySection workspaceId={workspaceId} canManage={canManage} />
       {canManage ? (
+        // The request field is the card here: an open section keeps the
+        // textarea from becoming a box inside a box.
         <Section
-          title="Write it with OpenGeni"
-          description="OpenGeni keeps it to identity and mission, asks only what it needs, and shows you the result before saving."
+          variant="open"
+          title="Write it with Opengeni"
+          description="Opengeni keeps it to identity and mission, asks only what it needs, and shows you the result before saving."
         >
           <OrganizationKnowledgePrompt workspaceId={workspaceId} />
         </Section>

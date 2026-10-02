@@ -10,6 +10,7 @@ import {
   isWorkspaceKeyPermission,
   keyDateLabel,
   permissionLabel,
+  presetById,
   presetFor,
 } from "./api-key-presets";
 
@@ -27,6 +28,25 @@ describe("workspace API key presets", () => {
       for (const permission of preset.permissions) {
         expect(isWorkspaceKeyPermission(permission)).toBe(true);
       }
+    }
+  });
+
+  test("All permissions is exactly the supported workspace set, distinct from automation", () => {
+    const all = presetById("all_permissions");
+    expect([...all.permissions].sort()).toEqual(
+      Permission.options.filter(isWorkspaceKeyPermission).sort(),
+    );
+    expect(presetFor([...all.permissions].reverse())).toBe("all_permissions");
+    expect(accessLabel(all.permissions)).toBe("All permissions");
+    for (const permission of [
+      "workspace:admin",
+      "members:manage",
+      "api_keys:manage",
+      "secrets:read",
+      "variable-sets:read",
+    ]) {
+      expect(all.permissions).toContain(permission);
+      expect(presetById("full_automation").permissions).not.toContain(permission);
     }
   });
 

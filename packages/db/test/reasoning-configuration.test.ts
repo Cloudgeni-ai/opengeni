@@ -12,6 +12,7 @@ import {
   applySessionTurnSettlement,
   applyContextCompaction,
   requestSessionCompaction,
+  setSessionModelInTransaction,
 } from "../src/index";
 import { readReasoningConfiguration } from "@opengeni/codex";
 let shared: SharedTestDatabase;
@@ -43,10 +44,21 @@ test("manual compaction installs configuration without a user-input row", async 
     resources: [],
     metadata: {},
     model: "scripted-model",
-    reasoningEffort: "high",
+    reasoningEffort: "low",
     latencyMode: "standard",
     sandboxBackend: "none",
   });
+  await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, grant.subjectId, (db) =>
+    setSessionModelInTransaction(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      actor: { type: "human", subjectId: grant.subjectId },
+      operationKey: crypto.randomUUID(),
+      model: "scripted-model",
+      reasoningEffort: "high",
+    }),
+  );
   await requestSessionCompaction(client.db, workspaceId, session.id);
   const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
     sessionId: session.id,
@@ -58,6 +70,7 @@ test("manual compaction installs configuration without a user-input row", async 
   });
   if (claimed.action !== "claimed") throw new Error("maintenance not claimed");
   expect(claimed.turn.source).toBe("compaction");
+  expect(claimed.turn.reasoningEffort).toBe("high");
   expect(await getActiveSessionHistoryItems(client.db, workspaceId, session.id)).toHaveLength(0);
   const identity = {
     accountId: grant.accountId,
