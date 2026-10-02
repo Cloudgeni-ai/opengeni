@@ -482,6 +482,10 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Custom MCP OAuth endpoint discovery and isolated popup completion:
+    // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
+    // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_585_890, 1.5 * kib),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the

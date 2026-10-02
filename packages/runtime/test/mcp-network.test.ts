@@ -14,6 +14,7 @@ import {
   MCP_MAX_INBOUND_REQUEST_BYTES,
   MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
+  MCP_MAX_TOOL_DEFINITION_BYTES,
   McpAggregateToolListBudget,
   McpPayloadTooLargeError,
   assertMcpPayloadWithinBytes,
@@ -450,9 +451,14 @@ describe("MCP network and payload boundary", () => {
 
   test("bounds individual definitions, server lists, and tool results", () => {
     expect(assertMcpToolListWithinBounds([{ name: "small" }])).toHaveLength(1);
-    expect(() => assertMcpToolListWithinBounds([{ schema: "x".repeat(128 * 1024) }])).toThrow(
-      McpPayloadTooLargeError,
-    );
+    const rich = {
+      name: "nested_schema",
+      inputSchema: { type: "object", description: "x".repeat(300 * 1024) },
+    };
+    expect(assertMcpToolListWithinBounds([rich])).toEqual([rich]);
+    expect(() =>
+      assertMcpToolListWithinBounds([{ schema: "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES) }]),
+    ).toThrow(McpPayloadTooLargeError);
     expect(() =>
       assertMcpPayloadWithinBytes(
         { content: "x".repeat(MCP_MAX_TOOL_RESULT_BYTES) },

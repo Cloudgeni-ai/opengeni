@@ -54,32 +54,35 @@ function titleEvent(sequence: number, title: string): SessionEvent {
 }
 
 const realDb = await import("@opengeni/db");
-const realListSessionEvents = realDb.listSessionEvents;
+const realListSessionEventPage = realDb.listSessionEventPage;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
 const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
 mock.module("@opengeni/db", () => ({
   ...realDb,
-  listSessionEvents: async (
+  listSessionEventPage: async (
     db: unknown,
     workspaceId: string,
     sessionId: string,
-    afterOrOptions: number | { after?: number; limit?: number },
-    legacyLimit?: number,
+    options: { after?: number; limit?: number; maxBytes?: number },
   ) => {
     if (db !== fakeDb) {
-      return await realListSessionEvents(
-        db as never,
-        workspaceId,
-        sessionId,
-        afterOrOptions as never,
-        legacyLimit,
-      );
+      return await realListSessionEventPage(db as never, workspaceId, sessionId, options);
     }
-    const after = typeof afterOrOptions === "number" ? afterOrOptions : (afterOrOptions.after ?? 0);
-    const limit =
-      typeof afterOrOptions === "number" ? (legacyLimit ?? 500) : (afterOrOptions.limit ?? 500);
+    const after = options.after ?? 0;
+    const limit = options.limit ?? 500;
     durableReads.push({ after, limit });
-    return durableEvents.filter((candidate) => candidate.sequence > after).slice(0, limit);
+    const remaining = durableEvents.filter((candidate) => candidate.sequence > after);
+    const candidates = remaining.slice(0, limit);
+    const events: SessionEvent[] = [];
+    const maxBytes = options.maxBytes ?? realDb.SESSION_EVENT_DB_PAGE_MAX_BYTES;
+    let bytes = 2;
+    for (const candidate of candidates) {
+      const eventBytes = Buffer.byteLength(JSON.stringify(candidate));
+      if (events.length > 0 && bytes + eventBytes + 1 > maxBytes) break;
+      events.push(candidate);
+      bytes += eventBytes + (events.length > 1 ? 1 : 0);
+    }
+    return { events, bytes, hasMore: events.length < remaining.length };
   },
   listWorkspaceControlEvents: async (
     db: unknown,
@@ -662,10 +665,9 @@ test("an open session stream catches up after an accepted embedding publish whil
   // heartbeat both remain read-free.
   reconnect?.(1);
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
-  // The short page requires one EOF probe: byte-selected pages can be short
-  // even when more exact events remain. Neither heartbeat nor duplicate
-  // recovery notification starts another read after that probe.
-  expect(durableReads).toHaveLength(3);
+  // Explicit continuation proves the durable snapshot is exhausted. A short
+  // page alone would not; no extra EOF probe or heartbeat read is needed.
+  expect(durableReads).toHaveLength(2);
 
   await reader.cancel();
   expect(reconnectReleased).toBe(1);

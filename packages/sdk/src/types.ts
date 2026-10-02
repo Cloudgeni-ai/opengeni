@@ -1437,8 +1437,21 @@ export type SessionBackgroundCommandActivity = {
   count: number;
 };
 
+/** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
+export type SessionBackgroundCommandReconciliation = {
+  lastOutcome: string | null;
+  attempts: number;
+  dueAt: string;
+  claimedAt: string | null;
+  terminalProof:
+    | { outcome: "exited"; exitCode: number; observedAt: string }
+    | { outcome: "lost"; exitCode: null; observedAt: string }
+    | null;
+};
+
 export type SessionBackgroundCommand = {
   observationStatus?: "unavailable" | undefined;
+  reconciliation?: SessionBackgroundCommandReconciliation | undefined;
   id: string;
   workspaceId: string;
   sessionId: string;

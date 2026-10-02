@@ -605,6 +605,9 @@ explicit activation brings a tab forward. The override ends when its controller
 detaches. Native **App controls** also work in the background where supported.
 Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
 makes that change explicit.
+Computer frames fit the dock while preserving their proportions. Resizing or
+reopening the dock refits the visible image without changing capture resolution
+or the coordinates sent to the computer.
 
 Desktop IME candidates and their selection keys stay local; only committed text is sent.
 

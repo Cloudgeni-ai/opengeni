@@ -12902,6 +12902,40 @@ export const SessionCommandFailure = z
   );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
+export const SessionBackgroundCommandReconciliation = z
+  .object({
+    lastOutcome: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,63}$/)
+      .nullable(),
+    attempts: z.number().int().nonnegative(),
+    dueAt: z.string().datetime({ offset: true }),
+    claimedAt: z.string().datetime({ offset: true }).nullable(),
+    terminalProof: z
+      .discriminatedUnion("outcome", [
+        z
+          .object({
+            outcome: z.literal("exited"),
+            exitCode: z.number().int(),
+            observedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+        z
+          .object({
+            outcome: z.literal("lost"),
+            exitCode: z.null(),
+            observedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+      ])
+      .nullable(),
+  })
+  .strict();
+export type SessionBackgroundCommandReconciliation = z.infer<
+  typeof SessionBackgroundCommandReconciliation
+>;
+
 export const SessionBackgroundCommand = z
   .object({
     id: z.string().uuid(),
@@ -12910,6 +12944,7 @@ export const SessionBackgroundCommand = z
     provider: SessionBackgroundCommandProvider,
     state: SessionBackgroundCommandState,
     observationStatus: z.literal("unavailable").optional(),
+    reconciliation: SessionBackgroundCommandReconciliation.optional(),
     commandPreview: z.string().max(512),
     commandText: z.string().optional(),
     cancelRequestedAt: z.string().nullable(),

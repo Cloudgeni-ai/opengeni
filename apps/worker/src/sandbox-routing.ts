@@ -47,6 +47,7 @@ import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   buildSelfhostedBackendSession,
   ActiveBackendUnresolvableError,
@@ -401,6 +402,11 @@ async function resolveCurrentHomeBackend(
       diagnostic: "provider_not_found_during_home_route_rebind",
     });
     if (marked.status === "marked") {
+      await publishDurableSessionEvents(
+        services.bus,
+        ids.workspaceId,
+        marked.backgroundCommandEvents,
+      );
       await services.onHomeSandboxLost?.({
         sandboxGroupId: ids.sandboxGroupId,
         instanceId: lease.instanceId,
@@ -1093,6 +1099,11 @@ export function wrapTurnBoxWithRouting(
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: expectedInstanceId,
@@ -1355,6 +1366,11 @@ export function wrapLazyTurnBoxWithRouting(
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: backend.providerInstanceId,

@@ -2017,26 +2017,24 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         ))}
 
         {accountConnectOpen &&
-        rawSelectedItem?.kind === "mcp" &&
-        rawSelectedItem.authKind === "oauth2" &&
-        !rawSelectedItem.enabled ? (
+        selectedItem?.kind === "mcp" &&
+        selectedItem.authKind === "oauth2" &&
+        !selectedItem.enabled ? (
           <TrackedMcpConnectionCard
             integrationClass={integrationClassFromDomain(
-              rawSelectedItem.providerDomain ??
-                rawSelectedItem.mcpUrl ??
-                rawSelectedItem.endpointUrl,
+              selectedItem.providerDomain ?? selectedItem.mcpUrl ?? selectedItem.endpointUrl,
             )}
             client={client}
             workspaceId={workspaceId}
-            capabilityId={rawSelectedItem.id}
-            name={rawSelectedItem.name}
+            capabilityId={selectedItem.id}
+            name={selectedItem.name}
             returnUrl={window.location.href}
             dialogOnly
-            personalOnly={personalOnlyCapability(rawSelectedItem)}
-            connectLabel={`Connect ${rawSelectedItem.name}`}
+            personalOnly={personalOnlyCapability(selectedItem)}
+            connectLabel={`Connect ${selectedItem.name}`}
             dialogSubtitle="Review access, then sign in"
-            description={capabilityDescription(rawSelectedItem) ?? undefined}
-            logoSrc={logoUrl(rawSelectedItem)}
+            description={capabilityDescription(selectedItem) ?? undefined}
+            logoSrc={logoUrl(selectedItem)}
             ownershipCopy={{
               legend: "Who can use it?",
               workspace: OWNERSHIP_HELP.workspace,

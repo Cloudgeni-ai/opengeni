@@ -94,6 +94,9 @@ const withheldMigrationNames = [
   "0534_scheduled_admission_diagnostics.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
   "0539_scheduled_admission_refusals.sql",
+  // Installs inventory read policies with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0547_idle_command_containment.sql",
   ...allowanceMigrationTail,
   // Extends the attachment helper from withheld 0499; replay after it.
   "0560_archived_session_imports.sql",

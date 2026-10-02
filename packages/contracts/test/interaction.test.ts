@@ -19,6 +19,7 @@ import {
   ComputerActionRequest,
   ComputerActionReceipt,
   ComputerClipboard,
+  ComputerSessionCapabilities,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
   ComputerTargetListResponse,
@@ -86,6 +87,30 @@ function observation() {
 }
 
 describe("interaction contracts", () => {
+  test("preserves optional background input capability without changing native defaults", () => {
+    const native = {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      clipboard: true,
+      backgroundActions: true,
+      parallelApps: true,
+    };
+    expect(ComputerSessionCapabilities.parse(native)).toEqual(native);
+    expect(ComputerSessionCapabilities.parse({ ...native, backgroundInput: true })).toEqual({
+      ...native,
+      backgroundInput: true,
+    });
+    expect(
+      ComputerSessionCapabilities.safeParse({ ...native, backgroundInput: "true" }).success,
+    ).toBe(false);
+  });
+
   test("keeps public actions actor-free and defaults new browsers to headless", () => {
     expect(
       CreateBrowserSessionRequest.parse({
