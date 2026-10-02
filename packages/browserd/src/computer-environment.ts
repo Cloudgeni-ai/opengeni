@@ -5,6 +5,7 @@ import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
+import { readWindowsSeat } from "./cua/windows-seat";
 
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 3_000;
@@ -320,9 +321,15 @@ async function removeDirectories(directories: readonly string[]): Promise<unknow
 
 /** Existing physical/login seat used by connected machines and macOS. */
 export class ExistingComputerEnvironmentAllocator implements ComputerEnvironmentAllocator {
+  constructor(private readonly options: { allowWindows?: boolean } = {}) {}
+
   async allocate(context: ComputerEnvironmentContext): Promise<ComputerEnvironmentLease> {
     const environment = nativeComputerEnvironment(context.baseEnvironment);
     const platform = process.platform;
+    if (platform === "win32" && this.options.allowWindows) {
+      const seat = await readWindowsSeat(environment);
+      return { ...seat, rfbPort: null, environment, async close() {} };
+    }
     if (platform !== "darwin" && platform !== "linux") {
       throw new InteractionControllerError(
         "unsupported",
@@ -437,6 +444,17 @@ export function nativeComputerEnvironment(input: NodeJS.ProcessEnv): NodeJS.Proc
     "GDK_BACKEND",
     "QT_QPA_PLATFORM",
     "__CF_USER_TEXT_ENCODING",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "WINDIR",
+    "windir",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "TEMP",
+    "TMP",
+    "ComSpec",
+    "COMSPEC",
   ]);
   const environment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(input)) {

@@ -1544,6 +1544,52 @@ describe("ComputerViewer", () => {
     await rendered.unmount();
   });
 
+  test("routes advertised background window clicks and typing without focusing the desktop", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture(undefined, undefined, {
+      currentTarget: { ...target(), title: "Background window", focused: false },
+      backgroundInput: true,
+    });
+    try {
+      await fixture.frame(1);
+      await canvasMock.finishDecode(0);
+      expect(fixture.keyboard.disabled).toBe(false);
+      expect(fixture.rendered.container.textContent).not.toContain("Control directly");
+      expect(fixture.rendered.container.textContent).toContain(
+        "clicks and typing stay in the background",
+      );
+      await actRun(() => {
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            clientX: 20,
+            clientY: 20,
+            button: 0,
+          }),
+        );
+        fixture.canvas.dispatchEvent(
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            clientX: 20,
+            clientY: 20,
+            button: 0,
+          }),
+        );
+        fixture.keyboard.value = "background text";
+        fixture.keyboard.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      });
+      await flush(40);
+      expect(fixture.actions.map((request) => request.action)).toEqual([
+        { type: "pointer", frameId: "frame-1", action: "click", x: 0, y: 0 },
+        { type: "keyboard", action: "type", value: "background text" },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
   test("verifies the native clipboard before issuing a paste keystroke", async () => {
     const currentTarget = target();
     const actions: Array<ComputerActionReceipt["state"] | string> = [];
@@ -1929,10 +1975,17 @@ describe("ComputerViewer input reliability", () => {
   test("keeps control unavailable across live frames and reconnects the same desktop", async () => {
     const canvasMock = mockComputerCanvas();
     let controlUnavailable = true;
-    const fixture = await renderComputerInputFixture(async (request) => {
-      if (controlUnavailable) throw new OpenGeniApiError(503, "Desktop control unavailable");
-      return receipt(observation(), request.operationId);
-    });
+    const fixture = await renderComputerInputFixture(
+      async (request) => {
+        if (controlUnavailable) throw new OpenGeniApiError(503, "Desktop control unavailable");
+        return receipt(observation(), request.operationId);
+      },
+      undefined,
+      {
+        currentTarget: { ...target(), title: "Background window", focused: false },
+        backgroundInput: true,
+      },
+    );
     const refreshed: string[] = [];
     const getSession = fixture.client.getComputerSession;
     const listTargets = fixture.client.listComputerTargets;
@@ -1958,6 +2011,7 @@ describe("ComputerViewer input reliability", () => {
       expect(fixture.actions).toHaveLength(1);
       expect(fixture.keyboard.disabled).toBe(true);
       expect(fixture.rendered.container.textContent).toContain("Desktop controls unavailable");
+      expect(fixture.rendered.container.textContent).toContain("Reconnect to use desktop input");
       expect(fixture.rendered.container.textContent).not.toContain("App controls remain available");
       await actRun(() =>
         [...fixture.rendered.container.querySelectorAll("button")]
@@ -2375,14 +2429,19 @@ function computerWheel(deltaY: number): WheelEvent {
 async function renderComputerInputFixture(
   actInComputer?: (request: ComputerActionRequest) => Promise<ComputerActionReceipt>,
   readComputerClipboard?: () => Promise<ComputerClipboard>,
+  options: { currentTarget?: ComputerTarget; backgroundInput?: boolean } = {},
 ) {
-  const currentTarget = target();
+  const currentTarget = options.currentTarget ?? target();
+  const currentSession = computerSession();
+  if (options.backgroundInput !== undefined) {
+    currentSession.capabilities!.backgroundInput = options.backgroundInput;
+  }
   const secondTarget = { ...target("window-2"), title: "Second desktop", focused: false };
   const actions: ComputerActionRequest[] = [];
   const sockets: FakeComputerSocket[] = [];
   const client = fakeClient({
-    listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
-    getComputerSession: async () => computerSession(),
+    listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+    getComputerSession: async () => currentSession,
     listComputerTargets: async () => ({
       computerSessionId: COMPUTER_SESSION_ID,
       controllerGeneration: "controller-1",

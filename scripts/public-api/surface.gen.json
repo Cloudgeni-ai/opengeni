@@ -10860,6 +10860,7 @@
         "$.appDiscovery": "boolean!",
         "$.appLaunch": "boolean!",
         "$.backgroundActions": "boolean!",
+        "$.backgroundInput": "boolean?",
         "$.clipboard": "boolean!",
         "$.keyboardInput": "boolean!",
         "$.parallelApps": "boolean!",

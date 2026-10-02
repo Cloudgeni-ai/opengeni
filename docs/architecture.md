@@ -1367,6 +1367,9 @@ Typing batches: [React](../packages/react/README.md).
 Native macOS operations drain Cocoa pools and clear pending capture starts;
 desktop discovery is independent of semantic inspection.
 
+`ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
+Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
+
 Capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
