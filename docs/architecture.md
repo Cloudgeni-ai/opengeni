@@ -1356,27 +1356,26 @@ Postgres state under workspace RLS, then check the existing one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
-Editable artifacts use `@opengeni/artifact-tool` and durable collaboration.
-Attempt-scoped `BrowserSession`/`ComputerSession` tools use
-`@opengeni/interaction` and `@opengeni/browserd` on the selected sandbox or
-machine. Bounded reads/stills authenticate session/controller/target. SDK/viewer retain
-full observations; Code Mode receives local image handles. Human computer control
+Editable artifacts: `@opengeni/artifact-tool` with durable collaboration.
+Attempt-scoped `BrowserSession`/`ComputerSession` use
+`@opengeni/interaction`/`@opengeni/browserd` on selected sandbox/machine.
+Bounded reads/stills authenticate session/controller/target. SDK/viewer retain full
+observations; Code Mode receives local image handles. Human computer control
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
-Lightpanda supports semantic observations only.
+Lightpanda is semantic-only.
 
 The operation lock settles only prepared creates without controller generations;
 dispatched bindings survive activation persistence failures for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
 
-Native macOS operations drain Cocoa pools and clean up pending capture starts.
-Desktop discovery proceeds independently of semantic inspection.
+macOS drains Cocoa pools and cleans pending capture starts; desktop discovery
+is independent of semantic inspection.
 
-New capability negotiation advertises only `manual` and `on-verify` recording.
-Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
-remain parseable for old events, SDK clients, and retained evidence, but they do
-not register a runnable legacy computer tool.
+New negotiation advertises only `manual`/`on-verify` recording. Historical
+`ComputerUse`/`on-turn`/`computer_screenshot` remain parseable for old
+events/SDKs/retained evidence, never runnable legacy computer tools.
 
 Sites retain immutable HTML, optional source, tool allowlists and rollback,
 separately from Documents/editable artifacts. Agents publish signed-upload IDs,
@@ -1514,22 +1513,21 @@ closure precedes rejected completion; EOF is not success. The worker awaits
 completion and routes rejection through `sandbox_deadline_rotation` before
 `turn.completed`.
 
-BrowserSession/ComputerSession holders remain durable despite old heartbeats.
-Before Modal expiry, checkpoint-capable managed browsers suspend through existing
-encrypted profile authority. A private claim binds lease epoch, instance and
-controller; no originating-user grant is borrowed. The existing reaper tick starts
-bounded capture children on `-browser-checkpoint-v1`; ordinary draining starts
-independently. Cleanup follows committed suspension; retries reuse its receipt.
-Normal authorized resume restores the checkpoint. At physical expiry, unsupported
-or unsaved controllers become `lost`; dispatched operations become `outcome_unknown`.
-The bounded deadline batch includes interaction-held and draining leases.
-Lease-free Connected Machine/device
-transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
-fences before mutation visibility. Healthy interactions have no independent age
-limit. Existing browser/computer control, including suspension, retains its provider across
-image updates. Admission locks and checks provider identity; replacements and
-capture/rotation bypasses are forbidden. New work enforces the deployment image.
-See `docs/run-lifecycle.md` for rotation and capture ordering.
+`BrowserSession`/`ComputerSession` holders persist despite old heartbeats.
+Before Modal expiry, checkpoint-capable managed browsers suspend under existing
+encrypted profile authority. Private claims bind lease epoch/instance/controller
+without borrowing originating-user grants. Reaper ticks start bounded `-browser-checkpoint-v1`
+capture children independently of ordinary draining. Cleanup follows committed
+suspension; retries reuse its receipt. Authorized resume restores checkpoints.
+Physical expiry marks unsupported/unsaved controllers `lost`, dispatched operations
+`outcome_unknown`; bounded deadline batches include interaction-held/draining leases.
+Lease-free Connected Machine/device transitions require owner-only FORCE-RLS
+inventory and canonically ordered workspace fences before mutation visibility.
+Healthy interactions have no independent age limit. Existing browser/computer
+control/suspension retains its provider across image updates.
+Admission locks/checks provider identity, forbidding replacements and capture/rotation
+bypasses. New work enforces deployment images.
+Rotation/capture ordering: [`run-lifecycle.md`](run-lifecycle.md).
 
 Retained Modal commands own authenticated task-router byte offsets. Output/cursor
 commit atomically under expected-cursor fences; losing readers reread without
