@@ -143,9 +143,9 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
-          (migration) => migration.path === "0565_session_tenancy_operator_permission.sql",
+          (migration) => migration.path === "0583_session_tenancy_operator_permission.sql",
         )
-          ? "0565_session_tenancy_operator_permission.sql"
+          ? "0583_session_tenancy_operator_permission.sql"
           : sourceContract.migrations.some(
                 (migration) => migration.path === "0564_browser_deadline_checkpoints.sql",
               )
@@ -560,7 +560,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0564_browser_deadline_checkpoints.sql",
     );
     const sessionTenancyOperatorPermission = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0565_session_tenancy_operator_permission.sql",
+      (migration) => migration.path === "0583_session_tenancy_operator_permission.sql",
     );
     const acceptedPreferenceSnapshotRecovery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0563_accepted_preference_snapshot_recovery.sql",
@@ -1305,7 +1305,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0564_browser_deadline_checkpoints.sql" }
         : {}),
       ...(sessionTenancyOperatorPermission
-        ? { latestMigration: "0565_session_tenancy_operator_permission.sql" }
+        ? { latestMigration: "0583_session_tenancy_operator_permission.sql" }
         : {}),
     });
     // Keep the historical migration-order probes below scoped to published
@@ -1361,7 +1361,7 @@ describe("release schema contract", () => {
             "0562_realtime_connection_accounts.sql",
             "0563_accepted_preference_snapshot_recovery.sql",
             "0564_browser_deadline_checkpoints.sql",
-            "0565_session_tenancy_operator_permission.sql",
+            "0583_session_tenancy_operator_permission.sql",
           ].includes(migration.path),
       ),
     };
@@ -2673,9 +2673,9 @@ describe("release schema contract", () => {
     // remove forward migrations. Archives follow the agent configuration step.
     expect(unfilteredSourceContract.latestMigration).toBe(
       unfilteredSourceContract.migrations.some(
-        (migration) => migration.path === "0565_session_tenancy_operator_permission.sql",
+        (migration) => migration.path === "0583_session_tenancy_operator_permission.sql",
       )
-        ? "0565_session_tenancy_operator_permission.sql"
+        ? "0583_session_tenancy_operator_permission.sql"
         : unfilteredSourceContract.migrations.some(
               (migration) => migration.path === "0564_browser_deadline_checkpoints.sql",
             )
@@ -2904,7 +2904,7 @@ describe("release schema contract", () => {
       "0563_accepted_preference_snapshot_recovery.sql",
       "0564_browser_deadline_checkpoints.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
-      "0565_session_tenancy_operator_permission.sql",
+      "0583_session_tenancy_operator_permission.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
       "0524_codex_plan_entitlement.sql",
@@ -3459,7 +3459,7 @@ describe("release schema contract", () => {
       "0562_realtime_connection_accounts.sql",
       "0563_accepted_preference_snapshot_recovery.sql",
       "0564_browser_deadline_checkpoints.sql",
-      "0565_session_tenancy_operator_permission.sql",
+      "0583_session_tenancy_operator_permission.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

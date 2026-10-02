@@ -1389,12 +1389,12 @@ and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For the OPE-563 **fleet permission-on** cutover, rolling migration
-`0565_session_tenancy_operator_permission.sql` is inert preparation only. It
+For the **fleet permission-on** cutover, rolling migration
+`0583_session_tenancy_operator_permission.sql` is inert preparation only. It
 adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
 it neither activates organizations nor changes sessions. The CLI additionally
 requires the separately reviewed maintenance marker
-`0566_private_sessions_fleet_activation.sql` before accepting:
+`0584_private_sessions_fleet_activation.sql` before accepting:
 
 ```bash
 bun run db:activate-session-tenancy -- \

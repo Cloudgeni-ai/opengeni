@@ -14,10 +14,10 @@ const REQUIRED_MIGRATIONS = [
   "0303_session_tenancy_product_activation.sql",
   "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
-export const FLEET_PREPARATION_MIGRATION = "0565_session_tenancy_operator_permission.sql";
+export const FLEET_PREPARATION_MIGRATION = "0583_session_tenancy_operator_permission.sql";
 // Deliberately absent from this preparatory PR. Applying only the rolling
 // definitions cannot admit an irreversible fleet activation.
-export const FLEET_MIGRATION = "0566_private_sessions_fleet_activation.sql";
+export const FLEET_MIGRATION = "0584_private_sessions_fleet_activation.sql";
 
 export function requiredActivationMigrations(allOrganizations: boolean): readonly string[] {
   return allOrganizations

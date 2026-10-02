@@ -15,9 +15,9 @@ let owner: postgres.Sql | null = null;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-0565-operator-permission");
+  owned = await acquireOwnerMigratedTestDatabase("migration-0583-operator-permission");
   if (!owned) {
-    if (requireRealDatabase) throw new Error("migration 0565 requires local PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0583 requires local PostgreSQL");
     return;
   }
   await migrate(owned.ownerUrl);
@@ -43,7 +43,7 @@ async function expectState(action: () => Promise<unknown>, state: string): Promi
 async function organization(activated: boolean): Promise<string> {
   if (!owned) throw new Error("test database unavailable");
   const [account] = await owned.admin<{ id: string }[]>`
-    insert into managed_accounts (name) values ('0565 permission test') returning id`;
+    insert into managed_accounts (name) values ('0583 permission test') returning id`;
   if (activated)
     await owned.admin`
     insert into session_tenancy_activations (
@@ -52,10 +52,10 @@ async function organization(activated: boolean): Promise<string> {
   return account!.id;
 }
 
-describe("migration 0565 inert operator permission preparation", () => {
+describe("migration 0583 inert operator permission preparation", () => {
   test("defines only the owner seam, with truthful audit and two drain checks", () => {
     const source = readFileSync(
-      new URL("../drizzle/0565_session_tenancy_operator_permission.sql", import.meta.url),
+      new URL("../drizzle/0583_session_tenancy_operator_permission.sql", import.meta.url),
       "utf8",
     );
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
