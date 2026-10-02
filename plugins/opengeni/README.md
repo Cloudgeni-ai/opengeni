@@ -57,7 +57,9 @@ without a browser, run `claude mcp login --no-browser plugin:opengeni:opengeni`
 and paste the redirect URL back.
 
 Without the plugin, add only the server:
-`claude mcp add --transport http opengeni <MCP URL>`.
+`claude mcp add --scope user --transport http opengeni <MCP URL>`.
+
+One connection covers one workspace: the MCP URL contains the workspace ID, and on the sign-in page you approve that same workspace. Sign in to the Opengeni web app in your browser first; a signed-out sign-in shows an error instead of redirecting.
 
 ## Codex
 
