@@ -599,6 +599,13 @@ workspace discovery, peer switching, tabs/windows, live frames, human input,
 identity versions, interventions, diagnostics, reconnect, and lifecycle state do
 not require app-private controller glue.
 
+Managed browser actions keep the foreground tab in place. Target-local Chromium
+focus emulation keeps animation callbacks running without an open preview;
+explicit activation brings a tab forward. The override ends when its controller
+detaches. Native **App controls** also work in the background where supported.
+Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
+makes that change explicit.
+
 A managed browser's attachment authority error keeps a same-browser **Reconnect**
 action available. It obtains a fresh server-authorized attachment without creating
 a replacement browser or replaying input. The fresh Connected Chrome instruction

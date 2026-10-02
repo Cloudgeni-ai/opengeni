@@ -1368,14 +1368,6 @@ Typing batches: [React](../packages/react/README.md).
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
 Desktop discovery proceeds independently of semantic inspection.
 
-A visible managed browser still uses target-scoped input and capture in the
-background; bringing a tab forward requires an explicit `activate` action.
-Managed Chromium pages use target-local active-state emulation so animation
-callbacks continue without a live preview. This changes page-reported focus
-and visibility, not the actual foreground tab, and ends with the attachment.
-Native app controls also stay in the background where supported. Physical
-desktop mouse and keyboard input share the OS foreground seat.
-
 New capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
