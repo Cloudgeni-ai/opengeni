@@ -1,4 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
+import { deflateSync } from "node:zlib";
 import { StreamClose, StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
@@ -1725,6 +1726,93 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
+  test("fits captured windows to the dock while preserving pixels and input coordinates", async () => {
+    const canvasMock = mockComputerCanvas();
+    const resizeMock = mockComputerViewportResize();
+    const fixture = await renderComputerInputFixture();
+    const canvas = fixture.rendered.container.querySelector<HTMLCanvasElement>("canvas")!;
+    const viewport = canvas.parentElement!;
+    let available = { width: 1_000, height: 900 };
+    let measurements = 0;
+    Object.defineProperties(viewport, {
+      clientWidth: {
+        get: () => {
+          measurements += 1;
+          return available.width;
+        },
+      },
+      clientHeight: { get: () => available.height },
+    });
+    canvas.getBoundingClientRect = () =>
+      ({
+        left: 10,
+        top: 20,
+        width: Number.parseFloat(canvas.style.width),
+        height: Number.parseFloat(canvas.style.height),
+      }) as DOMRect;
+    try {
+      await fixture.frame(1, { width: 400, height: 300 });
+      await canvasMock.finishDecode(0);
+      expect([canvas.width, canvas.height]).toEqual([400, 300]);
+      expect([canvas.style.width, canvas.style.height]).toEqual(["1000px", "750px"]);
+      const observer = resizeMock.observers.find(({ observed }) => observed.has(viewport))!;
+      expect(observer.observed).toEqual(new Set([viewport]));
+
+      await actRun(() => {
+        for (const type of ["pointerdown", "pointerup"]) {
+          canvas.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              clientX: 760,
+              clientY: 207.5,
+            }),
+          );
+        }
+      });
+      await flush(350);
+      expect(fixture.actions.map(({ action }) => action)).toEqual([
+        { type: "pointer", frameId: "frame-1", action: "click", x: 300, y: 75 },
+      ]);
+
+      measurements = 0;
+      await fixture.frame(2, { width: 400, height: 300 });
+      await canvasMock.finishDecode(1);
+      expect(measurements).toBe(0);
+      expect(resizeMock.observers.filter(({ observed }) => observed.has(viewport))).toHaveLength(1);
+
+      available = { width: 240, height: 500 };
+      observer.emit();
+      expect([canvas.style.width, canvas.style.height]).toEqual(["240px", "180px"]);
+      expect([canvas.width, canvas.height]).toEqual([400, 300]);
+
+      available = { width: 0, height: 0 };
+      observer.emit();
+      expect([canvas.style.width, canvas.style.height]).toEqual(["240px", "180px"]);
+      await fixture.frame(3, { width: 300, height: 600 });
+      await canvasMock.finishDecode(2);
+      expect([canvas.width, canvas.height]).toEqual([300, 600]);
+      expect([canvas.style.width, canvas.style.height]).toEqual(["240px", "180px"]);
+
+      available = { width: 1_000, height: 900 };
+      observer.emit();
+      expect([canvas.style.width, canvas.style.height]).toEqual(["450px", "900px"]);
+      await fixture.frame(4, { width: 1_200, height: 600 });
+      await canvasMock.finishDecode(3);
+      expect([canvas.style.width, canvas.style.height]).toEqual(["1000px", "500px"]);
+      expect([canvas.width, canvas.height]).toEqual([1_200, 600]);
+
+      await fixture.rendered.unmount();
+      expect(observer.disconnected).toBe(true);
+      expect(observer.observed.size).toBe(0);
+    } finally {
+      await fixture.rendered.unmount();
+      resizeMock.restore();
+      canvasMock.restore();
+    }
+  });
+
   test("retains keyboard focus after a canvas click and types after that click", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
@@ -1984,6 +2072,43 @@ describe("ComputerViewer input reliability", () => {
   });
 });
 
+function mockComputerViewportResize() {
+  const priorObserver = Object.getOwnPropertyDescriptor(globalThis, "ResizeObserver");
+  const observers: ControlledResizeObserver[] = [];
+  class ControlledResizeObserver implements ResizeObserver {
+    readonly observed = new Set<Element>();
+    disconnected = false;
+
+    constructor(private readonly callback: ResizeObserverCallback) {
+      observers.push(this);
+    }
+    observe(element: Element): void {
+      this.observed.add(element);
+    }
+    unobserve(element: Element): void {
+      this.observed.delete(element);
+    }
+    disconnect(): void {
+      this.disconnected = true;
+      this.observed.clear();
+    }
+    emit(): void {
+      this.callback([], this);
+    }
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: ControlledResizeObserver,
+  });
+  return {
+    observers,
+    restore: () => {
+      if (priorObserver) Object.defineProperty(globalThis, "ResizeObserver", priorObserver);
+      else Reflect.deleteProperty(globalThis, "ResizeObserver");
+    },
+  };
+}
+
 function mockComputerCanvas(deferred = false) {
   const priorBitmap = Object.getOwnPropertyDescriptor(globalThis, "createImageBitmap");
   const priorContext = HTMLCanvasElement.prototype.getContext;
@@ -2117,12 +2242,15 @@ function frameMessage(
   sequence: number,
   overrides: Partial<ComputerFrameMetadata> = {},
 ): Uint8Array {
-  const png = Uint8Array.from(
-    atob(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-    ),
-    (character) => character.charCodeAt(0),
-  );
+  const png =
+    (overrides.width ?? 1) !== 1 || (overrides.height ?? 1) !== 1
+      ? solidPng(overrides.width ?? 1, overrides.height ?? 1)
+      : Uint8Array.from(
+          atob(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          ),
+          (character) => character.charCodeAt(0),
+        );
   const metadata: ComputerFrameMetadata = {
     frameId: `frame-${sequence}`,
     computerSessionId: COMPUTER_SESSION_ID,
@@ -2134,7 +2262,7 @@ function frameMessage(
     width: 1,
     height: 1,
     capturedAt: NOW,
-    sha256: PNG_SHA256,
+    sha256: new Bun.CryptoHasher("sha256").update(png).digest("hex"),
     ...overrides,
   };
   const encodedMetadata = new TextEncoder().encode(JSON.stringify(metadata));
@@ -2143,4 +2271,27 @@ function frameMessage(
   message.set(encodedMetadata, 4);
   message.set(png, 4 + encodedMetadata.byteLength);
   return message;
+}
+
+function solidPng(width: number, height: number): Uint8Array {
+  const chunk = (name: string, data: Uint8Array) => {
+    const body = Buffer.concat([Buffer.from(name), data]);
+    const result = Buffer.alloc(body.length + 8);
+    result.writeUInt32BE(data.length, 0);
+    result.set(body, 4);
+    result.writeUInt32BE(Bun.hash.crc32(body), body.length + 4);
+    return result;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const pixels = Buffer.alloc(height * (width * 3 + 1));
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(pixels)),
+    chunk("IEND", new Uint8Array()),
+  ]);
 }
