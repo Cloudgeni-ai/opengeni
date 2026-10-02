@@ -1536,11 +1536,9 @@ exit requires both streams' EOF. Fixed native lease-readiness probes share the
 pre-dispatch guard; uncertain Starts observe their exact invocation within the
 existing readiness budget.
 
-Post-start transport recovery retries exact-ID reads within the original
-wait. Exhaustion preserves uncertainty and writer fences, never replay
-or lease loss. Mixed provider faults contain uncertainty without retry authority;
-shared access cancellation affects only its waiter. Supervised cleanup retains
-the same helper UUID and private cursor until exact observation succeeds.
+Post-start recovery preserves IDs/cursors, budgets and writer fences.
+Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
+helper UUID/cursors.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
