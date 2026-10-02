@@ -28004,6 +28004,7 @@
       "BrowserFrameWebSocket": "type",
       "BrowserFrameWebSocketFactory": "type",
       "BrowserIdentitiesClient": "type",
+      "BrowserInputFailure": "type",
       "BrowserSessionsClient": "type",
       "BrowserViewer": "value",
       "BrowserViewerNotification": "type",
