@@ -127,14 +127,12 @@ type PayerRow = {
   pricedCalls: bigint;
 };
 
-type PayerTotals = Omit<Totals, "billingPath"> & { payer: UsagePayer };
-
 /**
  * Spend by who pays. Uses the server's per-payer totals; an older API replica
  * without them falls back to the listed models, which may be capped.
  */
 export function organizationPayerRows(data: {
-  payers?: readonly PayerTotals[] | undefined;
+  payers?: OrganizationModelUsage["payers"] | undefined;
   models: OrganizationModelUsage["models"];
 }): PayerRow[] {
   const rows = new Map<UsagePayer, PayerRow>();
@@ -298,9 +296,7 @@ export function OrganizationModelUsagePanel(props: {
   if (data.billing.length === 0) return null;
   const total = summarizeModelUsage(data.billing);
   const coverage = ledgerCoverageNote(props.ledgerCreditMicros, total.creditMicros);
-  const payers = organizationPayerRows(
-    data as OrganizationModelUsage & { payers?: readonly PayerTotals[] },
-  );
+  const payers = organizationPayerRows(data);
   return (
     <>
       <Section title="Paid with" description={PAID_WITH_DESCRIPTION}>

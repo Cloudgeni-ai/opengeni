@@ -148,13 +148,6 @@ export function organizationUsageRows(input: {
   });
 }
 
-type PrivateChatsTotals = {
-  workspaceId: string;
-  membershipId: string | null;
-  name: string | null;
-  totals: Total[];
-};
-
 /** One person's private-chat spend in one shared workspace: a name and an amount, nothing else. */
 export interface OrganizationPrivateRow {
   key: string;
@@ -173,11 +166,9 @@ export function organizationPrivateRows(input: {
   members: readonly Member[];
   workspaceNames: ReadonlyMap<string, string>;
 }): { rows: OrganizationPrivateRow[]; truncated: boolean } {
-  const summary = input.summary as OrganizationUsageSummary & {
-    privateChats?: PrivateChatsTotals[];
-    privateChatsTruncated?: boolean;
-  };
+  const { summary } = input;
   const members = new Map(input.members.map((member) => [member.id, member]));
+  // The SDK does not apply the contract defaults: an older replica omits both.
   const rows = (summary.privateChats ?? [])
     .map((entry) => {
       const member = entry.membershipId ? members.get(entry.membershipId) : undefined;

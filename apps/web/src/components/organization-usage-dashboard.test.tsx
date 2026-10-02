@@ -50,6 +50,8 @@ describe("organization usage presentation", () => {
       nextWorkspaceCursor: null,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
       buckets: [
         {
           bucket: "2026-09-14T01:00",
