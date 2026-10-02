@@ -29,6 +29,7 @@ Install both packages from the same release.
     Map each tenant to an OpenGeni workspace and make each user a member, once, when your product admits them:
 
     ```ts
+    // lib/opengeni.ts
     import { OpenGeniClient } from "@opengeni/sdk";
 
     export const og = new OpenGeniClient({
@@ -70,6 +71,7 @@ Install both packages from the same release.
     ```ts
     import { createSessionProxyRoute } from "@opengeni/sdk/next";
     import { authenticate, verifyCsrf } from "@/lib/auth"; // your product's own checks
+    import { og, source } from "@/lib/opengeni";
 
     export const dynamic = "force-dynamic";
     export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
@@ -93,6 +95,8 @@ Install both packages from the same release.
       }),
     });
     ```
+
+    `agent` needs agent settings enabled on the deployment. If `getClientConfig()` reports `agentConfig.enabled: false`, leave it out and pass `firstPartyMcpTools: []` instead; see [Configure the agent](/integrate/configure-the-agent). Private chats need private sessions enabled for your organization; without them the proxy throws `OpenGeniSetupError`, which says who can turn it on.
 
     For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters). A Django, Rails, Go, PHP, or Java backend needs no Node sidecar: see [Proxy from any backend](/integrate/proxy-from-any-backend).
 

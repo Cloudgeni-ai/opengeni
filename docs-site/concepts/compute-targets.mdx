@@ -6,17 +6,17 @@ icon: "microchip"
 
 Every session picks where its commands, files, and tools run. Two kinds of target are co-equal and first-class.
 
-|                   | Managed sandbox                    | Connected Machine                                    |
-| ----------------- | ---------------------------------- | ---------------------------------------------------- |
-| Ownership         | Platform-owned, ephemeral          | User-owned, persistent                               |
-| Provisioning      | OpenGeni creates and tears it down | OpenGeni attaches to what is already there           |
-| Repositories      | Cloned into `/workspace`           | Not cloned; the machine uses its own git credentials |
-| Working directory | `/workspace`                       | A per-session folder under the agent's launch root   |
-| Network           | Provisioned inside the deployment  | The machine dials out; nothing is exposed inbound    |
+|                   | Managed sandbox                    | Connected Machine                                     |
+| ----------------- | ---------------------------------- | ----------------------------------------------------- |
+| Ownership         | Platform-owned, ephemeral          | User-owned, persistent                                |
+| Provisioning      | OpenGeni creates and tears it down | OpenGeni attaches to what is already there            |
+| Repositories      | Cloned into `/workspace`           | Not cloned; the machine uses its own git credentials  |
+| Working directory | `/workspace`                       | The agent's launch root, or a folder the session sets |
+| Network           | Provisioned inside the deployment  | The machine dials out; nothing is exposed inbound     |
 
 ## Managed sandboxes
 
-A managed sandbox is a fresh box OpenGeni provisions for the session. Backends are pluggable: Docker (the local default), Modal, an in-process local provider, and several cloud sandbox providers. Both stock images include Terraform, Checkov, AnyDoc, GitHub CLI, git, the PostgreSQL client (`psql`), a Python toolchain (uv, requests, pandas, numpy, matplotlib, pytest, and psycopg), and common shell tools. The desktop image also includes the graphical desktop, Chrome/Chromium, and FFmpeg; it does not install Azure CLI or its Azure DevOps extension. The headless image still includes Azure CLI.
+A managed sandbox is a fresh box OpenGeni provisions for the session. Backends are pluggable: Docker (the local default), Modal, an in-process local provider, and several cloud sandbox providers. Both stock images include Terraform, Checkov, AnyDoc, GitHub CLI, git, the PostgreSQL client (`psql`), a Python toolchain (uv, requests, pandas, numpy, matplotlib, pytest, and psycopg), common shell tools, and a Chromium-based browser. The desktop image also includes the graphical desktop and FFmpeg; it does not install Azure CLI or its Azure DevOps extension. The headless image still includes Azure CLI.
 
 Opt-in preparation profiles authenticate tools already in the image, such as the Azure CLI on the headless image.
 
@@ -27,7 +27,7 @@ Sandboxes are swappable within a session, and a session's files can be recovered
 A Connected Machine is a computer you enroll: a laptop, a workstation, a build server, a GPU box. When a session targets it, the agent runs there directly. There is no cloud box behind it.
 
 - **Your credentials stay yours.** No platform-minted token, Git credential, or setup hook crosses to the machine. It uses its own SSH, `gh`, or credential helper.
-- **Your files stay in place.** Repositories are never cloned onto the machine. Each session works in a folder you choose under the agent's root.
+- **Your files stay in place.** Repositories are never cloned onto the machine. Each session works in the agent's launch root or a folder you choose (absolute, or relative to that root).
 - **Dial-out only.** The enrolled agent connects out to OpenGeni's control plane and stream relay. Nothing on the machine needs to be reachable from the internet.
 - **Loud consent, one-click revocation.** Enrollment asks for whole-machine access explicitly, screen control is a separate consent, and revoking a machine invalidates every grant at once.
 - **Never cold-created or killed.** An offline machine is offline, not missing. OpenGeni never provisions a replacement box for it and never stops it.

@@ -54,7 +54,7 @@ await og.asUser(user.id, { source }).createSession(workspaceId, {
 });
 ```
 
-Omitting `tools` or `firstPartyMcpTools` inherits workspace and deployment defaults, including tools that reach other sessions. Always pass explicit lists.
+Omitting `tools` or `firstPartyMcpTools` inherits workspace and deployment defaults, including tools that reach other sessions. Always pass explicit lists. On deployments with agent settings enabled, `agent: { capabilities: "none" }` limits the agent to the session's own tools plus the essentials; see [Configure the agent](/integrate/configure-the-agent).
 
 Organization owners can also restrict which integrations may be set up at all in **Organization settings → Integrations**, or through `@opengeni/sdk/organization-integration-policy`.
 

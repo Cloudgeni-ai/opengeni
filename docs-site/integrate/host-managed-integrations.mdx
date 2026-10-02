@@ -12,7 +12,7 @@ icon: "sliders"
   user watching.
 </Info>
 
-All three are configured per workspace through the API or `@opengeni/sdk` and require `workspace:admin`. Agents can never change them. OpenGeni generates each signing secret and returns it once, at creation.
+The credential provider and webhooks are configured per workspace (`workspace:admin`) or once for the organization (owners and admins, or a full-access organization key) through the API or `@opengeni/sdk`; see [Webhooks and credentials](/guides/webhooks-and-credentials) for who sets up what. Turn identity needs no setup. Agents can never change any of them. OpenGeni generates each signing secret and returns it once, at creation.
 
 ## One signature scheme
 
@@ -33,7 +33,7 @@ const request = await verifyCredentialProviderRequest({ body: rawBody, headers, 
 
 ## Credential provider
 
-One optional HTTPS endpoint per workspace that supplies short-lived credentials for sandbox work: environment variables, files, and Git credentials. OpenGeni calls it before a turn's sandbox work and again before the returned material expires.
+One optional HTTPS endpoint per workspace that supplies short-lived credentials for sandbox work: environment variables, files, Git credentials, and MCP credentials. OpenGeni calls it before a turn's sandbox work and again before the returned material expires.
 
 ```ts
 const { secret } = await og.putWorkspaceCredentialProvider(workspaceId, {
@@ -48,12 +48,13 @@ Each request identifies the workspace, session, turn, and the human who started 
 
 Up to ten endpoints per workspace, each subscribed to a subset of:
 
-| Event                                               | Sent when                                     |
-| --------------------------------------------------- | --------------------------------------------- |
-| `turn.completed` / `turn.failed` / `turn.cancelled` | A turn settles                                |
-| `session.status.changed`                            | The session status changes                    |
-| `session.requiresAction`                            | The agent waits for a tool approval           |
-| `session.humanInput.requested`                      | The agent asks the user a structured question |
+| Event                                                                | Sent when                                                                                                        |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `turn.completed` / `turn.failed` / `turn.cancelled`                  | A turn settles                                                                                                   |
+| `session.status.changed`                                             | The session status changes                                                                                       |
+| `session.requiresAction`                                             | The agent waits for a tool approval                                                                              |
+| `session.humanInput.requested`                                       | The agent asks the user a structured question                                                                    |
+| `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | A [usage allowance](/guides/usage-allowances) crosses a threshold, runs out, or resets (workspace webhooks only) |
 
 ```ts
 const { webhook, secret } = await og.createWorkspaceWebhook(workspaceId, {
@@ -62,7 +63,7 @@ const { webhook, secret } = await og.createWorkspaceWebhook(workspaceId, {
 });
 ```
 
-The body is a thin event with the session, turn, and sequence; read details through the API. Delivery is at least once and unordered: deduplicate on the event `id` and order by `sequence` within a session. Failed deliveries retry with backoff; `listWorkspaceWebhookDeliveries` and `redeliverWorkspaceWebhookDelivery` let you inspect and replay them.
+The body is a thin event with the session, turn, and sequence (usage events and the `webhook.test` event from **Send test event** carry no session); read details through the API. Delivery is at least once and unordered: deduplicate on the event `id` and order by `sequence` within a session. Failed deliveries retry with backoff; `listWorkspaceWebhookDeliveries` and `redeliverWorkspaceWebhookDelivery` let you inspect and replay them.
 
 ## Turn identity on MCP calls
 
