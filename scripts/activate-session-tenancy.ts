@@ -25,6 +25,19 @@ export function requiredActivationMigrations(allOrganizations: boolean): readonl
     : REQUIRED_MIGRATIONS;
 }
 
+export function activationDatabaseUrl(databaseUrl: string): string {
+  // Preserve the authority/path verbatim, including postgres-js multi-host URLs.
+  // URL query parameters override connection options in the actual driver.
+  const fragmentIndex = databaseUrl.indexOf("#");
+  const fragment = fragmentIndex < 0 ? "" : databaseUrl.slice(fragmentIndex);
+  const connectionUrl = fragmentIndex < 0 ? databaseUrl : databaseUrl.slice(0, fragmentIndex);
+  const queryIndex = connectionUrl.indexOf("?");
+  const authorityAndPath = queryIndex < 0 ? connectionUrl : connectionUrl.slice(0, queryIndex);
+  const parameters = new URLSearchParams(queryIndex < 0 ? "" : connectionUrl.slice(queryIndex + 1));
+  parameters.set("application_name", LOSSLESS_CONTENT_WRITER_APPLICATION_NAME);
+  return `${authorityAndPath}?${parameters.toString()}${fragment}`;
+}
+
 export function activationConnectionOptions(searchPath?: string) {
   return {
     max: 1,
@@ -398,7 +411,7 @@ async function main(): Promise<void> {
   if (!databaseUrl) throw new Error("OPENGENI_MIGRATIONS_DATABASE_URL is required");
   const roles = applicationRoles();
   const searchPath = dbSearchPath(settings);
-  const sql = postgres(databaseUrl, activationConnectionOptions(searchPath));
+  const sql = postgres(activationDatabaseUrl(databaseUrl), activationConnectionOptions(searchPath));
   try {
     const result = await sql.begin((transaction) =>
       activateSessionTenancyTransaction(transaction, {
