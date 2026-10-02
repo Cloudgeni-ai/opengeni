@@ -1239,7 +1239,13 @@ export async function readSessionBackgroundCommandOutput(
   // Only observe the terminal state actually used by this read. A finish racing
   // a running read must leave its notification pending.
   const terminal = command.state === "exited" || command.state === "lost";
-  const observed = terminal ? await observeSessionBackgroundCommandCompletion(db, input) : command;
+  // Observation and pending-notice suppression commit together. Once that
+  // receipt exists, retained paging must not take session/event write locks
+  // again: an unrelated writer could otherwise block an already observed read.
+  const observed =
+    terminal && command.completionObservedAt === null
+      ? await observeSessionBackgroundCommandCompletion(db, input)
+      : command;
   return {
     commandId: command.id,
     state: command.state,

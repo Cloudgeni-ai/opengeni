@@ -156,6 +156,106 @@ test("running reads do not observe; terminal retained paging suppresses only pen
   );
 });
 
+test.each(["exited", "lost"] as const)(
+  "already observed %s paging does not wait for an unrelated session writer",
+  async (outcome) => {
+    const command = await connected();
+    await appendSessionEvents(client.db, workspaceId, sessionId, [
+      {
+        type: "sandbox.command.output.delta",
+        payload: { commandId: command.commandId, chunk: "abcdefgh", stream: "stdout" },
+      },
+    ]);
+    const exitCode = outcome === "exited" ? 0 : null;
+    await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      ...command,
+      outcome,
+      exitCode,
+    });
+    const first = await read(client.db, { ...command, maxOutputBytes: 4 });
+    expect(first.completionObservedAt).not.toBeNull();
+    expect(first.hasMore).toBe(true);
+    const before = await shared.admin`
+    select row_to_json(c) as value from session_background_commands c where id=${command.commandId}`;
+    const notifications = await shared.admin`
+    select row_to_json(u) as value from session_system_updates u where source_id=${command.commandId}`;
+    let unlock!: () => void, locked!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = shared.admin.begin(async (tx) => {
+      await tx`select id from sessions where id=${sessionId} for no key update`;
+      locked();
+      await gate;
+    });
+    await ready;
+    const second = read(client.db, { ...command, cursor: first.nextCursor });
+    let result: Awaited<ReturnType<typeof read>> | undefined;
+    try {
+      // The writer keeps its lock until after the assertion. A bounded wait is
+      // only a deadlock escape for RED; it is not a latency benchmark.
+      result = await Promise.race([second, Bun.sleep(1_000).then(() => undefined)]);
+      expect(result).toBeDefined();
+    } finally {
+      unlock();
+      await holder;
+      await second;
+    }
+    expect(result).toMatchObject({
+      terminal: true,
+      state: outcome,
+      exitCode,
+      hasMore: false,
+      completionObservedAt: first.completionObservedAt,
+    });
+    expect(result!.chunks.map((row) => row.chunk)).toEqual(["efgh"]);
+    const after = await shared.admin`
+      select row_to_json(c) as value from session_background_commands c where id=${command.commandId}`;
+    const afterNotifications = await shared.admin`
+      select row_to_json(u) as value from session_system_updates u where source_id=${command.commandId}`;
+    expect(Array.from(after)).toEqual(Array.from(before));
+    expect(Array.from(afterNotifications)).toEqual(Array.from(notifications));
+  },
+);
+
+test("first terminal observation still serializes with session writers", async () => {
+  const command = await connected();
+  await settleConnectedMachineSessionBackgroundCommand(client.db, command);
+  let unlock!: () => void, locked!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  const ready = new Promise<void>((resolve) => {
+    locked = resolve;
+  });
+  const holder = shared.admin.begin(async (tx) => {
+    await tx`select id from sessions where id=${sessionId} for no key update`;
+    locked();
+    await gate;
+  });
+  await ready;
+  const reading = read(client.db, command);
+  try {
+    expect(
+      await Promise.race([reading.then(() => "returned"), Bun.sleep(100).then(() => "blocked")]),
+    ).toBe("blocked");
+    const [notification] = await shared.admin`
+      select state from session_system_updates where source_id=${command.commandId}`;
+    expect(notification!.state).toBe("pending");
+  } finally {
+    unlock();
+    await holder;
+    await reading;
+  }
+  expect((await reading).completionObservedAt).not.toBeNull();
+  const [notification] = await shared.admin`
+    select state from session_system_updates where source_id=${command.commandId}`;
+  expect(notification!.state).toBe("superseded");
+});
+
 test("command reads deny another session and account before observation", async () => {
   const command = await connected();
   await settleConnectedMachineSessionBackgroundCommand(client.db, command);
@@ -166,6 +266,13 @@ test("command reads deny another session and account before observation", async 
   const [row] =
     await shared.admin`select completion_observed_at from session_background_commands where id=${command.commandId}`;
   expect(row!.completion_observed_at).toBeNull();
+  const observed = await read(client.db, command);
+  expect(observed.completionObservedAt).not.toBeNull();
+  await expect(read(client.db, { ...command, sessionId: crypto.randomUUID() })).rejects.toThrow(
+    "not found",
+  );
+  await expect(read(client.db, { ...command, accountId: crypto.randomUUID() })).rejects.toThrow();
+  expect((await read(client.db, command)).completionObservedAt).toBe(observed.completionObservedAt);
 });
 
 test("already claimed notification and history remain byte-for-byte unchanged", async () => {

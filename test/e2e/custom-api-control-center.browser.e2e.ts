@@ -55,6 +55,8 @@ describe("custom API control center diagnostics", () => {
     for (const query of [
       "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
       "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false",
+      "view=page&limit=1&projection=summary&pinsOnly=true",
     ]) {
       expect(
         isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
@@ -553,9 +555,11 @@ function isExpectedSessionPageCancellation(
   return new Set([
     // Default root page on this fixture's capabilities route; keep exact keys and values.
     "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
+    "limit=1&pinsOnly=true&projection=summary&view=page",
   ]).has(actual);
 }
 

@@ -546,8 +546,7 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
-      // The stock console owns its page: reload stale tabs after an API contract change.
-      reloadOnApiContractChange
+      // The console's API adapter owns update notices and guarded page reloads.
       onWorkspaceControlEvent={(event) => {
         if (workspaceControlEventInvalidatesWorkspace(event)) {
           void context.refreshWorkspace(workspaceId);

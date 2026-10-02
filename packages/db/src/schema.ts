@@ -9128,6 +9128,7 @@ export const sessionEventCursors = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     lastSequence: integer("last_sequence").notNull().default(0),
+    lastMeaningfulSequence: integer("last_meaningful_sequence").notNull().default(0),
     revision: bigint("revision", { mode: "number" }).notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -9148,6 +9149,10 @@ export const sessionEventCursors = pgTable(
       table.sessionId,
     ),
     sequenceValid: check("session_event_cursors_sequence_check", sql`${table.lastSequence} >= 0`),
+    meaningfulSequenceValid: check(
+      "session_event_cursors_meaningful_sequence_check",
+      sql`${table.lastMeaningfulSequence} >= 0 and ${table.lastMeaningfulSequence} <= ${table.lastSequence}`,
+    ),
     revisionValid: check("session_event_cursors_revision_check", sql`${table.revision} >= 0`),
   }),
 );
