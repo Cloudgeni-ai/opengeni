@@ -16,6 +16,11 @@ const sharingMigration = "0501_session_sharing_execution.sql";
 const admissionDiagnosticsMigration = "0534_scheduled_admission_diagnostics.sql";
 // Replaces 0534's scheduled-run triggers; withheld with it.
 const admissionRefusalsMigration = "0539_scheduled_admission_refusals.sql";
+// Patches to the refusal guard must follow its withheld creation as well.
+const refusalDependentMigrations = [
+  ...allowanceMigrationTail,
+  "0584_scheduled_model_admission_refusal.sql",
+];
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -37,12 +42,12 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
       `CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
     );
     await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration}), (${admissionDiagnosticsMigration}), (${admissionRefusalsMigration})`;
-    // The allowance guard patch must wait for the withheld refusal lifecycle.
-    for (const name of allowanceMigrationTail)
+    // Guard patches must wait for the withheld refusal lifecycle.
+    for (const name of refusalDependentMigrations)
       await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(db.ownerUrl);
     await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration}, ${admissionDiagnosticsMigration}, ${admissionRefusalsMigration})`;
-    for (const name of allowanceMigrationTail)
+    for (const name of refusalDependentMigrations)
       await owner`delete from schema_migrations where name=${name}`;
     const [posture] =
       await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
