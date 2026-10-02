@@ -906,14 +906,12 @@ billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
-Workspace built-in tool and MCP-server defaults inherit independently when
-their respective `settings.sessionToolDefaults` key is absent. Existing arrays
-remain exact custom selections (including empty arrays). The settings API
-merges these nested keys atomically; explicit `null` removes only that override.
-The UI requires deliberate customization and exposes partial selections;
-saving plugin defaults never freezes built-in defaults. Persistence lives in
-`packages/db/src/workspace-tool-defaults.ts`; deployment ceilings still apply,
-and changing defaults never rewrites existing sessions or accepted attempts.
+Workspace built-in and MCP defaults inherit independently from absent
+`settings.sessionToolDefaults` keys. Arrays are exact custom selections;
+`null` removes one override. Atomic settings merges never freeze unrelated
+defaults or rewrite accepted work. Deliberate UI customization exposes partial
+selections. Deployment ceilings apply; persistence lives in
+`packages/db/src/workspace-tool-defaults.ts`.
 
 A fresh session selecting a workspace Gateway or OpenRouter custom model, an
 existing session explicitly switching from another model, a new/materially
@@ -939,11 +937,9 @@ admission; see [run lifecycle](run-lifecycle.md).
 `artifacts:publish`, archive, restore, and exact mutation fences apply;
 pure service work fails closed. See [run lifecycle](run-lifecycle.md).
 
-Tool disclosure is progressive, but authority is not. A tool may be eager or
-lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
-still resolves through the current authorized catalog and the same execution
-fences. Approval-required tools remain approval-required regardless of access
-path.
+Tool disclosure is progressive. Every eager, lazy, local, MCP, direct-model,
+or Codemode invocation uses the current authorized catalog, execution fences,
+and approval requirements.
 
 The closed always-visible local first-request set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -951,15 +947,19 @@ The closed always-visible local first-request set is `exec_command`,
 them), and optional [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
+Configured agents always receive discovery mechanics; `media` gates image/video
+guidance. An unmatched literal `tool_list.namePrefix` preserves the empty page
+and may suggest bounded authorized descriptors. Suggestions neither load schemas
+nor grant execution; exact `tool_search` resolves them.
+
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
-Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
-ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
-`opengeni-client`, `opengeni-help`, `opengeni-visualize`, and `document-parsing`,
-unless explicitly overridden. `.agents/skills/opengeni-client` is canonical;
-`scripts/sync-client-skill.ts` generates bundled and docs-site copies with drift tests.
-Every deployment can read it without installation or sandbox setup.
+Repository `.agents/skills` holds maintainer/integration guidance; runtime Skills
+ship from `packages/runtime/src/bundled_*_skills`. Overridable worker defaults:
+`opengeni-client`, `opengeni-help`, `opengeni-visualize`, `document-parsing`.
+`scripts/sync-client-skill.ts` copies canonical `.agents/skills/opengeni-client`
+to bundles/docs with drift tests; reading requires no installation or sandbox.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
