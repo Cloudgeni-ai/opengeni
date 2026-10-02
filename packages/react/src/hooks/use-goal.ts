@@ -1,6 +1,7 @@
 import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
+import { normalizeError } from "../lib/error-message";
 import {
   useDebouncedCallback,
   useMutationRunner,
@@ -117,7 +118,7 @@ export function useGoal(
         setGoal(null);
         setError(null);
       } else {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+        setError(normalizeError(cause));
       }
       setLoading(false);
     } finally {

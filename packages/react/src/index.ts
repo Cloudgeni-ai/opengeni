@@ -43,7 +43,7 @@ export type {
   SessionClientLike,
 } from "./client";
 export { OpenGeniProvider } from "./provider";
-export type { OpenGeniProviderProps } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
