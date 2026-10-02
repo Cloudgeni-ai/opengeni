@@ -1538,7 +1538,9 @@ existing readiness budget.
 
 Post-start transport recovery retries exact-ID reads within the original
 wait. Exhaustion preserves uncertainty and writer fences, never replay
-or lease loss.
+or lease loss. Mixed provider faults contain uncertainty without retry authority;
+shared access cancellation affects only its waiter. Supervised cleanup retains
+the same helper UUID and private cursor until exact observation succeeds.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;

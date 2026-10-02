@@ -1453,6 +1453,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let observationFailure: ProviderCommandObservationUnavailableError | null =
       input.initialObservationFailure ?? null;
     for (;;) {
+      if (observationFailure?.readRetryAllowed === false) break;
       if (performance.now() - startedAt >= waitMs) break;
       if (this.cancelled) throw cancellationError(this.reason);
       if (
@@ -1499,6 +1500,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         // No terminal proof and no early adoption: spend only the original
         // foreground wait while preserving the exact turn-owned registration.
         observationFailure = error;
+        if (!error.readRetryAllowed) break;
         await delay(Math.min(SHELL_POLL_MS, Math.max(0, waitMs - (performance.now() - startedAt))));
         continue;
       }
@@ -1627,7 +1629,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   private ensureDrain(): Promise<void> {
-    this.drainPromise ??= this.drain();
+    if (!this.drainPromise) {
+      const drain = this.drain();
+      this.drainPromise = drain;
+      void drain.catch(() => {
+        // A bounded observation failure is not a quiescence receipt. Preserve
+        // every registration, but allow a later drain to observe its SAME
+        // native helper instead of permanently caching a rejected promise.
+        if (this.drainPromise === drain) this.drainPromise = null;
+      });
+    }
     return this.drainPromise;
   }
 

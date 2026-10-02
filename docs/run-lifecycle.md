@@ -789,6 +789,15 @@ scripted Runner and native PostgreSQL worker tests cover continuation,
 exactly-once Start, failed promotion recovery, retained writer fencing and
 terminal-proof settlement. No new database outcome or migration is required.
 
+Post-ACK native observation failure uses that same internal writer-retention and
+no-replay parking boundary. Mixed or unreadable transport graphs produce typed
+uncertainty but grant no automatic read retry; pure missing-handle or persistence
+failures retain their existing behavior. Shared router lookup cancellation is
+waiter-local. Supervised cancellation preserves durable intent and its original
+writer; a bounded helper observation failure keeps the same helper UUID, cursor
+and partial response for a later drain. Rejection never proves quiescence or
+permits numeric-PID fallback or another possibly dispatched helper Start.
+
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain

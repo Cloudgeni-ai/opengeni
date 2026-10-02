@@ -25,8 +25,13 @@ import {
   SandboxExecReadinessTimeoutError,
 } from "../../../apps/worker/src/sandbox-resume";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
-import type { ModalRouterProviderCommand } from "@opengeni/contracts";
-import { isProviderCommandObservationUnavailableError } from "../src/sandbox/provider-command-session";
+import type { ModalRouterProviderCommand, CommandSupervisionReceipt } from "@opengeni/contracts";
+import {
+  isProviderCommandObservationUnavailableError,
+  ProviderCommandObservationUnavailableError,
+  withCommandSupervisionReady,
+  withSupervisedLaunchReservation,
+} from "../src/sandbox/provider-command-session";
 
 const service = "/modal.task_command_router.TaskCommandRouter/";
 const definition = (method: string, input: string, output: string, streaming = false) => ({
@@ -66,6 +71,14 @@ let foregroundPollCancelled = 0;
 let foregroundWrites = 0;
 let fixtureSequence = 0;
 let fixtureToken = "test-token";
+let supervised: {
+  receipt: CommandSupervisionReceipt | null;
+  commandExecId: string | null;
+  helpers: Map<string, string>;
+  reads: Array<{ execId: string; offset: number }>;
+  failCancelRead: boolean;
+  acked: boolean;
+} | null = null;
 function currentFixture(call: { metadata: { get(key: string): unknown[] } }): boolean {
   return call.metadata.get("authorization")[0] === `Bearer ${fixtureToken}`;
 }
@@ -112,6 +125,14 @@ beforeAll(async () => {
         }
         expect(call.metadata.get("authorization")).toEqual([`Bearer ${fixtureToken}`]);
         starts.push(call.request);
+        if (supervised) {
+          const actionIndex = call.request.commandArgs.indexOf("--action");
+          if (actionIndex >= 0) {
+            const action = call.request.commandArgs[actionIndex + 1];
+            supervised.helpers.set(call.request.execId, action);
+            if (action === "ack") supervised.acked = true;
+          } else supervised.commandExecId = call.request.execId;
+        }
         callback(
           mode === "rejected"
             ? { code: status.NOT_FOUND, details: "executable unavailable" }
@@ -138,6 +159,33 @@ beforeAll(async () => {
           return;
         }
         observations.push(call.request.execId);
+        if (supervised?.helpers.has(call.request.execId)) {
+          const action = supervised.helpers.get(call.request.execId);
+          const offset = Number(call.request.offset);
+          supervised.reads.push({ execId: call.request.execId, offset });
+          if (call.request.fileDescriptor !== 0) {
+            call.end();
+            return;
+          }
+          const response = Buffer.from(
+            JSON.stringify({ state: "quiescent", receipt: supervised.receipt }),
+          );
+          if (action === "cancel" && supervised.failCancelRead) {
+            if (offset === 0) {
+              // Commit a private response prefix before the next read fails.
+              // Leaving the stream open yields a bounded non-EOF page.
+              call.write({ data: response.subarray(0, 17) });
+            } else
+              call.emit("error", {
+                code: status.UNAVAILABLE,
+                details: "cancel helper read unavailable",
+              });
+            return;
+          }
+          call.write({ data: response.subarray(offset) });
+          call.end();
+          return;
+        }
         if (foregroundReadFailures > 0) {
           foregroundReadFailures--;
           call.emit("error", { code: status.UNAVAILABLE, details: "read DNS unavailable" });
@@ -154,6 +202,13 @@ beforeAll(async () => {
           return;
         }
         observations.push(call.request.execId);
+        if (supervised) {
+          const action = supervised.helpers.get(call.request.execId);
+          if (action === "cancel" && supervised.failCancelRead) callback(null, {});
+          else if (action || supervised.acked) callback(null, { code: 0 });
+          else callback(null, {});
+          return;
+        }
         if (foregroundPollPending) {
           call.on("cancelled", () => foregroundPollCancelled++);
           return;
@@ -219,6 +274,7 @@ function fixture(
   foregroundPollPending = false;
   foregroundPollCancelled = 0;
   foregroundWrites = 0;
+  supervised = null;
   preparationPending = preparation?.pending ?? false;
   const enteredPreparation = new Promise<void>((resolve) => {
     preparationEntered = resolve;
@@ -337,7 +393,137 @@ function fixture(
   };
 }
 
-function foregroundTools(f: ReturnType<typeof fixture>) {
+test("supervised cancellation uncertainty retains intent, writer and partial helper observation without Start replay", async () => {
+  const f = fixture();
+  const nativeState = {
+    receipt: null as CommandSupervisionReceipt | null,
+    commandExecId: null as string | null,
+    helpers: new Map<string, string>(),
+    reads: [] as Array<{ execId: string; offset: number }>,
+    failCancelRead: true,
+    acked: false,
+  };
+  supervised = nativeState;
+  let command!: ModalRouterProviderCommand;
+  let proof: CommandSupervisionReceipt | null = null;
+  let intent = false;
+  let retained = true;
+  let adoptions = 0;
+  let numericHelpers = 0;
+  const fence = createTurnToolCancellationController();
+  const [exec] = fence.wrapTools(
+    [
+      {
+        type: "function",
+        name: "exec_command",
+        invoke: async (_context: unknown, input: string) => {
+          await withSupervisedLaunchReservation(
+            {
+              reserve: async (original) => {
+                command = structuredClone(original);
+                nativeState.receipt = {
+                  protocol: "native-subreaper-v1",
+                  invocationId: original.supervision!.invocationId,
+                  receiptId: crypto.randomUUID(),
+                  leaderExitCode: 137,
+                };
+                f.session.bindProviderCommand!(73, command, {
+                  load: async () => structuredClone(command),
+                  acknowledge: async (next) => next,
+                  reserveInput: async () => {
+                    throw new Error("no stdin permitted");
+                  },
+                  requestCancellation: async () => {
+                    intent = true;
+                  },
+                  cancellationRequested: async () => intent,
+                  loadSupervisionReceipt: async () => proof,
+                  recordSupervisionReceipt: async (next) => {
+                    proof = next;
+                  },
+                  captureRouterPage: async (page) => {
+                    command = page.command;
+                    return { command, captured: true };
+                  },
+                });
+              },
+            },
+            () =>
+              withCommandSupervisionReady(true, () =>
+                f.control.start({ cmd: JSON.parse(input).cmd }),
+              ),
+          );
+          return "Chunk ID: supervised-start\nWall time: 0 seconds\nProcess running with session ID 73\nOutput:\n";
+        },
+      },
+    ],
+    {
+      supportsPty: () => true,
+      hasRetainedProcess: () => retained,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions++;
+      },
+      cancelSupervisedCommand: (handle, reason) =>
+        f.session.cancelSupervisedCommand!(handle, reason),
+      execCommandForProcessControl: async () => {
+        numericHelpers++;
+        throw new Error("numeric fallback forbidden");
+      },
+      writeStdinForProcessControl: async (args) => {
+        const result = await f.session.writeStdin!(args);
+        if (result.includes("Process exited")) retained = false;
+        return result;
+      },
+    },
+  );
+  try {
+    const initial = await exec!.invoke(
+      {},
+      JSON.stringify({ cmd: "user-work", tty: false, yield_time_ms: 0 }),
+    );
+    expect(initial).toContain("Process running with session ID 73");
+    expect(adoptions).toBe(0);
+    const originalExecId = command.execId;
+    const began = performance.now();
+    fence.cancel("pause");
+    const failure = await fence.waitForQuiescence().catch((error) => error);
+    expect(performance.now() - began).toBeLessThan(6_500);
+    expect(failure).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(intent).toBe(true);
+    expect(retained).toBe(true);
+    expect(proof).toBeNull();
+    expect(command.execId).toBe(originalExecId);
+    const cancelStart = starts.find((start) => start.commandArgs.includes("cancel"))!;
+    expect(failure.command).toMatchObject({
+      sandboxId: command.sandboxId,
+      taskId: command.taskId,
+      execId: cancelStart.execId,
+    });
+    expect(failure.command.streams.stdout.byteOffset).toBe(17);
+    expect(failure.command.streams.stdout.eof).toBe(false);
+    expect(starts.filter((start) => start.commandArgs.includes("cancel"))).toHaveLength(1);
+    expect(
+      nativeState.reads.some((read) => read.execId === cancelStart.execId && read.offset === 17),
+    ).toBe(true);
+    expect(numericHelpers).toBe(0);
+    expect(adoptions).toBe(0);
+    expect(foregroundWrites).toBe(0);
+    nativeState.failCancelRead = false;
+    await fence.waitForQuiescence();
+    expect(starts.filter((start) => start.commandArgs.includes("cancel"))).toHaveLength(1);
+    expect(proof).toEqual(nativeState.receipt);
+    expect(retained).toBe(false);
+    expect(command.execId).toBe(originalExecId);
+    expect(numericHelpers).toBe(0);
+    expect(adoptions).toBe(0);
+    expect(foregroundWrites).toBe(0);
+  } finally {
+    await f.close();
+  }
+}, 15_000);
+
+function foregroundTools(f: ReturnType<typeof fixture>, stdoutOffset = 0) {
   let stored: ModalRouterProviderCommand;
   let adoptions = 0;
   let retained = true;
@@ -346,6 +532,7 @@ function foregroundTools(f: ReturnType<typeof fixture>) {
   const invoke = async (_context: unknown, input: string) => {
     const args = JSON.parse(input);
     stored = await f.control.start({ cmd: args.cmd, tty: args.tty }, AbortSignal.timeout(2_000));
+    stored.streams.stdout.byteOffset = stdoutOffset;
     f.session.bindProviderCommand!(73, stored, {
       load: async () => stored,
       acknowledge: async (command) => command,
@@ -409,6 +596,96 @@ function foregroundTools(f: ReturnType<typeof fixture>) {
     cleanupHelpers: () => cleanupHelpers,
   };
 }
+
+test.each(["aggregate", "cause", "unreadable"] as const)(
+  "the actual foreground wrapper contains %s provider read uncertainty without retry authority",
+  async (shape) => {
+    const f = fixture();
+    const tools = foregroundTools(f, 17);
+    const native = f.control as unknown as {
+      readRouterPage(...args: unknown[]): Promise<unknown>;
+    };
+    const readPage = native.readRouterPage.bind(f.control);
+    let reads = 0;
+    let getters = 0;
+    let wrapped: unknown;
+    Object.defineProperty(f.control, "readRouterPage", {
+      value: async (...args: unknown[]) => {
+        reads++;
+        try {
+          return await readPage(...args);
+        } catch (error) {
+          if (shape === "aggregate") wrapped = new AggregateError([error, { code: 404 }]);
+          else if (shape === "cause")
+            wrapped = Object.assign(
+              new Error("provider wrapper", {
+                cause: new Error("unclassified provider cause"),
+              }),
+              { code: 14 },
+            );
+          else {
+            wrapped = Object.assign(new Error("provider wrapper"), { code: 14 });
+            Object.defineProperty(wrapped, "cause", {
+              get: () => {
+                getters++;
+                throw new Error("must not inspect", { cause: error });
+              },
+            });
+          }
+          throw wrapped;
+        }
+      },
+    });
+    foregroundReadFailures = 100;
+    try {
+      const result = await tools.exec.invoke(
+        {},
+        JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+      );
+      expect(result).toContain("observation unavailable");
+      expect(result).toContain("Do not replay");
+      expect(result).not.toContain("Please try again");
+      expect(result).not.toContain("Process exited");
+      expect(reads).toBe(1);
+      expect(getters).toBe(0);
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+      expect(tools.stored().streams.stdout.byteOffset).toBe(17);
+      expect(tools.stored().streams.stdout.eof).toBe(false);
+      expect(tools.adoptions()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each(["missing-handle", "persistence"] as const)(
+  "pure %s failure does not acquire provider-observation containment",
+  async (shape) => {
+    const f = fixture();
+    const tools = foregroundTools(f);
+    const failure = Object.assign(new Error(shape), {
+      code: shape === "missing-handle" ? 404 : "23505",
+    });
+    let reads = 0;
+    Object.defineProperty(f.control, "readRouterPage", {
+      value: async () => {
+        reads++;
+        throw failure;
+      },
+    });
+    try {
+      await expect(
+        tools.exec.invoke({}, JSON.stringify({ cmd: "work", yield_time_ms: 1_000 })),
+      ).rejects.toBe(failure);
+      expect(reads).toBe(1);
+      expect(starts).toHaveLength(1);
+      expect(tools.adoptions()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test.each([true, false])(
   "post-start real gRPC UNAVAILABLE retries only the exact unsupervised foreground read (PTY=%s)",

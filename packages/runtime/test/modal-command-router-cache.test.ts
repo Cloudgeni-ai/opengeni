@@ -34,6 +34,99 @@ function fixture() {
   return { control, cache: control as unknown as CacheControl, lookups: () => lookups };
 }
 
+function pendingAccessFixture() {
+  let resolve!: (access: { url: string; jwt: string }) => void;
+  let providerSignal!: AbortSignal;
+  let lookups = 0;
+  const pending = new Promise<{ url: string; jwt: string }>((fulfill) => {
+    resolve = fulfill;
+  });
+  const control = ModalCommandControl.forSandbox(
+    {
+      version: () => "0.9.0",
+      cpClient: {
+        taskGetCommandRouterAccess: (_request: unknown, options: { signal: AbortSignal }) => {
+          lookups++;
+          providerSignal = options.signal;
+          // Deliberately ignores cancellation, exercising bounded waiter cleanup.
+          return pending;
+        },
+      },
+    } as never,
+    "sandbox-original",
+    "/workspace",
+  );
+  return {
+    control,
+    cache: control as unknown as CacheControl,
+    resolve: () => resolve({ url: "https://localhost:1", jwt: "test-authenticated-access" }),
+    signal: () => providerSignal,
+    lookups: () => lookups,
+  };
+}
+
+test("the first caller's cancellation does not cancel shared authenticated access", async () => {
+  const f = pendingAccessFixture();
+  const first = new AbortController();
+  const reason = new Error("first owner cancelled");
+  let runs = 0;
+  const cancelled = f.cache
+    .withRouter("task-original", first.signal, async () => runs++)
+    .catch((error) => error);
+  const sibling = f.cache.withRouter("task-original", undefined, async () => runs++);
+  first.abort(reason);
+  try {
+    expect(await cancelled).toBe(reason);
+    expect(f.signal().aborted).toBe(false);
+    expect(f.lookups()).toBe(1);
+    f.resolve();
+    await sibling;
+    expect(runs).toBe(1);
+  } finally {
+    await f.control.close();
+  }
+});
+
+test("a cancelled shared lookup waiter returns without waiting for its sibling or provider", async () => {
+  const f = pendingAccessFixture();
+  const owner = new AbortController();
+  const sibling = f.cache.withRouter("task-original", undefined, async () => "sibling");
+  const reason = new Error("second owner cancelled");
+  const cancelled = f.cache
+    .withRouter("task-original", owner.signal, async () => "cancelled")
+    .catch((error) => error);
+  owner.abort(reason);
+  try {
+    expect(await Promise.race([cancelled, Bun.sleep(200).then(() => "timeout")])).toBe(reason);
+    expect(f.signal().aborted).toBe(false);
+    f.resolve();
+    expect(await sibling).toBe("sibling");
+    expect(f.lookups()).toBe(1);
+  } finally {
+    await f.control.close();
+  }
+});
+
+test("the last cancelled waiter and close drain an uncooperative access lookup", async () => {
+  const f = pendingAccessFixture();
+  const owner = new AbortController();
+  const reason = new Error("only owner cancelled");
+  const cancelled = f.cache
+    .withRouter("task-original", owner.signal, async () => "unexpected")
+    .catch((error) => error);
+  owner.abort(reason);
+  expect(await cancelled).toBe(reason);
+  expect(f.signal().aborted).toBe(true);
+  expect(f.cache.routers.has("task-original")).toBe(false);
+  expect(
+    await Promise.race([
+      f.control.close().then(() => "closed"),
+      Bun.sleep(200).then(() => "timeout"),
+    ]),
+  ).toBe("closed");
+  f.resolve();
+});
+
 test("concurrent expiry continuations preserve one fresh authenticated router", async () => {
   const f = fixture();
   let closes = 0;

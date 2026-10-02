@@ -60,6 +60,9 @@ export class ProviderCommandObservationUnavailableError extends Error {
   constructor(
     readonly command: SandboxProviderCommand,
     cause: unknown,
+    /** Mixed or unreadable provider graphs can contain observation failure
+     * without proving that an automatic read retry is safe. */
+    readonly readRetryAllowed = true,
   ) {
     super("Provider command observation unavailable; do not replay the invocation", { cause });
     this.name = "ProviderCommandObservationUnavailableError";
