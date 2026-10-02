@@ -21,14 +21,14 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
 NATS transports reconstructible events. The API authorizes; workers execute.
 
-External users require live membership; `asUser()` supplies identity, labels do
-not. Visibility differs from `agentAccess`; Personal Knowledge follows the
-verified active-turn user. Task notes coordinate; linking never merges users.
+External users require live membership and `asUser()` identity, never labels.
+Visibility differs from `agentAccess`; Personal Knowledge follows the verified
+active-turn user. Task notes coordinate; links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
-Skill removal deletes scoped heads/revisions with exact approval and Learning
-enforcement, preserving conversation context.
+Skill removal deletes scoped heads/revisions with exact approval/Learning
+enforcement, preserving context.
 
 `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors, granting no capabilities/credentials.
@@ -37,16 +37,14 @@ Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-acc
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
 [`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
-owns effective turn refs: ordinary work uses session policy; scheduled work
-retains its frozen selection. Credential-provider targeting and MCP preparation
-consume those execution refs, never the queue's omitted-tools empty array.
-Connection-backed MCPs remain exclusively native-authenticated and are excluded
-from provider targeting and header application, even for historical work.
-Signed credential-provider callbacks also carry the exact accepted turn's
-informational initiator context. Children inherit bounded agent lineage;
-internal continuations freeze their exact causal turn's provenance at claim,
-without replacing their service authorization principal. Provider renewals
-retain that turn snapshot, never mutable session state. See
+owns turn refs: ordinary work uses session policy; scheduled work retains frozen
+selection. Credential-provider targeting/MCP preparation consume these refs,
+never omitted-tools queue arrays. Connection-backed MCPs use native authentication,
+excluding provider targeting/headers, including historical work. Signed credential
+callbacks carry accepted-turn informational initiators. Children inherit bounded
+lineage; internal continuations freeze causal-turn provenance at claim without
+replacing service principals. Renewals retain turn snapshots, never mutable
+session state. See
 [`workspace-integrations.md`](workspace-integrations.md).
 
 ---
@@ -58,8 +56,8 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
-Postgres commits precede notifications. NATS transports fanout, invalidations,
-request/reply and machine streams—not durable commit evidence.
+Postgres commits precede notifications. NATS carries fanout, invalidations,
+request/reply and machine streams, never commit evidence.
 
 `session_event_cursors` verifies appends transactionally and owns monotonic
 per-session sequencing/public `lastSequence`. Semantic writers lock sessions
@@ -77,10 +75,10 @@ filtered reads cannot skip unseen content. Manual unread survives old replay;
 newer consumed activity or explicit mark-read supersedes it.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
-SSE replays durable events, subscribes to fanout, and backfills gaps from Postgres.
-Replay reads select a byte-bounded prefix before transferring payloads. One
-oversized event travels intact, alone; a short page does not prove EOF.
-NATS restarts affect delivery/reachability, never history or queued obligations.
+SSE replays events, subscribes to fanout and backfills Postgres gaps. Reads select
+byte-bounded prefixes before payload transfer. Oversized events travel intact,
+alone; short pages never prove EOF. NATS restarts affect delivery/reachability,
+never history or queued obligations.
 
 Raw-isolation rollback:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
@@ -96,7 +94,7 @@ see `docs/connected-machines.md`.
 Control revisions increase.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
-`packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
+`packages/sdk/src/stream.ts`, [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
@@ -145,7 +143,12 @@ original turn, history, authority and selected model policy—never synthetic in
 
 Active-run writes require the current exact attempt/generation; stale workers
 cannot write or settle replacements. Temporal cancellation is intent, not
-quiescence: unresolved writers, even on closed attempts, fence replacements.
+quiescence: unresolved writers fence capture, rotation and physical settlement.
+Inference can resume on the same machine after a lease-lost closed attempt's
+legacy Modal exec observation is unknown and has no retained locator. Exact
+actor/turn/generation and home-route checks bound this exception; the original
+admission and quiescence remain unresolved. Recovery tool results warn the model
+to inspect actual state before repeating a call. Pause/Steer fences stay strict.
 Finalization contains each stage with heartbeat/metric evidence
 (`agent-turn/finalization-monitor.ts`).
 
@@ -155,6 +158,9 @@ settlement atomically advances its outbox. Workflow-close/writer-exit races
 cannot orphan recovery; repeated Pause re-arms missing quiescence wakes.
 
 A command stays attempt-owned until durable exact-provider-identity adoption.
+The reaper recovers missed adoption for closed legacy Modal commands under its
+exact claim. Original identity, output and unknown outcome remain intact;
+the durable wake permits later inference without replay or invented exit.
 Turn completion/Steer then detach; command cancellation, Pause and terminal
 Cancel govern lifetime. Instance stop/revocation/replacement marks Connected
 Machine tracking `lost`, never process death; temporary outages preserve it.
@@ -212,21 +218,21 @@ See [`goals.md`](goals.md).
 
 | Store | Owns | Must not become |
 | --- | --- | --- |
-| `session_history_items` | Protocol-preserving conversation truth supplied to the model | An audit projection or mutable UI cache |
-| `session_pending_tool_calls` | In-flight call/result receipts and the open suffix needed to resume | General conversation history |
-| `agent_run_states` | Control snapshots and the open-suffix sentinel | Model memory |
-| `session_events` | Exact append-only human/audit timeline and SSE replay | Model input |
-| `session_system_updates` | Durable machine-origin inputs such as child results and schedules | Synthetic human messages |
-| `session_goals` | The standing objective and continuation obligation | Workflow-local state |
-| Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
-| Knowledge entries, instructions, Skills, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | Conversation history or temporary task notes |
+| `session_history_items` | Model conversation truth preserving protocol | Audit projections/mutable UI caches |
+| `session_pending_tool_calls` | In-flight call/result receipts and resumable open suffix | Conversation history |
+| `agent_run_states` | Control snapshots/open-suffix sentinel | Model memory |
+| `session_events` | Append-only human/audit timeline, SSE replay | Model input |
+| `session_system_updates` | Durable machine inputs: child results/schedules | Synthetic human messages |
+| `session_goals` | Standing objective/continuation obligation | Workflow-local state |
+| Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
+| Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
 
 [Archived imports](../packages/core/src/application/archived-session-imports.ts)
 use server-only `@opengeni/sdk/session-history-import` for idempotent
-`session_events`; never model history, turns, active goals or wakes. Lifecycle
-seams establish `asUser` ownership/visibility; upload files first. Imports refuse
-execution during rolling deployments. React's projection is unchanged;
-`SessionConversation` hides execution controls. [Product integration](product-integration.md).
+`session_events`, never model history/turns/active goals/wakes. Lifecycle seams
+establish `asUser` ownership/visibility; upload files first. Imports refuse rolling
+deployments. React's projection remains unchanged; `SessionConversation` hides
+execution controls. [Product integration](product-integration.md).
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
@@ -381,10 +387,10 @@ provider identity and all other executable fields remain exact.
 permitted serving account for browser/default/agent choices. It rechecks authority,
 refreshes tokens, and caches support by workspace/credential/revision.
 
-Claude's request-local system placement groups each assistant-delimited input
-phase at Anthropic's user/system boundary without changing canonical roles or
-content; `anthropic-request-error.ts` exposes bounded provider diagnostics to
-durable failure settlement while transport exception text stays structural.
+Claude projects system inputs at native phase boundaries, adding a labeled
+machine-continuation anchor when needed, without changing canonical roles/content.
+`anthropic-request-error.ts` provides bounded durable diagnostics; transport
+exception text stays structural.
 
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.

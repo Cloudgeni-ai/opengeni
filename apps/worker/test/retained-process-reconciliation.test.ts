@@ -5,12 +5,15 @@ import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { promisify } from "node:util";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
+import { sessionAttemptPendingWritersSql } from "../../../packages/db/src/session-attempt-writers";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
   createProviderCommandRetainer,
   getRetainedProviderCommand,
   acknowledgeRetainedProviderOutput,
   reserveRetainedProviderInput,
+  requestRetainedProcessCancellation,
 } from "@opengeni/db/retained-provider-commands";
 import {
   testSettings,
@@ -21,16 +24,21 @@ import {
   addSessionSystemUpdate,
   applySessionTurnSettlement,
   getSessionTurn,
+  getActiveSessionHistoryItems,
+  registerPendingSessionToolCall,
+  readWorkspaceArchiveCapturePreflight,
   peekSessionWork,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   adoptManagedSessionBackgroundCommand,
+  recoverManagedSessionBackgroundCommand,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
   claimSessionWorkForAttempt,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
   countExpiredDrainingSandboxLeases,
+  evaluateSessionControl,
   createDb,
   createSession,
   getRetainedProcess,
@@ -38,6 +46,7 @@ import {
   mutateSessionControlInTransaction,
   readLease,
   recordRetainedProcessReconciliationProof,
+  rejectRetainedSupervisedLaunch,
   releaseLeaseHolder,
   requestSessionTurnRecovery,
   retainedProcessSettlementIdentity,
@@ -287,6 +296,7 @@ async function promoteTurnProcess(
     backgroundCommand?: string;
     providerCommand?: boolean;
     supervised?: boolean;
+    routerCommand?: boolean;
     providerCommandSandboxId?: string;
   } = {},
 ): Promise<ProcessFixture> {
@@ -314,35 +324,40 @@ async function promoteTurnProcess(
   const processId = crypto.randomUUID();
   const providerSessionId = input.providerSessionId ?? 71;
   const invocationId = crypto.randomUUID();
-  const command: SandboxProviderCommand | null = input.supervised
-    ? {
-        kind: "modal-router-v1",
-        sandboxId: instanceId,
-        taskId: "ta-test",
-        execId: crypto.randomUUID(),
-        supervision: {
-          protocol: "native-subreaper-v1",
-          invocationId,
-          nonce: "a".repeat(64),
-          controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
-        },
-        streams: {
-          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-        },
-      }
-    : input.providerCommand
+  const command: SandboxProviderCommand | null =
+    input.supervised || input.routerCommand
       ? {
-          kind: "modal-control-v1",
-          sandboxId: input.providerCommandSandboxId ?? instanceId,
+          kind: "modal-router-v1",
+          sandboxId: instanceId,
           taskId: "ta-test",
-          execId: `tp-${crypto.randomUUID()}`,
+          execId: crypto.randomUUID(),
+          ...(input.supervised
+            ? {
+                supervision: {
+                  protocol: "native-subreaper-v1" as const,
+                  invocationId,
+                  nonce: "a".repeat(64),
+                  controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+                },
+              }
+            : {}),
           streams: {
-            stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-            stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
           },
         }
-      : null;
+      : input.providerCommand
+        ? {
+            kind: "modal-control-v1",
+            sandboxId: input.providerCommandSandboxId ?? instanceId,
+            taskId: "ta-test",
+            execId: `tp-${crypto.randomUUID()}`,
+            streams: {
+              stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+              stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            },
+          }
+        : null;
   const process = await retainWorkspaceProviderCommand(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -575,6 +590,172 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  for (const operation of ["execCommand", "writeFile"] as const) {
+    test(`locator-less legacy recovery preserves unknown truth (${operation})`, async () => {
+      if (!available) return;
+      const ids = await freshWorkspace();
+      const attempt = await freshTurn(ids);
+      const { leaseId, instanceId } = await insertWarmLease(ids, {
+        sessionId: attempt.sessionId,
+        holderId: attempt.holderId,
+        holderKind: "turn",
+      });
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 7,
+        expectedInstanceId: instanceId,
+        operation,
+      });
+      const callId = crypto.randomUUID();
+      expect(
+        await registerPendingSessionToolCall(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          callId,
+          callType: "function_call",
+          callItem: { type: "function_call", callId, name: operation, arguments: "{}" },
+        }),
+      ).toMatchObject({ accepted: true, registered: true });
+      expect(
+        await recoverSessionDispatch(db, ids.workspaceId, {
+          sessionId: attempt.sessionId,
+          attemptId: attempt.attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toMatchObject({ action: "recovering" });
+      const claim = () =>
+        claimSessionWorkForAttempt(db, ids.workspaceId, {
+          sessionId: attempt.sessionId,
+          workflowId: `session-${attempt.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+      if (operation === "execCommand") {
+        for (const [
+          name,
+          admissionOverride,
+          attemptOverride,
+          inferencePending,
+          retainedLocator = false,
+        ] of [
+          ["exact legacy owner", {}, {}, false],
+          ["live owner", {}, { state: "running" }, true],
+          ["completed owner", {}, { outcome: "completed" }, true],
+          ["other provider", { provider_backend: "local" }, {}, true],
+          [
+            "active route",
+            { route_kind: "active", route_target_id: crypto.randomUUID() },
+            {},
+            true,
+          ],
+          ["non-exec", { operation: "writeFile" }, {}, true],
+          ["wrong actor", { actor_id: crypto.randomUUID() }, {}, true],
+          ["wrong turn", { turn_id: crypto.randomUUID() }, {}, true],
+          ["wrong generation", { execution_generation: attempt.executionGeneration + 1 }, {}, true],
+          ["known provider outcome", { provider_outcome: "retained" }, {}, true],
+          ["retained parent locator", {}, {}, true, true],
+        ] as const) {
+          const [predicate] = await withWorkspaceSessionActivityRls(
+            db,
+            ids.workspaceId,
+            (scopedDb) =>
+              scopedDb.execute<{ physical: boolean; inference: boolean }>(sql`
+            with sandbox_workspace_mutation_admissions as (
+              select (jsonb_populate_record(null::sandbox_workspace_mutation_admissions,
+                to_jsonb(source) || ${JSON.stringify(admissionOverride)}::jsonb)).*
+              from public.sandbox_workspace_mutation_admissions source where id=${admission.id}
+            ), sandbox_retained_processes as (
+              select * from public.sandbox_retained_processes where parent_admission_id=${admission.id}
+              union all select (jsonb_populate_record(null::sandbox_retained_processes,
+                ${JSON.stringify({ id: crypto.randomUUID(), parent_admission_id: admission.id, account_id: ids.accountId, workspace_id: ids.workspaceId, session_id: attempt.sessionId, owner_attempt_id: attempt.attemptId, state: "exited" })}::jsonb)).*
+              where ${retainedLocator}
+            ), owner as (
+              select (jsonb_populate_record(null::session_turn_attempts,
+                to_jsonb(source) || ${JSON.stringify(attemptOverride)}::jsonb)).*
+              from session_turn_attempts source where id=${attempt.attemptId}
+            )
+            select ${sessionAttemptPendingWritersSql(sql`owner`)} as physical,
+              ${sessionAttemptPendingWritersSql(sql`owner`, "inference")} as inference from owner
+          `),
+          );
+          expect(predicate, name).toEqual({ physical: true, inference: inferencePending });
+        }
+        const operationId = crypto.randomUUID();
+        await admin`insert into session_command_receipts (id,account_id,workspace_id,actor_type,actor_subject_id,
+          action,target_session_id,operation_key,canonical_request_hash)
+          values (${operationId},${ids.accountId},${ids.workspaceId},'human','user:test-owner',
+          'prompt.steer',${attempt.sessionId},${crypto.randomUUID()},${"a".repeat(64)})`;
+        await admin`insert into session_attempt_interruptions (account_id,workspace_id,session_id,operation_id,
+          attempt_id,kind,control_revision,state,settled_at)
+          values (${ids.accountId},${ids.workspaceId},${attempt.sessionId},${operationId},
+          ${attempt.attemptId},'steer',0,'settled',now())`;
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "cancellation-wait",
+          attemptId: attempt.attemptId,
+        });
+        expect(await claim()).toMatchObject({ action: "unclaimed", reason: "control-pending" });
+        await admin`delete from session_attempt_interruptions where operation_id=${operationId}`;
+        await admin`delete from session_command_receipts where id=${operationId}`;
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "runnable",
+        });
+        expect(await claim()).toMatchObject({ action: "claimed", turn: { id: attempt.turnId } });
+        const history = await getActiveSessionHistoryItems(db, ids.workspaceId, attempt.sessionId);
+        const result = history.find(
+          ({ item }) => item.type === "function_call_result" && item.callId === callId,
+        );
+        expect(result?.item).toMatchObject({
+          type: "function_call_result",
+          output: { type: "text" },
+        });
+        expect(JSON.stringify(result?.item)).toContain(
+          "side-effect outcome is unknown; inspect actual state before repeating the call",
+        );
+      } else {
+        expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+          kind: "cancellation-wait",
+          attemptId: attempt.attemptId,
+        });
+        expect(await claim()).toMatchObject({ action: "unclaimed", reason: "control-pending" });
+      }
+      const [unchanged] =
+        await admin`select admission.provider_outcome, admission.settled_at, attempt.quiesced_at
+        from sandbox_workspace_mutation_admissions admission join session_turn_attempts attempt on attempt.id=admission.attempt_id
+        where admission.id=${admission.id}`;
+      expect(unchanged).toMatchObject({
+        provider_outcome: null,
+        settled_at: null,
+        quiesced_at: null,
+      });
+      expect(
+        await readWorkspaceArchiveCapturePreflight(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 7,
+          expectedInstanceId: instanceId,
+          liveness: "warm",
+        }),
+      ).toBeNull();
+      const [lease] = await admin`select instance_id from sandbox_leases where id=${leaseId}`;
+      expect(lease!.instance_id).toBe(instanceId);
+    }, 60_000);
+  }
+
   test.skipIf(process.platform !== "linux")(
     "SIGKILL after native launch preserves the pre-dispatch DB reservation and cancels the original idle invocation",
     async () => {
@@ -1212,6 +1393,199 @@ describe("retained-process terminal-owner reconciliation", () => {
       state: "running",
     });
   });
+
+  test("lost legacy observation after turn completion recovers background ownership and admits the next turn", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ routerCommand: true });
+    const originalCommand = await getRetainedProviderCommand(db, {
+      ...fixture,
+      processId: fixture.process.id,
+    });
+    const attempt = fixture.attempt!;
+    await applySessionTurnSettlement(db, fixture.workspaceId, {
+      sessionId: fixture.sessionId,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      attemptId: attempt.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    await addSessionSystemUpdate(db, {
+      ...fixture,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "Child finished",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toMatchObject({
+      kind: "cancellation-wait",
+    });
+    let probes = 0;
+    await runReaper(async () => {
+      probes++;
+      throw new Error("Original command observation unavailable");
+    });
+    expect(probes).toBe(1);
+    const commands = await listSessionBackgroundCommands(db, fixture);
+    expect(commands).toEqual([
+      expect.objectContaining({ id: fixture.process.id, state: "running" }),
+    ]);
+    expect(commands[0]!.commandPreview).toContain("outcome unknown");
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "active",
+      processExitCode: null,
+      admissionOutcome: "retained",
+      admissionSettled: false,
+      processHolders: 1,
+    });
+    expect(
+      await getRetainedProviderCommand(db, { ...fixture, processId: fixture.process.id }),
+    ).toEqual(originalCommand);
+    expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+      kind: "runnable",
+    });
+    expect(
+      (
+        await claimSessionWorkForAttempt(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          workflowId: `session-${fixture.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        })
+      ).action,
+    ).toBe("claimed");
+    const [wake] =
+      await admin`select reason from session_workflow_wake_outbox where session_id=${fixture.sessionId}`;
+    expect(wake?.reason).toBe("retained_command_background_recovery");
+  }, 60_000);
+
+  test("closed legacy command recovery rejects a stale claim and mismatched process, then is idempotent", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({
+      routerCommand: true,
+      outcome: "interrupted_recoverable",
+    });
+    const claimId = crypto.randomUUID();
+    const claims = await claimTerminalRetainedProcesses(db, {
+      claimId,
+      limit: 100,
+      claimTtlMs: 60_000,
+    });
+    const claim = claims.find((item) => item.process.id === fixture.process.id)!;
+    expect(claim).toBeDefined();
+    const input = {
+      ...fixture,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(claim.process),
+      reconciliationClaimId: claim.claimId,
+    };
+    expect(
+      await recoverManagedSessionBackgroundCommand(db, {
+        ...input,
+        reconciliationClaimId: crypto.randomUUID(),
+      }),
+    ).toBeNull();
+    expect(
+      await recoverManagedSessionBackgroundCommand(db, {
+        ...input,
+        expected: { ...input.expected, leaseEpoch: 8 },
+      }),
+    ).toBeNull();
+    expect(await listSessionBackgroundCommands(db, fixture)).toEqual([]);
+    expect(await recoverManagedSessionBackgroundCommand(db, input)).toMatchObject({
+      id: fixture.process.id,
+      state: "running",
+    });
+    expect(await recoverManagedSessionBackgroundCommand(db, input)).toBeNull();
+    expect(await listSessionBackgroundCommands(db, fixture)).toHaveLength(1);
+  }, 60_000);
+
+  test.each([false, true])(
+    "background recovery preserves cancellation intent (paused=%s)",
+    async (paused) => {
+      if (!available) return;
+      const fixture = await promoteTurnProcess({ routerCommand: true });
+      if (paused)
+        await withWorkspaceSessionActivityRls(db, fixture.workspaceId, (tx) =>
+          mutateSessionControlInTransaction(tx, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sessionId: fixture.sessionId,
+            actor: { type: "human", subjectId: "user:test-owner" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+        );
+      else
+        await requestRetainedProcessCancellation(
+          db,
+          {
+            ...fixture,
+            processId: fixture.process.id,
+          },
+          "explicit_stop",
+        );
+      await closeTurnOwner(fixture, fixture.attempt!, "cancelled");
+      let cancelProbes = 0;
+      await runReaper(async (_settings, _lease, _process, mode) => {
+        expect(mode).toBe("cancel");
+        cancelProbes++;
+        return { status: "deferred", reason: "provider_error" };
+      });
+      expect(cancelProbes).toBe(1);
+      expect(await listSessionBackgroundCommands(db, fixture)).toEqual([
+        expect.objectContaining({ state: "stopping" }),
+      ]);
+      const control = await withWorkspaceSessionActivityRls(db, fixture.workspaceId, (tx) =>
+        evaluateSessionControl(tx, fixture.workspaceId, fixture.sessionId),
+      );
+      expect(control.state).toBe(paused ? "paused" : "active");
+      expect((await durableProcess(fixture)).state).toBe("active");
+    },
+    60_000,
+  );
+
+  test.each([false, true])(
+    "background recovery refuses a live owner or supervised command (supervised=%s)",
+    async (supervised) => {
+      if (!available) return;
+      const fixture = await promoteTurnProcess({
+        routerCommand: true,
+        supervised,
+        ...(supervised ? { outcome: "interrupted_recoverable" as const } : {}),
+      });
+      const claimId = crypto.randomUUID();
+      await admin`update sandbox_retained_processes set reconcile_claim_id=${claimId}, reconcile_claimed_at=now() where id=${fixture.process.id}`;
+      expect(
+        await recoverManagedSessionBackgroundCommand(db, {
+          ...fixture,
+          processId: fixture.process.id,
+          expected: retainedProcessSettlementIdentity(fixture.process),
+          reconciliationClaimId: claimId,
+        }),
+      ).toBeNull();
+      expect(await listSessionBackgroundCommands(db, fixture)).toEqual([]);
+      expect((await durableProcess(fixture)).state).toBe("active");
+      if (supervised) {
+        // This synthetic fixture reserved the invocation but never launched it.
+        const scope = { ...fixture, processId: fixture.process.id };
+        const command = await getRetainedProviderCommand(db, scope);
+        if (command?.kind !== "modal-router-v1") throw new Error("Expected router command");
+        await rejectRetainedSupervisedLaunch(db, scope, command);
+      }
+    },
+    60_000,
+  );
 
   test("a retained command that finishes during foreground waiting creates no background input", async () => {
     if (!available) return;

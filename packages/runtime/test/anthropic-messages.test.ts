@@ -396,19 +396,25 @@ test("system placement preserves assistant phases, tool pairing and exact signed
     "Second tool phase system",
   ]);
   expect(JSON.stringify(input)).toBe(before);
-  expect(() =>
-    buildAnthropicRequest(
-      request([
-        { role: "user", content: "Task" },
-        { role: "assistant", content: "Done" },
-        { role: "system", content: "Unplaceable system" },
-        { role: "assistant", content: "More" },
-      ]),
-      "claude",
-      provider,
-      true,
-    ),
-  ).toThrow("preceding user");
+  const continuation = buildAnthropicRequest(
+    request([
+      { role: "user", content: "Task" },
+      { role: "assistant", content: "Done" },
+      { role: "system", content: "Continuation system" },
+      { role: "assistant", content: "More" },
+    ]),
+    "claude",
+    provider,
+    true,
+  );
+  expectValidSystemPlacement(continuation.messages);
+  expect(continuation.messages.map((message: any) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "user",
+    "system",
+    "assistant",
+  ]);
 });
 
 test("successful continuation keeps the compacted request prefix stable on the next turn", () => {
