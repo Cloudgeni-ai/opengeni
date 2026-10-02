@@ -482,16 +482,16 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
-    // Media prompt-module metadata adds 33 raw bytes to the shared inspector
-    // projection. Bun 1.4 macOS/arm64 measures base 15234d2e1 at 2,587,867
-    // bytes (already above the previous cap) and this graph at 2,587,900,
-    // matching Linux/x64 CI. Preserve the established 1.5 KiB allowance;
-    // compressed and unrelated caps stay fixed.
-    wholeKibEnvelope(2_587_900, 1.5 * kib),
     // Custom MCP OAuth endpoint discovery and isolated popup completion:
     // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
     // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
     wholeKibEnvelope(2_585_890, 1.5 * kib),
+    // Media prompt-module metadata adds 33 raw bytes to the shared inspector
+    // projection. The configured Bun 1.4 macOS/arm64 build of main cbb3e36e1
+    // measures 2,592,785 raw bytes; the merge measures 2,592,818. Both already
+    // exceed the previous cap. Retain the established 1.5 KiB allowance;
+    // every unrelated cap stays fixed.
+    wholeKibEnvelope(2_592_818, 1.5 * kib),
     // Browser failure signals (failed-request classifier, live-stream health,
     // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
     // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
@@ -646,6 +646,10 @@ const effectiveBudgets = {
     // Browser failure signals: 727,806 gzip on Bun 1.4 Linux/x64 rebased on
     // main aa5661dec. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(727_806, 1.5 * kib),
+    // The same configured current-main build measures 730,600 gzip bytes;
+    // the media merge measures 730,574. Both exceed the previous cap. Bound
+    // the larger baseline with the established 1.5 KiB variance allowance.
+    wholeKibEnvelope(730_600, 1.5 * kib),
     // Runtime robustness on main f874217f5: the empty-final-reply notice and
     // per-model availability in the session timeline measure 711,698 gzip
     // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
