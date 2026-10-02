@@ -144,6 +144,11 @@ export type ControlActivityServices = SharedActivityServices;
 
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
+  /** Host-owned containment: stop polling and checkpoint peer turns before exit.
+   * Bare activity embedders must provide their own worker lifecycle edge. */
+  requestWorkerDrain: () => void;
+  /** Deterministic test clock for the cleanup-only monitor. */
+  turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;

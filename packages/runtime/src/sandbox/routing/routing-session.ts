@@ -281,6 +281,12 @@ export interface RoutingSandboxSessionDeps {
     process: RoutingRetainedProcess;
     proof: RoutingRetainedProcessTerminalProof;
   }) => Promise<void>;
+  /** Read terminal truth for this exact copied process/backend. Missing rows,
+   * failed observations and active rows must never count as physical proof. */
+  isProcessSettled?: (input: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }) => Promise<boolean>;
   /** A terminal result is being returned to the model, not merely drained by
    * control/reaper work. Never invoke this for a running receipt. */
   observeProcessTerminal?: (input: {
@@ -2156,6 +2162,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       positiveProviderSessionId(providerSessionId) !== null &&
       this.retainedProcesses.has(providerSessionId)
     );
+  }
+
+  /** A reaper may have settled the command while a local capture/control receipt
+   * remained pending. Cleanup may consume that same durable proof without
+   * replaying a provider operation or accepting pending output into the model. */
+  async reconcileRetainedProcess(providerSessionId: number): Promise<boolean> {
+    const record = this.retainedProcesses.get(providerSessionId);
+    if (!record || !this.deps.isProcessSettled) return false;
+    if (!(await this.deps.isProcessSettled({ backend: record.backend, process: record.process })))
+      return false;
+    // Do not erase a rival route installed while the durable read was pending.
+    if (this.retainedProcesses.get(providerSessionId) !== record) return false;
+    this.retainedProcesses.delete(providerSessionId);
+    return true;
   }
 
   /** Local, Docker, and OpenSandbox process ids address an in-memory table on one worker

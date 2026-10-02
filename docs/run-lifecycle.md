@@ -110,9 +110,18 @@ containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
 `finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
-A stuck writer drain is never detached to release a successor: the worker exits,
-and normal heartbeat recovery and durable retained-process proofs govern
-admission. The deadline resets only when cleanup advances to another stage and
+A stuck writer drain is never detached to release a successor. At the deadline,
+the host stops polling and requests the ordinary graceful worker shutdown. Other
+live turns checkpoint and resume the same logical turn on a healthy worker,
+without spending their unexpected-worker-death redispatch allowance. The
+standalone host arms a 100-second exit backstop alongside Temporal's existing
+shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
+retained-process proofs still govern its admission. Temporal force shutdown only
+rejects `Worker.run()` and cannot stop JavaScript activity promises. Embedded
+service hosts own their fatality policy through `terminateWorker` or an equivalent
+boundary; bare activity embedders must supply `requestWorkerDrain`. Activities
+never exit the shared process. The deadline resets only when cleanup advances
+to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
 Closed attempts with unsettled workspace mutations or active, unadopted retained
@@ -2346,6 +2355,13 @@ page, with explicit markers where output was skipped; later bytes are still
 read, and live output returned to the agent is not capped.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
+
+Turn cleanup also checks the exact durable process UUID and copied backend route.
+If reconciliation already committed physical terminal proof, cleanup forgets its
+stale local route even when a pending output capture or old provider transport
+cannot advance. Missing rows, active rows, mismatched routes and failed reads
+never prove quiescence. This check is cleanup-only and does not accept rejected
+output into model history or replay the original command.
 
 Command reads expose `observationStatus: unavailable` when the exact retained
 process cannot be observed; session aggregates expose `unavailableCount`.

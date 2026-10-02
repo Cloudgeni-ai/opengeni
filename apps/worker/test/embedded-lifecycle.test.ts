@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createTurnActivities } from "../src/activities-turn";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
@@ -30,6 +31,7 @@ import {
   combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
+  createWorkerCleanupContainment,
 } from "../src/worker-service-lifecycle";
 
 const temporaryRoots: string[] = [];
@@ -41,6 +43,68 @@ afterEach(async () => {
 });
 
 describe("embedded worker lifecycle contract", () => {
+  test("bare turn activities refuse execution without the host cleanup drain edge", async () => {
+    const activities = createTurnActivities();
+    await expect(activities.runAgentTurn({} as never)).rejects.toThrow(
+      "host requestWorkerDrain lifecycle edge",
+    );
+  });
+
+  test("cleanup containment drains once and keeps the host exit backstop until successful shutdown", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-turn" });
+    let drains = 0;
+    let exits = 0;
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        drains++;
+        return true;
+      },
+      terminate: () => {
+        exits++;
+      },
+      observability,
+      timeoutMs: 40,
+    });
+    containment.request();
+    containment.request();
+    expect(drains).toBe(1);
+    expect(exits).toBe(0);
+    await Bun.sleep(60);
+    expect(exits).toBe(1);
+    containment.finished();
+
+    const healthy = createWorkerCleanupContainment({
+      drain: () => true,
+      terminate: () => {
+        exits++;
+      },
+      observability,
+      timeoutMs: 10,
+    });
+    healthy.request();
+    healthy.finished();
+    await Bun.sleep(20);
+    expect(exits).toBe(1);
+  });
+
+  test("a rejected cleanup drain still preserves final host containment", async () => {
+    let exits = 0;
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        throw new Error("shutdown request failed");
+      },
+      terminate: () => {
+        exits++;
+      },
+      observability: createObservability(testSettings(), { component: "worker-turn" }),
+      timeoutMs: 10,
+    });
+    containment.request();
+    await Bun.sleep(20);
+    expect(exits).toBe(1);
+    containment.finished();
+  });
+
   test("a multi-queue worker starts and drains every Temporal poller as one service", async () => {
     let finishFirst!: () => void;
     let finishSecond!: () => void;

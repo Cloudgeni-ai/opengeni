@@ -37,13 +37,13 @@ describe("turn finalization diagnostics", () => {
       observability: obs,
       details,
       heartbeat: (x) => heartbeats.push(structuredClone(x)),
-      terminateWorker() {},
+      requestWorkerDrain() {},
     });
     const second = startTurnFinalizationMonitor({
       observability: obs,
       details: { opAcks: {} },
       heartbeat() {},
-      terminateWorker() {},
+      requestWorkerDrain() {},
     });
     try {
       first.enter("tool_writers");
@@ -89,21 +89,21 @@ describe("turn finalization diagnostics", () => {
     );
     const warning = spyOn(console, "warn").mockImplementation(() => {});
     const obs = observability();
-    let exits = 0;
+    let drains = 0;
     const monitor = startTurnFinalizationMonitor({
       observability: obs,
       details: { opAcks: {} },
       heartbeat() {},
       timeoutMs: 10,
       slowAfterMs: 1,
-      terminateWorker() {
-        exits++;
+      requestWorkerDrain() {
+        drains++;
       },
     });
     try {
       monitor.enter("credential_cleanup");
       await Bun.sleep(15);
-      expect(exits).toBe(1);
+      expect(drains).toBe(1);
       expect(logs.join("\n")).toContain('"reason":"credential_cleanup"');
       expect(logs.join("\n")).toContain('"surface":"turn_finalization"');
       expect(

@@ -666,6 +666,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
             idleGraceMs: 0,
           }),
         ).rejects.toThrow("copied durable identity");
+        expect(await proxy.reconcileRetainedProcess(retained!.providerSessionId)).toBe(false);
         const observed = await proxy.writeStdinForProcessRead({
           sessionId: retained!.providerSessionId,
           chars: "",
@@ -746,6 +747,28 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         expect(output).not.toContain("Please try again");
         expect(output).not.toContain("Process running");
         expect(output).not.toContain("Process exited");
+        // Reconstruct a stale cleanup route after another authority committed
+        // settlement. Modal locator identity comes from protected persistence,
+        // not the public/general retained-process projection.
+        if (!proxy.hasRetainedProcess(retained!.providerSessionId)) {
+          proxy.adoptRetainedProcess({
+            process: {
+              id: retained!.id,
+              providerSessionId: retained!.providerSessionId,
+              providerCommand: row!.provider_command,
+            },
+            backend: {
+              sandboxId: null,
+              leaseEpoch,
+              providerInstanceId: instanceId,
+              activeEpoch: 0,
+            },
+          });
+        }
+        const observationsBefore = fixture.observations.length;
+        expect(await proxy.reconcileRetainedProcess(retained!.providerSessionId)).toBe(true);
+        expect(proxy.hasRetainedProcess(retained!.providerSessionId)).toBe(false);
+        expect(fixture.observations.length).toBe(observationsBefore);
       } finally {
         await fixture.close();
       }
@@ -753,98 +776,118 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     60_000,
   );
 
-  test("a local SDK process settles against its canonical durable backend", async () => {
-    if (!available) throw new Error("PostgreSQL required for retained-process regression");
-    const [account] = await admin<{ id: string }[]>`
+  test.each(["provider_poll", "reaper"] as const)(
+    "a local SDK process consumes exact %s settlement",
+    async (settler) => {
+      if (!available) throw new Error("PostgreSQL required for retained-process regression");
+      const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('local-process-test') returning id`;
-    const [workspace] = await admin<{ id: string }[]>`
+      const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${account!.id}, 'local-process-test') returning id`;
-    const accountId = account!.id;
-    const workspaceId = workspace!.id;
-    await admin`insert into workspace_inference_controls (workspace_id, account_id)
+      const accountId = account!.id;
+      const workspaceId = workspace!.id;
+      await admin`insert into workspace_inference_controls (workspace_id, account_id)
       values (${workspaceId}, ${accountId})`;
-    const session = await createSession(db, {
-      accountId,
-      workspaceId,
-      initialMessage: "scripted process",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "local",
-    });
-    const workspaceMutationFence = await claimRoutingAttempt({
-      accountId,
-      workspaceId,
-      sessionId: session.id,
-    });
-    const acquired = await acquireLease(db, {
-      accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      kind: "turn",
-      holderId: sandboxLeaseHolderIdForAttempt(workspaceMutationFence.attemptId),
-      subjectId: session.id,
-      backend: "local",
-      leaseTtlMs: 45_000,
-    });
-    const committed = await commitWarmingToWarm(db, {
-      accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      expectedEpoch: acquired.lease.leaseEpoch,
-      instanceId: "local-process-box",
-      resumeBackendId: "unix_local",
-      resumeState: { backendId: "unix_local", sessionState: { instanceId: "local-process-box" } },
-      leaseTtlMs: 45_000,
-    });
-    expect(committed.committed).toBe(true);
-    let executions = 0;
-    const established = wrapTurnBoxWithRouting(
-      { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
-      {
+      const session = await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: "scripted process",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "local",
+      });
+      const workspaceMutationFence = await claimRoutingAttempt({
+        accountId,
         workspaceId,
         sessionId: session.id,
-        workspaceMutationFence,
-        homeLease: {
-          accountId,
-          sandboxGroupId: session.sandboxGroupId,
-          leaseEpoch: committed.lease!.leaseEpoch,
-          instanceId: "local-process-box",
-          backend: "local",
-        },
-      },
-      {
-        client: {},
-        backendId: "unix_local",
+      });
+      const acquired = await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        kind: "turn",
+        holderId: sandboxLeaseHolderIdForAttempt(workspaceMutationFence.attemptId),
+        subjectId: session.id,
+        backend: "local",
+        leaseTtlMs: 45_000,
+      });
+      const committed = await commitWarmingToWarm(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        expectedEpoch: acquired.lease.leaseEpoch,
         instanceId: "local-process-box",
-        sessionState: {},
-        session: {
-          state: { instanceId: "local-process-box" },
-          async exec() {
-            executions += 1;
-            return { sessionId: 17, stdout: "working" };
-          },
-          async writeStdin() {
-            return "Process exited with code 0\nOutput:\ndone";
+        resumeBackendId: "unix_local",
+        resumeState: { backendId: "unix_local", sessionState: { instanceId: "local-process-box" } },
+        leaseTtlMs: 45_000,
+      });
+      expect(committed.committed).toBe(true);
+      let executions = 0;
+      const established = wrapTurnBoxWithRouting(
+        { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
+        {
+          workspaceId,
+          sessionId: session.id,
+          workspaceMutationFence,
+          homeLease: {
+            accountId,
+            sandboxGroupId: session.sandboxGroupId,
+            leaseEpoch: committed.lease!.leaseEpoch,
+            instanceId: "local-process-box",
+            backend: "local",
           },
         },
-      },
-    );
-    const proxy = established.session as {
-      exec: (args: unknown) => Promise<unknown>;
-      writeStdin: (args: unknown) => Promise<string>;
-    };
-    await proxy.exec({ cmd: "scripted" });
-    expect(await proxy.writeStdin({ session_id: 17, chars: "" })).toContain(
-      "Process exited with code 0",
-    );
-    const [process] = await admin`select state, exit_code from sandbox_retained_processes
+        {
+          client: {},
+          backendId: "unix_local",
+          instanceId: "local-process-box",
+          sessionState: {},
+          session: {
+            state: { instanceId: "local-process-box" },
+            async exec() {
+              executions += 1;
+              return { sessionId: 17, stdout: "working" };
+            },
+            async writeStdin() {
+              return "Process exited with code 0\nOutput:\ndone";
+            },
+          },
+        },
+      );
+      const proxy = established.session as RoutingSandboxSession;
+      await proxy.exec({ cmd: "scripted" });
+      expect(await proxy.reconcileRetainedProcess(17)).toBe(false);
+      expect(await proxy.reconcileRetainedProcess(999)).toBe(false);
+      if (settler === "reaper") {
+        const identity = proxy.retainedProcessIdentity(17)!;
+        const scope = { accountId, workspaceId, sessionId: session.id, processId: identity.id };
+        const retained = (await getRetainedProcess(db, scope))!;
+        await settleRetainedProcess(db, {
+          ...scope,
+          expected: retainedProcessSettlementIdentity(retained),
+          outcome: "exited",
+          exitCode: 0,
+          reason: "provider_exit_banner",
+          idleGraceMs: 0,
+        });
+        expect(proxy.hasRetainedProcess(17)).toBe(true);
+        expect(await proxy.reconcileRetainedProcess(17)).toBe(true);
+        expect(proxy.hasRetainedProcess(17)).toBe(false);
+      } else {
+        expect(await proxy.writeStdin({ session_id: 17, chars: "" })).toContain(
+          "Process exited with code 0",
+        );
+      }
+      const [process] = await admin`select state, exit_code from sandbox_retained_processes
       where workspace_id = ${workspaceId} and session_id = ${session.id}`;
-    expect(process).toMatchObject({ state: "exited", exit_code: 0 });
-    expect(executions).toBe(1);
-  }, 60_000);
+      expect(process).toMatchObject({ state: "exited", exit_code: 0 });
+      expect(executions).toBe(1);
+    },
+    60_000,
+  );
 
   test("the proxy routes to the GROUP box by default, then to the MACHINE after a swap, then back", async () => {
     if (!available) return;
