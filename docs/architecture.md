@@ -831,23 +831,21 @@ receipt so an overlapping committed Send or Steer is replayed exactly once.
 Failed sessions can be revived by new accepted work. Cancellation remains the
 terminal boundary.
 
-An operational database failure after an exact claim but before turn-start
-completion revalidates that immutable attempt and uses the ordinary same-turn
-recovery and bounded redispatch path. A lost claim response that later reveals
-the exact active attempt follows the same transition. Permanent database or
-state failures remain terminal, and no model, tool, or provider work is replayed
-or converted into a new queue item.
+Database failures after an exact claim but before turn-start completion,
+including lost claim responses revealing that attempt, revalidate it and use
+ordinary same-turn recovery with bounded redispatch. Permanent database/state
+failures are terminal; no model, tool, or provider work replays or becomes a new
+queue item.
 
-Transient provider recovery is bounded by a durable consecutive-failure streak,
-not lifetime failures across a long turn. A completed model request
-from the exact current attempt clears the durable streak atomically with its
-timeline event, and the worker clears its in-memory copy only after that commit;
-late attempt evidence cannot replenish the retry budget. See
-[`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
+A durable consecutive-failure streak bounds transient provider recovery. A
+completed model request from the exact current attempt clears that streak
+atomically with its timeline event; only then does the worker clear its
+in-memory copy. Late evidence cannot replenish retries. Pacing/exhaustion:
+[`run-lifecycle.md`](run-lifecycle.md).
 
 ### 5.3 Goals, schedules, automations, and child work
 
-These producers all converge on the ordinary session/turn runtime:
+Producers share session/turn runtime:
 
 - an active **goal** creates a durable continuation obligation;
 - a **scheduled task** freezes one accepted occurrence and its execution
@@ -861,8 +859,8 @@ These producers all converge on the ordinary session/turn runtime:
   session rather than copying the parent's (see
   [`nested-agent-depth.md`](nested-agent-depth.md)).
 
-Schedule indicators include authorized, non-deleted reusable-session targets and paused schedules.
-Schedules API filtering uses `sessionId`.
+Schedule indicators include authorized, non-deleted reusable targets and paused schedules;
+API filtering uses `sessionId`.
 
 Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; runs waiting on a person and their optional timeout are in [scheduled-task-access.md](scheduled-task-access.md#runs-waiting-on-a-person).
 
@@ -884,9 +882,8 @@ claim and task lifecycle locks serialize this decision. Resume never revives
 pre-pause deposits, and a delivery fence rejects updates for terminal runs even
 from old workers during a rolling deployment.
 
-None of them creates a parallel agent engine. They differ in admission and
-provenance, then use the same logical turn, attempt, event, recovery, and usage
-boundaries.
+These producers differ in admission/provenance, then share one agent engine
+and logical-turn, attempt, event, recovery, and usage boundaries.
 
 Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
 [`nested-agent-depth.md`](nested-agent-depth.md), and
@@ -894,14 +891,13 @@ Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
 
 ### 5.4 Approval and structured human input
 
-Tool approval and structured human input are durable interruptions. The worker
-stores enough exact protocol state to stop without pairing an unfinished call
-into model history. A response must bind to the pending request, target turn,
-execution generation, requester, and current authorization.
+Tool approvals and structured human input are durable interruptions. Stored
+protocol state keeps unfinished calls out of model history. Responses bind to
+the pending request, target turn, execution generation, requester, and current
+authorization.
 
-Tool approvals are human-only. Agents may answer an authorized structured
-human-input request for another session where the agent-session authority model
-allows it, but they cannot grant themselves tool approval.
+Only humans approve tools. Agents may answer another session's structured
+input where session authority permits, but cannot grant themselves approval.
 
 Canonical: [`human-input.md`](human-input.md),
 [`agent-session-authority.md`](agent-session-authority.md), and
@@ -914,30 +910,24 @@ billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
-Workspace built-in tool and MCP-server defaults inherit independently when
-their respective `settings.sessionToolDefaults` key is absent. Existing arrays
-remain exact custom selections (including empty arrays). The settings API
-merges these nested keys atomically; explicit `null` removes only that override.
-The UI requires deliberate customization and exposes partial selections;
-saving plugin defaults never freezes built-in defaults. Persistence lives in
-`packages/db/src/workspace-tool-defaults.ts`; deployment ceilings still apply,
-and changing defaults never rewrites existing sessions or accepted attempts.
+Workspace built-in and MCP defaults inherit independently from absent
+`settings.sessionToolDefaults` keys. Arrays are exact custom selections;
+`null` removes one override. Atomic settings merges never freeze unrelated
+defaults or rewrite accepted work. Deliberate UI customization exposes partial
+selections. Deployment ceilings apply; persistence lives in
+`packages/db/src/workspace-tool-defaults.ts`.
 
-A fresh session selecting a workspace Gateway or OpenRouter custom model, an
-existing session explicitly switching from another model, a new/materially
-reaccepted scheduled task, automation trigger, or PR-review binding, or a fresh
-generated-session scheduled occurrence rechecks that exact provider-qualified
-active slug under the model catalog's shared transaction lock before the
-session, turn, task, trigger, binding, or accepted occurrence can commit.
-Adapter-rendered automation templates are the acceptance authority, so adapter
-parameters cannot hide a model override from this gate. Deployment-curated
-workspace provider models use their provider's public prefix but no mutable
-custom row, so they do not enter this fence. Custom-model retirement holds the
-exclusive counterpart; already accepted work, exact occurrence replay,
-same-model/existing-session continuations, and administrative-only task,
-trigger, or binding edits use retained definitions instead of reopening
-fresh-selection authority. Committed keyed session shells replay before
-active-only catalog checks, preserving repairable initialization.
+Fresh provider-qualified Gateway/OpenRouter selections recheck the exact active
+slug under the catalog's shared transaction lock before committing a session,
+turn, task, trigger, binding, or occurrence. This covers fresh sessions,
+explicit switches, new/materially reaccepted schedules, automation triggers,
+PR-review bindings, and fresh generated-session occurrences. Automation adapter
+templates own acceptance; parameters cannot bypass this gate. Deployment-curated
+workspace models retain public provider prefixes but have no mutable custom row
+and bypass this fence. Retirement holds the exclusive counterpart. Accepted
+work, exact replays, same-model/existing-session continuations, and
+administrative-only task/trigger/binding edits retain definitions. Committed
+keyed session shells replay before active-only checks.
 
 Human preferences require frozen causal identity. Command/timeout successors
 preserve immutable receipts, separate causal claims and live personal-grant
@@ -947,8 +937,11 @@ admission; see [run lifecycle](run-lifecycle.md).
 `artifacts:publish`, archive, restore, and exact mutation fences apply;
 pure service work fails closed. See [run lifecycle](run-lifecycle.md).
 
-Eager/lazy, local/MCP-backed, and model/Codemode tool calls share the current
-authorized catalog, execution fences, and approval requirements.
+Tool disclosure is progressive, but authority is not. A tool may be eager or
+lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
+still resolves through the current authorized catalog and the same execution
+fences. Approval-required tools remain approval-required regardless of access
+path.
 
 The closed always-visible local first-request set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -959,13 +952,17 @@ remain behind progressive search.
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
-Repository guidance lives in `.agents/skills`; runtime bundles in
-`packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
-client assets/docs from `.agents/skills/opengeni-client`, with drift tests.
-`opengeni-schedules` supplies creation guidance when tools/host selection permit;
-the Schedules shortcut sends only the request and time zone.
+Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
+ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
+`opengeni-client`, `opengeni-help`, `opengeni-visualize`, and `document-parsing`,
+unless explicitly overridden. `.agents/skills/opengeni-client` is canonical;
+`scripts/sync-client-skill.ts` generates bundled and docs-site copies with drift tests.
+Every deployment can read it without installation or sandbox setup.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
+
+`opengeni-schedules` supplies creation guidance when tools/host selection permit;
+the Schedules shortcut sends only the request and time zone.
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no
