@@ -5,12 +5,24 @@ import {
   readLease,
   accrueWarmSeconds,
   SandboxWorkspaceMutationFencedError,
+  retainWorkspaceMutationProcess,
+  retainedProviderCommandPersistence,
+  SandboxRetainedProcessPromotionFencedError,
 } from "@opengeni/db";
+import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import {
   RoutingMutationOutcomeUnknownError,
+  ProviderCommandStartOutcomeUnknownError,
+  isModalCommandStartOutcomeUnknownError,
+  withModalCommandStartSignal,
+  resolveModalCheckpointProviderBindingForSession,
   runManagedCodemodeClientHook,
   type EstablishedSandboxSession,
+  type ProviderCommandSession,
+  type RoutingRetainedProcess,
 } from "@opengeni/runtime";
+import { ModalRouterProviderCommand } from "@opengeni/contracts";
+import { isDeepStrictEqual } from "node:util";
 import {
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
@@ -50,6 +62,111 @@ export type SandboxTurnRuntimeDeps = {
 
 export type SandboxTurnRuntime = ReturnType<typeof createSandboxTurnRuntime>;
 
+const retainInternalProviderCommand = createProviderCommandRetainer(
+  retainWorkspaceMutationProcess,
+  (error) => (error instanceof SandboxRetainedProcessPromotionFencedError ? error.process : null),
+);
+
+/** Only the complete runtime producer boundary supplies a command descriptor.
+ * A bare SDK boundary can veto rejection, but its task/exec fields alone cannot
+ * establish its sandbox, PTY or complete original invocation. */
+function internalMutationUnknownCommand(
+  error: unknown,
+  instanceId: string,
+): { unknown: boolean; command: ModalRouterProviderCommand | null } {
+  const pending = [{ value: error, depth: 0 }];
+  const seen = new Set<object>();
+  const commands: ModalRouterProviderCommand[] = [];
+  let unknown = false;
+  let incomplete = false;
+  for (let inspected = 0; pending.length && inspected < 128; inspected++) {
+    const { value, depth } = pending.shift()!;
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    try {
+      if (value instanceof ProviderCommandStartOutcomeUnknownError) {
+        unknown = true;
+        // Zod reads ordinary properties. First make a bounded own-data-only
+        // copy so neither validation nor equality executes descriptor getters.
+        // This contract has no arrays, functions or symbol-keyed fields.
+        let remaining = 64;
+        const copyCommandData = (candidate: unknown, descriptorDepth = 0): unknown => {
+          if (--remaining < 0 || descriptorDepth > 4)
+            throw new Error("Internal command descriptor exceeded inspection bounds");
+          if (
+            candidate === null ||
+            candidate === undefined ||
+            typeof candidate === "string" ||
+            typeof candidate === "number" ||
+            typeof candidate === "boolean"
+          )
+            return candidate;
+          if (typeof candidate !== "object" || Array.isArray(candidate))
+            throw new Error("Internal command descriptor is not a data object");
+          const keys = Reflect.ownKeys(candidate);
+          if (keys.length > 16)
+            throw new Error("Internal command descriptor exceeded field bounds");
+          const copy: Record<string, unknown> = Object.create(null);
+          for (const key of keys) {
+            const property = Object.getOwnPropertyDescriptor(candidate, key);
+            if (typeof key !== "string" || !property || !("value" in property))
+              throw new Error("Internal command descriptor contains a non-data field");
+            copy[key] = copyCommandData(property.value, descriptorDepth + 1);
+          }
+          return copy;
+        };
+        const parsed = ModalRouterProviderCommand.safeParse(
+          copyCommandData(Object.getOwnPropertyDescriptor(value, "command")?.value),
+        );
+        if (!parsed.success || parsed.data.sandboxId !== instanceId) incomplete = true;
+        else commands.push(parsed.data);
+        // This complete producer boundary owns its original SDK cause. Do not
+        // reinterpret that cause's partial locator as a second command.
+        continue;
+      }
+      const sdkUnknown = isModalCommandStartOutcomeUnknownError(value);
+      if (sdkUnknown || value instanceof RoutingMutationOutcomeUnknownError) unknown = true;
+      const nested: unknown[] = [];
+      for (const key of ["cause", "error", "errors"] as const) {
+        const property = Object.getOwnPropertyDescriptor(value, key);
+        if (!property) continue;
+        if (!("value" in property)) {
+          incomplete = true;
+          continue;
+        }
+        if (key === "errors" && Array.isArray(property.value)) {
+          const length = Object.getOwnPropertyDescriptor(property.value, "length")?.value;
+          if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+            incomplete = true;
+            continue;
+          }
+          if (length > 64) incomplete = true;
+          for (let index = 0; index < Math.min(length, 64); index++) {
+            const element = Object.getOwnPropertyDescriptor(property.value, String(index));
+            if (!element || !("value" in element)) incomplete = true;
+            else nested.push(element.value);
+          }
+        } else if (property.value !== undefined) nested.push(property.value);
+      }
+      if (
+        sdkUnknown &&
+        (nested.length === 0 ||
+          Object.getOwnPropertyDescriptor(value, "taskId") ||
+          Object.getOwnPropertyDescriptor(value, "execId"))
+      )
+        incomplete = true;
+      if (depth >= 12 && nested.length) incomplete = true;
+      else for (const child of nested) pending.push({ value: child, depth: depth + 1 });
+    } catch {
+      incomplete = true;
+    }
+  }
+  if (pending.length) incomplete = true;
+  const command = commands[0] ?? null;
+  if (commands.some((candidate) => !isDeepStrictEqual(candidate, command))) incomplete = true;
+  return { unknown: unknown || incomplete, command: incomplete ? null : command };
+}
+
 /**
  * Provider-deadline rotation is a preemption boundary, not a cooperative
  * snapshot boundary. Snapshotting while this attempt still owns active tools
@@ -85,12 +202,62 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     eventing,
     attempt,
   } = deps;
+  const commandStartSignal = cancellationSignal
+    ? AbortSignal.any([cancellationSignal, sandboxRotationController.signal])
+    : sandboxRotationController.signal;
+
+  // The exact existing private release closure is the holder authority. Keep
+  // its ordinary eager release, but never pass a false writer-drain proof that
+  // would let releaseLeaseHolder settle an ambiguous null-outcome admission.
+  const releaseGuards = new WeakMap<
+    ResumedTurnSandbox["release"],
+    {
+      pending: Map<string, { operation: string; cause?: unknown }>;
+      release: ResumedTurnSandbox["release"];
+    }
+  >();
+  const guardSandboxRelease = (sandbox: ResumedTurnSandbox) => {
+    if (typeof sandbox.release !== "function") return null;
+    const original = sandbox.release;
+    let guard = releaseGuards.get(original);
+    if (!guard) {
+      const pending = new Map<string, { operation: string; cause?: unknown }>();
+      const release: ResumedTurnSandbox["release"] = async (options) => {
+        if (options?.workspaceWritersQuiesced && pending.size) {
+          await original();
+          throw new RoutingMutationOutcomeUnknownError(
+            "internalWorkspaceMutationDrain",
+            "Internal workspace command is still outcome-unknown; its admission remains fenced until exact retention or physical settlement",
+            { cause: new AggregateError([...pending.values()].map((entry) => entry.cause)) },
+          );
+        }
+        await original(options);
+      };
+      guard = { pending, release };
+      releaseGuards.set(original, guard);
+      releaseGuards.set(release, guard);
+    }
+    // Rebound preparation may use a shallow copy of the published sandbox.
+    // Protect every known copy of this SAME private holder release closure,
+    // never another lease or a newly fabricated holder.
+    for (const target of [
+      sandbox,
+      sandboxState.resolvedSandbox,
+      sandboxState.prefetchedManagedBoxResult,
+      ...(sandboxState.lateSandboxesAwaitingWriterDrain ?? []),
+    ]) {
+      if (target?.release === original || target?.release === guard.release)
+        target.release = guard.release;
+    }
+    return guard;
+  };
 
   // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
   // the one box by id from the group lease and injects it NON-OWNED into the
   // run. null when the flag is off (byte-for-byte the legacy build-and-discard
   // path) OR when the backend is "none". Released + dropped in `finally`.
   const releaseLateSandbox = async (sandbox: ResumedTurnSandbox): Promise<void> => {
+    guardSandboxRelease(sandbox);
     sandboxState.lateSandboxesAwaitingWriterDrain.add(sandbox);
     // Drop the holder/timer immediately, but keep its null-outcome admissions
     // fenced until the shared attempt writer drain completes. The staged
@@ -314,13 +481,116 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       }
     };
     let result: T;
+    const releaseGuard = guardSandboxRelease(sandbox);
+    releaseGuard?.pending.set(admission.id, { operation });
     const providerStartedAt = performance.now();
     let providerOutcome: "completed" | "failed" = "failed";
     try {
-      result = await mutation();
+      result = await withModalCommandStartSignal(commandStartSignal, mutation);
       providerOutcome = "completed";
     } catch (providerError) {
       observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
+      const ambiguity = internalMutationUnknownCommand(providerError, identity.expectedInstanceId);
+      if (ambiguity.unknown) {
+        releaseGuard?.pending.set(admission.id, { operation, cause: providerError });
+        if (!ambiguity.command) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" has no unique exact command descriptor; its admission remains fenced and it was not replayed`,
+            { cause: providerError },
+          );
+        }
+        const process: RoutingRetainedProcess = {
+          id: crypto.randomUUID(),
+          providerSessionId: admission.workspaceGeneration,
+          providerCommand: ambiguity.command,
+        };
+        let exactRetentionVerified = false;
+        try {
+          const providerBinding = await resolveModalCheckpointProviderBindingForSession(
+            settings,
+            sandbox.established.session,
+          );
+          try {
+            await retainInternalProviderCommand(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              processId: process.id,
+              providerSessionId: process.providerSessionId,
+              providerCommand: ambiguity.command,
+              admissionId: admission.id,
+              admittedWorkspaceGeneration: admission.workspaceGeneration,
+              operation,
+              providerBinding,
+              owner: { kind: "turn", ...identity },
+            });
+          } catch (promotionError) {
+            if (!(promotionError instanceof SandboxRetainedProcessPromotionFencedError))
+              throw promotionError;
+            const durable = promotionError.process;
+            if (
+              durable.id !== process.id ||
+              durable.providerSessionId !== process.providerSessionId ||
+              durable.parentAdmissionId !== admission.id ||
+              durable.accountId !== identity.accountId ||
+              durable.workspaceId !== identity.workspaceId ||
+              durable.sessionId !== identity.sessionId ||
+              durable.leaseId !== admission.leaseId ||
+              durable.sandboxGroupId !== identity.sandboxGroupId ||
+              durable.ownerActorKind !== admission.actorKind ||
+              durable.ownerActorId !== admission.actorId ||
+              durable.ownerTurnId !== identity.turnId ||
+              durable.ownerAttemptId !== identity.attemptId ||
+              durable.ownerExecutionGeneration !== identity.executionGeneration ||
+              durable.leaseEpoch !== identity.expectedEpoch ||
+              durable.providerBackend !== "modal" ||
+              durable.providerInstanceId !== identity.expectedInstanceId ||
+              durable.providerBindingKey !== providerBinding.key ||
+              !isDeepStrictEqual(durable.providerBinding, providerBinding.binding) ||
+              durable.routeKind !== admission.routeKind ||
+              durable.routeTargetId !== admission.routeTargetId ||
+              durable.routeEpoch !== admission.routeEpoch ||
+              durable.state !== "active"
+            )
+              throw promotionError;
+            // The established retainer committed BOTH locator and holder before
+            // rejecting stale output. Do not undo that physical retention.
+          }
+          const persistence = retainedProviderCommandPersistence(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            processId: process.id,
+          });
+          if (!isDeepStrictEqual(await persistence.load(), ambiguity.command))
+            throw new Error("Internal command retention lost its exact original locator", {
+              cause: providerError,
+            });
+          exactRetentionVerified = true;
+          releaseGuard?.pending.delete(admission.id);
+          (sandbox.established.session as ProviderCommandSession).bindProviderCommand?.(
+            process.providerSessionId,
+            ambiguity.command,
+            persistence,
+          );
+        } catch (retentionError) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" remains outcome-unknown and its exact retention or observer binding failed; it was not replayed`,
+            {
+              cause: new AggregateError([providerError, retentionError]),
+              ...(exactRetentionVerified ? { retainedProcess: process } : {}),
+            },
+          );
+        }
+        throw new RoutingMutationOutcomeUnknownError(
+          operation,
+          `Platform workspace mutation "${operation}" has an unknown Start outcome; its exact original invocation is retained and it was not replayed`,
+          { cause: providerError, retainedProcess: process },
+        );
+      }
+      releaseGuard?.pending.delete(admission.id);
       const partialMutation = providerError instanceof ChannelAPartialMutationError;
       try {
         await settleMutation(partialMutation ? "resolved" : "rejected");
@@ -342,6 +612,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       }
       throw providerError;
     }
+    releaseGuard?.pending.delete(admission.id);
     observeMutationPhase("provider", providerOutcome, performance.now() - providerStartedAt);
     try {
       await settleMutation("resolved");

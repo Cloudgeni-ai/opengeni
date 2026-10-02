@@ -16,7 +16,17 @@ Default to the full conversation component. Deviate only when the product needs 
 
 Inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Prefer, in order: `SessionConversation` customized through `composerProps` and `renderMessageText`; `MessageTimeline`, `ChatComposer`, and the session hooks composed into product layout; then a fully custom SDK-driven UI. Do not force a packaged component when the product needs a materially different interaction model.
 
+## Native non-React frontends
+
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
+
+Start with the [runnable Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md)
+for native Vue single-file components, Vite and the existing Bun Fetch session
+proxy using the published SDK. Follow the README's deployment and host-auth
+prerequisites; run install, onboarding and consumer checks from
+`examples/vue-conversation/app`, not the repository root. The sample handles
+durable conversations and decisions with an escaped-text UI, not a full rich
+Markdown, artifact or file renderer. Keep organization credentials server-only.
 
 ## Links, downloads, artifacts, and Sites
 

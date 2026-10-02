@@ -1,5 +1,23 @@
 # @opengeni/sdk
 
+## 7.6.1
+
+### Patch Changes
+
+- 3f7ff5b: Fix composer draft save and submit through a session proxy with model selection disabled. Saves ignore browser model, reasoning effort, and latency choices and use the authenticated actor's server-side draft policy (initially the session defaults). Submit preserves the mandatory saved-policy snapshot as an API revision/content integrity fence, so identical retries replay the original receipt even after another draft replaces that actor's policy; missing, invalid, or changed submit policy is rejected, not rewritten into a new selection.
+
+## 7.6.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+
 ## 7.5.0
 
 ### Minor Changes

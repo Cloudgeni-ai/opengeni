@@ -56,6 +56,7 @@ import {
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { turnCredentialRestriction } from "./credential-restriction";
 
 import {
   credentialSubjectIdForTurnInitiator,
@@ -290,10 +291,21 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
-  const policyForAbsent =
+  const candidatePolicy =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
       : resolveTurnExecutionPolicyV1(capabilitySettings, legacyTurnExecutionPolicyInput(turn));
+  // This context is frozen by the accepted-turn writer from the exact source
+  // turn. Its reserved restriction field cannot come from public service JSON.
+  const credentialRestriction =
+    claimedPolicy.kind === "absent"
+      ? turn.initiatorContext?.credentialRestriction === "developer_setup"
+        ? "developer_setup"
+        : turnCredentialRestriction(candidatePolicy, session.metadata)
+      : undefined;
+  const policyForAbsent = credentialRestriction
+    ? { ...candidatePolicy, credentialRestriction }
+    : candidatePolicy;
   const installedPolicy = await installOrReadTurnExecutionPolicyForAttempt(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,

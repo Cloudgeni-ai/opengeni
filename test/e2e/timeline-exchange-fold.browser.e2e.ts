@@ -210,6 +210,65 @@ describe("readable timeline browser regression", () => {
   }
 
   for (const width of [390, 1280]) {
+    for (const navigation of ["wheel", "End", "interleaved commit"] as const) {
+      test(`returning from the contextual question hides the bottom button at ${width}px (${navigation})`, async () => {
+        const page = await openHarness("history", width, width < 500);
+        try {
+          await page.setViewportSize({ width, height: 320 });
+          await page.evaluate(() =>
+            window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total),
+          );
+          await page.waitForTimeout(500);
+          const back = page.getByRole("button", { name: "Back to your message", exact: true });
+          await back.click();
+          await back.waitFor({ state: "hidden" });
+          const scroller = page.locator("[data-og-timeline-scroller]");
+          const jump = page.locator("[data-og-jump-to-latest]");
+          await jump.waitFor({ state: "visible" });
+          const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+          if (output) {
+            mkdirSync(output, { recursive: true });
+            await page.screenshot({
+              path: `${output}/return-to-bottom-${width}-${navigation}-before.png`,
+            });
+          }
+          if (navigation === "wheel") {
+            await scroller.hover();
+            await page.mouse.wheel(0, 20000);
+          } else if (navigation === "End") {
+            await page.keyboard.press("End");
+          } else {
+            await scroller.evaluate((node) => {
+              node.dispatchEvent(new WheelEvent("wheel", { deltaY: 20000, bubbles: true }));
+              node.scrollTop = node.scrollHeight;
+              // A chrome commit lands before the native scroll notification.
+              [...document.querySelectorAll<HTMLButtonElement>("button")]
+                .find((button) => button.textContent === "Dark")!
+                .click();
+            });
+          }
+          await page.waitForFunction(() => {
+            const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+            return node.scrollHeight - node.clientHeight - node.scrollTop <= 1;
+          });
+          await page.waitForTimeout(300);
+          const state = await sample(page);
+          expect(state.following, JSON.stringify(state)).toBe(true);
+          await jump.waitFor({ state: "hidden", timeout: 3000 });
+          expect((await sample(page)).following).toBe(true);
+          if (output) {
+            await page.screenshot({
+              path: `${output}/return-to-bottom-${width}-${navigation}-after.png`,
+            });
+          }
+        } finally {
+          await page.context().close();
+        }
+      }, 20_000);
+    }
+  }
+
+  for (const width of [390, 1280]) {
     test(`a partially visible tall prompt has no return action at ${width}px`, async () => {
       const page = await openHarness("history-tall", width, width < 500);
       try {

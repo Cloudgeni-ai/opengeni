@@ -3,6 +3,74 @@ import { readFile } from "node:fs/promises";
 import { parseSync } from "oxc-parser";
 
 describe("web management chunk boundary", () => {
+  test("splits mixed-consumer form primitives without merging management helpers into sessions", async () => {
+    const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+    const group = config.match(/name: "workspace-form-primitives",[\s\S]*?priority: (\d+),/u);
+    const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
+    expect(pattern).toBeDefined();
+    expect(group?.[0]).toContain("includeDependenciesRecursively: false");
+    expect(group?.[0]).toContain("entriesAware: true");
+    expect(group?.[0]).toContain("entriesAwareMergeThreshold: 4 * 1024");
+    const formTest = new RegExp(pattern!);
+    for (const separator of ["/", "\\"]) {
+      const moduleId = (relative: string) =>
+        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+      for (const module of [
+        "components/ui/dialog.tsx",
+        "components/ui/textarea.tsx",
+        "components/settings/organization-workspace-administration.tsx",
+      ]) {
+        expect(formTest.test(moduleId(module))).toBe(true);
+      }
+      for (const module of [
+        "routes/session.tsx",
+        "routes/workspace-settings.tsx",
+        "components/organization-api-keys-section.tsx",
+      ]) {
+        expect(formTest.test(moduleId(module))).toBe(false);
+      }
+    }
+    const members = config.match(/name: "workspace-members",[\s\S]*?priority: (\d+),/u);
+    expect(members?.[0]).toContain("entriesAware: true");
+    expect(members?.[0]).toContain("entriesAwareMergeThreshold: 24 * 1024");
+    expect(Number(group?.[1])).toBeGreaterThan(Number(members?.[1]));
+  });
+
+  test("keeps organization API-key setup behind the existing lazy settings group", async () => {
+    const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+    const group = config.match(/name: "settings-pages",[\s\S]*?priority: (\d+),/u);
+    const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
+    expect(pattern).toBeDefined();
+    expect(group?.[0]).toContain("includeDependenciesRecursively: false");
+    const settingsTest = new RegExp(pattern!);
+    for (const separator of ["/", "\\"]) {
+      const moduleId = (relative: string) =>
+        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+      for (const module of [
+        "components/organization-api-keys-section.tsx",
+        "routes/workspace-api-keys.tsx",
+        "lib/api-key-presets.ts",
+        "lib/api-key-status.ts",
+      ]) {
+        expect(settingsTest.test(moduleId(module))).toBe(true);
+      }
+      for (const module of ["routes/session.tsx", "context.tsx", "lib/permissions.ts"]) {
+        expect(settingsTest.test(moduleId(module))).toBe(false);
+      }
+    }
+    const sessionPriority = config.match(/name: "session",[\s\S]*?priority: (\d+),/u)?.[1];
+    expect(Number(group?.[1])).toBeGreaterThan(Number(sessionPriority));
+
+    const source = await readFile(new URL("./routes/org-settings.tsx", import.meta.url), "utf8");
+    const { program, errors } = parseSync("org-settings.tsx", source);
+    expect(errors).toEqual([]);
+    const imports = program.body
+      .filter((node) => node.type === "ImportDeclaration")
+      .map((node) => node.source.value);
+    expect(imports).not.toContain("@/components/organization-api-keys-section");
+    expect(source).toContain('import("@/components/organization-api-keys-section")');
+  });
+
   test("keeps revision and diff UI behind the existing lazy management group", async () => {
     const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
     const group = config.match(/name: "management-ui-primitives",[\s\S]*?priority: (\d+),/u);

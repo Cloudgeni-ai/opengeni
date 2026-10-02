@@ -411,8 +411,54 @@ describe("createSessionProxyHandler", () => {
       text: "hi",
       model: "expensive-model",
       reasoningEffort: "high",
+      latencyMode: "priority",
     } as never);
     expect(upstream.requests[0]!.body).toEqual({ type: "user.message", payload: { text: "hi" } });
+    await browser.steerMessage(WORKSPACE_ID, SESSION_ID, {
+      text: "steer",
+      model: "expensive-model",
+      reasoningEffort: "high",
+      latencyMode: "fast",
+    });
+    expect(upstream.requests[1]!.body).toEqual({ text: "steer" });
+    expect(
+      (
+        await rejection(
+          browser.requestJson(
+            "PUT",
+            `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/model-policy`,
+            { model: "expensive-model" },
+          ),
+        )
+      ).status,
+    ).toBe(404);
+    expect(upstream.requests).toHaveLength(2);
+  });
+
+  test("modelSelection: false preserves host-owned creation policy", async () => {
+    const { upstream, browser } = setup({
+      modelSelection: false,
+      createSession: ({ initialMessage }) => ({
+        initialMessage,
+        model: "host-model",
+        reasoningEffort: "high",
+        latencyMode: "priority",
+      }),
+    });
+    for (const policy of [{ model: "client-model" }, { latencyMode: "fast" }] as const) {
+      expect(
+        (await rejection(browser.createSession(WORKSPACE_ID, { initialMessage: "hi", ...policy })))
+          .status,
+      ).toBe(400);
+    }
+    expect(upstream.requests).toHaveLength(0);
+    await browser.createSession(WORKSPACE_ID, { initialMessage: "hi" });
+    expect(upstream.requests[0]!.body).toMatchObject({
+      initialMessage: "hi",
+      model: "host-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+    });
   });
 
   test("mutations honor authorizeMutation and default cross-site protection", async () => {
@@ -567,6 +613,7 @@ describe("createSessionProxyHandler", () => {
   test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({
+      modelSelection: false,
       createSession: ({ initialMessage }) => ({ initialMessage, modelContext: "Workspace plan" }),
       beforeForwardMessage: (input, context) => {
         inputs.push({ ...input, user: context.user });
@@ -592,12 +639,20 @@ describe("createSessionProxyHandler", () => {
     });
     await browser.submitComposerDraft(WORKSPACE_ID, SESSION_ID, {
       text: "draft",
+      annotations: [],
+      resources: [],
+      model: "saved-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       expectedDraftRevision: 1,
       clientEventId: "c1",
       delivery: "send",
-    } as never);
+    });
     expect(upstream.requests[2]!.body).toMatchObject({
       text: "draft",
+      model: "saved-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
       modelContext: expect.any(String),
     });
     await browser.createSession(WORKSPACE_ID, { initialMessage: "start" } as never);

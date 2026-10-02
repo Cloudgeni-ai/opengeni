@@ -125,6 +125,8 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  createUserPresenceRecorder,
+  registerProductUsageMetricBaselines,
 } from "@opengeni/core";
 import {
   createManagedAuth,
@@ -470,10 +472,21 @@ export function createAppComposition(deps: AppDependencies): {
           ffmpegPath: deps.settings.voiceInputFfmpegPath,
         })
       : deps.transcriptionSegmenter;
+  registerProductUsageMetricBaselines(observability);
+  // Server-side presence counts managed people, so it exists only where
+  // canonical managed browser sessions exist. Writes are batched off the
+  // request path; see packages/core/src/user-presence.ts.
+  const userPresence =
+    deps.userPresence !== undefined
+      ? deps.userPresence
+      : deps.settings.productAccessMode === "managed"
+        ? createUserPresenceRecorder({ db: deps.db, observability })
+        : null;
   const routeDeps: ApiRouteDeps = {
     ...deps,
     resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
+    userPresence,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
@@ -557,6 +570,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
+      "X-OpenGeni-User-Activity",
     ],
     exposeHeaders: [
       "Accept-Ranges",

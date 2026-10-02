@@ -35,6 +35,8 @@ export * from "./domain/knowledge-search";
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
 export * from "./workflow-wake-contract";
+export * from "./user-presence";
+export * from "./product-usage-metrics";
 
 // Boundary type slots referenced by dependencies.ts. The IMPLEMENTATIONS that
 // construct these (the real sandbox client / Better Auth instance) stay in

@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import {
+  CREDIT_GRANT_CLASSES,
   PRODUCT_LIFECYCLE_FACT_ATTRIBUTES,
   PRODUCT_LIFECYCLE_FACT_TYPES,
   type HostLifecycleFactExportBatch,
@@ -16,6 +18,7 @@ import {
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   claimHostExportBatch,
+  countActiveUsers,
   completeSelfServiceOrganizationSetup,
   createAdditionalManagedOrganization,
   createConnection,
@@ -27,7 +30,10 @@ import {
   deadLetterHostExportHead,
   disableHostExportConsumer,
   installPortableSkill,
+  readCreditGrantTotals,
+  recordUserActivityPresence,
   registerHostExportConsumer,
+  revokeConnection,
   saveSlackBotUserLink,
   upsertCodexSubscriptionCredential,
   upsertOrganizationModelProviderConnection,
@@ -49,6 +55,10 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const CONSUMER = "lifecycle-facts-test";
 const migrationText = readFileSync(
   new URL("../drizzle/0532_product_lifecycle_fact_export.sql", import.meta.url),
+  "utf8",
+);
+const usageAnalyticsMigrationText = readFileSync(
+  new URL("../drizzle/0565_usage_analytics_presence_and_facts.sql", import.meta.url),
   "utf8",
 );
 
@@ -195,6 +205,7 @@ afterAll(async () => {
 describe("product lifecycle facts (real PostgreSQL)", () => {
   test("the migration is rolling and its fixed lists match the contract", async () => {
     expect(migrationText.split("\n", 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(usageAnalyticsMigrationText.split("\n", 1)[0]).toBe("-- deployment-mode: rolling");
     if (!owned) return;
     for (const type of PRODUCT_LIFECYCLE_FACT_TYPES) {
       const allowed: readonly string[] = PRODUCT_LIFECYCLE_FACT_ATTRIBUTES[type];
@@ -239,6 +250,29 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     });
     for (const row of classes) {
       expect(PRODUCT_LIFECYCLE_FACT_ATTRIBUTES["connection.created"]).toContain(row.class as never);
+    }
+    const grantClasses = await owned.admin<
+      { type: string; source: string | null; class: string }[]
+    >`
+      select type, source, opengeni_private.credit_grant_class(type, source) as class
+      from (values
+        ('grant', 'verified_signup_trial'),
+        ('grant', 'stripe_checkout_coupon'),
+        ('manual_credit_grant', 'stripe_checkout_session'),
+        ('grant', 'operator_adjustment'),
+        ('grant', 'promotion'),
+        ('grant', null)
+      ) as input(type, source)`;
+    expect(grantClasses.map((row) => row.class)).toEqual([
+      "signup_trial",
+      "coupon",
+      "manual",
+      "manual",
+      "other",
+      "other",
+    ]);
+    for (const row of grantClasses) {
+      expect(CREDIT_GRANT_CLASSES).toContain(row.class as never);
     }
     const methods = await owned.admin<{ provider: string; method: string }[]>`
       select provider, opengeni_private.product_lifecycle_auth_method(provider) as method
@@ -565,17 +599,197 @@ describe("product lifecycle facts (real PostgreSQL)", () => {
     );
   });
 
+  test("presence, credit grants and connection revocations write bounded facts", async () => {
+    if (!owned || !client) return;
+    type AdminSql = OwnerMigratedTestDatabase["admin"];
+    const withoutTriggers = async (statement: (tx: AdminSql) => Promise<unknown>) =>
+      await owned!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await statement(tx as unknown as AdminSql);
+      });
+
+    // Presence: only opaque user subjects are stored; API keys, services,
+    // configured and local subjects are dropped before the database.
+    const active = await insertAuthUser({ verified: true, provider: "credential" });
+    expect(
+      await recordUserActivityPresence(client.db, [
+        active.subjectId,
+        active.subjectId,
+        "api_key:abcdefgh1234",
+        "service:scheduler",
+        "dev",
+        "configured:host-user@example.test",
+      ]),
+    ).toBe(1);
+    // A repeat inside the 30 second window writes nothing and no second fact.
+    expect(await recordUserActivityPresence(client.db, [active.subjectId])).toBe(0);
+    const first = await factsFor({ type: "user.active", subjectId: active.subjectId });
+    expect(
+      first.map((row) => [row.payload.attribute, row.payload.subjectKind, row.account_id]),
+    ).toEqual([[null, "user", null]]);
+    const stored = await owned.admin<{ subject_id: string }[]>`
+      select subject_id from opengeni_private.user_activity_presence order by subject_id`;
+    expect(stored.map((row) => row.subject_id)).toEqual([active.subjectId]);
+
+    // A person last seen on an earlier UTC day becomes active again today.
+    const returning = await insertAuthUser({ verified: true, provider: "credential" });
+    await withoutTriggers(
+      (tx) => tx`
+        insert into opengeni_private.user_activity_presence
+          (subject_id, first_seen_at, last_seen_at, active_day)
+        values (${returning.subjectId}, now() - interval '3 days', now() - interval '2 days',
+          ((now() - interval '2 days') at time zone 'UTC')::date)`,
+    );
+    expect(await factsFor({ type: "user.active", subjectId: returning.subjectId })).toEqual([]);
+    expect(await recordUserActivityPresence(client.db, [returning.subjectId])).toBe(1);
+    expect(await factsFor({ type: "user.active", subjectId: returning.subjectId })).toHaveLength(1);
+    const [returned] = await owned.admin<{ first: Date; last: Date }[]>`
+      select first_seen_at as first, last_seen_at as last
+      from opengeni_private.user_activity_presence where subject_id = ${returning.subjectId}`;
+    expect(Date.now() - returned!.last.getTime()).toBeLessThan(60_000);
+    expect(Date.now() - returned!.first.getTime()).toBeGreaterThan(2 * 86_400_000);
+
+    // Windowed counts: two people now, one 2h ago, one 10d ago, one 40d ago.
+    for (const [label, age] of [
+      ["two-hours", "2 hours"],
+      ["ten-days", "10 days"],
+      ["forty-days", "40 days"],
+    ] as const) {
+      await withoutTriggers(
+        (tx) => tx`
+          insert into opengeni_private.user_activity_presence
+            (subject_id, first_seen_at, last_seen_at, active_day)
+          values (${`user:presence-${label}`}, now() - ${age}::interval,
+            now() - ${age}::interval, ((now() - ${age}::interval) at time zone 'UTC')::date)`,
+      );
+    }
+    expect(await countActiveUsers(client.db)).toEqual({
+      "5m": 2,
+      "15m": 2,
+      "1h": 2,
+      "24h": 3,
+      "7d": 3,
+      "30d": 4,
+    });
+    // The runtime role reaches presence only through its two capabilities.
+    let directRead: unknown = null;
+    try {
+      await client.db.execute(sql`select * from opengeni_private.user_activity_presence`);
+    } catch (error) {
+      directRead = error;
+    }
+    expect(directRead).not.toBeNull();
+
+    // Credit grants: every writer is observed and exported with its class.
+    const owner = await verifiedOwner("Lifecycle grant org");
+    const before = await readCreditGrantTotals(client.db);
+    const grant = (type: string, sourceType: string, amountMicros: number) =>
+      applyCreditLedgerEntry(client!.db, {
+        accountId: owner.organizationId,
+        type,
+        amountMicros,
+        sourceType,
+        sourceId: remember(`grant-source-${crypto.randomUUID()}`),
+        idempotencyKey: `lifecycle-grant:${crypto.randomUUID()}`,
+      });
+    await grant("grant", "stripe_checkout_coupon", 5_000_000);
+    await grant("manual_credit_grant", "operator_adjustment", 7_000_000);
+    await grant("grant", "promotion", 3_000_000);
+    // A negative or non-grant row is neither a grant fact nor an observation.
+    await grant("grant", "promotion", -1_000_000);
+    await grant("credit_refund", "stripe_refund", -2_000_000);
+    const granted = await factsFor({ type: "credits.granted", accountId: owner.organizationId });
+    expect(granted.map((row) => row.payload.attribute).sort()).toEqual([
+      "coupon",
+      "manual",
+      "other",
+    ]);
+    const after = await readCreditGrantTotals(client.db);
+    expect({
+      coupon: after.coupon.count - before.coupon.count,
+      manual: after.manual.count - before.manual.count,
+      other: after.other.count - before.other.count,
+      couponMicros: after.coupon.micros - before.coupon.micros,
+      manualMicros: after.manual.micros - before.manual.micros,
+      otherMicros: after.other.micros - before.other.micros,
+    }).toEqual({
+      coupon: 1,
+      manual: 1,
+      other: 1,
+      couponMicros: 5_000_000,
+      manualMicros: 7_000_000,
+      otherMicros: 3_000_000,
+    });
+
+    // The verified-signup trial grant runs inside setup's own trigger and is
+    // attributed to the new owner.
+    const trialPerson = await insertAuthUser({ verified: true, provider: "credential" });
+    const trialSetup = await completeSelfServiceOrganizationSetup(client.db, {
+      authUserId: trialPerson.userId,
+      actorSubjectId: trialPerson.subjectId,
+      organizationName: remember("Lifecycle trial org"),
+      operationId: crypto.randomUUID(),
+      requestFingerprint: "d".repeat(64),
+      trialCreditsEnabled: true,
+    });
+    const trial = await factsFor({
+      type: "credits.granted",
+      accountId: trialSetup.organizationId,
+    });
+    expect(trial.map((row) => [row.payload.attribute, row.initiator?.subjectId])).toEqual([
+      ["signup_trial", trialPerson.subjectId],
+    ]);
+    const afterTrial = await readCreditGrantTotals(client.db);
+    expect(afterTrial.signup_trial.count - after.signup_trial.count).toBe(1);
+    expect(afterTrial.signup_trial.micros - after.signup_trial.micros).toBe(10_000_000);
+
+    // Connection revocation and deletion of a live connection, with the same
+    // provider class list as creation; an already revoked row is not counted twice.
+    const person = `user:revoke-${crypto.randomUUID()}`;
+    const target = await workspace("revoke", person);
+    const connect = (providerDomain: string) =>
+      createConnection(client!.db, {
+        ...target,
+        subjectId: null,
+        providerDomain,
+        kind: "api_key",
+        credentialEncrypted: remember(`revoke-ciphertext-${crypto.randomUUID()}`),
+        grantedScopes: [],
+        metadata: {},
+        createdBySubjectId: person,
+      });
+    const linear = await connect("linear.app");
+    const custom = await connect(remember(`mcp.${crypto.randomUUID()}.customer-internal.example`));
+    const revoked = await revokeConnection(client.db, target.workspaceId, linear.id, person);
+    expect(revoked?.status).toBe("revoked");
+    await revokeConnection(client.db, target.workspaceId, linear.id, person);
+    await owned.admin`delete from connections where id = ${linear.id}`;
+    await owned.admin`delete from connections where id = ${custom.id}`;
+    const revocations = await factsFor({
+      type: "connection.revoked",
+      accountId: target.accountId,
+    });
+    expect(
+      revocations
+        .map((row) => [row.payload.attribute, row.workspace_id, row.initiator?.subjectId ?? null])
+        .sort(),
+    ).toEqual([
+      ["linear", target.workspaceId, person],
+      ["other", target.workspaceId, null],
+    ]);
+  });
+
   test("a capture failure never fails the product change", async () => {
     if (!owned) return;
+    // Make validation (called from inside the capture's exception block) fail.
     const [original] = await owned.admin<{ definition: string }[]>`
       select pg_get_functiondef(
-        'opengeni_private.enqueue_product_lifecycle_fact(text, text, text, uuid, uuid, text)'::regprocedure
+        'opengeni_private.product_lifecycle_fact_valid(text, text)'::regprocedure
       ) as definition`;
     await owned.admin.unsafe(`
-      CREATE OR REPLACE FUNCTION opengeni_private.enqueue_product_lifecycle_fact(
-        p_fact_type text, p_attribute text, p_subject_id text,
-        p_account_id uuid, p_workspace_id uuid, p_dedupe_key text
-      ) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+      CREATE OR REPLACE FUNCTION opengeni_private.product_lifecycle_fact_valid(
+        p_fact_type text, p_attribute text
+      ) RETURNS boolean LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog
       AS $$ BEGIN RAISE EXCEPTION 'simulated capture failure'; END $$`);
     try {
       const person = await insertAuthUser({ verified: true, provider: "credential" });

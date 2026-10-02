@@ -31,7 +31,7 @@ test.each([undefined, "", "missing-target"])(
       browserSessionId: crypto.randomUUID(),
       controllerGeneration: "initial-target-test",
       targetLifecycle: "cdp",
-      foregroundManagedTabs: true,
+      focusEmulation: true,
       runner: {
         async run<T>(args: readonly string[]): Promise<T> {
           if (args[0] === "get") return { cdpUrl: "ws://localhost/test" } as T;

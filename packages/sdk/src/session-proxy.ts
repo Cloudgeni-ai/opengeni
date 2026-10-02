@@ -196,7 +196,11 @@ export type SessionProxyHandlerOptions = {
   /**
    * Let the browser choose model, reasoning effort, and latency per message
    * or draft (still limited by the workspace model catalog). When false those
-   * fields are removed; hide the composer's model picker to match. Defaults to true.
+   * choices are removed from messages and draft saves. Saves use the actor's
+   * server-owned draft policy (initially the session defaults). Submit must repeat
+   * the saved policy unchanged as an integrity fence, not a new selection: the
+   * API atomically checks the saved revision/content or replays the original
+   * receipt. Hide the composer's model picker to match. Defaults to true.
    */
   modelSelection?: boolean | undefined;
   /** SSE heartbeat interval. Defaults to 15 seconds. */
@@ -344,7 +348,10 @@ export function createSessionProxyHandler(
         value: unknown,
         input: SessionProxyMessageInput,
       ): Promise<Record<string, unknown> | Response> => {
-        const message = sanitizeMessage(value, modelSelection);
+        // Submit repeats the saved policy as a mandatory integrity fence. Never
+        // replace it with a newer draft's policy: outcome-unknown retries must
+        // retain the original receipt hash. The API rejects any new selection.
+        const message = sanitizeMessage(value, modelSelection || input.delivery === "submit");
         const extras = await messageExtras(input);
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(
@@ -586,6 +593,18 @@ export function createSessionProxyHandler(
       const route = `${method} ${op.join("/")}`;
       const body = method === "GET" ? undefined : await readJsonBody(request, maxBodyBytes, true);
       const sanitize = (value: unknown) => sanitizeMessage(value, modelSelection);
+      const saveDraftPolicy = async (message: Record<string, unknown>) => {
+        if (modelSelection) return message;
+        // Save requires explicit policy fields. Use this actor's durable draft,
+        // not browser choices. The API's expectedRevision fence rejects races.
+        const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+        return {
+          ...message,
+          model: draft.model,
+          reasoningEffort: draft.reasoningEffort,
+          latencyMode: draft.latencyMode,
+        };
+      };
       const forward = async (path: string, payload: Record<string, unknown> | Response) =>
         payload instanceof Response
           ? payload
@@ -644,12 +663,17 @@ export function createSessionProxyHandler(
         case "GET composer-draft":
           return await read(`${session}/composer-draft`);
         case "PUT composer-draft":
-          return json(await client.requestJson("PUT", `${session}/composer-draft`, sanitize(body)));
-        case "POST composer-draft/submit":
-          return await forward(
-            `${session}/composer-draft/submit`,
-            await forwardMessage(body, { sessionId, delivery: "submit" }),
+          return json(
+            await client.requestJson(
+              "PUT",
+              `${session}/composer-draft`,
+              await saveDraftPolicy(sanitize(body)),
+            ),
           );
+        case "POST composer-draft/submit": {
+          const message = await forwardMessage(body, { sessionId, delivery: "submit" });
+          return await forward(`${session}/composer-draft/submit`, message);
+        }
         case "POST control": {
           if (body?.action !== "pause" && body?.action !== "resume") {
             reject(403, "control_not_allowed", "Only pause and resume are available.");
