@@ -1038,18 +1038,15 @@ export async function createOpenGeniWorkerService(
     }
 
     if (options.http !== false) {
-      const databaseReady = dbReadyCheck(
-        options.http?.readinessDb ?? options.activityDependencies.db,
-        options.databasePosture,
-      );
+      const readinessDb = options.http?.readinessDb ?? options.activityDependencies.db;
+      const databaseReady = dbReadyCheck(readinessDb, options.databasePosture, async () => {
+        await resolveCatalogSettings(readinessDb, settings);
+      });
       httpServer = startWorkerHttpServer({
         settings,
         observability,
         checks: {
-          db: async () => {
-            await databaseReady();
-            await resolveCatalogSettings(options.activityDependencies.db, settings);
-          },
+          db: databaseReady,
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },
