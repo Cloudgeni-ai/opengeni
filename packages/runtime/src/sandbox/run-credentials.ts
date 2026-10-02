@@ -18,7 +18,10 @@ const MAX_CREDENTIAL_FILES = 64;
 const MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_MATERIAL_BYTES = 4 * 1024 * 1024;
 const MAX_AUTH_NEEDED_NOTICES = 32;
-const WRITE_CHUNK_BYTES = 24 * 1024;
+// Encoded chunks must leave room for both the cancellation shell and the SDK
+// run-as wrapper, each of which repeats and quotes the command. Keep chunks
+// base64-aligned and bounded without dropping any credential bytes.
+const WRITE_CHUNK_BYTES = 1536;
 const COMMAND_OK_MARKER = "__OPENGENI_RUN_CREDENTIAL_COMMAND_OK__";
 const AUTH_NEEDED_REASONS = new Set([
   "missing_connection",
