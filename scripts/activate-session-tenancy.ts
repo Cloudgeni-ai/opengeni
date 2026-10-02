@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import postgres from "postgres";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../packages/db/src/lossless-json";
 
 const REQUIRED_MIGRATIONS = [
   "0285_organization_tenancy_inventory.sql",
@@ -22,6 +23,17 @@ export function requiredActivationMigrations(allOrganizations: boolean): readonl
   return allOrganizations
     ? [...REQUIRED_MIGRATIONS, FLEET_PREPARATION_MIGRATION, FLEET_MIGRATION]
     : REQUIRED_MIGRATIONS;
+}
+
+export function activationConnectionOptions(searchPath?: string) {
+  return {
+    max: 1,
+    connection: {
+      // Use the same PgBouncer-compatible current-protocol identity as createDb.
+      application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+      ...(searchPath ? { search_path: searchPath } : {}),
+    },
+  };
 }
 
 function argument(name: string, argv: readonly string[] = process.argv): string | null {
@@ -386,10 +398,7 @@ async function main(): Promise<void> {
   if (!databaseUrl) throw new Error("OPENGENI_MIGRATIONS_DATABASE_URL is required");
   const roles = applicationRoles();
   const searchPath = dbSearchPath(settings);
-  const sql = postgres(databaseUrl, {
-    max: 1,
-    ...(searchPath ? { connection: { search_path: searchPath } } : {}),
-  });
+  const sql = postgres(databaseUrl, activationConnectionOptions(searchPath));
   try {
     const result = await sql.begin((transaction) =>
       activateSessionTenancyTransaction(transaction, {

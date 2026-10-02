@@ -1442,6 +1442,12 @@ entire transaction. The already-activated replay-only fleet must pass the same
 fresh initial and final drain checks; it never uses preference enablement as a
 drain mechanism.
 
+The activation CLI's migration-owner connection carries the same canonical
+`application_name` protocol identity as `createDb`, including through a
+transaction pooler. An unversioned raw connection is not a supported operator
+substitute: the current sessions policy rejects it even when the backfill
+receipts and parity evidence are ready.
+
 For each subsequent single-organization activation:
 
 1. bind and verify the exact production subscription, cluster context,

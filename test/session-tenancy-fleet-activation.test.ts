@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type postgres from "postgres";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../packages/db/src/lossless-json";
 import {
+  activationConnectionOptions,
   activationScope,
   activateSessionTenancyTransaction,
   assertSessionTenancyApplicationRolesDrained,
@@ -14,6 +16,19 @@ const id = "00000000-0000-4000-8000-000000000001";
 const secondId = "00000000-0000-4000-8000-000000000002";
 
 describe("session tenancy fleet activation admission", () => {
+  test("the actual CLI connection carries the canonical current protocol and preserves schema selection", () => {
+    expect(activationConnectionOptions()).toEqual({
+      max: 1,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    expect(activationConnectionOptions("embedded_fixture")).toEqual({
+      max: 1,
+      connection: {
+        application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+        search_path: "embedded_fixture",
+      },
+    });
+  });
   test("admits exactly one activation scope and rejects preference overrides", () => {
     expect(activationScope(["--organization-id", id])).toEqual({
       organizationId: id,
