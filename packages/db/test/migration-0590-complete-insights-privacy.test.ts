@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import {
   createDb,
@@ -99,9 +99,9 @@ test("0590 scrubs polluted defaults without widening approved amount-reader gran
 test("frozen pre-feature and current binaries accept the complete real PostgreSQL routine inventory", async () => {
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   const repoRoot = new URL("../../..", import.meta.url).pathname;
-  // Immutable origin/main fetched October 2, 2026, before #2768's new readers.
-  // Do not substitute today's constants or filter the old binary's catalog.
-  const oldRevision = "131eda293";
+  // Both the immutable original feature merge-base and origin/main fetched
+  // October 2, 2026, before #2768's new readers. Never filter either inventory.
+  const oldRevisions = ["76ff363228fcc5d26e24018b3335729f1e94237b", "131eda293"];
   const root = await mkdtemp(`${repoRoot}/.insights-old-runtime-`);
   const runtime = createDb(shared.appUrl, { max: 2 });
   const options = {
@@ -116,33 +116,43 @@ test("frozen pre-feature and current binaries accept the complete real PostgreSQ
     rlsStrategy: "force" as const,
   };
   try {
-    for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"]) {
-      await writeFile(
-        `${root}/${name}`,
-        execFileSync("git", ["show", `${oldRevision}:packages/db/src/${name}`], { cwd: repoRoot }),
-      );
+    for (const oldRevision of oldRevisions) {
+      // Distinct module URLs prevent Bun's import cache from reusing the first
+      // binary after the second frozen source has been extracted.
+      const directory = `${root}/${oldRevision}`;
+      await mkdir(directory);
+      for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"]) {
+        await writeFile(
+          `${directory}/${name}`,
+          execFileSync("git", ["show", `${oldRevision}:packages/db/src/${name}`], {
+            cwd: repoRoot,
+          }),
+        );
+      }
+      const old = await import(pathToFileURL(`${directory}/runtime-posture.ts`).href);
+      const oldProvision = await import(pathToFileURL(`${directory}/provision-roles.ts`).href);
+      const verify = async () => {
+        expect(
+          old.evaluateRuntimeDatabasePosture(
+            await old.inspectRuntimeDatabasePosture(runtime.db, options),
+            options,
+          ),
+          oldRevision,
+        ).toEqual([]);
+        expect(
+          evaluateRuntimeDatabasePosture(
+            await inspectRuntimeDatabasePosture(runtime.db, options),
+            options,
+          ),
+          oldRevision,
+        ).toEqual([]);
+      };
+      await verify();
+      await oldProvision.provisionRoles(shared.adminUrl, roles);
+      await verify();
+      await provisionRoles(shared.adminUrl, roles);
+      await verify();
     }
-    const old = await import(pathToFileURL(`${root}/runtime-posture.ts`).href);
-    const oldProvision = await import(pathToFileURL(`${root}/provision-roles.ts`).href);
-    const verify = async () => {
-      expect(
-        old.evaluateRuntimeDatabasePosture(
-          await old.inspectRuntimeDatabasePosture(runtime.db, options),
-          options,
-        ),
-      ).toEqual([]);
-      expect(
-        evaluateRuntimeDatabasePosture(
-          await inspectRuntimeDatabasePosture(runtime.db, options),
-          options,
-        ),
-      ).toEqual([]);
-    };
-    await verify();
-    await oldProvision.provisionRoles(shared.adminUrl, roles);
-    await verify();
-    await provisionRoles(shared.adminUrl, roles);
-    await verify();
   } finally {
     await provisionRoles(shared.adminUrl, roles);
     await runtime.close();
