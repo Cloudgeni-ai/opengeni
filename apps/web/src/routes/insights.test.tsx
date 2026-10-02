@@ -442,8 +442,24 @@ describe("Insights route presentation", () => {
     }
   });
 
-  test("a session scope hides the private section instead of showing it empty", async () => {
-    nextSnapshot = privateChats();
+  test("a session scope hides every private-chat line instead of showing it empty", async () => {
+    nextSnapshot = privateChats({
+      projects: [
+        {
+          id: "unavailable",
+          kind: "unavailable",
+          label: "Unavailable",
+          projects: 0,
+          rootSessions: 1,
+          calls: 2,
+          tokens: 300,
+          creditUsd: 1,
+          estimatedProviderUsd: 0,
+          estimatedProviderCostKnownCalls: 0,
+          cacheHitPct: null,
+        },
+      ],
+    });
     const rendered = await renderRoute({
       search: { root: "33333333-3333-4333-8333-333333333333" },
     });
@@ -452,6 +468,8 @@ describe("Insights route presentation", () => {
         rendered.container.querySelector('[role="table"][aria-label="Private chats by person"]'),
       ).toBeNull();
       expect(rendered.container.textContent).not.toContain("Only me");
+      expect(rendered.container.textContent).not.toContain("private ones included");
+      expect(rendered.container.textContent).not.toContain("Private chats");
     } finally {
       await rendered.unmount();
     }

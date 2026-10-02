@@ -323,7 +323,7 @@ export function InsightsRoute({
     return (
       <ContentPage width="wide" data-insights className="gap-6">
         {heading}
-        <InsightsSkeleton />
+        <InsightsSkeleton filtered={filtered} />
       </ContentPage>
     );
   }
@@ -334,6 +334,11 @@ export function InsightsRoute({
   const { rows: privateRows, truncated: privateTruncated } = privateSpendRows(snap);
   // A session scope holds no one else's private chats: hide the section, no empty state.
   const showPrivate = !scopeActive && privateRows.length > 0;
+  // A session scope counts only chats the viewer can read, so it never lists
+  // a private-chats row.
+  const projects = (snap.projects ?? []).filter(
+    (project) => !scopeActive || project.kind !== "unavailable",
+  );
   const longerRange = RANGE_OPTIONS[RANGE_OPTIONS.findIndex((option) => option.id === range) + 1];
   const estimatedSpend = payers
     .filter((payer) => payer.estimated)
@@ -444,11 +449,7 @@ export function InsightsRoute({
     <SectionStack variant="open">
       <Section
         title="Overview"
-        description={
-          filtered
-            ? "Filters narrow everything on this tab. Activity stays workspace-wide."
-            : OVERVIEW_DESCRIPTION
-        }
+        description={filtered ? FILTERED_DESCRIPTION : OVERVIEW_DESCRIPTION}
       >
         <div className="flex min-w-0 flex-col gap-4">
           <UsageStats
@@ -623,8 +624,8 @@ export function InsightsRoute({
         title="By project"
         description="A session and its subagents count under the project its first chat is in now."
       >
-        {(snap.projects ?? []).length > 0 ? (
-          <ProjectUsageList projects={snap.projects ?? []} />
+        {projects.length > 0 ? (
+          <ProjectUsageList projects={projects} />
         ) : (
           <EmptyLine>No project usage in this selection.</EmptyLine>
         )}
@@ -1129,7 +1130,7 @@ const TOOLBAR_CLASS = "flex min-w-0 flex-wrap items-center gap-2";
  * The usage tab's shape while the first snapshot loads: toolbar, period line,
  * stats, chart and a list, at their final sizes so nothing jumps when data lands.
  */
-function InsightsSkeleton() {
+function InsightsSkeleton(props: { filtered: boolean }) {
   return (
     <div
       role="status"
@@ -1143,7 +1144,10 @@ function InsightsSkeleton() {
         <Skeleton className="h-[18px] w-72 max-w-full rounded-full" />
       </div>
       <SectionStack variant="open">
-        <Section title="Overview" description={OVERVIEW_DESCRIPTION}>
+        <Section
+          title="Overview"
+          description={props.filtered ? FILTERED_DESCRIPTION : OVERVIEW_DESCRIPTION}
+        >
           <StatGroup label="Loading">
             {["Spend", "Tokens", "Model calls", "Cache hit"].map((label) => (
               <StatTile key={label} label={label} loading />
@@ -1173,6 +1177,8 @@ function InsightsSkeleton() {
 
 // Shared with the skeleton so loading and loaded copy take the same lines.
 const OVERVIEW_DESCRIPTION = "Every chat counts, private ones included.";
+const FILTERED_DESCRIPTION =
+  "Filters narrow everything on this tab. Activity stays workspace-wide.";
 const PAID_WITH_DESCRIPTION =
   "Credits are what Opengeni charged. A connected plan or your own API key is paid outside Opengeni, so its amount is a list-price estimate.";
 const TOKENS_CHART_DESCRIPTION =
