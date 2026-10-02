@@ -73,11 +73,12 @@ postgresTest(
           useCase: "embed",
         }),
       ).rejects.toMatchObject({ cause: { code: "42501" } });
-      expect(
-        await owned.admin<Array<{ account_id: string; subject_id: string; use_case: string }>>`
+      const storedUseCases = await owned.admin<
+        Array<{ account_id: string; subject_id: string; use_case: string }>
+      >`
           SELECT account_id, subject_id, use_case FROM opengeni_private.organization_signup_use_cases
-          ORDER BY use_case`,
-      ).toEqual([
+          ORDER BY use_case`;
+      expect([...storedUseCases]).toEqual([
         { account_id: otherOrganizationId, subject_id: subjectId, use_case: "cloud" },
         { account_id: organizationId, subject_id: subjectId, use_case: "embed" },
       ]);
