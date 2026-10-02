@@ -5,17 +5,25 @@
  */
 export type UsagePayer = "opengeni_credits" | "subscription" | "own_key";
 
-/** Providers whose calls run on a connected ChatGPT or SuperGrok plan. */
+/** Providers whose calls run on a connected ChatGPT, Claude or SuperGrok plan. */
 const SUBSCRIPTION_PROVIDERS: Readonly<Record<string, string>> = {
   "codex-subscription": "ChatGPT plan",
+  "workspace-claude-subscription": "Claude plan",
+  "organization-claude-subscription": "Claude plan",
   "supergrok-subscription": "SuperGrok plan",
 };
+
+function subscriptionPlan(provider: string): string | undefined {
+  return Object.hasOwn(SUBSCRIPTION_PROVIDERS, provider)
+    ? SUBSCRIPTION_PROVIDERS[provider]
+    : undefined;
+}
 
 export const PAYER_ORDER: readonly UsagePayer[] = ["opengeni_credits", "subscription", "own_key"];
 
 export function usagePayer(billing: "opengeni_credits" | "external", provider: string): UsagePayer {
   if (billing === "opengeni_credits") return "opengeni_credits";
-  return provider in SUBSCRIPTION_PROVIDERS ? "subscription" : "own_key";
+  return subscriptionPlan(provider) === undefined ? "own_key" : "subscription";
 }
 
 export function payerLabel(payer: UsagePayer): string {
@@ -32,7 +40,7 @@ export function payerLabel(payer: UsagePayer): string {
 /** The payer for one model row: names the plan when it is a subscription. */
 export function rowPayerLabel(billing: "opengeni_credits" | "external", provider: string): string {
   if (billing === "opengeni_credits") return "Opengeni credits";
-  return SUBSCRIPTION_PROVIDERS[provider] ?? "Your API key";
+  return subscriptionPlan(provider) ?? "Your API key";
 }
 
 /** One sentence on what the amount means for that payer. */

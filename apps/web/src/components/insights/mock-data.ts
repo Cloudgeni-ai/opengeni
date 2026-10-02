@@ -52,6 +52,8 @@ const PROVIDER_LABEL: Record<string, string> = {
   xai: "xAI",
   openrouter: "OpenRouter",
   "codex-subscription": "Codex",
+  "workspace-claude-subscription": "Workspace Claude",
+  "organization-claude-subscription": "Organization Claude",
   "supergrok-subscription": "SuperGrok",
   "opengeni-gateway": "Opengeni gateway",
   "workspace-gateway": "Workspace gateway",
