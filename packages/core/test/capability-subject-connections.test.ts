@@ -135,6 +135,58 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("tool permissions resolve one shared selector account without pinning or borrowing a personal account", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:selector-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://service.example.test/mcp",
+    });
+    const selected = await createConnection(db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "service.example.test",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+    const selector = {
+      providerDomain: "service.example.test",
+      kind: "oauth2" as const,
+      accountSelection: "all_eligible" as const,
+    };
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      config: { connectionRef: selector },
+      metadata: { mcpConnectivity: { status: "auth_deferred" } },
+    });
+    const input = {
+      db,
+      settings,
+      workspaceId: workspace.workspaceId,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      personalOwnerVerified: true,
+    };
+    const permissions = await getConnectorToolPermissions(input);
+    expect(permissions.connectionId).toBe(selected.id);
+    // This credential fixture contains no real token; discovery stays offline.
+    expect(permissions.discoveryError).not.toBeNull();
+    expect(
+      (await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.config
+        .connectionRef,
+    ).toEqual(selector);
+    await createConnection(db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "service.example.test",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+    await expect(getConnectorToolPermissions(input)).rejects.toThrow("Choose one account");
+  });
+
   test("new Slack catalog selectors survive enable/storage/projection and admit workspace plus only the sender's accounts", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();
