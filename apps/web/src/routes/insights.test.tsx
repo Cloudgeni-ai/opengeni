@@ -133,6 +133,8 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     driversTruncated: false,
     facetsTruncated: false,
     recentCallsTruncated: false,
+    privateChats: [],
+    privateChatsTruncated: false,
     ...overrides,
   };
 }
@@ -374,9 +376,8 @@ describe("Insights route presentation", () => {
     }
   });
 
-  const privateChats = (overrides: Record<string, unknown> = {}) =>
-    ({
-      ...snapshot(),
+  const privateChats = (overrides: Partial<WorkspaceInsightsSnapshot> = {}) =>
+    snapshot({
       privateChats: [
         {
           ownerKey: "owner-2",
@@ -400,7 +401,7 @@ describe("Insights route presentation", () => {
         },
       ],
       ...overrides,
-    }) as WorkspaceInsightsSnapshot;
+    });
 
   test("lists other people's private chats as plain amounts per person, largest first", async () => {
     nextSnapshot = privateChats();

@@ -332,7 +332,9 @@ export function SessionUsageList(props: {
             cells={{
               tokens: <Amount>{formatTokens(driver.tokens)}</Amount>,
               share: <Quiet>{share(driver.tokens)}</Quiet>,
-              cache: <Quiet>{formatCachePct(driver.cacheHitPct)}</Quiet>,
+              cache: (
+                <Quiet>{driver.tokens === 0 ? "—" : formatCachePct(driver.cacheHitPct)}</Quiet>
+              ),
               credits: <Amount>{formatUsd(driver.creditUsd, 2)}</Amount>,
               listPrice: (
                 <Quiet>

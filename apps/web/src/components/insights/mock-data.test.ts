@@ -129,6 +129,8 @@ function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): Workspace
     driversTruncated: false,
     facetsTruncated: false,
     recentCallsTruncated: false,
+    privateChats: [],
+    privateChatsTruncated: false,
     ...overrides,
   };
 }
@@ -227,7 +229,6 @@ describe("buildInsightsView", () => {
     const view = buildInsightsView(
       snapshot({
         models: [{ ...base, cachedTokens: 0, cacheInputTokens: 0, cacheKnownCalls: 0 }],
-        priorCacheHitPct: null,
       }),
       { provider: "all", model: "all" },
     );

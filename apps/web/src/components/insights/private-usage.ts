@@ -2,32 +2,18 @@ import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import type { PrivateSpendRow } from "./usage-sections";
 
-type PrivateChatsRow = {
-  ownerKey: string;
-  name: string | null;
-  you: boolean;
-  calls: number;
-  tokens: number;
-  creditUsd: number;
-  estimatedProviderUsd: number;
-  estimatedProviderCostKnownCalls: number;
-};
-
 /**
  * Other people's private chats in this workspace, one row per person with
  * amounts only. The snapshot never carries their titles or ids; an older API
- * replica omits the field and the list is simply empty. Largest spend first.
+ * replica may omit the field, so the list is then simply empty. Largest spend
+ * first.
  */
 export function privateSpendRows(snap: WorkspaceInsightsSnapshot): {
   rows: PrivateSpendRow[];
   /** The server listed only the largest 200 people. */
   truncated: boolean;
 } {
-  const source = snap as WorkspaceInsightsSnapshot & {
-    privateChats?: PrivateChatsRow[];
-    privateChatsTruncated?: boolean;
-  };
-  const rows = (source.privateChats ?? [])
+  const rows = (snap.privateChats ?? [])
     .map((row) => ({
       key: `private:${row.ownerKey}`,
       person: row.name ?? "A member",
@@ -45,5 +31,5 @@ export function privateSpendRows(snap: WorkspaceInsightsSnapshot): {
         b.tokens - a.tokens ||
         a.person.localeCompare(b.person),
     );
-  return { rows, truncated: source.privateChatsTruncated ?? false };
+  return { rows, truncated: snap.privateChatsTruncated ?? false };
 }

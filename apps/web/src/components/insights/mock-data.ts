@@ -382,10 +382,7 @@ export function buildInsightsView(
       equivalentPct: pctDelta(snap.equivalentCreditUsd, snap.priorEquivalentCreditUsd),
       warmPct: pctDelta(snap.warmSeconds, snap.priorWarmSeconds),
       tokensPct: pctDelta(totalTokens, snap.priorTotalTokens),
-      cachePts:
-        cacheHitPct === null || snap.priorCacheHitPct === null
-          ? null
-          : cacheHitPct - snap.priorCacheHitPct,
+      cachePts: cacheHitPct === null ? null : cacheHitPct - snap.priorCacheHitPct,
     },
     series: snap.series,
     availableModels,
@@ -465,9 +462,7 @@ export function buildInsightsDiagnostics(snap: WorkspaceInsightsSnapshot): Insig
   const lowCacheRoots = snap.drivers
     .filter(
       (driver) =>
-        driver.cacheHitPct !== null &&
-        driver.cacheHitPct < LOW_CACHE_ROOT_MAX_PCT &&
-        driver.tokens >= LOW_CACHE_ROOT_MIN_TOKENS,
+        driver.cacheHitPct < LOW_CACHE_ROOT_MAX_PCT && driver.tokens >= LOW_CACHE_ROOT_MIN_TOKENS,
     )
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, DIAGNOSTIC_ROWS);
