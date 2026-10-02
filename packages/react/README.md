@@ -606,6 +606,8 @@ detaches. Native **App controls** also work in the background where supported.
 Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
 makes that change explicit.
 
+Desktop IME candidates and their selection keys stay local; only committed text is sent.
+
 A managed browser's attachment authority error keeps a same-browser **Reconnect**
 action available. It obtains a fresh server-authorized attachment without creating
 a replacement browser or replaying input. The fresh Connected Chrome instruction
