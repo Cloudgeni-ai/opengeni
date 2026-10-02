@@ -204,6 +204,11 @@ the signal to `fetch`. The epoch is a presentation fence, not authorization:
 the backend must still check every request's user and session ownership. Do not
 run these browser helpers with an organization key or put that key in storage.
 
+For reopened reports, key the selected report and its authorized session together.
+Refresh request headers/mappings when that selection changes; do not keep the
+first report's session in a mounted closure. A new actor object in the same
+component still requires reset/invalidation, not only a logout-time unmount.
+
 ## Decide what the user sees
 
 OpenGeni's durable event stream can support different product projections:

@@ -770,6 +770,67 @@ Beyond `initialMessage`/`tools`/`resources`, the create body (`POST /v1/workspac
 - Session creation exposes a workspace-scoped `idempotencyKey` (distinct from the per-call `clientEventId`): forward a stable value so concurrent/retried creates of the same logical session collapse to a single session. Without it every create is independent, so a blind retry can double-create — keep sending a stable key when you retry.
 - Treat unknown event types as extensible timeline entries, not client crashes.
 
+### Read a settled result without caching progress or losing text
+
+`agent.message.completed` means one message ended, not that the turn completed.
+`phase: "commentary"` is progress; even `final_answer` text precedes canonical
+settlement. For a text-result cache, wait for the expected logical turn's
+`turn.completed` and use its original `payload.output`. Empty output or
+`emptyFinalReply` is not a successful report; a wait-ended turn may contain
+`reply` for human attention without a result. Handle failure, cancellation,
+approval and human-input states separately. Do not mark the whole session/goal
+complete merely because one turn settled.
+
+REST `listEvents` defaults to a bounded monitoring/summary projection. A compact
+latest result is also a projection and can truncate long text. For an exact
+saved result, use bounded `listEventPage` reads of original events, check
+`forensicExact`, and follow the returned cursor, not a guessed sequence:
+
+```js
+async function readOriginalResultPage(client, workspaceId, sessionId, after) {
+  const page = await client.listEventPage(workspaceId, sessionId, {
+    mode: "forensic", payloadMode: "full", direction: "after", after, limit: 50,
+    includeTypes: ["agent.message.completed", "turn.completed", "turn.failed",
+      "turn.cancelled", "session.requiresAction", "session.humanInput.requested"],
+  });
+  if (!page.forensicExact ||
+      (page.hasMore && (!Number.isSafeInteger(page.nextAfter) || page.nextAfter <= after))) {
+    throw new Error("An exact result page is not available.");
+  }
+  return page; // truncated/hasMore may mean more exact events, not truncated text
+}
+
+function settledTurnResult(event, expectedTurnId) {
+  if (event.turnId !== expectedTurnId ||
+      ["late_rejected", "duplicate"].includes(event.turnAssociation)) return null;
+  if (event.type === "turn.failed" || event.type === "turn.cancelled") {
+    return { state: event.type === "turn.failed" ? "failed" : "cancelled", text: null };
+  }
+  if (event.type !== "turn.completed") return null;
+  const payload = event.payload ?? {};
+  if (payload.emptyFinalReply === true || typeof payload.output !== "string" || !payload.output.trim()) {
+    return { state: "settled_without_result", text: null };
+  }
+  return { state: "completed", text: payload.output };
+}
+```
+
+Keep the newest candidate plus its original event ID/sequence while following
+`hasMore`; publish/cache only after reaching the current page boundary. Preserve
+the original full text rather than stripping a summary's truncation marker.
+If exact retrieval is unavailable, report that explicitly; do not cache a
+snippet as the final answer. Render only authorized result fields, never raw
+forensic payloads. The existing UI/facade projections are preferable when they
+already fit; this is a narrow backend text-result example, not a new timeline.
+
+Use a background job or nonblocking bounded status ticks when a turn's tools
+call back into the same host. Holding every scarce synchronous request worker
+in a blocking wait can starve those callbacks under concurrency; it is a
+deployment-dependent risk, not an inevitable failure. Bound each read/deadline,
+retain callback capacity, and resume from the saved cursor. For static pages,
+initialize enhancement scripts after their DOM targets exist (`defer`, modules
+or `DOMContentLoaded`); retain the native form/POST fallback.
+
 ## Files
 
 The usual flow is:
@@ -995,6 +1056,12 @@ Put configuration, dynamic SDK import/initialization, identity resolution,
 upstream calls and local persistence inside the route's error boundary, not only
 the final call. Log a redacted diagnostic with a non-secret correlation ID on
 the server; never copy an SDK exception into the browser response or DOM.
+
+Branding applies to UI-owned labels/notices, not legitimate source quotations,
+code, or user/assistant transcript content; do not rewrite those to hide names.
+Check the installed SDK/React error-copy API separately: changing conversation
+labels does not itself prove that upstream error messages are remapped. Host
+safe-copy guidance alone does not change a package's default error behavior.
 
 For an approval route, distinguish an accepted decision from completed tool
 execution. If the call returns a decision event and local mapping/receipt save
@@ -1638,6 +1705,71 @@ an extra body field; an ordinary login token is not a bridge credential. Check
 expiry, issuer/audience and operation scope with negative tests. These are host
 authorization tests, not proof supplied by OpenGeni's tool selection or approval.
 
+### Reauthorize current host policy, not only signed claims
+
+After verifying the provider token's signature, issuer/audience and expiry,
+reload the current host user and its membership/record-owner policy for each
+call. A disabled owner or downgraded role must lose authority even while an old
+JWT remains cryptographically valid. For writes, recheck at the transaction
+boundary; a prior read is not a permission lease. The host-owned adapter below
+uses illustrative policy fields, not an OpenGeni token/SDK schema:
+
+```js
+function requireLiveToolAuthority(claims, user, grant, operation) {
+  if (typeof claims?.subjectId !== "string" || !claims.subjectId ||
+      typeof claims.tenantId !== "string" || !claims.tenantId ||
+      user?.enabled !== true || user.id !== claims.subjectId ||
+      grant?.active !== true || grant.subjectId !== user.id ||
+      grant.tenantId !== claims.tenantId ||
+      !Array.isArray(grant.operations) || !grant.operations.includes(operation) ||
+      !Array.isArray(claims.operations) || !claims.operations.includes(operation)) {
+    throw new Error("Tool request is not authorized.");
+  }
+  return { subjectId: user.id, tenantId: grant.tenantId };
+}
+
+// Website-share credentials are not team-report credentials.
+function websiteShareMayReadReport(share, report) {
+  return share?.kind === "website-share" &&
+    typeof share.websiteId === "string" && share.websiteId.length > 0 &&
+    report?.scope?.kind === "website" &&
+    report.scope.websiteId === share.websiteId;
+}
+
+// Host parses dates into validated UTC milliseconds; this example is half-open.
+function requireAuthorizedWindow(requested, allowed) {
+  if (![requested.start, requested.end, allowed.start, allowed.end].every(Number.isSafeInteger) ||
+      requested.start >= requested.end || allowed.start >= allowed.end ||
+      requested.start < allowed.start || requested.end > allowed.end) {
+    throw new Error("Requested date window is not authorized.");
+  }
+  return requested;
+}
+```
+
+Load `user` and `grant` from fresh trusted host records, never from browser/model
+fields or the token's old role alone. The token is only a ceiling. After this
+check, still authorize each requested record and field against that context.
+A one-user workspace still requires enabled-owner and record-ownership checks.
+
+### Scope report reads and publication
+
+Authorize the stored report's actual scope on list, summary, detail and export
+routes. A website-share credential must not expose a team report merely because
+that team contains the shared website. Filter summaries before returning them;
+transcript access is a separate check. Signed-in team sharing remains valid under
+its own current membership policy; the website-share helper is not that policy.
+The host derives this persisted scope from authorized records, not an unchecked
+editor-submitted authorization/provenance field.
+
+Enforce the advertised analytics window in the server/provider query, including
+time zone and the provider's boundary conventions, not only in prompts or UI.
+Bind reopening/export headers and session lookup to the currently selected
+report's immutable ID and authorized session, not the first mounted report.
+Persist generated-report provenance on the trusted backend from verified
+session/job receipts. An ordinary editor's submitted body or `generated` flag
+cannot establish that provenance or impersonate a different session/author.
+
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.
@@ -1874,6 +2006,14 @@ invalid Unicode are rejected. A native-looking ID does not impersonate a native
 user. Workspace mapping identity passed to `ensureWorkspace` is a separate
 concept from this acting-user identity.
 
+Use an immutable database/auth subject ID, never an editable username, email or
+display name. Renaming must keep the same external ID and private history;
+reassigning a username must not reassign the previous actor's identity. History
+collision on username reuse is conditional on the host allowing reuse, not a
+guarantee about every host. Derive the ID anew from current authentication rather
+than a mounted component's old user object; apply the
+[identity/session epoch fence](product-shapes-and-ui.md#bind-asynchronous-ui-work-to-the-current-identity-and-session).
+
 User mode lazily establishes an external identity but does not grant access to a
 shared workspace. An explicitly authorized service onboarding operation may use:
 
@@ -1893,6 +2033,15 @@ permissions conflict instead of overwriting a subsequently reduced grant. Instal
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
+
+Check the host user's current enabled state, tenant membership and role on every
+session read/control route and every provider call. A still-valid token or an
+old `sessions:control` onboarding grant is not proof of current host authority.
+Block newly disallowed requests immediately and reconcile OpenGeni grants using
+the authorized membership lifecycle below; do not silently re-onboard or widen
+them on a user request. Permission-changing revocation can cancel running work.
+Per-user workspaces and deliberate team/site sharing are valid product choices,
+but neither replaces these current host-policy checks.
 
 ### Read the member inventory: SDK versus REST
 
@@ -2789,6 +2938,11 @@ view. `load(signal)` calls the host's authenticated same-origin route and passes
 the signal to `fetch`. The epoch is a presentation fence, not authorization:
 the backend must still check every request's user and session ownership. Do not
 run these browser helpers with an organization key or put that key in storage.
+
+For reopened reports, key the selected report and its authorized session together.
+Refresh request headers/mappings when that selection changes; do not keep the
+first report's session in a mounted closure. A new actor object in the same
+component still requires reset/invalidation, not only a logout-time unmount.
 
 ## Decide what the user sees
 

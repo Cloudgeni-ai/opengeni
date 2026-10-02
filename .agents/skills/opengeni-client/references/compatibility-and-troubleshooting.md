@@ -56,6 +56,12 @@ upstream calls and local persistence inside the route's error boundary, not only
 the final call. Log a redacted diagnostic with a non-secret correlation ID on
 the server; never copy an SDK exception into the browser response or DOM.
 
+Branding applies to UI-owned labels/notices, not legitimate source quotations,
+code, or user/assistant transcript content; do not rewrite those to hide names.
+Check the installed SDK/React error-copy API separately: changing conversation
+labels does not itself prove that upstream error messages are remapped. Host
+safe-copy guidance alone does not change a package's default error behavior.
+
 For an approval route, distinguish an accepted decision from completed tool
 execution. If the call returns a decision event and local mapping/receipt save
 then fails, the decision may already be durable. `outcomeUnknown: true` also
