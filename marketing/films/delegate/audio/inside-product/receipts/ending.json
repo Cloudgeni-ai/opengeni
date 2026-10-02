@@ -1,0 +1,18 @@
+{
+  "id": "ending",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:44:04.632Z",
+  "reserveUsd": 2,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/ending.mp3",
+  "model": "eleven_v4",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "request-id": "oA6ZGZlsT0ZAiZiM6EVB",
+    "character-cost": "4",
+    "content-type": "audio/mpeg",
+    "x-trace-id": "2b4aadf87d2f38edd82f1b273f46ea59"
+  },
+  "bytes": 39332,
+  "durationSeconds": 2.429388
+}

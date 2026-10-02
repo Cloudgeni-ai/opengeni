@@ -1,0 +1,18 @@
+{
+  "id": "projects",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:44:00.946Z",
+  "reserveUsd": 2,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/projects.mp3",
+  "model": "eleven_v4",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "request-id": "Q4wSGlqo4HT39EjimuaR",
+    "character-cost": "6",
+    "content-type": "audio/mpeg",
+    "x-trace-id": "21682b5997f22f4ab22dcbb5dda4100a"
+  },
+  "bytes": 39332,
+  "durationSeconds": 2.429388
+}

@@ -1,0 +1,18 @@
+{
+  "id": "connection",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:44:01.999Z",
+  "reserveUsd": 2,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/connection.mp3",
+  "model": "eleven_v4",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "request-id": "kY89kKWoCpdJL0ss624q",
+    "character-cost": "17",
+    "content-type": "audio/mpeg",
+    "x-trace-id": "f14071bb5039cd44c5862a91b502ff1f"
+  },
+  "bytes": 149673,
+  "durationSeconds": 9.325714
+}

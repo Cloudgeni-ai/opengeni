@@ -1,0 +1,18 @@
+{
+  "id": "store",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:43:59.813Z",
+  "reserveUsd": 2,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/store.mp3",
+  "model": "eleven_v4",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "request-id": "MdiFZQCoy0IXvExIGbwa",
+    "character-cost": "6",
+    "content-type": "audio/mpeg",
+    "x-trace-id": "06a828a8fe06d9c00c174780fe7a34b6"
+  },
+  "bytes": 41839,
+  "durationSeconds": 2.586122
+}

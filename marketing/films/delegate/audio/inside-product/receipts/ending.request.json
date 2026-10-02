@@ -1,0 +1,10 @@
+{
+  "model_id": "eleven_v4",
+  "language_code": "en",
+  "inputs": [
+    {
+      "voice_id": "CwhRBWXzGAHq8TQ4Fs17",
+      "text": "[warmly] Give your users an agent."
+    }
+  ]
+}

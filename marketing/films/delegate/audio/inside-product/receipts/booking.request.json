@@ -1,0 +1,10 @@
+{
+  "model_id": "eleven_v4",
+  "language_code": "en",
+  "inputs": [
+    {
+      "voice_id": "EXAVITQu4vr4xnSDxMaL",
+      "text": "[conversational] Move tomorrow's clients to next week. And let them know."
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "score",
+  "status": "completed",
+  "submittedAt": "2026-10-02T15:43:58.550Z",
+  "reserveUsd": 10,
+  "output": "/workspace/last-click/marketing/films/delegate/public/audio/inside-product/score.mp3",
+  "model": "music_v2_5",
+  "httpStatus": 200,
+  "curlExit": 0,
+  "provider": {
+    "content-type": "audio/mpeg",
+    "x-trace-id": "016b65db9114eab0bae2600458a22542"
+  },
+  "bytes": 1152621,
+  "durationSeconds": 48.024
+}
