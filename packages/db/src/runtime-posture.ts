@@ -42,6 +42,17 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+const MODEL_FACT_CAPABILITY_ROUTINES = [
+  [
+    "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+    "organization model usage aggregate is missing or unsafe",
+  ],
+  [
+    "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights scoped fact projection is missing or unsafe",
+  ],
+] as const;
+
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
   "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
 
@@ -1649,6 +1660,8 @@ export type RuntimeDatabasePostureOptions = {
   protectedNoDirectDmlTables?: readonly string[];
   targetSchemaCapabilityRoutines?: readonly string[];
   targetSchemaForbiddenRoutines?: readonly string[];
+  /** Frozen binary contract; current callers require both additive Insights capabilities. */
+  modelFactCapabilityRoutines?: readonly string[];
   organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
@@ -4048,34 +4061,27 @@ export function evaluateRuntimeDatabasePosture(
       violations.push("organization usage aggregate capability is missing or unsafe");
     }
   }
-  const organizationModelUsageRoutine = posture.privateRoutines.find(
-    (routine) =>
-      routine.name ===
-      "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
-  );
   const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
-  if (
-    modelCallFactsOwner !== undefined &&
-    (!organizationModelUsageRoutine ||
-      !organizationModelUsageRoutine.securityDefiner ||
-      organizationModelUsageRoutine.publicExecute ||
-      organizationModelUsageRoutine.owner !== modelCallFactsOwner)
-  ) {
-    violations.push("organization model usage aggregate is missing or unsafe");
-  }
-  const scopedFactRowsRoutine = posture.privateRoutines.find(
-    (routine) =>
-      routine.name ===
-      "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+  const modelFactCapabilityRoutines = new Set(
+    options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
   );
-  if (
-    modelCallFactsOwner !== undefined &&
-    (!scopedFactRowsRoutine ||
-      !scopedFactRowsRoutine.securityDefiner ||
-      scopedFactRowsRoutine.publicExecute ||
-      scopedFactRowsRoutine.owner !== modelCallFactsOwner)
-  ) {
-    violations.push("Insights scoped fact projection is missing or unsafe");
+  if (modelCallFactsOwner !== undefined) {
+    for (const [name, violation] of MODEL_FACT_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+      // An older binary does not require a later additive capability, but any
+      // installed capability must retain the same owner and ACL safety contract.
+      if (matches.length === 0 && !modelFactCapabilityRoutines.has(name)) continue;
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine?.securityDefiner ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== modelCallFactsOwner
+      ) {
+        violations.push(violation);
+      }
+    }
   }
 
   const integrationRoutine = [

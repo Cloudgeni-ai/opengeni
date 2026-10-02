@@ -1125,6 +1125,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       protectedNoDirectDmlTables: preSessionSetNoDirectDmlTables,
       tablePrivileges: preSessionSetTablePrivileges,
       targetSchemaCapabilityRoutines: preSessionSetCapabilityRoutines,
+      // This binary predates both additive Insights model-fact routines. Keep
+      // its required capabilities frozen just like its table/target-routine sets.
+      modelFactCapabilityRoutines: [],
       targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.filter(
         (routine) => !post0353ForbiddenRoutines.has(routine),
       ),
@@ -1204,6 +1207,15 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual(
         expectedPost0353EvaluatorGaps,
       );
+      // The current binary must not become ready on this historical schema:
+      // only the explicitly frozen old binary omits these later requirements.
+      const { modelFactCapabilityRoutines, ...currentBinaryOptions } = postureOptions(customRole);
+      expect(modelFactCapabilityRoutines).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(customPosture, currentBinaryOptions)).toEqual([
+        ...expectedPost0353EvaluatorGaps,
+        "organization model usage aggregate is missing or unsafe",
+        "Insights scoped fact projection is missing or unsafe",
+      ]);
 
       // Model the complete pre-policy posture with its original target-table
       // contract and private-routine generic loop. The current evaluator covers
