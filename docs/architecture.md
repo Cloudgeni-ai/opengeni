@@ -1352,7 +1352,7 @@ Canonical: [`capabilities.md`](capabilities.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
 
 MCP OAuth redirects carry a short signed reference to encrypted, time-limited
-Postgres state under workspace RLS, then check the existing one-use nonce.
+Postgres state under workspace RLS, then check the one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
@@ -1363,17 +1363,16 @@ machine. Bounded reads/stills authenticate session/controller/target. SDK/viewer
 full observations; Code Mode receives local image handles. Human computer control
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
-Lightpanda supports semantic observations only.
+Lightpanda is semantic-only.
 
-The operation lock settles only prepared creates without controller generations;
-dispatched bindings survive activation persistence failures for reconciliation.
+Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
 
-Native macOS operations drain Cocoa pools and clean up pending capture starts.
-Desktop discovery proceeds independently of semantic inspection.
+Native macOS operations drain Cocoa pools and clear pending capture starts;
+desktop discovery is independent of semantic inspection.
 
-New capability negotiation advertises only `manual` and `on-verify` recording.
+Capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
