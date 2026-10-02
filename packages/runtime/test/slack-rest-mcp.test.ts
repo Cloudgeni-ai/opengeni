@@ -162,6 +162,51 @@ describe("Slack API-backed MCP pilot", () => {
     expect(requests).toBe(0);
   });
 
+  test.each([
+    ["subject", undefined, 0],
+    ["subject", "subject-a", 1],
+    ["workspace", undefined, 1],
+    [undefined, undefined, 1],
+  ] as const)(
+    "reports recovery for %s grants with owner %s only when that authority can recover",
+    async (subjectScope, subjectId, expectedEvents) => {
+      const events: unknown[] = [];
+      let requests = 0;
+      const slack = server({
+        connectionRef: { ...connectionRef, subjectScope },
+        subjectId,
+        resolveCredential: async (request) => {
+          expect(request.subjectId).toBe(subjectId);
+          return {
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "slack.com",
+          };
+        },
+        onAuthNeeded: (payload) => {
+          events.push(payload);
+        },
+        fetchImpl: async () => {
+          requests++;
+          throw new Error("Missing authority cannot reach Slack");
+        },
+      });
+      await expect(slack.connect()).rejects.toThrow("Authentication required for Slack");
+      expect(requests).toBe(0);
+      expect(events).toHaveLength(expectedEvents);
+      if (expectedEvents) {
+        expect(events).toEqual([
+          {
+            serverId: "slack",
+            providerDomain: "slack.com",
+            reason: "missing_connection",
+            ...(subjectId ? { subjectId } : {}),
+          },
+        ]);
+      }
+    },
+  );
+
   test("maps each reviewed tool to its fixed Web API method with fresh exact credentials", async () => {
     const requests: Request[] = [];
     const resolves: Parameters<SlackRestMcpServerOptions["resolveCredential"]>[0][] = [];

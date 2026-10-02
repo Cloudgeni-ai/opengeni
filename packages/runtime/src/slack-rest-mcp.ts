@@ -396,6 +396,9 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
     result: Extract<CredentialResult, { status: "auth_needed" }>,
     toolName?: string,
   ): Promise<void> {
+    // An attempt without the personal owner cannot recover that owner's grant.
+    // Workspace grants keep their ordinary recovery, including legacy refs.
+    if (this.options.connectionRef.subjectScope === "subject" && !this.options.subjectId) return;
     await this.options.onAuthNeeded?.({
       serverId: this.options.serverId,
       ...(toolName ? { toolName } : {}),

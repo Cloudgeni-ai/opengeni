@@ -35,6 +35,7 @@ export default defineConfig({
     "src/session-final-reply.ts",
     "src/site-session-http.ts",
     "src/slack-bot-scopes.ts",
+    "src/slack-rest-mcp.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-committed-transaction.ts",
     "src/editable-artifact-serialized-commit.ts",
