@@ -415,6 +415,60 @@ describe("ModelPolicyPicker", () => {
     expect(calls).toEqual([["effort", "high"]]);
   });
 
+  test("Claude Extra high and Max reuse the inline picker without changing model or closing it", async () => {
+    const model: ClientModel = {
+      ...MODELS[0]!,
+      id: "workspace-claude-subscription/claude-opus-5-5",
+      provider: "workspace-claude-subscription",
+      providerLabel: "Claude subscription",
+      source: undefined,
+      api: "anthropic-messages",
+      label: "Claude Opus 5.5",
+      capabilities: {
+        ...MODELS[0]!.capabilities!,
+        reasoning: {
+          upstream: "supported",
+          runnable: true,
+          efforts: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
+          required: false,
+        },
+        latencyModes: [],
+      },
+    };
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[model]}
+        model={model.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={(id) => calls.push(["model", id])}
+        onEffortChange={(effort) => calls.push(["effort", effort])}
+        onLatencyModeChange={() => {}}
+        onOpenChange={(open) => calls.push(["open", open])}
+      />,
+    );
+    expect(
+      [...container.querySelectorAll('[role="radio"]')].map((element) =>
+        element.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Low", "Medium", "High", "Extra high", "Max"]);
+    expect(
+      container.querySelector('[role="radio"][aria-label="Medium"]')?.getAttribute("aria-checked"),
+    ).toBe("true");
+    for (const label of ["Extra high", "Max"])
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`[role="radio"][aria-label="${label}"]`)!
+          .click(),
+      );
+    expect(calls).toEqual([
+      ["effort", "xhigh"],
+      ["effort", "max"],
+    ]);
+  });
+
   test("hides thinking for models with no runnable reasoning controls", async () => {
     const model = {
       ...MODELS[0]!,

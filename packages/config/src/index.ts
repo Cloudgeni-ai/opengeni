@@ -8319,6 +8319,59 @@ function delay(ms: number): Promise<void> {
 /** Native Claude connections reuse the encrypted workspace and organization boundaries. */
 export const CLAUDE_CONNECTION_KINDS = ["anthropic", "claude_subscription"] as const;
 export type ClaudeConnectionKind = (typeof CLAUDE_CONNECTION_KINDS)[number];
+// Per-model native Messages controls. Unknown IDs never inherit adaptive
+// thinking merely because they share a provider with a supported model.
+const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
+  Record<
+    string,
+    Readonly<{
+      efforts: readonly ReasoningEffort[];
+      defaultEffort: ReasoningEffort | null;
+      contextWindowTokens: number;
+      maxOutputTokens: number;
+    }>
+  >
+> = Object.fromEntries([
+  ...[
+    ["claude-opus-5-5", "medium"],
+    ["claude-sonnet-5-5", "medium"],
+    ["claude-opus-5", "high"],
+    ["claude-sonnet-5", "high"],
+    ["claude-opus-4-8", "high"],
+    ["claude-opus-4-7", "xhigh"],
+  ].map(([id, defaultEffort]) => [
+    id,
+    {
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort,
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  ]),
+  ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
+    id,
+    {
+      efforts: ["low", "medium", "high", "max"],
+      defaultEffort: "high",
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  ]),
+  [
+    "claude-haiku-4-5-20251001",
+    {
+      efforts: [],
+      defaultEffort: null,
+      contextWindowTokens: 200_000,
+      maxOutputTokens: 64_000,
+    },
+  ],
+]);
+export function claudeNativeModelProfile(upstreamModelId: string) {
+  return Object.hasOwn(CLAUDE_NATIVE_MODEL_PROFILES, upstreamModelId)
+    ? CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId]
+    : undefined;
+}
 export function claudeProviderId(
   kind: ClaudeConnectionKind,
   scope: "workspace" | "organization" = "organization",
@@ -8360,19 +8413,21 @@ export function withClaudeConnectionCatalog(
       anthropic: {
         auth: kind === "anthropic" ? "api-key" : "oauth",
         cacheTtl: "5m",
-        maxOutputTokens: 32000,
+        maxOutputTokens: 128000,
         streamIdleTimeoutMs: 600000,
       },
       models: connection.models.map((model) => {
-        // Only captured adaptive-thinking models are enabled by the managed catalog.
-        // Operators can explicitly declare other capabilities in a registry provider.
-        const adaptiveThinking = ["claude-opus-5-5", "claude-sonnet-5-5"].includes(
-          model.upstreamModelId,
-        );
+        const profile = claudeNativeModelProfile(model.upstreamModelId);
+        const adaptiveThinking = Boolean(profile?.efforts.length);
+        const contextWindowTokens = profile?.contextWindowTokens ?? 200_000;
+        const outputReserve = profile?.maxOutputTokens ?? 32_000;
         return {
-          contextWindowTokens: 200000,
-          effectiveContextWindowTokens: 168000,
-          autoCompactTokenLimit: 150000,
+          contextWindowTokens,
+          effectiveContextWindowTokens: contextWindowTokens - outputReserve,
+          autoCompactTokenLimit:
+            contextWindowTokens === 1_000_000
+              ? 800_000
+              : Math.min(150_000, contextWindowTokens - outputReserve - 18_000),
           id: id + "/" + model.upstreamModelId,
           upstreamModelId: model.upstreamModelId,
           label:
@@ -8394,8 +8449,8 @@ export function withClaudeConnectionCatalog(
             reasoning: {
               upstream: adaptiveThinking ? "supported" : "unknown",
               runnable: adaptiveThinking,
-              efforts: adaptiveThinking ? ["low", "medium", "high"] : [],
-              defaultEffort: adaptiveThinking ? "high" : null,
+              efforts: [...(profile?.efforts ?? [])],
+              defaultEffort: profile?.defaultEffort ?? null,
               required: false,
             },
             functionCalling: { upstream: "supported", runnable: true },
