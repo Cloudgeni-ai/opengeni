@@ -1071,6 +1071,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const fixture = await seedWorkspace();
     const [subjectId] = fixture.subjects;
     const turn = await seedSessionTurn(fixture, workspaceSnapshot, 3);
+    const now = new Date();
     const armed = await armXaiCapacityWait(client.db, {
       ...fixture,
       subjectId: subjectId!,
@@ -1079,7 +1080,8 @@ describe("migration 0234 xAI subscription authority", () => {
       attemptId: turn.attemptId,
       workflowId: turn.workflowId,
       authoritySnapshot: workspaceSnapshot,
-      earliestResetAt: new Date(Date.now() + 86_400_000),
+      now,
+      earliestResetAt: new Date(now.getTime() + 86_400_000),
       failurePayload: {
         error: "all connected SuperGrok subscriptions are unavailable",
         code: "xai_capacity_unavailable",
@@ -1089,7 +1091,7 @@ describe("migration 0234 xAI subscription authority", () => {
     if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
     const waiter = armed.waiter;
     // External resets must be detected without waiting until tomorrow's reset.
-    expect(waiter.nextCheckAt.getTime() - waiter.createdAt.getTime()).toBeLessThanOrEqual(60_000);
+    expect(waiter.nextCheckAt.getTime() - now.getTime()).toBe(60_000);
     expect(waiter.nextCheckAt.getTime()).toBeLessThan(waiter.earliestResetAt!.getTime());
     expect(waiter).toMatchObject({
       status: "waiting",
