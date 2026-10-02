@@ -1,3 +1,4 @@
+import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -29,7 +30,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { GMAIL_REST_MCP_TOOLS, isOfficialGmailMcpConfig } from "@opengeni/runtime";
+import {
+  GMAIL_REST_MCP_TOOLS,
+  isOfficialGmailMcpConfig,
+  isOfficialSlackMcpConfig,
+} from "@opengeni/runtime";
 import { hasPermission } from "../access";
 import { buildCapabilityCatalog, settingsWithMcpCapabilityServers } from "./capabilities";
 
@@ -161,17 +166,30 @@ async function resolveTarget(input: Input) {
   return { server, connection, connectionId };
 }
 
+/** Use the same adapter-owned identities as execution for reviewed local catalogs. */
+export function reviewedConnectorToolCatalog(
+  server: Pick<Settings["mcpServers"][number], "url" | "connectionRef" | "allowedTools">,
+  grantedScopes: readonly string[],
+): ListedTool[] | null {
+  const tools = isOfficialGmailMcpConfig(server.url, server.connectionRef)
+    ? GMAIL_REST_MCP_TOOLS
+    : isOfficialSlackMcpConfig(server.url, server.connectionRef)
+      ? slackRestMcpToolsForScopes(grantedScopes)
+      : null;
+  return (
+    tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
+  );
+}
+
 async function listTools(
   input: Input,
   target: Awaited<ReturnType<typeof resolveTarget>>,
 ): Promise<ListedTool[]> {
-  // Runtime substitutes the reviewed REST bridge for this exact MCP identity.
-  // Its static catalog must not depend on Google's hosted MCP preview.
-  if (isOfficialGmailMcpConfig(target.server.url, target.server.connectionRef)) {
-    return GMAIL_REST_MCP_TOOLS.filter(
-      (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
-    );
-  }
+  const reviewed = reviewedConnectorToolCatalog(
+    target.server,
+    target.connection?.grantedScopes ?? [],
+  );
+  if (reviewed !== null) return reviewed;
   let headers = { ...target.server.headers };
   if (target.server.connectionRef) {
     const result = await buildConnectionTokenResolver(

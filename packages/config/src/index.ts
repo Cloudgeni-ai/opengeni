@@ -456,6 +456,8 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  // Unlisted apps share Slack’s restricted history/replies quota across all tokens.
+  slackAccessMode: z.enum(["limited", "full"]).default("limited"),
   slackBotDisplayName: OpenGeniSlackBotDisplayName.default("OpenGeni"),
   slackCommand: z
     .string()
@@ -3380,6 +3382,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackAccessMode: optional("OPENGENI_SLACK_ACCESS_MODE"),
     slackBotDisplayName: optional("OPENGENI_SLACK_BOT_DISPLAY_NAME"),
     slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),

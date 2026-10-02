@@ -1048,6 +1048,12 @@ describe("runtime database posture evaluator", () => {
               ? 1
               : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 4 : 0) +
+          // Content-free Slack provider quotas are global and full-DML only.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -1063,7 +1069,7 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 1;
       for (const removed of [
         "workspace_packs",
         "pack_installations",

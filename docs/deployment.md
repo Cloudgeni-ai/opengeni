@@ -3970,3 +3970,15 @@ change organization API keys, external-user authentication, sandbox credentials,
 webhook signatures or signed storage URLs. Review existing issued credentials
 separately when restricting an already-running deployment: removing an email does
 not revoke its previously issued API keys or cancel already accepted work.
+
+### Slack API pilot activation (0586)
+
+Stop every old/new API, control worker, and turn worker before applying
+`0586_slack_api_rate_limits.sql`, supply the complete runtime login list via
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, and provision the matching role
+afterward. The content-free deployment-global quota table changes the exact
+runtime-posture contract; a pre-0586 binary must not be restarted as rollback.
+The default `OPENGENI_SLACK_ACCESS_MODE=limited` uses the reviewed Web API MCP
+bridge with one shared history/replies slot per minute and no search. Apply the
+generated Slack app scopes before rollout. See [Slack](slack-bot.md#unlisted-pilot-and-rollout)
+for the feature limits and external-workspace release acceptance.

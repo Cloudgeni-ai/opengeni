@@ -308,7 +308,20 @@ export function useSlackIntegration({
   const savedDestination = slackBotDocumentDestinationAuthority(botConnection?.metadata);
 
   const personalItem = personalSlackCapability(items);
-  const personalConnection = preferredHostedSlackConnection(connections ?? []);
+  const visiblePersonalConnections = (connections ?? []).filter(
+    (connection) =>
+      connection.workspaceId === workspaceId &&
+      (connection.subjectId === null || connection.subjectId === context.accessContext.subjectId),
+  );
+  // The account page represents this human first. A newer shared account must
+  // not replace their own account as the reconnect/disconnect target.
+  const personalConnection =
+    preferredHostedSlackConnection(
+      visiblePersonalConnections.filter((connection) => connection.subjectId !== null),
+    ) ??
+    preferredHostedSlackConnection(
+      visiblePersonalConnections.filter((connection) => connection.subjectId === null),
+    );
   const personalState = preview?.personal ?? personalSlackAccountState(personalConnection, loaded);
   const personalAvailable = personalItem !== null || readOnly;
 
@@ -755,7 +768,11 @@ export function useSlackIntegration({
                 }
               : {}),
             items: [
-              { name: "All public channels", meta: "searchable without joining" },
+              {
+                name: "Conversations Opengeni has joined",
+                meta: "recent messages and threads",
+              },
+              { name: "Direct messages to Opengeni", meta: "messages you send the bot" },
               ...(invitedChannels ?? []).map((channel) => {
                 const route = (channelRoutes ?? []).find(
                   (candidate) => candidate.slackChannelId === channel.id,
@@ -782,7 +799,7 @@ export function useSlackIntegration({
                     : `${invited} · asks once, then remembers`,
                 };
               }),
-              { name: "Anywhere else", meta: "tag @Opengeni there to invite it" },
+              { name: "Other channels", meta: "invite Opengeni to read messages there" },
             ],
           }
         : undefined;
@@ -1015,7 +1032,7 @@ export function useSlackIntegration({
     }
     if ("connection" in state) {
       facts.push({
-        label: "Your account",
+        label: state.connection.subjectId === null ? "Shared account" : "Your account",
         value:
           state.state === "connected"
             ? state.accessTokenRefreshDue
@@ -1088,18 +1105,34 @@ export function useSlackIntegration({
     return {
       id: "slack",
       name: "Slack",
-      description: "Let Opengeni read and send Slack messages as you.",
+      description:
+        "connection" in state && state.connection.subjectId === null
+          ? "Let Opengeni read and send Slack messages through the shared account."
+          : "Let Opengeni read and send Slack messages as you.",
       mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
       chip,
       connection: facts,
       ...(connectedPersonal
         ? {
             access: {
-              title: "What Opengeni can see as you",
+              title:
+                state.connection.subjectId === null
+                  ? "What Opengeni can access through the shared account"
+                  : "What Opengeni can see as you",
               items: [
                 {
-                  name: "Everything you can see in Slack",
-                  meta: "including private channels and DMs",
+                  name:
+                    state.connection.subjectId === null
+                      ? "Channels and DMs the shared Slack account can access"
+                      : "Channels and DMs your Slack account can access",
+                  meta: "recent messages and threads allowed by your connection permissions",
+                },
+                {
+                  name:
+                    state.connection.subjectId === null
+                      ? "Send messages through the shared account"
+                      : "Send messages as you",
+                  meta: "workspace-wide message search is unavailable",
                 },
               ],
             },

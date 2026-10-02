@@ -74,6 +74,7 @@ import {
 } from "./codex-plan-entitlement";
 export * from "./codex-plan-entitlement";
 export * from "./scheduled-task-access";
+export { buildSlackApiRateLimiter } from "./slack-api-rate-limits";
 export * from "./scheduled-human-wait";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,

@@ -64,6 +64,7 @@ import {
 
 export * from "./editable-artifacts-schema";
 export * from "./managed-auth-session-set-schema";
+export * from "./slack-api-rate-limit-schema";
 export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
