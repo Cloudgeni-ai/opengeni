@@ -284,6 +284,7 @@ export function OrganizationOnboardingPanel({
         const created = await completeSelfServiceOrganizationSetup({
           organizationName: normalizedName,
           operationId: operationId.current,
+          ...(useCase ? { useCase } : {}),
         });
         onboardingJourney().completed("organization_name", "created");
         setCreatedSetup({

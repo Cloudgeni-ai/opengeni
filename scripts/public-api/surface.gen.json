@@ -132,6 +132,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/billing/checkout/:checkoutSessionId",
+      "sdk": [
+        "OpenGeniClient.getBillingCheckout"
+      ],
+      "request": [],
+      "response": [
+        "BillingCheckoutStatus"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/billing/entitlements",
       "sdk": [
         "OpenGeniClient.getBillingEntitlements"
@@ -9017,6 +9028,34 @@
         "$.ownerKey": "string!"
       }
     },
+    "BillingBalance": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.balanceMicros": "integer!",
+        "$.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.updatedAt": "string!"
+      }
+    },
+    "BillingCheckoutStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.balance": "ref(BillingBalance)! null",
+        "$.checkoutSessionId": "string!",
+        "$.credit": "object!",
+        "$.credit.amountMicros": "integer!",
+        "$.credit.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.credit.free": "boolean!",
+        "$.credit.state": "enum!=[\"\\\"granted\\\"\",\"\\\"pending\\\"\"]",
+        "$.status": "enum!=[\"\\\"complete\\\"\",\"\\\"expired\\\"\",\"\\\"open\\\"\"]"
+      }
+    },
     "BrowserAction": {
       "io": [
         "input"
@@ -11585,8 +11624,9 @@
       "shape": {
         "$": "object",
         "$.accountId": "string?",
-        "$.amountUsd": "number!",
+        "$.amountUsd": "number?",
         "$.cancelUrl": "string?",
+        "$.promotionCode": "string?",
         "$.successUrl": "string?"
       }
     },
@@ -11596,6 +11636,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.amountUsd": "number?",
         "$.checkoutSessionId": "string!",
         "$.url": "string!"
       }
@@ -24835,6 +24876,7 @@
       "BeginExternalIdentityLinkResponse": "type",
       "BeginSessionRealtimeRequest": "type",
       "BillingBalance": "type",
+      "BillingCheckoutStatus": "type",
       "BillingEntitlementsResponse": "type",
       "BillingMode": "type",
       "BillingSummary": "type",
@@ -29135,6 +29177,7 @@
       "getAttachedBrowser",
       "getAuthRun",
       "getBilling",
+      "getBillingCheckout",
       "getBillingEntitlements",
       "getBillingUsage",
       "getBrowserActionReceipt",

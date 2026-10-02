@@ -602,6 +602,7 @@ export type {
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  BillingCheckoutStatus,
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembership,
   OrganizationAdministrationMember,

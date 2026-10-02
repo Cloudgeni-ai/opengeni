@@ -1,14 +1,16 @@
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import { labelReasoningEffort } from "@opengeni/react";
-import type { CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
+import type { BillingCheckoutStatus, CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
+import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
+import { CreditsPrize } from "@/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
 import { Disclosure } from "@/components/ui/disclosure";
@@ -150,6 +152,13 @@ export function ModelAccessOnboardingPanel({
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [selectionRetry, setSelectionRetry] = useState<ConnectedModelFamily | null>(null);
+  // Credits a coupon (or a purchase) just added, celebrated in place.
+  const [won, setWon] = useState<{
+    amountMicros: number;
+    balanceMicros: number | null;
+    free: boolean;
+    celebration: number;
+  } | null>(null);
   const cancelled = useRef(false);
   // Set while a connected model is being saved as the next-chat selection.
   const finishing = useRef(false);
@@ -192,7 +201,7 @@ export function ModelAccessOnboardingPanel({
     stopDeviceLogin();
     onboardingJourney().completed(
       "model_access",
-      variant === "choose" ? "skipped" : "start_chatting",
+      variant === "choose" && !won ? "skipped" : "start_chatting",
     );
     onComplete();
   }
@@ -410,6 +419,32 @@ export function ModelAccessOnboardingPanel({
     setKeyProvider(next);
     setDirectProvider(null);
   }
+
+  function celebrateCheckout(status: BillingCheckoutStatus): void {
+    setWon((previous) => ({
+      amountMicros: status.credit.amountMicros,
+      balanceMicros: status.balance?.balanceMicros ?? null,
+      free: status.credit.free,
+      celebration: (previous?.celebration ?? 0) + 1,
+    }));
+    // Without a credits default yet, make the next chat use the credits just added.
+    if (!startingCredits && client) {
+      void applyConnectedModelToNewSessionDraft(client, workspaceId, "credits").catch(
+        () => undefined,
+      );
+    }
+  }
+
+  const coupon =
+    billingMode === "stripe" ? (
+      <CouponRedeem
+        client={client}
+        accountId={organizationId}
+        workspaceId={workspaceId}
+        disabled={busy || !!pending}
+        onGranted={celebrateCheckout}
+      />
+    ) : null;
 
   const validAmount = validTopupAmount(topupAmount);
   const everyone = `everyone in ${organizationName || "your organization"}`;
@@ -639,24 +674,51 @@ export function ModelAccessOnboardingPanel({
         <p className="-mt-2 text-center text-xs text-fg-subtle">
           You’ll review your payment in Stripe Checkout.
         </p>
+        {startingCredits || won ? null : <div className="text-center">{coupon}</div>}
       </div>
     ) : null;
 
-  if (startingCredits) {
+  if (startingCredits || won) {
     const freeAfterCredits = includedModel?.free ? includedModel : null;
-    const amount = startingCredits.balance
-      ? formatCreditAmount(startingCredits.balance.balanceMicros, startingCredits.balance.currency)
+    const currency = startingCredits?.balance?.currency ?? "usd";
+    const trialAmount = startingCredits?.balance
+      ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
       : null;
+    const wonAmount = won ? formatCreditAmount(won.amountMicros, "usd") : null;
+    const heading = won
+      ? won.free
+        ? `You got ${wonAmount} in free credits`
+        : `You added ${wonAmount} in credits`
+      : trialAmount
+        ? `You got ${trialAmount} in free credits`
+        : "You got free Opengeni credits";
+    const prizeMicros = won ? won.amountMicros : (startingCredits?.balance?.balanceMicros ?? null);
     return (
       <section className="og-page-glow flex min-h-0 flex-1 overflow-y-auto px-4 py-8">
-        <CelebrationBurst />
+        <CelebrationBurst key={won?.celebration ?? 0} />
         <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
-          <h1 className="text-xl font-semibold tracking-tight">
-            {amount ? `You got ${amount} in free credits` : "You got free Opengeni credits"}
+          {prizeMicros !== null ? (
+            <CreditsPrize
+              key={won?.celebration ?? 0}
+              amountMicros={prizeMicros}
+              currency={won ? "usd" : currency}
+              label={won ? (won.free ? "Coupon redeemed" : "Credits added") : "Free credits"}
+              caption={
+                won && won.balanceMicros !== null
+                  ? `Your balance is now ${formatCreditAmount(won.balanceMicros, "usd")}`
+                  : `Added to ${organizationName || "your organization"}`
+              }
+            />
+          ) : null}
+          <h1
+            className={`text-xl font-semibold tracking-tight ${prizeMicros !== null ? "mt-6" : ""}`}
+          >
+            {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            You can start right now. New chats use {describeCreditsModel(startingCredits.model)}. No
-            card or API key needed.
+            {startingCredits
+              ? `You can start right now. New chats use ${describeCreditsModel(startingCredits.model)}. No card or API key needed.`
+              : "You can start right now. New chats use your Opengeni credits."}
           </p>
           {freeAfterCredits ? (
             <p className="mt-2 text-xs leading-relaxed text-fg-muted">
@@ -672,6 +734,7 @@ export function ModelAccessOnboardingPanel({
           >
             {continueToNextStep ? "Continue" : "Start chatting"}
           </Button>
+          {coupon ? <div className="mt-3 text-center">{coupon}</div> : null}
 
           <Disclosure
             className="mt-6 border-t border-border pt-3"

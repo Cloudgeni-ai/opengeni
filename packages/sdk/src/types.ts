@@ -8266,8 +8266,13 @@ export type BillingEntitlementsResponse = {
 
 export type CreateCheckoutRequest = {
   accountId?: string | undefined;
-  /** USD amount with cent precision (server enforces min/max). */
-  amountUsd: number;
+  /**
+   * USD amount with cent precision (server enforces min/max). Required unless
+   * `promotionCode` is given; a fixed-amount USD code then sets the amount.
+   */
+  amountUsd?: number | undefined;
+  /** A Stripe promotion code to apply up front, as the customer typed it. */
+  promotionCode?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
 };
@@ -8275,6 +8280,22 @@ export type CreateCheckoutRequest = {
 export type CreateCheckoutResponse = {
   checkoutSessionId: string;
   url: string;
+  /** The credits this checkout grants once it completes. */
+  amountUsd?: number | undefined;
+};
+
+/** Where one checkout stands, and whether its credits reached the balance. */
+export type BillingCheckoutStatus = {
+  checkoutSessionId: string;
+  status: "open" | "complete" | "expired";
+  credit: {
+    state: "pending" | "granted";
+    amountMicros: number;
+    currency: "usd";
+    /** True when a coupon covered the whole checkout, so nothing was charged. */
+    free: boolean;
+  };
+  balance: BillingBalance | null;
 };
 
 export type CreateBillingPortalRequest = {

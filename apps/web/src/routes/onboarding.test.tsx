@@ -1041,6 +1041,10 @@ describe("organization onboarding UI", () => {
         const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
           personalWorkspaceId: string;
         };
+        // The signup answer is stored with the organization.
+        expect(
+          (completeSelfServiceSetup.mock.calls.at(-1) as unknown as [Record<string, unknown>])[0],
+        ).toMatchObject({ organizationName: "Northwind Research", useCase: "cloud" });
         expect(getWorkspaceModelCatalog).toHaveBeenCalledWith(created.personalWorkspaceId);
         if (selectable) {
           expect(container.querySelector("h1")!.textContent).toBe("Start chatting for free");
@@ -1498,7 +1502,7 @@ describe("organization onboarding UI", () => {
         },
       ]);
       // Shown once, in its own copy step; the prompt never carries it.
-      expect(container.querySelector("textarea")!.value).toBe(token);
+      expect(container.querySelector("[data-slot=developer-setup-key]")!.textContent).toBe(token);
       expect(container.textContent).toContain("1. Copy your key");
       expect(container.querySelector("pre")!.textContent).not.toContain(token);
       expect(container.querySelector("pre")!.textContent).toContain(
@@ -1507,12 +1511,21 @@ describe("organization onboarding UI", () => {
 
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Copy key")!
+          .click(),
+      );
+      await flush();
+      expect(writeText.mock.calls).toEqual([[token]]);
+      expect(container.textContent).toContain("Key copied");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
           .find((button) => button.textContent?.trim() === "Copy prompt")!
           .click(),
       );
       await flush();
-      expect(writeText).toHaveBeenCalledTimes(1);
-      const prompt = writeText.mock.calls[0]![0];
+      expect(writeText).toHaveBeenCalledTimes(2);
+      const prompt = writeText.mock.calls[1]![0];
       expect(prompt).not.toContain(token);
       expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
       expect(prompt).toContain("claude plugin install opengeni@opengeni");
@@ -1554,6 +1567,93 @@ describe("organization onboarding UI", () => {
       await act(async () => root.unmount());
       container.remove();
       Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  test("a coupon code redeems its full amount in a new tab and celebrates it in place", async () => {
+    const createBillingCheckout = mock(async (_request: Record<string, unknown>) => ({
+      checkoutSessionId: "cs_test_coupon",
+      url: "https://checkout.stripe.test/c/pay/cs_test_coupon",
+      amountUsd: 100,
+    }));
+    const getBillingCheckout = mock(async () => ({
+      checkoutSessionId: "cs_test_coupon",
+      status: "complete" as const,
+      credit: { state: "granted" as const, amountMicros: 100_000_000, currency: "usd", free: true },
+      balance: {
+        accountId: "preview-organization",
+        balanceMicros: 110_000_000,
+        currency: "usd",
+        updatedAt: "2026-10-02T00:00:00.000Z",
+      },
+    }));
+    const tab = {
+      opener: {},
+      location: { href: "" },
+      close: mock(() => undefined),
+      document: { title: "", body: { style: { cssText: "" }, textContent: "" } },
+    };
+    const open = mock(() => tab);
+    const originalOpen = window.open;
+    window.open = open as unknown as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={{ ...setupClient, createBillingCheckout, getBillingCheckout } as never}
+            previewState="required"
+            billingMode="stripe"
+            initialUseCase="cloud"
+            startingCredits={{
+              balance: { balanceMicros: 10_000_000, currency: "usd" },
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+      expect(container.querySelector("[data-slot=credits-prize]")).not.toBeNull();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.includes("Have a coupon code?"))!
+          .click(),
+      );
+      await enter(
+        container.querySelector<HTMLInputElement>("input[placeholder='Enter your code']")!,
+        "launch100",
+      );
+      await act(async () =>
+        Array.from(container.querySelectorAll("form"))
+          .find((form) => form.textContent?.includes("Coupon code"))!
+          .requestSubmit(),
+      );
+      await flush();
+      await flush();
+      // The tab opened inside the click; checkout carries the code, not an amount.
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(createBillingCheckout.mock.calls[0]![0]).toMatchObject({
+        accountId: "preview-organization",
+        promotionCode: "launch100",
+      });
+      expect(createBillingCheckout.mock.calls[0]![0]).not.toHaveProperty("amountUsd");
+      expect(tab.location.href).toBe("https://checkout.stripe.test/c/pay/cs_test_coupon");
+      expect(getBillingCheckout).toHaveBeenCalledWith("cs_test_coupon", {
+        accountId: "preview-organization",
+      });
+      expect(container.querySelector("h1")!.textContent).toBe("You got $100 in free credits");
+      expect(container.textContent).toContain("Your balance is now $110");
+      expect(container.textContent).toContain("Coupon redeemed");
+    } finally {
+      window.open = originalOpen;
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 

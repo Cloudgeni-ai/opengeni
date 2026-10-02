@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { apiBaseUrl } from "@/api";
 import { Button } from "@/components/ui/button";
-import { CopyField, useCopyToClipboard } from "@/components/ui/copy-field";
+import { useCopyToClipboard } from "@/components/ui/copy-field";
 import { Disclosure } from "@/components/ui/disclosure";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { LogoTile } from "@/components/ui/logo-tile";
@@ -72,6 +72,7 @@ export function DeveloperSetupStep({
   const implementProgress = useRef<{ workspaceId?: string; variableSetId?: string | null }>({});
   const sessionRequestKey = useRef(`onboarding-developer-setup:${crypto.randomUUID()}`);
   const promptCopy = useCopyToClipboard();
+  const keyCopy = useCopyToClipboard();
   const facts = {
     apiBaseUrl: deploymentApiOrigin(apiBaseUrl, window.location),
     organizationId,
@@ -162,6 +163,15 @@ export function DeveloperSetupStep({
     }
   }
 
+  async function copyKey(): Promise<void> {
+    if (key.status !== "ready") return;
+    if (!(await keyCopy.copy(key.token))) {
+      toast.error("Couldn't copy the key", {
+        description: "Select the key above and copy it by hand.",
+      });
+    }
+  }
+
   async function copyPrompt(): Promise<void> {
     if (await promptCopy.copy(codingAgentSetupPrompt(facts))) {
       setPromptCopied(true);
@@ -247,7 +257,28 @@ export function DeveloperSetupStep({
             <ol className="m-0 grid list-none gap-4 p-0">
               <li className="grid gap-2">
                 <h3 className="text-sm font-medium text-fg">1. Copy your key</h3>
-                <CopyField variant="field" wrap value={key.token} label="API key" />
+                <code
+                  translate="no"
+                  data-slot="developer-setup-key"
+                  className="block rounded-[10px] border border-border bg-surface-2 px-3 py-2.5 font-mono text-xs leading-[18px] break-all text-fg select-all"
+                >
+                  {key.token}
+                </code>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full"
+                  disabled={opening}
+                  onClick={() => void copyKey()}
+                >
+                  {keyCopy.state === "copied" ? (
+                    <CheckIcon className="size-4" />
+                  ) : (
+                    <CopyIcon className="size-4" />
+                  )}
+                  {keyCopy.state === "copied" ? "Key copied" : "Copy key"}
+                </Button>
                 <p className="text-xs leading-[18px] text-fg-muted">
                   Add it to your product's server-only .env as{" "}
                   <code translate="no" className="font-mono text-fg">
