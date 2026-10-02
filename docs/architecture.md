@@ -1364,10 +1364,8 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda supports semantic observations only.
 
-Browser and computer creation settle placement failures only while their durable
-create operation remains prepared without a controller generation. The operation
-lock arbitrates failure against dispatch; a dispatched binding stays available
-for exact physical reconciliation, including activation-persistence failures.
+The operation lock settles only prepared creates without controller generations;
+dispatched bindings survive activation persistence failures for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
 
