@@ -2,7 +2,7 @@ import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { enableSandboxTerminal } from "@opengeni/react/terminal";
 import { enableCodeEditor } from "@opengeni/react/editor";
 import { enableDesktopViewer } from "@opengeni/react/desktop";
-import { retainedImageId } from "@opengeni/react";
+import { isModelUnavailableSubmissionError, retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
@@ -152,6 +152,12 @@ import {
   runnableLatencyModesForModel,
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
+import {
+  sessionModelMissingFromCatalog,
+  unavailableModelName,
+  unavailableModelReplacement,
+} from "@/lib/unavailable-session-model";
+import { UnavailableModelNotice } from "@/components/session/unavailable-model-notice";
 import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
@@ -2201,7 +2207,15 @@ function SessionChatPane(props: {
       repositories.commitSent(input.resources ?? []);
       personalAttachment.onAccepted(input);
     },
-    onDeliveryError: personalAttachment.onDeliveryError,
+    onDeliveryError: (error, input, delivery) => {
+      personalAttachment.onDeliveryError(error, input, delivery);
+      // Retrying cannot help: re-read the catalog so the composer offers a
+      // replacement, and open the picker so the next step is visible.
+      if (isModelUnavailableSubmissionError(error)) {
+        void modelCatalog.refresh();
+        setModelPickerSession(props.session.id);
+      }
+    },
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
@@ -2286,8 +2300,23 @@ function SessionChatPane(props: {
     (latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
   );
+  // A model the catalog no longer lists (retired or removed) is refused by the
+  // API, so the frozen session policy stops counting as sendable for it.
+  const composerModelUnavailable = sessionModelMissingFromCatalog({
+    model,
+    models: modelCatalog.models,
+    loading: modelCatalog.loading,
+    error: modelCatalog.error,
+  });
+  const sessionModelUnavailable = sessionModelMissingFromCatalog({
+    model: props.session.model,
+    models: modelCatalog.models,
+    loading: modelCatalog.loading,
+    error: modelCatalog.error,
+  });
   const composerPolicyValid = Boolean(
-    composerPolicy && (catalogComboValid || matchesFrozenSessionPolicy),
+    composerPolicy &&
+    (catalogComboValid || (matchesFrozenSessionPolicy && !composerModelUnavailable)),
   );
   const noRunnableModel =
     !modelCatalog.loading &&
@@ -2295,9 +2324,64 @@ function SessionChatPane(props: {
     !modelCatalog.rows.some((row) => row.selectable);
   const composerPolicyError =
     composerPolicy && !modelCatalog.loading && !composerPolicyValid && !noRunnableModel
-      ? "Choose a model, reasoning level, and speed supported by this session."
+      ? composerModelUnavailable
+        ? "This model is no longer available. Choose another model to continue."
+        : "Choose a model, reasoning level, and speed supported by this session."
       : null;
   composerPolicyValidRef.current = composerPolicyValid;
+
+  // Preselect a runnable model for the next message when the composer still
+  // names an unavailable one. Accepted turns and history keep their frozen
+  // model; the notice above the input names the replacement.
+  const unavailableReplacement = useMemo(
+    () =>
+      composerModelUnavailable || sessionModelUnavailable
+        ? unavailableModelReplacement({
+            models: modelCatalog.models,
+            rows: modelCatalog.rows,
+            defaultSelection: modelCatalog.defaultSelection,
+            latencyMode,
+            codexOnly: props.session.codexCompactionMode === "remote_v2",
+          })
+        : null,
+    [
+      composerModelUnavailable,
+      sessionModelUnavailable,
+      modelCatalog.models,
+      modelCatalog.rows,
+      modelCatalog.defaultSelection,
+      latencyMode,
+      props.session.codexCompactionMode,
+    ],
+  );
+  useEffect(() => {
+    if (!composerModelUnavailable || !unavailableReplacement) return;
+    if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
+    setComposerModel(unavailableReplacement.model);
+    setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
+    if (unavailableReplacement.latencyMode) {
+      setComposerLatencyMode(unavailableReplacement.latencyMode);
+    }
+  }, [
+    composerDraftLoading,
+    composerModelUnavailable,
+    hasComposerPolicy,
+    modelPickerDisabled,
+    setComposerLatencyMode,
+    setComposerModel,
+    setComposerReasoningEffort,
+    terminal,
+    unavailableReplacement,
+  ]);
+  const unavailableModelNotice =
+    (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
+      <UnavailableModelNotice
+        modelName={unavailableModelName(sessionModelUnavailable ? props.session.model : model)}
+        replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
+        canChooseModel={!modelPickerDisabled}
+        onChooseModel={() => setModelPickerSession(props.session.id)}
+      />
+    ) : null;
 
   useEffect(() => {
     if (
@@ -2993,6 +3077,7 @@ function SessionChatPane(props: {
                 `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
             }}
             disabled={terminal}
+            header={unavailableModelNotice}
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}

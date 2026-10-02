@@ -1,4 +1,9 @@
-import { AgentConfigError, AllowanceExhaustedRefusal, type ErrorCode } from "@opengeni/contracts";
+import {
+  AgentConfigError,
+  AllowanceExhaustedRefusal,
+  ModelUnavailableError,
+  type ErrorCode,
+} from "@opengeni/contracts";
 import { WorkspaceControlBusyError } from "@opengeni/db";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
@@ -92,5 +97,28 @@ export function agentConfigHttpError(error: unknown): ApiHttpError | null {
       code: cause.code,
       ...(cause.capability ? { capability: cause.capability } : {}),
     },
+  });
+}
+
+/**
+ * The requested or stored model is not in the live catalog. Rendered as the
+ * same 422 `validation_failed` with its historical message, plus
+ * `details.code: "model_unavailable"` and the model id so clients can ask for
+ * another model rather than offer a retry that cannot succeed.
+ */
+export function modelUnavailableHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof ModelUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ModelUnavailableError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, modelId: cause.modelId },
   });
 }

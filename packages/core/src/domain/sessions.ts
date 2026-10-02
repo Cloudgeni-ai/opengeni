@@ -1,4 +1,4 @@
-import { isDirectModelId } from "@opengeni/contracts";
+import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
@@ -1122,9 +1122,7 @@ export async function createAndStartSessionWithOutcome(input: {
               reference,
             });
             if (!active) {
-              throw new HTTPException(422, {
-                message: `model is not available: ${input.model}`,
-              });
+              throw modelUnavailableHttpException(input.model);
             }
           }
           // Reject an already-stale browser draft before the newly inserted
@@ -1546,6 +1544,17 @@ export function workflowIdForSession(sessionId: string): string {
 }
 
 /**
+ * The one 422 for a model that is not selectable in the live catalog (retired,
+ * removed, or never offered). The message keeps its historical text; the typed
+ * cause lets the API envelope add `details.code: "model_unavailable"` so
+ * clients can ask for another model instead of offering a futile retry.
+ */
+export function modelUnavailableHttpException(model: string): HTTPException {
+  const cause = new ModelUnavailableError(model);
+  return new HTTPException(422, { message: cause.message, cause });
+}
+
+/**
  * Reject an explicit model that the host does not expose. The set of usable
  * models is the union surfaced by `configuredAllowedModels` (the built-in
  * provider's allow-list plus every registry provider's ids); a `model` outside
@@ -1580,7 +1589,7 @@ export function canonicalConfiguredModel(
     ) {
       return canonicalModel;
     }
-    throw new HTTPException(422, { message: `model is not available: ${model}` });
+    throw modelUnavailableHttpException(model);
   }
   if (configuredAllowedModels(settings).includes(canonicalModel)) {
     return canonicalModel;
@@ -1604,7 +1613,7 @@ export function canonicalConfiguredModel(
   ) {
     return canonicalModel;
   }
-  throw new HTTPException(422, { message: `model is not available: ${model}` });
+  throw modelUnavailableHttpException(model);
 }
 
 export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
@@ -1978,9 +1987,7 @@ export async function postUserMessageTurn(
                         reference,
                       });
                       if (!active) {
-                        throw new HTTPException(422, {
-                          message: `model is not available: ${freshWorkspaceCustomModel}`,
-                        });
+                        throw modelUnavailableHttpException(freshWorkspaceCustomModel);
                       }
                     },
                   }
