@@ -194,6 +194,24 @@ async function oracle(seeded: Fixture) {
   return { ledger: ledger!, facts: facts! };
 }
 
+/** Full row fingerprints, including zero-value and out-of-window charges. */
+async function accountingState(seeded: Fixture) {
+  if (!shared) throw new Error("PostgreSQL test database unavailable");
+  return await shared.admin`
+    select 'usage' as source, count(*)::text as rows,
+      md5(coalesce(string_agg(to_jsonb(row)::text, '' order by row.id), '')) as fingerprint
+    from usage_events row where account_id = ${seeded.accountId}
+    union all
+    select 'debits', count(*)::text,
+      md5(coalesce(string_agg(to_jsonb(row)::text, '' order by row.id), ''))
+    from credit_ledger_entries row where account_id = ${seeded.accountId}
+    union all
+    select 'facts', count(*)::text,
+      md5(coalesce(string_agg(to_jsonb(row)::text, '' order by row.id), ''))
+    from model_call_facts row where account_id = ${seeded.accountId}
+    order by source`;
+}
+
 const cost = (totals: OrganizationUsageSummary["totals"]) =>
   totals.find((total) => total.eventType === "model.cost" && total.unit === "usd_micros");
 
@@ -313,10 +331,17 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
       values (${seeded.accountId}, ${seeded.workspaceId}, ${sessionId}, 'sandbox.warm_seconds',
         ${seconds}, 'seconds', 'sandbox_group', ${`${groupId}:1`}, ${crypto.randomUUID()}, ${occurredAt})`;
   }
+  for (const groupId of [publicGroup, privateGroup]) {
+    await shared.admin`insert into sandbox_leases
+      (account_id, workspace_id, sandbox_group_id, backend, liveness, expires_at)
+      values (${seeded.accountId}, ${seeded.workspaceId}, ${groupId}, 'local', 'warm',
+        ${new Date(now.getTime() + 60_000).toISOString()})`;
+  }
   // Usage/facts deliberately survive their session. No test-only RLS bypass on reads.
   await shared.admin`delete from sessions where id in (${deleted.id}, ${missingId})`;
   const viewer = `user:ledger-viewer-${crypto.randomUUID()}`;
   const expected = await oracle(seeded);
+  const unchanged = await accountingState(seeded);
   const organization = await seeded.readOrganization(viewer);
   const models = await seeded.readModels(viewer);
   const response = await seeded.readWorkspace(viewer);
@@ -334,6 +359,7 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   expect(snapshot.warmSeconds).toBe(63);
   expect(snapshot.series.reduce((sum, row) => sum + row.warmSeconds, 0)).toBe(63);
   expect(snapshot.warmGroups.map((row) => row.groupId)).toEqual([publicGroup]);
+  expect(snapshot.liveWarm.map((row) => row.groupId)).toEqual([publicGroup]);
   expect(organization.totals.find((row) => row.eventType === "sandbox.warm_seconds")).toEqual({
     eventType: "sandbox.warm_seconds",
     unit: "seconds",
@@ -370,6 +396,15 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   ).toBe(true);
   expect(snapshot.drivers).toHaveLength(1);
   expect(snapshot.drivers.every((row) => row.id === `root:${publicRoot.id}`)).toBe(true);
+  // Actual response fields retain the released numeric v1 wire shape even
+  // when every seeded fact has unknown cached tokens and prior calls are empty.
+  expect(snapshot.priorCacheHitPct).toBe(0);
+  expect(snapshot.series.length).toBeGreaterThan(0);
+  expect(snapshot.series.every((row) => typeof row.cacheHitPct === "number")).toBe(true);
+  expect(snapshot.drivers.every((row) => typeof row.cacheHitPct === "number")).toBe(true);
+  expect(WorkspaceInsightsSnapshot.safeParse({ ...snapshot, priorCacheHitPct: null }).success).toBe(
+    false,
+  );
   const wire = JSON.stringify({ response, organization, models });
   for (const secret of [
     privateRoot.id,
@@ -433,6 +468,14 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   });
   const { payers: _payers, ...oldModels } = models;
   expect(OrganizationModelUsage.parse(oldModels).payers).toEqual([]);
+  const owner = (await seeded.readWorkspace(seeded.subjectId)).snapshot;
+  expect(owner.privateChats).toEqual([]);
+  expect(owner.workspaceCreditUsd).toBe(snapshot.workspaceCreditUsd);
+  expect(owner.modelCalls).toBe(snapshot.modelCalls);
+  expect(cost((await seeded.readOrganization(seeded.subjectId)).totals)).toEqual(
+    cost(organization.totals),
+  );
+  expect(await accountingState(seeded)).toEqual(unchanged);
 });
 
 test("201 owners truncate only private rows; >50 models never cap payer accounting", async () => {
@@ -466,6 +509,7 @@ test("201 owners truncate only private rows; >50 models never cap payer accounti
       estimate: 13,
     });
   const expected = await oracle(seeded);
+  const unchanged = await accountingState(seeded);
   const organization = await seeded.readOrganization(viewer);
   const models = await seeded.readModels(viewer);
   const { snapshot } = await seeded.readWorkspace(viewer);
@@ -502,4 +546,5 @@ test("201 owners truncate only private rows; >50 models never cap payer accounti
   expect(onlyOne.privateChats).toHaveLength(1);
   expect(onlyOne.privateChatsTruncated).toBe(false);
   expect(onlyOne.modelCalls).toBe(1);
+  expect(await accountingState(seeded)).toEqual(unchanged);
 });

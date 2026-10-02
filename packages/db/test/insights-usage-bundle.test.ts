@@ -178,6 +178,7 @@ async function fixture(): Promise<Fixture> {
     currentAt,
   );
   add("model.tokens", 999, "tokens", null, null, monthSince);
+  add("agent_run.created", 13, "runs", null, null, monthSince);
   add("irrelevant.event", 999_999, "units", null, null, currentAt);
 
   for (const [index, value] of values.entries()) {
@@ -305,6 +306,13 @@ describe("Workspace Insights usage bundle", () => {
   test("matches the nine legacy reads for shared/private and workspace-level usage", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
+    // Independent raw ledger oracle, not the released strict-`>` helper.
+    const [month] = await shared.admin<Array<{ tokens: string; runs: string }>>`
+      select coalesce(sum(quantity) filter (where event_type = 'model.tokens'), 0)::text as tokens,
+        coalesce(sum(quantity) filter (where event_type = 'agent_run.created'), 0)::text as runs
+      from usage_events where workspace_id = ${seeded.workspaceId}
+        and occurred_at >= ${seeded.input.monthSince}`;
+    expect(month).toEqual({ tokens: "1699", runs: "20" });
     const cases = [
       { subjectId: seeded.ownerSubjectId, input: seeded.input },
       {
@@ -324,15 +332,19 @@ describe("Workspace Insights usage bundle", () => {
       const complete = await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
         legacyUsageBundle(client!.db, input),
       );
-      expect(comparable({ ...bundled, warmGroups: [] })).toEqual(
-        comparable({ ...complete, warmGroups: [] }),
+      expect(
+        comparable({ ...bundled, warmGroups: [], billableTokensUsed: 0, agentRunsUsed: 0 }),
+      ).toEqual(
+        comparable({ ...complete, warmGroups: [], billableTokensUsed: 0, agentRunsUsed: 0 }),
       );
       expect(bundled.warmGroups).toEqual(
         legacy.warmGroups.filter((group) => !group.groupId.startsWith("77777777-")),
       );
       expect(bundled.warmSeconds).toBe(151);
-      expect(bundled.billableTokensUsed).toBe(700);
-      expect(bundled.agentRunsUsed).toBe(7);
+      expect(bundled.billableTokensUsed).toBe(1699);
+      expect(bundled.agentRunsUsed).toBe(20);
+      expect(bundled.billableTokensUsed).toBe(Number(month!.tokens));
+      expect(bundled.agentRunsUsed).toBe(Number(month!.runs));
       expect(bundled.warmGroups.every((group) => group.groupId !== "not-a-uuid")).toBe(true);
       expect(bundled.warmGroups.some((group) => group.groupId.startsWith("77777777-"))).toBe(false);
     }
@@ -350,7 +362,11 @@ describe("Workspace Insights usage bundle", () => {
           readWorkspaceInsightsUsageBundle(client!.db, emptyInput),
         ]),
     );
-    expect(comparable(bundledEmpty)).toEqual(comparable(legacyEmpty));
+    expect(comparable({ ...bundledEmpty, billableTokensUsed: 0, agentRunsUsed: 0 })).toEqual(
+      comparable({ ...legacyEmpty, billableTokensUsed: 0, agentRunsUsed: 0 }),
+    );
+    expect(bundledEmpty.billableTokensUsed).toBe(1699);
+    expect(bundledEmpty.agentRunsUsed).toBe(20);
     expect(bundledEmpty.workspaceCreditMicros).toBe(0);
     expect(bundledEmpty.warmSeconds).toBe(0);
     expect(bundledEmpty.buckets).toEqual(new Map());

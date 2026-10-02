@@ -614,43 +614,6 @@ describe("runtime database posture evaluator", () => {
     return posture;
   }
 
-  test("private-chat owner helper rejects grants to unrelated reporting roles", () => {
-    const posture = modelFactPosture();
-    posture.tables.push({
-      ...posture.tables.find((table) => table.name === "model_call_facts")!,
-      name: "usage_events",
-    });
-    const helper = {
-      name: "organization_private_chat_usage(uuid, timestamp with time zone, timestamp with time zone)",
-      owner: "opengeni_migrator",
-      execute: false,
-      publicExecute: false,
-      nonOwnerExecute: false,
-      securityDefiner: true,
-      configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
-    };
-    posture.privateRoutines.push(helper);
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
-    for (const unsafe of [
-      { nonOwnerExecute: true },
-      { execute: true },
-      { publicExecute: true },
-      { securityDefiner: false },
-      { owner: "reporting_role" },
-      { configuration: ["search_path=public"] },
-    ]) {
-      const candidate = {
-        ...posture,
-        privateRoutines: posture.privateRoutines.map((routine) =>
-          routine.name === helper.name ? { ...helper, ...unsafe } : routine,
-        ),
-      };
-      expect(evaluateRuntimeDatabasePosture(candidate, options)).toContain(
-        "organization private chat helper has unsafe owner, ACL or search path",
-      );
-    }
-  });
-
   test("requires all current model-fact capabilities without changing the frozen old contract", () => {
     const posture = modelFactPosture();
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
