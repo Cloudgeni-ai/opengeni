@@ -3783,7 +3783,7 @@ export const InsightsSeriesPoint = z.object({
   totalTokens: z.number().nonnegative(),
   tokenKnownCalls: z.number().int().nonnegative(),
   cacheKnownCalls: z.number().int().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  cacheHitPct: z.number().int().min(0).max(100),
   calls: z.number().int().nonnegative(),
 });
 export type InsightsSeriesPoint = z.infer<typeof InsightsSeriesPoint>;
@@ -3810,7 +3810,7 @@ export const InsightsSpendDriver = z.object({
   equivalentCreditUsd: z.number().nonnegative(),
   equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
-  cacheHitPct: z.number().int().min(0).max(100).nullable(),
+  cacheHitPct: z.number().int().min(0).max(100),
   pctOfCreditUsd: z.number().int().min(0).max(100),
   pctOfTokens: z.number().int().min(0).max(100),
   deltaUsdVsPrior: z.number(),
@@ -3992,7 +3992,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
-  priorCacheHitPct: z.number().int().min(0).max(100).nullable(),
+  priorCacheHitPct: z.number().int().min(0).max(100),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
   goalsActive: z.number().int().nonnegative(),
@@ -4013,8 +4013,8 @@ export const WorkspaceInsightsSnapshot = z.object({
   modelFilterActive: z.boolean(),
   /** Latest `recorded_at` among visible facts in the window; null when none were ingested. */
   dataThrough: z.string().datetime().nullable().default(null),
-  /** Null when no call in the window reported both input and cached tokens. */
-  cacheHitPct: z.number().int().min(0).max(100).nullable().default(null),
+  /** Released v1 percentage computation; zero when no positive cache-input denominator exists. */
+  cacheHitPct: z.number().int().min(0).max(100).default(0),
   scope: InsightsScope.default({ rootSessionId: null, sessionId: null }),
   /** Root sessions with spend in the window; `drivers` holds the top slice. */
   driverGroups: z.number().int().nonnegative().default(0),

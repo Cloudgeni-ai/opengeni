@@ -88,8 +88,8 @@ function microsToUsd(micros: number): number {
   return micros / 1_000_000;
 }
 
-function cacheHitPct(cached: number, input: number): number | null {
-  if (input <= 0) return null;
+function cacheHitPct(cached: number, input: number): number {
+  if (input <= 0) return 0;
   return Math.min(100, Math.max(0, Math.round((cached / input) * 100)));
 }
 

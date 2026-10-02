@@ -1,13 +1,1 @@
-[
-  {
-    "ids": [
-      "schema:InsightsSeriesPoint:$.cacheHitPct",
-      "schema:InsightsSpendDriver:$.cacheHitPct",
-      "schema:WorkspaceInsightsSnapshot:$.priorCacheHitPct"
-    ],
-    "deprecation": ".changeset/complete-private-usage-totals.md",
-    "removedInMajor": 8,
-    "sunset": "2027-01-01T00:00:00Z",
-    "reason": "SDK 8 Insights responses represent unknown cache coverage as null instead of inventing a percentage. Consumers must handle number | null and never coerce unknown coverage to zero. Preserve the old managed-service contract through the Sunset and next major release, whichever is later; this acknowledgement does not waive deprecation headers or the minimum 90-day compatibility period."
-  }
-]
+[]

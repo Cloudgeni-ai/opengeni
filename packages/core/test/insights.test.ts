@@ -243,7 +243,7 @@ describe("getWorkspaceInsights", () => {
     expect(usageBundle.mock.calls[0]?.[1]).not.toHaveProperty("rootSessionId", root);
     expect(snapshot.scope).toEqual({ rootSessionId: root, sessionId: null });
     expect(snapshot.modelFilterActive).toBe(true);
-    expect(snapshot.cacheHitPct).toBeNull();
+    expect(snapshot.cacheHitPct).toBe(0);
     expect(snapshot.dataThrough).toBeNull();
   });
 
@@ -623,7 +623,7 @@ describe("getWorkspaceInsights", () => {
       ["unavailable", "Root session not visible"],
     ]);
     expect(snapshot.projects[0]).toMatchObject({ creditUsd: 1.25, cacheHitPct: 50, calls: 2 });
-    expect(snapshot.projects[3]?.cacheHitPct).toBeNull();
+    expect(snapshot.projects[3]?.cacheHitPct).toBe(0);
   });
 });
 

@@ -38,26 +38,6 @@ function appWith(registry: readonly RouteDeprecation[]): Hono {
 }
 
 describe("route deprecation headers", () => {
-  test("Insights advertises the exact nullable-cache migration with at least 90 days' notice", async () => {
-    const entry = DEPRECATED_ROUTES.find(
-      (route) => route.path === "/v1/workspaces/:workspaceId/insights",
-    );
-    expect(entry).toBeDefined();
-    assertValidRouteDeprecation(entry!);
-    const app = new Hono();
-    app.use("/v1/*", deprecationHeadersMiddleware());
-    app.get("/v1/workspaces/:workspaceId/insights", (context) =>
-      context.json({ cacheHitPct: null }),
-    );
-    const response = await app.request("/v1/workspaces/example/insights");
-    expect(response.headers.get("deprecation")).toBe(
-      `@${Date.parse("2026-10-02T00:00:00Z") / 1000}`,
-    );
-    expect(response.headers.get("sunset")).toBe("Fri, 01 Jan 2027 00:00:00 GMT");
-    expect(response.headers.get("link")).toContain("complete-private-usage-totals.md");
-    expect(await response.json()).toEqual({ cacheHitPct: null });
-  });
-
   test("formats RFC 9745 Deprecation, RFC 8594 Sunset, and deprecation/successor links", () => {
     expect(deprecationHeaders(PACKS)).toEqual({
       Deprecation: "@1788220800",
