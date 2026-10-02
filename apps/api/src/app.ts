@@ -23,6 +23,7 @@ import {
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
+  UnsupportedLatencyModeError,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -1682,6 +1683,20 @@ export function createAppComposition(deps: AppDependencies): {
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
+          (rawError instanceof UnsupportedLatencyModeError
+            ? new ApiHttpError(422, {
+                code: "validation_failed",
+                message: rawError.message,
+                retryable: false,
+                outcomeUnknown: false,
+                details: {
+                  code: rawError.code,
+                  modelId: rawError.modelId,
+                  latencyMode: rawError.latencyMode,
+                  allowedLatencyModes: [...rawError.allowedLatencyModes],
+                },
+              })
+            : null) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
