@@ -11,9 +11,9 @@
     {
       "name": "opengeni",
       "source": "./plugins/opengeni",
-      "description": "Offload long-running or parallel work to an OpenGeni workspace over MCP, and build products on OpenGeni agents.",
+      "description": "Set up SDK access, build products, and learn the OpenGeni offload workflow.",
       "category": "development",
-      "tags": ["mcp", "agents", "background-agents", "sdk"]
+      "tags": ["agents", "background-agents", "sdk"]
     }
   ]
 }

@@ -80,11 +80,14 @@ const source = { kind: "openapi" as const, url: "https://api.acme.com/agent-open
 const preview = await og.previewApiIntegration(workspaceId, { source, connectionId });
 const installed = await og.installApiIntegration(workspaceId, {
   source,
-  connectionId, // the encrypted credential the integration calls your API with
+  connectionId, // from og.createConnection(): the credential the integration calls your API with
   expectedRevisionId: preview.revisionId,
   expectedContentSha256: preview.contentSha256,
   instanceKey: "acme-api",
-  allowedTools: ["getTicket", "updateTicket"],
+  // Tool ids from the preview (not operationIds), for example every non-destructive one:
+  allowedTools: preview.tools
+    .filter((tool) => tool.safety !== "destructive")
+    .map((tool) => tool.id),
 });
 // Persist installed.serverId, then select it per session:
 // tools: [{ kind: "mcp", id: installed.serverId }]
@@ -94,7 +97,7 @@ Integrations belong to a workspace, so every session in that workspace can selec
 
 ## Reachability
 
-MCP server URLs and OpenAPI documents must be public HTTPS URLs the OpenGeni deployment can reach. For local development, expose your server with a tunnel such as `cloudflared tunnel --url http://localhost:4101` or `ngrok http 4101`.
+MCP servers, OpenAPI document URLs, and the API an integration calls must be public HTTPS URLs the OpenGeni deployment can reach. You can also pass the OpenAPI document inline (`kind: "openapi_document"`); the API it describes must still be reachable. For local development, expose your server with a tunnel such as `cloudflared tunnel --url http://localhost:4101` or `ngrok http 4101`.
 
 ## Keep the tool surface small
 

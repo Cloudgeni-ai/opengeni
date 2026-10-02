@@ -48,6 +48,7 @@ session proxy (it serves only that read; budgets and member limits stay on
 your backend):
 
 ```tsx
+import { ChatComposer } from "@opengeni/react";
 import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
 
 <UsageMeter workspaceId={workspaceId} />              // "38% left · Resets Nov 1"
