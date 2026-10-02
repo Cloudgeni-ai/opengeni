@@ -1127,32 +1127,64 @@ jobs:
       - name: Clean published consumer
         run: bun run test:publish-consumer
 
+      # PR jobs execute a merged workflow but check out the exact candidate.
+      # Keep workflow-owned regressions with their own immutable tooling tree;
+      # never skip them or replace the candidate when it predates these files.
+      - name: Check out registry export guard tooling
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci/registry-export-guard
+          persist-credentials: false
+
+      - name: Set up registry export guard Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .ci/registry-export-guard/.bun-version
+
+      - name: Install registry export guard tooling dependencies
+        working-directory: .ci/registry-export-guard
+        run: bun install --frozen-lockfile
+
       - name: Registry dependency export guard regression
-        # A PR workflow can be newer than its exact frozen source checkout.
-        # New sources declaring the guard must retain and pass every test;
-        # older sources without this feature cannot run tests added later.
+        working-directory: .ci/registry-export-guard
         run: |
+          set -euo pipefail
           bun --no-env-file -e '
-          const paths = [
-            "./scripts/test-registry-dependency-exports.test.ts",
-            "./scripts/test-effective-dependency-exports.test.ts",
-            "./scripts/dependency-export-workflow-contract.test.ts",
-          ];
           const manifest = await Bun.file("package.json").json();
-          const declared = Object.hasOwn(manifest.scripts ?? {}, "test:effective-dependency-exports");
-          const present = await Promise.all(paths.map((path) => Bun.file(path).exists()));
-          if (!declared && present.every((value) => !value)) {
-            console.log("Registry export guard is not part of this selected source revision.");
-            process.exit(0);
+          for (const script of ["test:registry-dependency-exports", "test:effective-dependency-exports"]) {
+            if (typeof manifest.scripts?.[script] !== "string" || !manifest.scripts[script].trim()) {
+              throw new Error("Missing workflow-owned guard declaration: " + script);
+            }
           }
-          if (!declared || present.some((value) => !value)) {
-            throw new Error("Registry export guard source is incomplete");
-          }
-          const child = Bun.spawn([process.execPath, "--no-env-file", "test", ...paths], {
-            stdout: "inherit", stderr: "inherit",
-          });
-          process.exit(await child.exited);
           '
+          for guard_test in \
+            scripts/test-registry-dependency-exports.test.ts \
+            scripts/test-effective-dependency-exports.test.ts \
+            scripts/dependency-export-workflow-contract.test.ts; do
+            if [ ! -f "$guard_test" ]; then
+              echo "Missing workflow-owned guard test: $guard_test" >&2
+              exit 1
+            fi
+          done
+          for guard_helper in \
+            scripts/test-registry-dependency-exports.ts \
+            scripts/test-effective-dependency-exports.ts \
+            scripts/publishable-workspaces.ts \
+            scripts/rewrite-entry-points.ts \
+            scripts/rewrite-workspace-deps.ts \
+            scripts/release-publish.sh; do
+            if [ ! -f "$guard_helper" ]; then
+              echo "Missing workflow-owned guard helper: $guard_helper" >&2
+              exit 1
+            fi
+          done
+          bun --no-env-file test ./scripts/test-registry-dependency-exports.test.ts ./scripts/test-effective-dependency-exports.test.ts ./scripts/dependency-export-workflow-contract.test.ts
+
+      - name: Restore candidate Bun after registry export regression
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
 
       - name: Frozen Version PR effective registry export closure
         if: github.head_ref == 'changeset-release/main' || inputs.automation_pr_number != ''
