@@ -66,7 +66,8 @@ export function OrganizationAccessFields({
   const ceilingFor = (asYou: boolean) => (permission: string) =>
     !asYou || !grantable || grantable.has(permission);
   const canGrant = ceilingFor(actsAsYou);
-  // Acting as you, a preset means "that much of what you can do", so it always fits.
+  // Acting as you, a preset is stored whole and the server caps it by your live access,
+  // so "Full access" keeps meaning "everything you can do" as that changes.
   const presetAllowed = (preset: Exclude<OrganizationAccessPreset, "custom">) =>
     actsAsYou || presetPermissions(preset).every(canGrant);
   const choosePreset = (next: OrganizationAccessPreset) => {
@@ -81,9 +82,7 @@ export function OrganizationAccessFields({
     onPolicyChange({
       ...policy,
       preset: next,
-      permissions: presetPermissions(next).filter(
-        (permission) => !actsAsYou || canGrant(permission),
-      ),
+      permissions: presetPermissions(next),
     });
   };
   const visibleWorkspaces =
@@ -108,7 +107,7 @@ export function OrganizationAccessFields({
               permissions:
                 policy.preset === "custom"
                   ? policy.permissions.filter(fits)
-                  : presetPermissions(policy.preset).filter(fits),
+                  : presetPermissions(policy.preset),
               // The organization can't open anyone's Personal workspace.
               workspaceScope:
                 value === "organization" && selected

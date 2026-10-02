@@ -13,7 +13,6 @@ import { userErrorText } from "@/lib/api-error";
 import {
   DEFAULT_POLICY,
   policyBlockedReason,
-  presetPermissions,
   type OrganizationAccessPolicy,
   type OrganizationActor,
 } from "@/lib/organization-access";
@@ -63,12 +62,7 @@ export function McpConsentPage({
   const organization =
     request.organizations.find((each) => each.id === organizationId) ?? request.organizations[0]!;
   const [actor, setActor] = useState<OrganizationActor>("user");
-  const [policy, setPolicy] = useState<OrganizationAccessPolicy>(() => ({
-    ...DEFAULT_POLICY,
-    permissions: presetPermissions("read_only").filter((permission) =>
-      organization.grantable.includes(permission),
-    ),
-  }));
+  const [policy, setPolicy] = useState<OrganizationAccessPolicy>(DEFAULT_POLICY);
   const [errors, setErrors] = useState<{ permissions?: string; workspaces?: string }>({});
   const grantable = useMemo(() => new Set(organization.grantable), [organization.grantable]);
 
@@ -119,14 +113,7 @@ export function McpConsentPage({
                   onValueChange={(next) => {
                     setOrganizationId(next);
                     setActor("user");
-                    setPolicy({
-                      ...DEFAULT_POLICY,
-                      permissions: presetPermissions("read_only").filter((permission) =>
-                        (
-                          request.organizations.find((each) => each.id === next)?.grantable ?? []
-                        ).includes(permission),
-                      ),
-                    });
+                    setPolicy(DEFAULT_POLICY);
                     setErrors({});
                   }}
                   className="w-full"
