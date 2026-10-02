@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
-import { withClaudeModelRequest } from "./claude-subscription-usage";
 import {
   protocol,
   Usage,
@@ -10,6 +9,7 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };

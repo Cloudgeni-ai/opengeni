@@ -641,12 +641,12 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
-    // The same unchanged current-main graph measures 730,608 gzip bytes.
-    // Retain the established 1.5 KiB platform-skew allowance.
-    wholeKibEnvelope(730_608, 1.5 * kib),
     // Browser failure signals: 727,806 gzip on Bun 1.4 Linux/x64 rebased on
     // main aa5661dec. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(727_806, 1.5 * kib),
+    // The same unchanged current-main graph measures 730,608 gzip bytes.
+    // Retain the established 1.5 KiB platform-skew allowance.
+    wholeKibEnvelope(730_608, 1.5 * kib),
     // Runtime robustness on main f874217f5: the empty-final-reply notice and
     // per-model availability in the session timeline measure 711,698 gzip
     // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
