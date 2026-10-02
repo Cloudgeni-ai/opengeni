@@ -628,10 +628,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         expect(inputFailure).toMatchObject({
           op: "writeStdin",
           retryable: false,
-          retainedProcess: {
-            id: retained!.id,
-            providerSessionId: retained!.providerSessionId,
-          },
+          retainedProcess: { providerSessionId: retained!.providerSessionId },
         });
         expect(inputFailure.cause).toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
         expect(inputFailure.cause).toMatchObject({

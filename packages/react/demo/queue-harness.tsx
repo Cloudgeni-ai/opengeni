@@ -1,5 +1,4 @@
 import type { SessionTurn } from "@opengeni/sdk";
-import { MockOpenGeniClient } from "./mock";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -22,12 +21,9 @@ import {
   type QueueHarnessErrorShape,
   type QueueVisibilityProbeKind,
 } from "./queue-fixtures";
+import { MockOpenGeniClient } from "./mock";
 import "./styles.css";
 import "./queue-harness.css";
-
-// Only generated public presentation errors use host-approved copy.
-class QueueHarnessPublicError extends Error {}
-const client = new MockOpenGeniClient();
 
 declare global {
   interface Window {
@@ -175,14 +171,10 @@ function QueueHarness() {
   );
   const [loading, setLoading] = useState(params.get("loading") === "1");
   const [queueError, setQueueError] = useState<Error | null>(() =>
-    errorSource === "queue" && initialErrorMessage
-      ? new QueueHarnessPublicError(initialErrorMessage)
-      : null,
+    errorSource === "queue" && initialErrorMessage ? new Error(initialErrorMessage) : null,
   );
   const [mutationError, setMutationError] = useState<Error | null>(() =>
-    errorSource === "mutation" && initialErrorMessage
-      ? new QueueHarnessPublicError(initialErrorMessage)
-      : null,
+    errorSource === "mutation" && initialErrorMessage ? new Error(initialErrorMessage) : null,
   );
   const [refreshCount, setRefreshCount] = useState(0);
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
@@ -272,12 +264,19 @@ function QueueHarness() {
   );
 }
 
+const client = new MockOpenGeniClient();
 createRoot(document.getElementById("root")!).render(
   <OpenGeniProvider
     client={client}
     workspaceId="11111111-1111-4111-8111-111111111111"
-    formatError={(error, neutral) =>
-      error instanceof QueueHarnessPublicError ? error.message : neutral
+    // Exercise host-owned long copy only for this exact synthetic layout fixture.
+    formatError={
+      params.has("customError")
+        ? (error, fallback) =>
+            error instanceof Error && error.message === initialErrorMessage
+              ? (initialErrorMessage ?? fallback)
+              : fallback
+        : undefined
     }
   >
     <QueueHarness />

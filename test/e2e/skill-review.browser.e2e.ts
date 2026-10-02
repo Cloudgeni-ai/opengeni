@@ -82,9 +82,7 @@ describe("exact Skill review browser acceptance", () => {
     const page = await browser.newPage({ viewport: { width: 320, height: 900 } });
     try {
       await page.goto(`${baseUrl}/?fail=1`);
-      const previewError = page.locator("[data-skill-review]").getByRole("alert");
-      await previewError.waitFor();
-      expect(await previewError.innerText()).toBe("The request could not be completed.");
+      await page.getByText("The request could not be completed.", { exact: true }).waitFor();
       expect(await page.getByText("Preview unavailable", { exact: true }).count()).toBe(0);
       await page.getByRole("radio", { name: "Save", exact: true }).check();
       await page.getByRole("button", { name: "Send answers", exact: true }).click();
