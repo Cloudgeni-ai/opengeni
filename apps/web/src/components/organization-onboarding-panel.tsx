@@ -1,16 +1,6 @@
-import {
-  Building2Icon,
-  CheckIcon,
-  CircleAlertIcon,
-  LockKeyholeIcon,
-  Loader2Icon,
-  LogOutIcon,
-  MailIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { Loader2Icon, LogOutIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
@@ -18,25 +8,32 @@ import {
   getSelfServiceOrganizationOnboardingStatus,
   type SelfServiceOrganizationOnboardingState,
 } from "@/api";
-import {
-  ModelAccessOnboardingPanel,
-  type IncludedOnboardingModel,
-} from "@/components/model-access-onboarding";
+import { OnboardingFrame, OnboardingStep } from "@/components/onboarding/onboarding-frame";
+import { UseQuestion } from "@/components/onboarding/use-question";
 import { Button } from "@/components/ui/button";
 import { TechnicalDetails } from "@/components/ui/error-message";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   apiErrorTechnicalFacts,
   userErrorText,
   userErrorTextWithoutReference,
 } from "@/lib/api-error";
-import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import { captureAnalyticsEvent } from "@/lib/analytics-observer";
+import { intentsForUse, type FirstAgentUse } from "@/lib/first-agent";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
 import {
-  loadModelAccessOnboarding,
-  type StartingCreditsOnboarding,
-} from "@/lib/onboarding-starting-credits";
+  intentAnalyticsProperties,
+  newOnboardingJourney,
+  onboardingJourneyStorageKey,
+  updateOnboardingJourney,
+  writeOnboardingJourney,
+} from "@/lib/onboarding-journey";
+import {
+  defaultOrganizationName,
+  onboardingDestination,
+  onboardingIntentFromAttribution,
+  type OnboardingCompletion,
+} from "@/lib/onboarding-paths";
+import { signupAttribution } from "@/lib/signup-attribution";
 import {
   clearOrganizationInvitationContinuation,
   storeOrganizationInvitationContinuation,
@@ -44,37 +41,36 @@ import {
 } from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@/types";
 
+/**
+ * The signed-in gate before an organization exists: an invitation to accept,
+ * or the first real question ("What do you want to use Opengeni for?") with
+ * the organization's suggested name folded into it. Answering (or Skip)
+ * creates the organization and opens the app on first run's next page.
+ */
 export function OrganizationOnboardingPanel({
   onComplete,
   client,
-  billingMode = "disabled",
-  codexEnabled = false,
-  supergrokEnabled = false,
-  includedModel,
-  startingCredits,
-  modelDefaults = null,
   previewState,
   activeEmail = null,
+  activeName = null,
+  subjectId = null,
+  preselectedUse,
   invitation = null,
   onUseInvitedAccount,
   onSignOut,
   onUseAnotherAccount,
 }: {
-  onComplete: () => void;
+  /** Opens the app; `next` names the page the chosen path continues on. */
+  onComplete: (next?: OnboardingCompletion) => void;
   client?: OpenGeniBrowserClient;
-  billingMode?: "disabled" | "stripe";
-  codexEnabled?: boolean;
-  supergrokEnabled?: boolean;
-  includedModel?: IncludedOnboardingModel | null;
-  /**
-   * Credits the organization already holds; read from the new workspace's
-   * catalog and balance when not given.
-   */
-  startingCredits?: StartingCreditsOnboarding | null;
-  /** Client-config model defaults; the included model is derived from them when not given. */
-  modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
+  /** The signed-in person's name, for the suggested organization name. */
+  activeName?: string | null;
+  /** The signed-in subject: keys the Get started checklist this browser keeps. */
+  subjectId?: string | null;
+  /** The answer to preselect; defaults to the sign-up attribution (Product Hunt: a product). */
+  preselectedUse?: FirstAgentUse | null;
   invitation?: OrganizationInvitationContinuation | null;
   onUseInvitedAccount?: (targetEmail: string) => void;
   /** Leaves onboarding for the signed-out page, so the person can pick another account. */
@@ -87,7 +83,16 @@ export function OrganizationOnboardingPanel({
   );
   const [statusError, setStatusError] = useState<{ error: unknown } | null>(null);
   const [statusRequest, setStatusRequest] = useState(0);
-  const [organizationName, setOrganizationName] = useState("");
+  const [organizationName, setOrganizationName] = useState(
+    () => defaultOrganizationName(activeName, activeEmail) || "My organization",
+  );
+  const [use, setUse] = useState<FirstAgentUse | null>(() =>
+    preselectedUse !== undefined
+      ? preselectedUse
+      : onboardingIntentFromAttribution(signupAttribution()) === "build"
+        ? "product"
+        : null,
+  );
   const [busy, setBusy] = useState(false);
   const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
   const [invitationLoading, setInvitationLoading] = useState(false);
@@ -96,37 +101,12 @@ export function OrganizationOnboardingPanel({
     "matched" | "wrong_account" | "unavailable" | null
   >(null);
   const [acceptingInvitationId, setAcceptingInvitationId] = useState<string | null>(null);
-  const [createdSetup, setCreatedSetup] = useState<{
-    organizationId: string;
-    personalWorkspaceId: string;
-  } | null>(null);
+  const [created, setCreated] = useState(false);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
-  // An explicit `includedModel` or `startingCredits` (previews, embedders) is
-  // authoritative. The client-config candidate is only a hint until the new
-  // Personal workspace's catalog confirms that model is selectable there, and
-  // on a deployment that bills credits the same catalog read tells whether new
-  // chats already default to a credits model the organization can pay for.
-  const includedCandidate =
-    includedModel !== undefined
-      ? null
-      : modelDefaults
-        ? includedDefaultModel({ ...modelDefaults, billingMode })
-        : null;
-  const checkStartingCredits = billingMode === "stripe" && startingCredits === undefined;
-  const liveCheckKey =
-    includedCandidate || checkStartingCredits
-      ? JSON.stringify({ includedCandidate, checkStartingCredits })
-      : null;
-  const [liveModelAccess, setLiveModelAccess] = useState<{
-    key: string;
-    workspaceId: string;
-    includedModel: IncludedOnboardingModel | null;
-    startingCredits: StartingCreditsOnboarding | null;
-  } | null>(null);
-  // Consent-gated onboarding journey; the model step reports itself.
+  // Consent-gated onboarding journey.
   useOnboardingStep(
-    state === null || state === "unavailable" || createdSetup
+    state === null || state === "unavailable" || created
       ? null
       : state === "invitation_pending" || invitation
         ? "invitation"
@@ -134,12 +114,9 @@ export function OrganizationOnboardingPanel({
     undefined,
     !previewState,
   );
-  const confirmingOrganizationId = createdSetup?.organizationId ?? null;
-  const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
-
   useEffect(() => {
     if (previewState) return;
-    if (createdSetup) return;
+    if (created) return;
     let active = true;
     setStatusError(null);
     void getSelfServiceOrganizationOnboardingStatus()
@@ -158,36 +135,7 @@ export function OrganizationOnboardingPanel({
     return () => {
       active = false;
     };
-  }, [createdSetup, previewState, onComplete, statusRequest]);
-
-  useEffect(() => {
-    if (!liveCheckKey || !confirmingOrganizationId || !confirmingWorkspaceId) return;
-    const unconfirmed = { includedModel: null, startingCredits: null };
-    if (!client) {
-      setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...unconfirmed });
-      return;
-    }
-    let active = true;
-    const check = JSON.parse(liveCheckKey) as {
-      includedCandidate: IncludedOnboardingModel | null;
-      checkStartingCredits: boolean;
-    };
-    void loadModelAccessOnboarding(client, {
-      organizationId: confirmingOrganizationId,
-      workspaceId: confirmingWorkspaceId,
-      billingMode: check.checkStartingCredits ? "stripe" : "disabled",
-      includedCandidate: check.includedCandidate,
-    })
-      // Unverifiable is not included: fall back to the ordinary choice screen.
-      .catch(() => unconfirmed)
-      .then((result) => {
-        if (active)
-          setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...result });
-      });
-    return () => {
-      active = false;
-    };
-  }, [client, confirmingOrganizationId, confirmingWorkspaceId, liveCheckKey]);
+  }, [created, previewState, onComplete, statusRequest]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;
@@ -239,14 +187,24 @@ export function OrganizationOnboardingPanel({
     setAcceptingInvitationId(selectedInvitation.id);
     setInvitationError(null);
     try {
-      await client.acceptOrganizationInvitation(selectedInvitation.id, {
+      const accepted = await client.acceptOrganizationInvitation(selectedInvitation.id, {
         expectedRevision: selectedInvitation.revision,
         operationId: acceptedOperationId,
       });
       invitationOperationIds.current.delete(selectedInvitation.id);
       clearOrganizationInvitationContinuation();
       onboardingJourney().completed("invitation", "joined");
-      onComplete();
+      // A lighter welcome for someone joining a team: no path question, just
+      // the Get started checklist, limited to what their role can do.
+      if (subjectId)
+        writeOnboardingJourney(
+          onboardingJourneyStorageKey(subjectId, selectedInvitation.organizationId),
+          newOnboardingJourney({ invited: true }),
+        );
+      const personalWorkspaceId = accepted?.membership?.personalWorkspaceId ?? null;
+      onComplete(
+        personalWorkspaceId ? { to: `/workspaces/${personalWorkspaceId}/sessions` } : undefined,
+      );
     } catch (error) {
       setInvitationError(userErrorText(error));
     } finally {
@@ -254,30 +212,45 @@ export function OrganizationOnboardingPanel({
     }
   }
 
-  async function submit() {
+  /**
+   * Creates the organization (and its Personal workspace) with the suggested
+   * or edited name, remembers the answer for first run, and opens the app on
+   * first run's next page: a product's questions, or the ready moment.
+   */
+  async function createOrganization(chosen: FirstAgentUse | null) {
     const normalizedName = organizationName.trim();
-    if (!normalizedName) {
-      toast.error("Enter your organization name");
-      return;
-    }
+    if (!normalizedName || busy) return;
     setBusy(true);
     try {
-      if (!previewState) {
-        const created = await completeSelfServiceOrganizationSetup({
-          organizationName: normalizedName,
-          operationId: operationId.current,
+      const setup = previewState
+        ? { organizationId: "preview-organization", personalWorkspaceId: "preview-workspace" }
+        : await completeSelfServiceOrganizationSetup({
+            organizationName: normalizedName,
+            operationId: operationId.current,
+          });
+      if (!previewState) onboardingJourney().completed("organization_name", "created");
+      const intents = intentsForUse(chosen);
+      if (subjectId)
+        updateOnboardingJourney(
+          onboardingJourneyStorageKey(subjectId, setup.organizationId),
+          (current) => ({
+            ...current,
+            intents,
+            firstAgent: {
+              ...current.firstAgent,
+              use: chosen,
+              outcome: chosen ? current.firstAgent.outcome : "skipped",
+            },
+          }),
+        );
+      if (chosen)
+        captureAnalyticsEvent("onboarding_intent_selected", {
+          ...intentAnalyticsProperties(intents),
+          source: "setup",
+          changed: false,
         });
-        onboardingJourney().completed("organization_name", "created");
-        setCreatedSetup({
-          organizationId: created.organizationId,
-          personalWorkspaceId: created.personalWorkspaceId,
-        });
-        return;
-      }
-      setCreatedSetup({
-        organizationId: "preview-organization",
-        personalWorkspaceId: "preview-workspace",
-      });
+      setCreated(true);
+      onComplete(onboardingDestination(setup.personalWorkspaceId, chosen));
     } catch (error) {
       toast.error("Couldn't set up the organization", {
         description: userErrorText(error),
@@ -287,47 +260,46 @@ export function OrganizationOnboardingPanel({
     }
   }
 
+  const account = (
+    <OnboardingAccountHeader
+      email={activeEmail}
+      onSignOut={onSignOut}
+      onUseAnotherAccount={onUseAnotherAccount}
+    />
+  );
   const frame = (content: ReactNode) => (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <OnboardingAccountHeader
-        email={activeEmail}
-        onSignOut={onSignOut}
-        onUseAnotherAccount={onUseAnotherAccount}
-      />
-      {content}
-    </div>
+    <OnboardingFrame account={account}>{content}</OnboardingFrame>
   );
 
   if (state === null && statusError) {
     return frame(
-      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
-        <div
-          role="alert"
-          className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
+      <div role="alert" className="contents">
+        <OnboardingStep
+          stepKey="status-error"
+          width="sm"
+          title="We couldn't load your account setup"
+          description={
+            <>
+              Your account is signed in, but checking its organization setup failed. This is usually
+              temporary. {userErrorTextWithoutReference(statusError.error)}
+            </>
+          }
         >
-          <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-status-failed/15 text-status-failed">
-            <CircleAlertIcon className="size-4" />
-          </span>
-          <h1 className="text-base font-semibold">We couldn't load your account setup</h1>
-          <p className="mt-2 text-sm leading-5 text-fg-subtle">
-            Your account is signed in, but checking its organization setup failed. This is usually
-            temporary. {userErrorTextWithoutReference(statusError.error)}
-          </p>
           {apiErrorTechnicalFacts(statusError.error).length > 0 ? (
-            <div className="mt-2">
+            <div className="-mt-3 mb-4">
               <TechnicalDetails facts={apiErrorTechnicalFacts(statusError.error)} />
             </div>
           ) : null}
           <Button
             type="button"
-            className="mt-4 w-full"
+            className="h-10 w-full"
             onClick={() => setStatusRequest((request) => request + 1)}
           >
             <RefreshCwIcon className="size-4" />
             Retry
           </Button>
-        </div>
-      </section>,
+        </OnboardingStep>
+      </div>,
     );
   }
 
@@ -345,192 +317,138 @@ export function OrganizationOnboardingPanel({
     const unavailable = invitationResolution === "unavailable";
     const focusedInvitation = invitationResolution === "matched" ? invitations[0] : null;
     return frame(
-      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6">
-          <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <MailIcon className="size-4" />
-          </span>
-          <h1 className="text-base font-semibold">
-            {focusedInvitation
-              ? `Join ${focusedInvitation.organizationName ?? "organization"}`
-              : wrongAccount
-                ? `This invitation is for ${invitation?.targetEmail}`
-                : unavailable
-                  ? "This invitation is no longer available"
-                  : "Invitation pending"}
-          </h1>
-          <p className="mt-2 text-sm leading-5 text-fg-subtle">
-            {focusedInvitation
-              ? "Accept this invitation to create your own Personal workspace in the organization."
-              : wrongAccount
-                ? `You're signed in as ${activeEmail}. Switch accounts to join ${invitation?.organizationName}.`
-                : unavailable
-                  ? `The invitation to ${invitation?.organizationName} may already have been accepted, expired, or revoked.`
-                  : "Choose the organization you want to join. Accepting creates your own Personal workspace there and never grants access to another person's personal content."}
+      <OnboardingStep
+        stepKey="invitation"
+        title={
+          focusedInvitation
+            ? `Join ${focusedInvitation.organizationName ?? "organization"}`
+            : wrongAccount
+              ? `This invitation is for ${invitation?.targetEmail}`
+              : unavailable
+                ? "This invitation is no longer available"
+                : "Invitation pending"
+        }
+        description={
+          focusedInvitation
+            ? "Accept this invitation to create your own Personal workspace in the organization."
+            : wrongAccount
+              ? `You're signed in as ${activeEmail}. Switch accounts to join ${invitation?.organizationName}.`
+              : unavailable
+                ? `The invitation to ${invitation?.organizationName} may already have been accepted, expired, or revoked.`
+                : "Choose the organization you want to join. Accepting creates your own Personal workspace there and never grants access to another person's personal content."
+        }
+      >
+        {invitationLoading ? (
+          <p className="flex items-center gap-2 text-sm text-fg-muted" role="status">
+            <Loader2Icon className="size-4 animate-spin" /> Loading invitations
           </p>
-          {invitationLoading ? (
-            <p className="mt-4 flex items-center gap-2 text-sm text-fg-muted">
-              <Loader2Icon className="size-4 animate-spin" /> Loading invitations
+        ) : invitationError ? (
+          <p role="alert" className="text-sm text-danger">
+            We couldn't update your invitations. {invitationError}
+          </p>
+        ) : wrongAccount ? (
+          <div className="grid gap-3">
+            <p className="text-sm text-fg-muted">
+              Use the account for {invitation?.targetEmail}. The invitation remains available while
+              you switch.
             </p>
-          ) : invitationError ? (
-            <p role="alert" className="mt-4 text-sm text-danger">
-              We couldn't update your invitations. {invitationError}
-            </p>
-          ) : wrongAccount ? (
-            <div className="mt-4 rounded-md border border-border bg-surface-subtle p-3">
-              <p className="text-sm text-fg-subtle">
-                Use the account for {invitation?.targetEmail}. The invitation remains available
-                while you switch.
-              </p>
-              {onUseInvitedAccount ? (
+            {onUseInvitedAccount ? (
+              <Button
+                type="button"
+                className="h-10 w-full"
+                onClick={() => {
+                  if (!invitation) return;
+                  storeContinuation(invitation);
+                  onUseInvitedAccount(invitation.targetEmail);
+                }}
+              >
+                Switch account
+              </Button>
+            ) : null}
+          </div>
+        ) : unavailable ? (
+          <p className="text-sm text-fg-muted">
+            Ask the organization administrator for a new invitation if you still need access.
+          </p>
+        ) : invitations.length === 0 ? (
+          <p className="text-sm text-fg-muted">
+            No pending invitation is available. Refresh the page or ask your administrator for a new
+            invitation.
+          </p>
+        ) : (
+          <ul className="-my-1 divide-y divide-border">
+            {invitations.map((listedInvitation) => (
+              <li
+                key={listedInvitation.id}
+                className="flex flex-wrap items-center justify-between gap-3 py-3"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-fg">
+                    {listedInvitation.organizationName ?? "Inviting organization"}
+                  </p>
+                  <p className="truncate text-xs text-fg-muted">
+                    {listedInvitation.targetEmail} · {listedInvitation.role}
+                  </p>
+                </div>
                 <Button
                   type="button"
                   size="sm"
-                  className="mt-3"
-                  onClick={() => {
-                    if (!invitation) return;
-                    storeContinuation(invitation);
-                    onUseInvitedAccount(invitation.targetEmail);
-                  }}
+                  variant={invitations.length === 1 ? "default" : "outline"}
+                  disabled={acceptingInvitationId !== null}
+                  onClick={() => void acceptInvitation(listedInvitation)}
                 >
-                  Switch account
+                  {acceptingInvitationId === listedInvitation.id ? (
+                    <Loader2Icon className="size-4 animate-spin" />
+                  ) : null}
+                  Join organization
                 </Button>
-              ) : null}
-            </div>
-          ) : unavailable ? (
-            <p className="mt-4 text-sm text-fg-muted">
-              Ask the organization administrator for a new invitation if you still need access.
-            </p>
-          ) : invitations.length === 0 ? (
-            <p className="mt-4 text-sm text-fg-muted">
-              No pending invitation is available. Refresh the page or ask your administrator for a
-              new invitation.
-            </p>
-          ) : (
-            <div className="mt-4 grid gap-2">
-              {invitations.map((listedInvitation) => (
-                <article
-                  key={listedInvitation.id}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">
-                      {listedInvitation.organizationName ?? "Inviting organization"}
-                    </p>
-                    <p className="text-xs text-fg-muted">
-                      {listedInvitation.targetEmail} · {listedInvitation.role}
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={acceptingInvitationId !== null}
-                    onClick={() => void acceptInvitation(listedInvitation)}
-                  >
-                    {acceptingInvitationId === listedInvitation.id ? (
-                      <Loader2Icon className="size-4 animate-spin" />
-                    ) : null}
-                    Join organization
-                  </Button>
-                </article>
-              ))}
-            </div>
-          )}
-        </div>
-      </section>,
-    );
-  }
-
-  if (createdSetup) {
-    const live =
-      liveModelAccess?.key === liveCheckKey &&
-      liveModelAccess.workspaceId === createdSetup.personalWorkspaceId
-        ? liveModelAccess
-        : null;
-    if (liveCheckKey && !live)
-      return frame(
-        <section className="flex flex-1 items-center justify-center" role="status">
-          <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
-          <span className="sr-only">Checking your models</span>
-        </section>,
-      );
-    const effectiveIncludedModel =
-      includedModel !== undefined ? includedModel : (live?.includedModel ?? null);
-    const effectiveStartingCredits =
-      startingCredits !== undefined ? startingCredits : (live?.startingCredits ?? null);
-    return frame(
-      <ModelAccessOnboardingPanel
-        client={client}
-        organizationId={createdSetup.organizationId}
-        organizationName={organizationName.trim() || undefined}
-        workspaceId={createdSetup.personalWorkspaceId}
-        billingMode={billingMode}
-        codexEnabled={codexEnabled}
-        supergrokEnabled={supergrokEnabled}
-        includedModel={effectiveIncludedModel}
-        startingCredits={effectiveStartingCredits}
-        onComplete={onComplete}
-      />,
+              </li>
+            ))}
+          </ul>
+        )}
+      </OnboardingStep>,
     );
   }
 
   if (state === "unavailable") {
     return frame(
-      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
-          <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <LockKeyholeIcon className="size-4" />
-          </span>
-          <h1 className="text-base font-semibold">Organization access unavailable</h1>
-          <p className="mt-2 text-sm leading-5 text-fg-subtle">
-            Your previous organization access is no longer active. Ask an organization administrator
-            for a new invitation before continuing.
-          </p>
-        </div>
-      </section>,
+      <OnboardingStep
+        stepKey="unavailable"
+        width="sm"
+        title="Organization access unavailable"
+        description="Your previous organization access is no longer active. Ask an organization administrator for a new invitation before continuing."
+      >
+        {null}
+      </OnboardingStep>,
     );
   }
 
+  if (created)
+    return frame(
+      <section className="flex flex-1 items-center justify-center" role="status">
+        <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
+        <span className="sr-only">Opening Opengeni</span>
+      </section>,
+    );
+
   return frame(
-    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
-      <form
-        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
+    <OnboardingStep
+      stepKey="organization"
+      title="What do you want to use Opengeni for?"
+      description="We'll set up the rest around your answer. You can do both later."
+    >
+      <UseQuestion
+        initialUse={use}
+        organizationName={organizationName}
+        onOrganizationNameChange={setOrganizationName}
+        busy={busy}
+        onChoose={(chosen, { submit }) => {
+          setUse(chosen);
+          if (submit) void createOrganization(chosen);
         }}
-      >
-        <div className="mb-4 flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <Building2Icon className="size-4" />
-          </span>
-          <div>
-            <h1 className="text-base font-semibold">Create your organization</h1>
-            <p className="text-sm text-fg-subtle">This is the company or team you work with.</p>
-          </div>
-        </div>
-        <Label htmlFor="organization-onboarding-name">Organization name</Label>
-        <Input
-          id="organization-onboarding-name"
-          value={organizationName}
-          onChange={(event) => setOrganizationName(event.target.value)}
-          autoComplete="organization"
-          className="mt-2"
-          autoFocus
-        />
-        <p className="mt-2 text-xs leading-4 text-fg-muted">
-          You can create shared workspaces later from Organization settings.
-        </p>
-        <Button type="submit" className="mt-4 w-full" disabled={busy}>
-          {busy ? (
-            <Loader2Icon className="size-4 animate-spin" />
-          ) : (
-            <CheckIcon className="size-4" />
-          )}
-          Create organization
-        </Button>
-      </form>
-    </section>,
+        onSkip={() => void createOrganization(null)}
+      />
+    </OnboardingStep>,
   );
 }
 
@@ -547,14 +465,15 @@ export function OnboardingAccountHeader({
   const [signingOut, setSigningOut] = useState(false);
   if (!email && !onSignOut && !onUseAnotherAccount) return null;
   return (
-    <header className="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1 px-4 pt-3 text-xs text-fg-muted">
+    <div className="flex min-w-0 flex-1 items-center justify-end gap-x-1 text-xs text-fg-muted">
       {email ? (
         <span className="min-w-0 truncate">
-          Signed in as <span className="font-medium text-fg">{email}</span>
+          <span className="max-[480px]:sr-only">Signed in as </span>
+          <span className="font-medium text-fg">{email}</span>
         </span>
       ) : null}
       {onUseAnotherAccount ? (
-        <Button type="button" variant="ghost" size="sm" onClick={onUseAnotherAccount}>
+        <Button type="button" variant="ghost" size="xs" onClick={onUseAnotherAccount}>
           Use another account
         </Button>
       ) : null}
@@ -562,7 +481,8 @@ export function OnboardingAccountHeader({
         <Button
           type="button"
           variant="ghost"
-          size="sm"
+          size="xs"
+          className="text-fg-muted pointer-coarse:h-11"
           disabled={signingOut}
           onClick={() => {
             setSigningOut(true);
@@ -581,10 +501,12 @@ export function OnboardingAccountHeader({
           ) : (
             <LogOutIcon className="size-3.5" />
           )}
-          {onUseAnotherAccount ? "Sign out" : "Sign out or use another account"}
+          <span className="max-[480px]:sr-only">
+            {onUseAnotherAccount ? "Sign out" : "Sign out or use another account"}
+          </span>
         </Button>
       ) : null}
-    </header>
+    </div>
   );
 }
 

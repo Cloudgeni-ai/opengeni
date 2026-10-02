@@ -25,6 +25,7 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import type { BrowserAccountTransition } from "@opengeni/react/accounts";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
+import type { OnboardingCompletion } from "@/lib/onboarding-paths";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, LockIcon } from "lucide-react";
 import {
@@ -175,6 +176,11 @@ const AnalyticsManager = lazy(() =>
   })),
 );
 
+const OnboardingRestart = lazy(() =>
+  import("@/components/onboarding/setup-resume").then((module) => ({
+    default: module.OnboardingRestart,
+  })),
+);
 const OrganizationOnboardingPanel = lazy(() =>
   import("@/components/organization-onboarding-panel").then((module) => ({
     default: module.OrganizationOnboardingPanel,
@@ -567,6 +573,12 @@ function createSessionEventFeedStore(): SessionEventFeedStore {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+/**
+ * Development harnesses only (`/dev/onboarding`): renders app pages over
+ * fixture data. Production code reads the context through useAppContext.
+ */
+export const AppContextFixtureProvider = AppContext.Provider;
+
 /** Stable event identity that dispatches only to the latest committed body. */
 export function useLatestCallback<Args extends unknown[], Result>(
   callback: (...args: Args) => Result,
@@ -762,6 +774,13 @@ export function RootRouteComponent() {
     select: (state) => Object.keys(state.location.search).length > 0,
   });
   const analyticsSearch = useRouterState({ select: (state) => state.location.searchStr });
+  // Development only: `?onboarding=restart` replays first run in this
+  // organization, from its first question.
+  const onboardingRestart = useRouterState({
+    select: (state) =>
+      import.meta.env.DEV &&
+      (state.location.search as Record<string, unknown>).onboarding === "restart",
+  });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
@@ -2504,6 +2523,16 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
+  // First-run setup ends by opening the app on the chosen path's page. The
+  // gate keeps rendering until the reloaded access names a workspace, so the
+  // destination is in place before the route mounts.
+  const completeOrganizationOnboarding = useCallback(
+    (next?: OnboardingCompletion) => {
+      if (next) void navigate({ href: next.to, replace: true });
+      revalidatePrincipalAccess();
+    },
+    [navigate, revalidatePrincipalAccess],
+  );
   async function refreshPrincipalAccess(): Promise<boolean> {
     if (!clientConfig || !authReady) return false;
     let acceptedPrincipal = principalTransitionIdentity.current;
@@ -2902,27 +2931,19 @@ export function RootRouteComponent() {
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
-        billingMode={clientConfig.billingMode ?? "disabled"}
-        codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
-        supergrokEnabled={clientConfig.models.some(
-          (catalogModel) => catalogModel.source === "supergrok",
-        )}
-        modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
+        activeName={authSession?.user.name ?? null}
+        subjectId={accessContext.subjectId}
         invitation={organizationInvitationContinuation}
-        onComplete={revalidatePrincipalAccess}
+        onComplete={completeOrganizationOnboarding}
       />
     ) : (
       <Suspense fallback={<LoadingPanel />}>
         <OrganizationOnboardingPanel
           client={client}
-          billingMode={clientConfig.billingMode ?? "disabled"}
-          codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
-          supergrokEnabled={clientConfig.models.some(
-            (catalogModel) => catalogModel.source === "supergrok",
-          )}
-          modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
+          activeName={authSession?.user.name ?? null}
+          subjectId={accessContext.subjectId}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
@@ -2930,7 +2951,7 @@ export function RootRouteComponent() {
             );
           }}
           onSignOut={handleManagedSignOut}
-          onComplete={revalidatePrincipalAccess}
+          onComplete={completeOrganizationOnboarding}
         />
       </Suspense>
     )
@@ -2941,6 +2962,14 @@ export function RootRouteComponent() {
       title="No workspace access"
       description="You don't have access to any workspace yet."
     />
+  ) : onboardingRestart && managedAuthRequired ? (
+    <Suspense fallback={<LoadingPanel />}>
+      <OnboardingRestart
+        appContext={appContext}
+        pathname={pathname}
+        onDone={(next) => void navigate({ href: next.to, replace: true })}
+      />
+    </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />

@@ -236,8 +236,8 @@ opacity-muted text.
 - Account menu (opens up from the footer, 16rem): name and email header; Invitations with a count
   only while some are pending; New organization only for people who can create one; then
   Appearance (a submenu: Light, Dark, System, the chosen one checked) and Help & feedback (a
-  submenu: Documentation when the deployment publishes a link, Send feedback when the person may
-  send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
+  submenu: Get started inside a workspace, Documentation when the deployment publishes a link,
+  Send feedback when the person may send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
   settings or Privacy preferences: both live in Settings > Your account (Privacy preferences only
   where analytics consent is configured). Deployments with browser accounts keep the same footer
   and put their account list and "Add another account" first in the same menu.
@@ -533,6 +533,28 @@ Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 `FlushFormPage` (or `FLUSH_FORM_PAGE_CLASS`) for `FormPage`, and the flush `AccessList`, so the
 back link, title and rows start where the section header does. Page actions use `RowButton` and
 `MoreMenu` from `components/ui/page-actions.tsx`.
+
+**First run.** No model question opens it. The first screen asks "What do you want to use
+Opengeni for?" (agents in my product, or agents for my own work), with the organization's
+suggested name folded in as one quiet line ("We'll set up Ada's organization for you. Rename"), so
+naming it is never a step of its own; answering or Skip creates it. A product then asks whether one
+exists: exploring asks nothing more, having one asks for its website, an optional GitHub repository
+(the deployment's own connect flow, or a plain line when GitHub isn't set up) and what the agent
+should do. Every path, Skip included, ends on one ready moment (`/workspaces/:id/first-agent?step=ready`):
+confetti and the real trial balance ("You got $10.00 in free credits"), never an invented amount.
+With the trial grant there is no model choice anywhere in first run: GPT-6 Luna at extra high
+reasoning is preselected, and subscriptions and keys stay in settings and the model picker. Only
+without a grant and without a model that runs does the model step appear first, so nobody is
+stuck. From the ready moment a product's composed prompt starts a building chat at once (its own
+coding agent is the quiet alternative), other paths pick a first task that starts at once, and "Go
+to Opengeni" lands in a ready composer holding what was entered. Answers are kept as they are
+typed. Each first-run step is a card on the signed-out page's glow. In the app, Get started is a
+page (one section per step, each with its one action) and a card on the new-chat page that stands
+in for the starter suggestions until it is hidden (Undo; Help & feedback reopens it); its first
+step links back to the first question. The playground is optional and, like first run, has no
+rail. Its chat is a recorded demo (the real timeline replaying a script, picked from suggested
+questions and labelled as a recording), so it needs no model and creates no session. Its coach
+marks are popover-styled, fade in, and never cover what they point at.
 
 **Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New

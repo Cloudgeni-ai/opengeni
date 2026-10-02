@@ -4,7 +4,6 @@ import {
   useBrowserAccounts,
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
-import type { ClientModel } from "@opengeni/sdk";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Loader2Icon, UserRoundPlusIcon } from "lucide-react";
@@ -19,6 +18,7 @@ import {
 } from "@/api";
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import type { OnboardingCompletion } from "@/lib/onboarding-paths";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { userErrorText } from "@/lib/api-error";
@@ -308,13 +308,11 @@ export function BrowserAccountsSignedOutPanel(props: {
 
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
   client: OpenGeniBrowserClient;
-  billingMode?: "disabled" | "stripe";
-  codexEnabled?: boolean;
-  supergrokEnabled?: boolean;
-  modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
+  activeName?: string | null;
+  subjectId?: string | null;
   invitation: OrganizationInvitationContinuation | null;
-  onComplete: () => void;
+  onComplete: (next?: OnboardingCompletion) => void;
 }) {
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
@@ -360,11 +358,9 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
   return (
     <OrganizationOnboardingPanel
       client={props.client}
-      billingMode={props.billingMode}
-      codexEnabled={props.codexEnabled}
-      supergrokEnabled={props.supergrokEnabled}
-      modelDefaults={props.modelDefaults ?? null}
       activeEmail={props.activeEmail}
+      activeName={props.activeName ?? null}
+      subjectId={props.subjectId ?? null}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}
       onUseAnotherAccount={() => authenticate("add")}

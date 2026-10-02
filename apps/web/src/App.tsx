@@ -18,6 +18,9 @@
 //   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
 //   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
 //   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
+//   /workspaces/:id/get-started              → Get started checklist for the chosen first-run path (?step)
+//   /workspaces/:id/playground               → playground: Opengeni inside a sample product, with a guided tour
+//   /workspaces/:id/first-agent              → first run in the app: a product's questions, then the ready moment
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
@@ -38,6 +41,7 @@ import {
   createRouter,
   lazyRouteComponent,
   useParams,
+  useRouterState,
   useSearch,
 } from "@tanstack/react-router";
 import { ProblemPanel } from "@/components/common";
@@ -123,10 +127,11 @@ const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
 );
-const LazyOnboardingPreviewRoute = lazyRouteComponent(
-  () => import("@/routes/onboarding-preview"),
-  "OnboardingPreviewRoute",
-);
+// DEV-only harness: never emitted into a production build (it renders the
+// playground and Get started over fixtures).
+const LazyOnboardingPreviewRoute = import.meta.env.DEV
+  ? lazyRouteComponent(() => import("@/routes/onboarding-preview"), "OnboardingPreviewRoute")
+  : () => null;
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
@@ -142,6 +147,18 @@ const LazyScheduleFormRoute = lazyRouteComponent(
   "ScheduleFormRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazyGetStartedRoute = lazyRouteComponent(
+  () => import("@/routes/first-run-pages"),
+  "GetStartedRoute",
+);
+const LazyPlaygroundRoute = lazyRouteComponent(
+  () => import("@/routes/first-run-pages"),
+  "PlaygroundRoute",
+);
+const LazyFirstAgentRoute = lazyRouteComponent(
+  () => import("@/routes/first-run-pages"),
+  "FirstAgentRoute",
+);
 const LazySessionDeepLinkRoute = lazyRouteComponent(
   () => import("@/routes/session-deep-link"),
   "SessionDeepLinkRoute",
@@ -457,6 +474,39 @@ const workspaceScheduleEditRoute = createRoute({
   path: "schedules/$scheduleId/edit",
   component: ScheduleEdit,
 });
+const GET_STARTED_STEPS = new Set([
+  "path",
+  "model",
+  "github",
+  "first-task",
+  "playground",
+  "product",
+  "coding-agent",
+]);
+const workspaceGetStartedRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "get-started",
+  validateSearch: (search: Record<string, unknown>): { step?: string } =>
+    typeof search.step === "string" && GET_STARTED_STEPS.has(search.step)
+      ? { step: search.step }
+      : {},
+  component: GetStarted,
+});
+const workspacePlaygroundRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "playground",
+  component: Playground,
+});
+const FIRST_AGENT_ROUTE_STEPS = new Set(["product", "details", "ready", "own-agent"]);
+const workspaceFirstAgentRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "first-agent",
+  validateSearch: (search: Record<string, unknown>): { step?: string } =>
+    typeof search.step === "string" && FIRST_AGENT_ROUTE_STEPS.has(search.step)
+      ? { step: search.step }
+      : {},
+  component: FirstAgent,
+});
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
@@ -657,6 +707,9 @@ const routeTree = rootRoute.addChildren([
     workspaceScheduleNewRoute,
     workspaceScheduleDetailRoute,
     workspaceScheduleEditRoute,
+    workspaceGetStartedRoute,
+    workspacePlaygroundRoute,
+    workspaceFirstAgentRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
@@ -709,6 +762,9 @@ export function App() {
 function RootIndexRoute() {
   const context = useAppContext();
   const { workspaceId: requestedWorkspaceId } = indexRoute.useSearch();
+  // While a navigation away from "/" resolves, this route still renders; its
+  // redirect would override where the person is going.
+  const leaving = useRouterState({ select: (state) => state.location.pathname !== "/" });
   const workspaceId = resolveLandingWorkspaceId({
     requestedWorkspaceId,
     rememberedWorkspaceId: readLastWorkspaceId(
@@ -717,6 +773,7 @@ function RootIndexRoute() {
     workspaces: context.workspaces,
     accessContext: context.accessContext,
   });
+  if (leaving) return null;
   if (!workspaceId) {
     return (
       <ProblemPanel
@@ -838,6 +895,28 @@ function ScheduleNew() {
       mode={{ kind: "create", template, from, sourceSessionId }}
     />
   );
+}
+
+function GetStarted() {
+  const { workspaceId } = workspaceGetStartedRoute.useParams();
+  const { step } = workspaceGetStartedRoute.useSearch();
+  return <LazyGetStartedRoute key={workspaceId} workspaceId={workspaceId} step={step ?? null} />;
+}
+
+function FirstAgent() {
+  const { workspaceId } = workspaceFirstAgentRoute.useParams();
+  const { step } = workspaceFirstAgentRoute.useSearch();
+  return (
+    <LazyFirstAgentRoute
+      workspaceId={workspaceId}
+      step={(step ?? "use") as "use" | "product" | "details" | "ready" | "own-agent"}
+    />
+  );
+}
+
+function Playground() {
+  const { workspaceId } = workspacePlaygroundRoute.useParams();
+  return <LazyPlaygroundRoute key={workspaceId} workspaceId={workspaceId} />;
 }
 
 function ScheduleDetail() {
