@@ -478,11 +478,15 @@ export function sessionEffectiveToolProjectionInput(
         "browser_screenshot",
         "browser_clipboard",
         "browser_debug",
+        "browser_downloads",
         "computer_targets",
         "computer_observe",
         "computer_clipboard",
       ].includes(name);
-      if (permissionAllowed(readOnly ? "sessions:read" : "sessions:control")) {
+      if (
+        permissionAllowed(readOnly ? "sessions:read" : "sessions:control") &&
+        (name !== "browser_download_save" || permissionAllowed("files:upload"))
+      ) {
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (
           !firstPartyMcpTools.includes(name) &&
