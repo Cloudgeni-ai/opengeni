@@ -5,7 +5,6 @@
  * their shared code in one place instead of re-bucketing it into the
  * direct-session graph.
  */
-export { GetStartedCard } from "@/components/onboarding/get-started-card";
 export { FirstAgentRoute } from "@/routes/first-agent";
 export { GetStartedRoute } from "@/routes/get-started";
 export { PlaygroundRoute } from "@/routes/playground";

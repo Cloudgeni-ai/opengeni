@@ -242,7 +242,6 @@ mock.module("sonner", () => ({
   ),
 }));
 
-const { GetStartedCard } = await import("./get-started-card");
 const { GetStartedRoute } = await import("@/routes/get-started");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const journeys = await import("@/lib/onboarding-journey");
@@ -325,77 +324,6 @@ function button(container: HTMLElement, text: string): HTMLButtonElement {
   if (!found) throw new Error(`Missing button ${text}`);
   return found;
 }
-
-describe("Get started card", () => {
-  test("shows nothing without a journey", async () => {
-    const { container, unmount } = await mount(
-      <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
-    );
-    try {
-      expect(container.textContent).toBe("");
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("lists the path's steps with truthful progress, and first tasks fill the composer", async () => {
-    journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["explore"] }));
-    const onPrefill = mock((_text: string) => undefined);
-    const { container, unmount } = await mount(
-      <GetStartedCard workspaceId={PERSONAL} onPrefill={onPrefill} />,
-    );
-    try {
-      expect(container.querySelector("h2")!.textContent).toBe("Get started");
-      // Path chosen; no usable model; no chat yet.
-      expect(container.textContent).toContain("1 of 5 done");
-      expect(container.textContent).toContain("Add credits or connect a model");
-      await act(async () => button(container, "Run your first task").click());
-      expect(button(container, "Run your first task").getAttribute("aria-expanded")).toBe("true");
-      await act(async () => button(container, "Research a decision").click());
-      const research = FIRST_TASKS.find((task) => task.id === "research")!;
-      expect(onPrefill).toHaveBeenCalledWith(research.kind === "prompt" ? research.prompt : "");
-      await act(async () => button(container, "Run your first task").click());
-      await act(async () => button(container, "Weekday morning brief").click());
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/workspaces/$workspaceId/schedules/new",
-        params: { workspaceId: PERSONAL },
-        search: { template: "morning-brief" },
-      });
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("Hide removes it everywhere until Undo, and says where to find it", async () => {
-    journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["cloud"] }));
-    const { container, unmount } = await mount(
-      <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
-    );
-    try {
-      await act(async () => button(container, "Hide Get started").click());
-      expect(container.querySelector("[data-get-started-card]")).toBeNull();
-      expect(journeys.readOnboardingJourney(KEY)!.checklistDismissed).toBe(true);
-      expect(toastCalls.at(-1)!.title).toBe("Get started is hidden");
-      await act(async () => toastCalls.at(-1)!.action!.onClick());
-      expect(container.querySelector("[data-get-started-card]")).not.toBeNull();
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("an invited member is welcomed to the organization without a path question", async () => {
-    journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ invited: true }));
-    const { container, unmount } = await mount(
-      <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
-    );
-    try {
-      expect(container.querySelector("h2")!.textContent).toBe("Welcome to Acme Robotics");
-      expect(container.textContent).not.toContain("Pick what you want to do");
-    } finally {
-      await unmount();
-    }
-  });
-});
 
 describe("Get started page", () => {
   test("without an answer, it sends you to Build your first agent", async () => {
@@ -559,17 +487,9 @@ describe("Models in Get started", () => {
     billingMode = "stripe";
     context.clientConfig = clientConfig();
     journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["cloud"] }));
-    const card = await mount(<GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />);
-    try {
-      const row = card.container.querySelector<HTMLAnchorElement>('[data-item="model"] a');
-      expect(row?.textContent).toContain("Add credits or connect a model");
-      expect(row?.getAttribute("href")).toBe(`/workspaces/${PERSONAL}/get-started`);
-      expect(card.container.querySelector('[data-item="credits"]')).toBeNull();
-    } finally {
-      await card.unmount();
-    }
     const page = await mount(<GetStartedRoute workspaceId={PERSONAL} step="model" />);
     try {
+      expect(page.container.textContent).toContain("Add credits or connect a model");
       await act(async () => button(page.container, "Buy $25 in credits").click());
       await flush();
       expect(createBillingCheckout).toHaveBeenCalledTimes(1);
@@ -580,31 +500,17 @@ describe("Models in Get started", () => {
     }
   });
 
-  test("no model item once credits (the trial grant or bought) or a model pay for chats", async () => {
-    journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["build"] }));
+  test("no model item once credits (the trial grant or bought) pay for chats", async () => {
+    journeys.writeOnboardingJourney(KEY, journeys.newOnboardingJourney({ intents: ["cloud"] }));
     billingMode = "stripe";
     balanceMicros = 10_000_000;
     context.clientConfig = clientConfig();
-    const credits = await mount(
-      <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
-    );
+    const page = await mount(<GetStartedRoute workspaceId={PERSONAL} step={null} />);
     try {
       await flush();
-      expect(credits.container.querySelector('[data-item="model"]')).toBeNull();
-      expect(credits.container.textContent).not.toContain("model");
+      expect(page.container.textContent).not.toContain("Add credits or connect a model");
     } finally {
-      await credits.unmount();
-    }
-    balanceMicros = 0;
-    modelReady = true;
-    context.clientConfig = clientConfig();
-    const ready = await mount(
-      <GetStartedCard workspaceId={PERSONAL} onPrefill={() => undefined} />,
-    );
-    try {
-      expect(ready.container.querySelector('[data-item="model"]')).toBeNull();
-    } finally {
-      await ready.unmount();
+      await page.unmount();
     }
   });
 });

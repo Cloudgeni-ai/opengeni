@@ -20,21 +20,7 @@ export async function loadRailFooterMenuHarness() {
   let pendingInvitations = 0;
 
   mock.module("@tanstack/react-router", () => ({
-    // Forwards the ref and handlers so a menu item rendered as a Link can take focus.
-    Link: ({
-      children,
-      to: _to,
-      params: _params,
-      search: _search,
-      ...rest
-    }: { children: ReactNode; to?: unknown; params?: unknown; search?: unknown } & Record<
-      string,
-      unknown
-    >) => (
-      <a href="#settings" {...rest}>
-        {children}
-      </a>
-    ),
+    Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
   }));
 
   mock.module("@/components/rail/rail-context", () => ({

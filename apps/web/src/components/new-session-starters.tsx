@@ -1,4 +1,5 @@
-import { Clock3, PanelsTopLeft, Search } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
 import slackLogo from "../../../../data/catalog/logos/slack-com-5a15dccc0dc0.jpg?url";
 import linearLogo from "../../../../data/catalog/logos/linear-app-4b4a9f349c60.png?url";
 import { Button } from "@/components/ui/button";
@@ -49,12 +50,25 @@ export const NEW_SESSION_STARTERS = [
   },
 ] as const;
 
+/** The recorded playground demo, offered with the starters in a workspace. */
+export const PLAYGROUND_STARTER = {
+  id: "playground",
+  title: "See a demo of an agent in a product",
+  description: "A recorded agent inside a sample app.",
+} as const;
+
+const STARTER_CLASS =
+  "h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer";
+
 export function NewSessionStarters({
   onSelect,
   disabled = false,
+  workspaceId,
 }: {
   onSelect: (prompt: string) => void;
   disabled?: boolean;
+  /** Adds the playground demo, which opens the workspace's playground. */
+  workspaceId?: string;
 }) {
   return (
     <section className="mt-8" aria-label="Starter suggestions">
@@ -73,7 +87,7 @@ export function NewSessionStarters({
               type="button"
               variant="outline"
               disabled={disabled}
-              className="h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer"
+              className={STARTER_CLASS}
               onClick={() => onSelect(starter.prompt)}
             >
               {logo ? (
@@ -97,6 +111,23 @@ export function NewSessionStarters({
             </Button>
           );
         })}
+        {workspaceId ? (
+          <Button asChild variant="outline" className={STARTER_CLASS}>
+            <Link
+              to="/workspaces/$workspaceId/playground"
+              params={{ workspaceId }}
+              data-starter={PLAYGROUND_STARTER.id}
+            >
+              <PlayCircleIcon aria-hidden="true" className="size-5 text-fg-subtle" />
+              <span className="min-w-0">
+                <span className="block text-sm">{PLAYGROUND_STARTER.title}</span>
+                <span className="mt-1 block text-xs font-normal text-fg-muted">
+                  {PLAYGROUND_STARTER.description}
+                </span>
+              </span>
+            </Link>
+          </Button>
+        ) : null}
       </div>
     </section>
   );

@@ -61,6 +61,10 @@ const LazyOrganizationModelsSection = lazy(async () => {
   const module = await import("@/components/models/organization-models-section");
   return { default: module.OrganizationModelsSection };
 });
+const LazyUseOwnCodingAgentSection = lazy(async () => {
+  const module = await import("@/components/onboarding/coding-agent-section");
+  return { default: module.UseOwnCodingAgentSection };
+});
 const LazyOrganizationApiKeysSection = lazy(async () => {
   const module = await import("@/components/organization-api-keys-section");
   return { default: module.OrganizationApiKeysSection };
@@ -405,6 +409,15 @@ export function OrgSettingsRoute({
                 }
               />
             </Suspense>
+            {organizationView !== "new-key" && canManageOrganizationApiKeys && accountId ? (
+              <Suspense fallback={<Skeleton className="h-32 w-full rounded-lg" />}>
+                <LazyUseOwnCodingAgentSection
+                  key={`${identityKey}:coding-agent`}
+                  organizationId={accountId}
+                  canCreateApiKeys
+                />
+              </Suspense>
+            ) : null}
             {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (
               <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
                 <OrganizationDeveloperIntegrations

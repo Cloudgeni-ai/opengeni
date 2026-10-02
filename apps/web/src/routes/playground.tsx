@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { MoreMenu } from "@/components/ui/page-actions";
 import { useAppContext } from "@/context";
-import { analyticsAction } from "@/lib/analytics-actions";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { markOnboarding, onboardingJourneyStorageKey } from "@/lib/onboarding-journey";
 import { cn } from "@/lib/utils";
@@ -334,10 +333,9 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
       >
         <Button asChild type="button" size="xs" onClick={() => finish("finish")}>
           <Link
-            to="/workspaces/$workspaceId/get-started"
+            to="/workspaces/$workspaceId/organization"
             params={{ workspaceId: sharedTarget ?? workspaceId }}
-            search={{ step: "product" }}
-            {...analyticsAction("open_get_started")}
+            search={{ section: "developer" } as never}
           >
             Add it to your product
           </Link>
@@ -357,12 +355,12 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
       <header className="flex h-14 shrink-0 items-center gap-1.5 border-b border-border bg-bg px-2 sm:gap-2 sm:px-4">
         <Button asChild variant="ghost" size="sm" className="shrink-0 px-2">
           <Link
-            to="/workspaces/$workspaceId/get-started"
+            to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId }}
-            aria-label="Back to Get started"
+            aria-label="Back to new session"
           >
             <ArrowLeftIcon aria-hidden="true" />
-            <span className="hidden sm:inline">Get started</span>
+            <span className="hidden sm:inline">New session</span>
           </Link>
         </Button>
         <span aria-hidden="true" className="hidden h-5 w-px bg-border sm:block" />

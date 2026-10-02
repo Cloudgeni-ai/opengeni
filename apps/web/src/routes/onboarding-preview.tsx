@@ -13,7 +13,7 @@ import {
 import { createContext, lazy, Suspense, useContext, useState, type ReactNode } from "react";
 
 import { NewSessionStarters } from "@/components/new-session-starters";
-import { GetStartedCard } from "@/components/onboarding/get-started-card";
+import { UseOwnCodingAgentSection } from "@/components/onboarding/coding-agent-section";
 import { OnboardingFrame } from "@/components/onboarding/onboarding-frame";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -681,10 +681,10 @@ function AppFixture({ children }: { children: (workspaceId: string) => ReactNode
 
 /**
  * The new-chat page's column as the real page draws it: the composer (static
- * here, with the model new chats start on), the starter suggestions, then the
- * Get started card.
+ * here, with the model new chats start on), then the starter suggestions with
+ * the playground demo.
  */
-function ChecklistPreview() {
+function NewChatPreview() {
   const params = usePreviewParams();
   const noModel = params.get("model") === "none" && params.get("credits") !== "trial";
   return (
@@ -696,8 +696,25 @@ function ChecklistPreview() {
               What should the agent do?
             </h1>
             <StaticComposer model={noModel ? null : "GPT-6 Luna"} />
-            <NewSessionStarters onSelect={() => undefined} />
-            <GetStartedCard workspaceId={workspaceId} onPrefill={() => undefined} />
+            <NewSessionStarters workspaceId={workspaceId} onSelect={() => undefined} />
+          </div>
+        </main>
+      )}
+    </AppFixture>
+  );
+}
+
+/** Organization settings > Developer's "Use your own coding agent", over fixtures. */
+function DeveloperPreview() {
+  return (
+    <AppFixture>
+      {() => (
+        <main className="min-h-dvh overflow-y-auto bg-canvas">
+          <div className="mx-auto max-w-[960px] px-4 pt-10 pb-16 min-[721px]:px-10">
+            <h1 className="text-xl leading-7 font-semibold tracking-[-0.5px] text-fg">Developer</h1>
+            <div className="mt-8">
+              <UseOwnCodingAgentSection organizationId={FIXTURE_ORG} canCreateApiKeys />
+            </div>
           </div>
         </main>
       )}
@@ -765,7 +782,7 @@ const PREVIEW_GROUPS: ReadonlyArray<{
   {
     title: "First run in the app",
     views: [
-      ["The first question again (replay, Get started)", "view=first-agent&path=build&step=use"],
+      ["The first question again (replay)", "view=first-agent&path=build&step=use"],
       ["Do you already have a product?", "view=first-agent&path=build&use=product&step=product"],
       [
         "Tell us about your product (nothing entered, GitHub to connect)",
@@ -812,31 +829,21 @@ const PREVIEW_GROUPS: ReadonlyArray<{
     ],
   },
   {
-    title: "Get started checklist (new-chat page)",
+    title: "In the app",
     views: [
-      ["Just look around", "view=checklist&path=explore"],
-      ["Just look around, no model yet", "view=checklist&path=explore&model=none"],
-      ["Build", "view=checklist&path=build"],
-      ["Run in the cloud", "view=checklist&path=cloud&github=on"],
-      ["Build and run in the cloud", "view=checklist&path=both&github=on"],
-      ["Invited member welcome", "view=checklist&path=invited&model=none"],
-    ],
-  },
-  {
-    title: "Get started page",
-    views: [
-      ["Nothing answered yet", "view=get-started&journey=none"],
-      ["Build", "view=get-started&path=build"],
-      ["Build and run in the cloud", "view=get-started&path=both&github=on"],
-      ["Add an agent to your product", "view=get-started&path=build&step=product"],
-      ["Your app's first chat arrived", "view=get-started&path=build&step=product&appChat=1"],
-      ["Coding agent (cloud)", "view=get-started&path=cloud&mcp=oauth&step=coding-agent"],
       [
-        "Run in the cloud, no model, GitHub available",
-        "view=get-started&path=cloud&github=on&model=none",
+        "New chat: composer on Luna, suggestions and the demo",
+        "view=new-chat&path=cloud&credits=trial",
       ],
-      ["First task picker", "view=get-started&path=cloud&step=first-task"],
-      ["Invited member", "view=get-started&path=invited&role=member"],
+      ["New chat with nothing paying for models", "view=new-chat&path=cloud&model=none"],
+      [
+        "Developer settings: Use your own coding agent",
+        "view=developer&path=build&use=product&product=have&fill=1",
+      ],
+      [
+        "The same, the product's first request arrived",
+        "view=developer&path=build&use=product&product=have&fill=1&appChat=1",
+      ],
     ],
   },
   {
@@ -989,7 +996,8 @@ function PreviewView({ view }: { view: string }) {
       </AppFixture>
     );
   }
-  if (view === "checklist") return <ChecklistPreview />;
+  if (view === "new-chat") return <NewChatPreview />;
+  if (view === "developer") return <DeveloperPreview />;
   if (view === "get-started")
     return (
       <AppFixture>

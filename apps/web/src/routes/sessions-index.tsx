@@ -72,7 +72,6 @@ import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { NewSessionStarters } from "@/components/new-session-starters";
-import { useGetStartedCardVisible } from "@/lib/get-started-visibility";
 import { takeComposerPrefill, takeComposerSend } from "@/lib/composer-prefill";
 import { NewSessionDraftSyncNotice } from "@/components/new-session-draft-sync-notice";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
@@ -214,11 +213,6 @@ const CreditTopupPrompt = lazy(() =>
   import("@/components/credit-required-prompt").then((module) => ({
     default: module.CreditRequiredPrompt,
   })),
-);
-
-// The Get started card shows only during a first-run journey; load it then.
-const LazyGetStartedCard = lazy(() =>
-  import("@/routes/first-run-pages").then((module) => ({ default: module.GetStartedCard })),
 );
 
 export function SessionsIndexRoute({
@@ -1021,7 +1015,6 @@ function SessionsIndexRouteContent({
     // GitHub remains optional and must not keep the composer unsendable.
     resourceHydrationReady: context.workspaceMcpCatalogReady && tenancyCapabilities !== null,
   });
-  const getStartedVisible = useGetStartedCardVisible(workspaceId);
   // A first task picked on Get started arrives here to be confirmed with Send.
   // Take it only after the saved draft has loaded, so the draft can't replace it.
   const prefillComposer = useLatestCallback((text: string) => {
@@ -2002,20 +1995,14 @@ function SessionsIndexRouteContent({
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
-        {/* The starters are where a first chat is picked; the Get started
-            checklist sits under them during first run, until it is hidden. */}
         <NewSessionStarters
+          workspaceId={workspaceId}
           disabled={busy || newSessionDraft.loading}
           onSelect={(prompt) => {
             setMessage(prompt);
             composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
           }}
         />
-        {getStartedVisible ? (
-          <Suspense fallback={null}>
-            <LazyGetStartedCard workspaceId={workspaceId} onPrefill={prefillComposer} />
-          </Suspense>
-        ) : null}
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}

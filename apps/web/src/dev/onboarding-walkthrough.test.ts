@@ -42,7 +42,15 @@ describe("onboarding walkthrough", () => {
     for (const path of ["product-opengeni", "work", "skip"] as const)
       expect(ids(path)).not.toContain("model-step");
     // An invited member skips the first question.
-    expect(ids("invited")).toEqual(expect.arrayContaining(["invitation", "welcome"]));
+    expect(ids("invited")).toEqual(expect.arrayContaining(["invitation", "new-chat"]));
+    // No Get started screens; the own coding agent waits in developer settings.
+    for (const path of PATHS) {
+      expect(ids(path).some((id) => id.includes("get-started") || id === "checklist")).toBe(false);
+      expect(ids(path)).toContain("new-chat");
+    }
+    expect(ids("product-opengeni")).toEqual(
+      expect.arrayContaining(["playground", "developer", "developer-worked"]),
+    );
     expect(ids("invited")).not.toContain("use");
     for (const path of PATHS) {
       const screens = walkthroughScreens(path);

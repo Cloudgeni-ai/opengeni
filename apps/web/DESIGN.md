@@ -236,8 +236,8 @@ opacity-muted text.
 - Account menu (opens up from the footer, 16rem): name and email header; Invitations with a count
   only while some are pending; New organization only for people who can create one; then
   Appearance (a submenu: Light, Dark, System, the chosen one checked) and Help & feedback (a
-  submenu: Get started inside a workspace, Documentation when the deployment publishes a link,
-  Send feedback when the person may send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
+  submenu: Documentation when the deployment publishes a link, Send feedback when the person may
+  send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
   settings or Privacy preferences: both live in Settings > Your account (Privacy preferences only
   where analytics consent is configured). Deployments with browser accounts keep the same footer
   and put their account list and "Add another account" first in the same menu.
@@ -541,15 +541,15 @@ name prefilled in an editable field under it; Continue or Skip creates the organ
 then asks "Do you already have a product?"; having one asks for its website or app, an optional
 GitHub repository and what the agent should do, all optional. Every path, Skip included, ends on
 the ready moment: confetti and "You got $10 in free credits" (the real balance, no cents for whole
-amounts, never invented), then one action. A product with answers gets "Start building" (its
-composed prompt starts a chat at once) and the quiet "Use your own coding agent instead"; every
-other path gets "Start" into a ready composer, where the new-chat starters are the place to pick a
-first chat. GPT-6 Luna at extra high reasoning is the silent default when credits pay for it; first
-run never mentions models. Only without a trial grant and without a model that runs does the model
-step appear first, so nobody is stuck. Answers are kept as they are typed. In the app, Get started
-is a page (one section per step) and a card under the starters on the new-chat page until it is
-hidden (Undo; Help & feedback reopens it). The playground is optional and, like first run, has no
-rail; its chat is a recorded demo that needs no model and creates no session.
+amounts, never invented), then one action: "Start building" for a product with answers (its
+composed prompt starts a chat at once), "Start" otherwise, into a ready composer with the new-chat
+starters, which include "See a demo of an agent in a product" (the playground). GPT-6 Luna at
+extra high reasoning is the silent default when credits pay for it; first run never mentions
+models. Only without a trial grant and without a model that runs does the model step appear
+first, so nobody is stuck. There is no checklist in first run or on the new-chat page. Using your
+own coding agent (one "Copy setup for my coding agent": plugin, prompt and a new key, details
+folded) lives in Organization settings > Developer. The playground has no rail; its chat is a
+recorded demo that needs no model and creates no session.
 
 **Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
