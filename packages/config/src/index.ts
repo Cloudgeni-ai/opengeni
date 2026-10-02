@@ -1395,11 +1395,11 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
-  // Launch-load safety switch. When false, managed auth refuses every new
-  // Better Auth account (email/password sign-up and implicit Google/GitHub
-  // sign-up) while existing sign-in, sessions, password reset, email
-  // verification, and invitation-bound account setup keep working. Read at
-  // startup: flipping it is a config change plus an API rolling restart.
+  // Deployment ceiling for new managed accounts. When false, managed auth
+  // refuses every new Better Auth account (email/password sign-up and implicit
+  // Google/GitHub sign-up) while existing sign-in, sessions, password reset,
+  // email verification, and invitation-bound account setup keep working. Read
+  // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep

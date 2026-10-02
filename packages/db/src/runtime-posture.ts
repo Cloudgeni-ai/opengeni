@@ -247,6 +247,10 @@ const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sess
 const VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE =
   "set_verified_signup_trial_credits_enabled(boolean, text, text)";
 const VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE = "verified_signup_trial_switch_revisions";
+/** Operator-only audited setter for the new-account sign-up switch (migration 0585). */
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE =
+  "set_managed_auth_new_signups_enabled(boolean, text, text)";
+const MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE = "managed_auth_new_signups_switch_revisions";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -727,6 +731,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
+  MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
@@ -2083,7 +2088,8 @@ export async function inspectRuntimeDatabasePosture(
               'session_import_batches',
               'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
-              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE}
+              ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
+              ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
             )
         `),
       ).map((row) => ({
@@ -3666,6 +3672,23 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push(
       "runtime role has forbidden write authority on the verified signup trial switch",
+    );
+  }
+
+  // The new-account sign-up switch is operator state too. The API reads it on
+  // each sign-up decision but must never append or rewrite it.
+  const newSignupsSwitchTable = posture.privateTables.find(
+    (table) => table.name === MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE,
+  );
+  if (
+    newSignupsSwitchTable &&
+    (newSignupsSwitchTable.owner === expectedRole ||
+      newSignupsSwitchTable.insert ||
+      newSignupsSwitchTable.update ||
+      newSignupsSwitchTable.delete)
+  ) {
+    violations.push(
+      "runtime role has forbidden write authority on the managed auth new signups switch",
     );
   }
 

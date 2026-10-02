@@ -1,7 +1,7 @@
 import { CheckIcon, Loader2Icon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { requestPasswordReset, sendVerificationEmail } from "@/api";
+import { AuthApiError, requestPasswordReset, sendVerificationEmail } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,7 +24,7 @@ import {
   verificationLinkErrorFromSearch,
   type VerificationLinkError,
 } from "@/lib/managed-auth-url";
-import { SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
+import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
 
 export function ManagedAuthPanel(props: {
   initialMode?: ManagedAuthMode;
@@ -72,7 +72,10 @@ export function ManagedAuthPanel(props: {
       : (allowedModes[0] ?? "signin"),
   );
   const emailVerificationRequired = props.emailVerificationRequired ?? true;
-  const newSignupsEnabled = props.newSignupsEnabled ?? true;
+  // An operator can pause sign-ups after this page loaded; the server's typed
+  // refusal then switches this tab to the same paused view.
+  const [signupsPausedByServer, setSignupsPausedByServer] = useState(false);
+  const newSignupsEnabled = (props.newSignupsEnabled ?? true) && !signupsPausedByServer;
   const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const [invitationDismissed, setInvitationDismissed] = useState(false);
   const invitation = invitationDismissed ? null : (props.invitation ?? null);
@@ -179,6 +182,14 @@ export function ManagedAuthPanel(props: {
       }
       if (resetMode) {
         setFormError("We couldn't request a password reset. Please try again.");
+        return;
+      }
+      if (
+        mode === "signup" &&
+        error instanceof AuthApiError &&
+        error.code === MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE
+      ) {
+        setSignupsPausedByServer(true);
         return;
       }
       const failure = managedAuthFailure(mode, error);

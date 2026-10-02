@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { AuthApiError } from "@/api";
 import { ManagedAuthPanel } from "./managed-auth-panel";
 
 beforeAll(() => {
@@ -195,6 +196,53 @@ test("an invited person on the paused sign-up screen is pointed back to their in
     expect(host.textContent).toContain(
       "To join Acme Labs, open the invitation link from your email to set up your account.",
     );
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("a tab opened before an operator paused sign-ups switches to the paused view on refusal", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const setField = async (selector: string, value: string) => {
+    const input = host.querySelector<HTMLInputElement>(selector)!;
+    const propsKey = Object.keys(input).find((k) => k.startsWith("__reactProps$"))!;
+    await act(async () => {
+      (input as unknown as Record<string, { onChange: (e: unknown) => void }>)[propsKey]!.onChange({
+        target: { value },
+      });
+    });
+  };
+  try {
+    await act(async () =>
+      root.render(
+        <ManagedAuthPanel
+          initialMode="signup"
+          onSubmit={async () => {
+            throw new AuthApiError(
+              403,
+              "NEW_SIGNUPS_PAUSED",
+              null,
+              "We're at capacity for new accounts right now. Please try again later.",
+            );
+          }}
+        />,
+      ),
+    );
+    expect(host.querySelector('[data-testid="managed-auth-signups-paused"]')).toBeNull();
+    await setField("#managed-auth-name", "New Person");
+    await setField("#managed-auth-email", "new@example.test");
+    await setField('input[type="password"]', "long-enough-password");
+    await act(async () =>
+      host
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    expect(host.querySelector('[data-testid="managed-auth-signups-paused"]')).not.toBeNull();
+    expect(host.querySelector('button[type="submit"]')).toBeNull();
+    expect(host.textContent).not.toContain("Couldn't create account");
   } finally {
     await act(async () => root.unmount());
     host.remove();

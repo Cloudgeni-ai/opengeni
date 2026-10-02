@@ -16,7 +16,7 @@ import {
 } from "@opengeni/db/canonical-human-identities";
 import type { Observability } from "@opengeni/observability";
 import { betterAuth } from "better-auth";
-import { createEmailVerificationToken } from "better-auth/api";
+import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
 import { Pool, type PoolConfig } from "pg";
@@ -28,6 +28,10 @@ import {
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
+import {
+  createManagedAuthNewSignupsGate,
+  type ManagedAuthNewSignupsGate,
+} from "./new-signups-gate";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
@@ -77,6 +81,18 @@ export function managedAuthNewSignupsPausedResponse(): Response {
     },
     { status: 403, headers: { "cache-control": "no-store" } },
   );
+}
+
+/**
+ * Thrown from the user-create hook while the runtime switch has paused new
+ * sign-ups. Better Auth returns it as `403 { code: "NEW_SIGNUPS_PAUSED" }` on
+ * email sign-up, and its OAuth callback turns the message into the
+ * `error=signup_disabled` redirect it also uses for a static provider refusal.
+ */
+export class ManagedAuthNewSignupsPausedError extends APIError {
+  constructor() {
+    super("FORBIDDEN", { code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, message: "signup disabled" });
+  }
 }
 
 export function managedAuthUserCreateAdmission(
@@ -200,7 +216,10 @@ export function createManagedAuth(
   settings: Settings,
   db: Database,
   managedEmailTransport: ManagedEmailTransport,
-  options: { observability?: ManagedAuthPoolObservability } = {},
+  options: {
+    observability?: ManagedAuthPoolObservability;
+    newSignupsGate?: ManagedAuthNewSignupsGate;
+  } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
@@ -211,7 +230,12 @@ export function createManagedAuth(
     : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
+  // The deployment ceiling is static Better Auth configuration; the runtime
+  // switch is checked per user create in the hook below.
   const newSignupsSocialProviderOptions = managedAuthSocialSignupOptions(settings);
+  const newSignupsGate =
+    options.newSignupsGate ??
+    createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
   const auth = betterAuth({
     appName: "OpenGeni",
     baseURL: betterAuthBaseUrl(settings),
@@ -566,8 +590,16 @@ export function createManagedAuth(
       },
       user: {
         create: {
-          before: async (user) =>
-            managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
+          before: async (user) => {
+            const admission = managedAuthUserCreateAdmission(
+              settings,
+              user,
+              currentManagedAuthProviderId(),
+            );
+            if (admission === false) return false;
+            if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
+            return admission;
+          },
           after: async (user, context) => {
             await funnel?.recordSignUp(context);
             if (!user.emailVerified) return;

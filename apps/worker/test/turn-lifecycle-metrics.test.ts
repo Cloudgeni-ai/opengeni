@@ -5,6 +5,7 @@ import {
   initializeWorkerOutcomeMetrics,
   recordCreditBalanceGauges,
   recordVerifiedSignupTrialDeploymentFlagGauge,
+  recordManagedAuthNewSignupsSwitchGauge,
   recordVerifiedSignupTrialSwitchGauge,
   recordWorkerDeathRecoveryMetrics,
   TurnLifecycleMetrics,
@@ -134,6 +135,21 @@ describe("turn lifecycle metrics", () => {
     recordVerifiedSignupTrialSwitchGauge(observability, false);
     metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_verified_signup_trial_credits_runtime_enabled\{[^}]*\} 0/);
+  });
+
+  test("records the managed auth new-signups runtime switch as a 0/1 gauge", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordManagedAuthNewSignupsSwitchGauge(observability, true);
+    let metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain(
+      "# HELP opengeni_managed_auth_new_signups_runtime_enabled Whether the runtime switch allows new managed account sign-ups (1) or has paused them (0).",
+    );
+    expect(metrics).toMatch(/opengeni_managed_auth_new_signups_runtime_enabled\{[^}]*\} 1/);
+
+    recordManagedAuthNewSignupsSwitchGauge(observability, false);
+    metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_managed_auth_new_signups_runtime_enabled\{[^}]*\} 0/);
   });
 
   test("records the verified signup trial deployment master opt-in as its own 0/1 gauge", async () => {

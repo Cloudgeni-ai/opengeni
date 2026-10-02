@@ -873,8 +873,9 @@ exists, and the user has only the inviting organization, their canonical
 Personal workspace, and the invitation's selected shared-workspace grants.
 
 This invitation-bound setup is independent of public sign-up. When an operator
-pauses new account sign-ups (`OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false`,
-see [Pausing new account sign-ups](deployment.md#pausing-new-account-sign-ups)),
+pauses new account sign-ups (the 0585 runtime switch or the
+`OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` ceiling, see
+[New account sign-up switch](deployment.md#new-account-sign-up-switch-0585)),
 ordinary email and implicit social sign-up are refused, but an invited person
 can still create their account here and an already-registered invitee can
 still sign in and accept.

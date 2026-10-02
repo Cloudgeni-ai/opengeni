@@ -43,6 +43,7 @@ import {
   listCreditBalancesByAccount,
   countActiveUsers,
   readCreditGrantTotals,
+  readManagedAuthNewSignupsSwitch,
   readVerifiedSignupTrialSwitch,
   listLegacyModalCheckpointSlots,
   listLiveModalSandboxLeaseAttributions,
@@ -174,6 +175,7 @@ import {
   recordSandboxRotationBacklogGauges,
   recordTurnsQueuedGauge,
   recordVerifiedSignupTrialDeploymentFlagGauge,
+  recordManagedAuthNewSignupsSwitchGauge,
   recordVerifiedSignupTrialSwitchGauge,
   runtimeMetricsHooksForObservability,
 } from "../observability-metrics";
@@ -2557,6 +2559,19 @@ async function refreshQueueLeaseAndCreditGauges(
         recordVerifiedSignupTrialSwitchGauge(observability, trialSwitch?.grantsEnabled === true);
       } catch (error) {
         observability.warn("sandbox reaper: trial-credit switch gauge refresh failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })(),
+    (async () => {
+      try {
+        const signupsSwitch = await readManagedAuthNewSignupsSwitch(db);
+        recordManagedAuthNewSignupsSwitchGauge(
+          observability,
+          signupsSwitch?.signupsEnabled !== false,
+        );
+      } catch (error) {
+        observability.warn("sandbox reaper: new-signups switch gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       }
