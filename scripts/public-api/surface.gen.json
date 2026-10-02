@@ -620,10 +620,26 @@
       "method": "GET",
       "path": "/v1/organizations/:organizationId/private-session-settings",
       "sdk": [
+        "getOrganizationPrivateSessionSettings",
         "settingsPath"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "OrganizationPrivateSessionSettings"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/private-session-settings",
+      "sdk": [
+        "updateOrganizationPrivateSessionSettings"
+      ],
+      "request": [
+        "UpdateOrganizationPrivateSessionSettingsRequest"
+      ],
+      "response": [
+        "OrganizationPrivateSessionSettings"
+      ]
     },
     {
       "method": "GET",
@@ -1179,7 +1195,8 @@
       "method": "DELETE",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.clearWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.clearWorkspaceAllowance",
+        "clearWorkspaceAllowance"
       ],
       "request": [
         "ClearWorkspaceAllowanceRequest"
@@ -1192,7 +1209,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.getWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.getWorkspaceAllowance",
+        "getWorkspaceAllowance"
       ],
       "request": [],
       "response": [
@@ -1203,7 +1221,8 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.setWorkspaceAllowance"
+        "OpenGeniEmbeddingClient.setWorkspaceAllowance",
+        "setWorkspaceAllowance"
       ],
       "request": [
         "SetWorkspaceAllowanceRequest"
@@ -1217,7 +1236,8 @@
       "path": "/v1/workspaces/:workspaceId/allowance/grants",
       "sdk": [
         "OpenGeniEmbeddingClient.grantWorkspaceCredits",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "grantWorkspaceCredits"
       ],
       "request": [
         "GrantWorkspaceCreditsRequest"
@@ -1231,7 +1251,8 @@
       "path": "/v1/workspaces/:workspaceId/allowance/state",
       "sdk": [
         "OpenGeniEmbeddingClient.getWorkspaceAllowanceState",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "getWorkspaceAllowanceState"
       ],
       "request": [],
       "response": [
@@ -2256,10 +2277,15 @@
       "path": "/v1/workspaces/:workspaceId/company-brain/context-receipts",
       "sdk": [
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
@@ -2267,20 +2293,30 @@
       "sdk": [
         "OpenGeniDocumentAuthorityClient.exportCompanyBrainOkf",
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/company-brain/knowledge-proposals",
       "sdk": [
         "createSessionProxyHandler",
-        "inspectorPath"
+        "inspectorPath",
+        "listCompanyBrainContextReceipts",
+        "listCompanyBrainKnowledgeProposals"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "CompanyBrainContextReceiptPage",
+        "CompanyBrainKnowledgeProposalPage"
+      ]
     },
     {
       "method": "GET",
@@ -4473,7 +4509,8 @@
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/members/:subjectId/allowance",
       "sdk": [
-        "OpenGeniEmbeddingClient.setMemberAllowance"
+        "OpenGeniEmbeddingClient.setMemberAllowance",
+        "setMemberAllowance"
       ],
       "request": [
         "SetMemberAllowanceRequest"
@@ -5591,6 +5628,7 @@
       "path": "/v1/workspaces/:workspaceId/sessions",
       "sdk": [
         "OpenGeniClient.listSessionPage",
+        "OpenGeniClient.listSessionSummaryPage",
         "OpenGeniClient.listSessions",
         "createSessionProxyHandler"
       ],
@@ -5599,6 +5637,7 @@
       ],
       "response": [
         "Session",
+        "SessionListEntryResponse",
         "SessionListResponse"
       ]
     },
@@ -5630,7 +5669,8 @@
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId",
       "sdk": [
         "OpenGeniClient.getSession",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "sessionPath"
       ],
       "request": [],
       "response": [
@@ -7188,7 +7228,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/usage",
       "sdk": [
-        "OpenGeniEmbeddingClient.getUsage"
+        "OpenGeniEmbeddingClient.getUsage",
+        "getUsage"
       ],
       "request": [
         "GetUsageRequest"
@@ -7202,7 +7243,8 @@
       "path": "/v1/workspaces/:workspaceId/usage/me",
       "sdk": [
         "OpenGeniEmbeddingClient.getMyUsage",
-        "createSessionProxyHandler"
+        "createSessionProxyHandler",
+        "getMyUsage"
       ],
       "request": [
         "GetMyUsageRequest"
@@ -10330,6 +10372,46 @@
         "$.status": "enum!=[\"\\\"completed\\\"\",\"\\\"noop\\\"\",\"\\\"pending\\\"\"]"
       }
     },
+    "CompanyBrainContextReceipt": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.acceptedAt": "string!",
+        "$.budgetOmittedMemoryCount": "integer!",
+        "$.companyProfileIncluded": "boolean!",
+        "$.companyProfileSnapshotHash": "string!",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.instructionPolicyEntryHash": "string!",
+        "$.memoryEnabled": "boolean!",
+        "$.memoryPromptMode": "ref(WorkspaceMemoryPromptMode)!",
+        "$.preferenceDescriptorHash": "string! null",
+        "$.renderedMemoryCount": "integer!",
+        "$.rootSessionId": "string!",
+        "$.selectedMemoryCount": "integer!",
+        "$.selectionHash": "string!",
+        "$.sessionId": "string!",
+        "$.sessionRole": "enum!=[\"\\\"child\\\"\",\"\\\"root\\\"\"]",
+        "$.turnContextSnapshotHash": "string!",
+        "$.turnContextSnapshotId": "string!",
+        "$.turnContextSnapshotSource": "enum!=[\"\\\"accepted_turn\\\"\",\"\\\"legacy_first_claim\\\"\"]",
+        "$.turnId": "string!"
+      }
+    },
+    "CompanyBrainContextReceiptPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.hasMore": "boolean!",
+        "$.nextCursor": "string! null",
+        "$.receipts": "array!",
+        "$.receipts[]": "ref(CompanyBrainContextReceipt)"
+      }
+    },
     "CompanyBrainGuidanceClassification": {
       "io": [
         "output"
@@ -10389,6 +10471,42 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"aggregate_content_bytes\\\"\",\"\\\"aggregate_item_count\\\"\",\"\\\"company_profile_history\\\"\",\"\\\"instruction_policy_history\\\"\",\"\\\"preference_count\\\"\",\"\\\"preference_history\\\"\"]"
+      }
+    },
+    "CompanyBrainKnowledgeProposal": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.authority": "ref(KnowledgeAuthority)!",
+        "$.content": "string!",
+        "$.contentHash": "string!",
+        "$.createdAt": "string!",
+        "$.id": "string!",
+        "$.projection": "object!",
+        "$.projection.originalContentUtf8Bytes": "integer!",
+        "$.projection.truncated": "boolean!",
+        "$.source": "object!",
+        "$.source.claimId": "string!",
+        "$.source.evidenceId": "string!",
+        "$.status": "const!=[\"\\\"proposed\\\"\"]",
+        "$.targetKey": "string! null",
+        "$.targetKind": "ref(KnowledgeChangeProposalTargetKind)!",
+        "$.targetScope": "string!"
+      }
+    },
+    "CompanyBrainKnowledgeProposalPage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.proposals": "array!",
+        "$.proposals[]": "ref(CompanyBrainKnowledgeProposal)",
+        "$.responseBytes": "integer!",
+        "$.truncatedForCount": "boolean!",
+        "$.truncatedForResponseBytes": "boolean!"
       }
     },
     "CompanyBrainOkfPackage": {
@@ -15042,6 +15160,15 @@
         "$.workspaceSharedAcknowledged": "boolean?"
       }
     },
+    "KnowledgeAuthority": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.kind": "ref(KnowledgeEntryScope)!"
+      }
+    },
     "KnowledgeChangeProposalTargetKind": {
       "io": [
         "output"
@@ -16951,6 +17078,20 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
+      }
+    },
+    "OrganizationPrivateSessionSettings": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.changed": "boolean?",
+        "$.enabled": "boolean!",
+        "$.organizationId": "string!",
+        "$.updatedAt": "string!",
+        "$.version": "integer!"
       }
     },
     "OrganizationProviderCustomModel": {
@@ -20087,6 +20228,83 @@
         "$.truncated": "boolean!"
       }
     },
+    "SessionListEntry": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.activelyWorking": "boolean!",
+        "$.archiveVersion": "integer!",
+        "$.archived": "boolean!",
+        "$.archivedAt": "string! null",
+        "$.attentionVersion": "integer!",
+        "$.backgroundCommandActivity": "ref(SessionBackgroundCommandActivity)?",
+        "$.channelId": "string! null",
+        "$.createdAt": "string!",
+        "$.createdBy": "ref(TurnInitiator)!",
+        "$.displayTitle": "string!",
+        "$.effectiveControl": "ref(EffectiveSessionControl)!",
+        "$.hasSchedules": "boolean?",
+        "$.id": "string!",
+        "$.importedArchive": "ref(SessionImportedArchive)?",
+        "$.inputWait": "object? null",
+        "$.inputWait.deadlineAt": "string!",
+        "$.inputWait.reason": "string!",
+        "$.lastSequence": "integer!",
+        "$.parentSessionId": "string! null",
+        "$.pinVersion": "integer!",
+        "$.pinned": "boolean!",
+        "$.pinnedAt": "string! null",
+        "$.renameSeed": "string!",
+        "$.requiresActionSince": "string? null",
+        "$.rootSessionId": "string!",
+        "$.scheduledTaskId": "string! null",
+        "$.siteOrigin": "object! null",
+        "$.siteOrigin.siteId": "string!",
+        "$.siteOrigin.title": "string!",
+        "$.status": "ref(SessionStatus)!",
+        "$.title": "string! null",
+        "$.titleSource": "enum! null=[\"\\\"agent\\\"\",\"\\\"user\\\"\"]",
+        "$.treeStats": "object?",
+        "$.treeStats.activelyWorkingDescendants": "integer?",
+        "$.treeStats.attentionDescendants": "integer!",
+        "$.treeStats.attentionSince": "string? null",
+        "$.treeStats.directChildren": "integer!",
+        "$.treeStats.failedDescendants": "integer!",
+        "$.treeStats.pausedDescendants": "integer!",
+        "$.treeStats.queuedDescendants": "integer!",
+        "$.treeStats.runningDescendants": "integer!",
+        "$.treeStats.totalDescendants": "integer!",
+        "$.treeStats.truncated": "boolean!",
+        "$.treeStats.unreadDescendants": "integer?",
+        "$.treeStats.unreadFailedDescendants": "integer?",
+        "$.treeStats.waitingDescendants": "integer?",
+        "$.unread": "boolean!",
+        "$.updatedAt": "string!",
+        "$.workspaceId": "string!"
+      }
+    },
+    "SessionListEntryResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveStatus": "enum?=[\"\\\"active\\\"\",\"\\\"all\\\"\",\"\\\"archived\\\"\"]",
+        "$.filtersApplied": "const?=[\"true\"]",
+        "$.nextCursor": "string! null",
+        "$.originSiteId": "string?",
+        "$.pinned": "array!",
+        "$.pinned[]": "ref(SessionListEntry)",
+        "$.pinnedTruncated": "boolean?",
+        "$.projection": "const!=[\"\\\"summary\\\"\"]",
+        "$.sessions": "array!",
+        "$.sessions[]": "ref(SessionListEntry)",
+        "$.sortBy": "enum?=[\"\\\"archivedAt\\\"\",\"\\\"createdAt\\\"\",\"\\\"name\\\"\",\"\\\"updatedAt\\\"\"]"
+      }
+    },
     "SessionListResponse": {
       "io": [
         "output"
@@ -22171,6 +22389,17 @@
         "$.operationId": "string!"
       }
     },
+    "UpdateOrganizationPrivateSessionSettingsRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.enabled": "boolean!",
+        "$.expectedVersion": "integer!",
+        "$.operationId": "string!"
+      }
+    },
     "UpdateOrganizationRetentionPolicyRequest": {
       "io": [
         "input"
@@ -23971,7 +24200,8 @@
     },
     "WorkspaceMemoryPromptMode": {
       "io": [
-        "input"
+        "input",
+        "output"
       ],
       "shape": {
         "$": "enum=[\"\\\"legacy_standing\\\"\",\"\\\"retrieval_only\\\"\"]"
@@ -25634,6 +25864,9 @@
       "SessionGoalStatus": "type",
       "SessionHumanInputRequest": "type",
       "SessionLineageResponse": "type",
+      "sessionListEntry": "value",
+      "SessionListEntry": "type",
+      "SessionListEntryResponse": "type",
       "SessionListPageOptions": "type",
       "SessionListResponse": "type",
       "SessionMcpApprovalPolicy": "type",
@@ -26832,6 +27065,9 @@
       "ImportArchivedSessionResponse": "type",
       "importExternalWorkspaceArchivedSession": "value",
       "SessionImportedArchive": "type"
+    },
+    "@opengeni/sdk/session-list-entries": {
+      "sessionListEntry": "value"
     },
     "@opengeni/sdk/session-proxy": {
       "artifactViewerCapability": "value",
@@ -29064,6 +29300,7 @@
       "listSessionCodexAccounts",
       "listSessionEditableArtifacts",
       "listSessionPage",
+      "listSessionSummaryPage",
       "listSessions",
       "listSiteAuthConnections",
       "listSlackInstallationBindings",

@@ -8,7 +8,7 @@ import {
   type SessionBrowseDateRange,
   type SessionRecencyGroup,
 } from "@/lib/sessions-group";
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 type CreatorIdentity = Pick<Session["createdBy"], "kind" | "subjectId">;
 

@@ -13325,6 +13325,55 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
 
+/** Compact list-only records; full Session and SessionSummary contracts are unchanged. */
+export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
+  Session.pick({
+    id: true,
+    workspaceId: true,
+    accountId: true,
+    status: true,
+    backgroundCommandActivity: true,
+    hasSchedules: true,
+    title: true,
+    titleSource: true,
+    createdBy: true,
+    channelId: true,
+    parentSessionId: true,
+    rootSessionId: true,
+    effectiveControl: true,
+    inputWait: true,
+    lastSequence: true,
+    pinned: true,
+    pinnedAt: true,
+    pinVersion: true,
+    unread: true,
+    activelyWorking: true,
+    attentionVersion: true,
+    archived: true,
+    archivedAt: true,
+    importedArchive: true,
+    archiveVersion: true,
+    treeStats: true,
+    requiresActionSince: true,
+    createdAt: true,
+    updatedAt: true,
+  }).extend({
+    displayTitle: z.string(),
+    renameSeed: z.string(),
+    scheduledTaskId: z.string().nullable(),
+    siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+  }),
+);
+export type SessionListEntry = z.infer<typeof SessionListEntry>;
+export const SessionListEntryResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  SessionListResponse.omit({ pinned: true, sessions: true }).extend({
+    projection: z.literal("summary"),
+    pinned: z.array(SessionListEntry),
+    sessions: z.array(SessionListEntry),
+  }),
+);
+export type SessionListEntryResponse = z.infer<typeof SessionListEntryResponse>;
+
 /**
  * Organization session queries may filter a canonical scope subject and lifecycle
  * state. Legacy end-user label filters are rejected.

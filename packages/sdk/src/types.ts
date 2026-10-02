@@ -1659,6 +1659,50 @@ export type CreateSessionResponse = Session & {
 
 export type SessionSummary = Session;
 
+/** Compact list-only record, excluding prompts and execution configuration. */
+export type SessionListEntry = Pick<
+  Session,
+  | "id"
+  | "workspaceId"
+  | "accountId"
+  | "status"
+  | "backgroundCommandActivity"
+  | "hasSchedules"
+  | "title"
+  | "titleSource"
+  | "createdBy"
+  | "channelId"
+  | "parentSessionId"
+  | "rootSessionId"
+  | "effectiveControl"
+  | "inputWait"
+  | "lastSequence"
+  | "pinned"
+  | "pinnedAt"
+  | "pinVersion"
+  | "unread"
+  | "activelyWorking"
+  | "attentionVersion"
+  | "archived"
+  | "archivedAt"
+  | "importedArchive"
+  | "archiveVersion"
+  | "treeStats"
+  | "requiresActionSince"
+  | "createdAt"
+  | "updatedAt"
+> & {
+  displayTitle: string;
+  renameSeed: string;
+  scheduledTaskId: string | null;
+  siteOrigin: { siteId: string; title: string } | null;
+};
+export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
+  projection: "summary";
+  pinned: SessionListEntry[];
+  sessions: SessionListEntry[];
+};
+
 /** Canonical session-list page; pinned rows are excluded from ordinary pages. */
 export type SessionListResponse = {
   pinned: Session[];

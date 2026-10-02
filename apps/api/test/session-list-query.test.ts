@@ -28,7 +28,15 @@ describe("session list sorting and archive query", () => {
       { archiveStatus: "all", archivedOnly: "true" },
       { archiveStatus: "active", archivedOnly: "true" },
       { archiveStatus: "archived", pinsOnly: "true" },
+      { includePinned: "0" },
+      { includePinned: "false", pinsOnly: "true" },
     ])
       expect(() => sessionListQuery(query)).toThrow();
+  });
+
+  test("keeps pin hydration by default and permits an ordinary-only page", () => {
+    expect(sessionListQuery({}).includePinned).toBe(true);
+    expect(sessionListQuery({ includePinned: "true" }).includePinned).toBe(true);
+    expect(sessionListQuery({ includePinned: "false" }).includePinned).toBe(false);
   });
 });

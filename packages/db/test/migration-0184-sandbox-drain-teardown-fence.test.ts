@@ -108,6 +108,8 @@ const withheldMigrationNames = [
   "0582_scheduled_setup_policy_identity.sql",
   // Replaces the private instruction helper from withheld 0466; replay after it.
   "0584_agent_instruction_size_parity.sql",
+  // Requires the withheld cursor table and meaningful attention index.
+  "0585_session_attention_cursor.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

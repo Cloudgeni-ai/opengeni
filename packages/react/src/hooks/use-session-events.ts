@@ -114,8 +114,11 @@ const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
 const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
-export const SESSION_EVENT_BROWSER_MAX_BYTES = 160 * 1024 * 1024;
-export const SESSION_EVENT_BROWSER_MAX_COUNT = 200_000;
+// Durable history remains on the server and is available through bounded
+// navigation. Keep the live browser working set small across multiple tabs;
+// serialized payloads also expand into objects and timeline projections.
+export const SESSION_EVENT_BROWSER_MAX_BYTES = 16 * 1024 * 1024;
+export const SESSION_EVENT_BROWSER_MAX_COUNT = 20_000;
 export const SESSION_EVENT_BROWSER_PENDING_MAX_BYTES = 1024 * 1024;
 export const SESSION_EVENT_BROWSER_PENDING_MAX_COUNT = 256;
 
@@ -1078,10 +1081,13 @@ export function useSessionEvents(
       visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
         ? questionEvidence.events
         : EMPTY_EVENTS;
+    const timelineOptions = { partialStart: hasOlder || eventWindow.truncated || after > 0 };
+    if (witness.length === 0) return buildTimeline(visibleEvents, timelineOptions);
     const ids = new Set(visibleEvents.map((event) => event.id));
-    return buildTimeline([...visibleEvents, ...witness.filter((event) => !ids.has(event.id))], {
-      partialStart: hasOlder || eventWindow.truncated || after > 0,
-    });
+    return buildTimeline(
+      [...visibleEvents, ...witness.filter((event) => !ids.has(event.id))],
+      timelineOptions,
+    );
   }, [visibleEvents, hasOlder, eventWindow.truncated, after, questionEvidence, client, streamKey]);
 
   return {

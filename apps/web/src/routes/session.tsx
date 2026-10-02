@@ -163,6 +163,7 @@ import {
   applySessionAttentionProjection,
   updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
+  sessionAttentionReadThroughSequence,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
@@ -355,7 +356,6 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
-    lastSequence: renderedThroughSequence,
     jumpToLatest,
     jumpToSequence,
     error: streamError,
@@ -622,9 +622,13 @@ export function SessionRoute({
     },
     [setContextSession],
   );
-  const readThroughSequence = session
-    ? Math.max(session.lastSequence, renderedThroughSequence)
-    : renderedThroughSequence;
+  // Raw token/progress batches do not create unread attention. Acknowledge
+  // completed output or an actionable boundary, rather than every stream flush.
+  const attentionThroughSequence = useMemo(
+    () => sessionAttentionReadThroughSequence(events),
+    [events],
+  );
+  const readThroughSequence = Math.max(session?.lastSequence ?? 0, attentionThroughSequence);
   const activeReadProjectionKey = session
     ? sessionReadProjectionKey(session.id, readThroughSequence)
     : null;
