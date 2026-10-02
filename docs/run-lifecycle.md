@@ -470,10 +470,15 @@ service initiator, latest connection, latest queue head, or an unrelated newer
 turn.
 
 That same exact calling-turn boundary supplies an agent-spawned child's omitted
-model, reasoning effort, and latency mode. Explicit child values may override
-them. A Codex-subscription manager therefore keeps its external billing path for
-workers by default instead of falling back to the deployment's OpenGeni-credit
-model.
+model and reasoning effort. Explicit child values may override them. A
+Codex-subscription manager therefore keeps its external billing path for workers
+by default instead of falling back to the deployment's OpenGeni-credit model.
+Omitted latency mode instead defaults to `standard` for every fresh session;
+`fast` and `priority` require an explicit, model-supported selection. The initial
+policy records this default as `deployment`, not `continuation`. Keyed replay
+preserves the originally accepted session and turn settings. Subsequent agent
+messages do not copy the sender's latency; follow-up admission retains the
+recipient's own defaults.
 
 Session detail reads expose `dispatchWait` for active-control queued sessions
 without an active turn. It projects the existing workflow-wake ledger's pending

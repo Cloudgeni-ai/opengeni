@@ -138,6 +138,12 @@ Session labels and fresh message drafts use those settings too. Before any turn
 starts, the initial session settings apply. Existing drafts, queued messages and
 historical turns retain their own settings.
 
+When an agent creates a new worker, omitted model and reasoning inherit the
+calling turn, but omitted speed starts at **Standard**. Fast or Priority must be
+selected explicitly and supported by the chosen model. Later messages from a
+faster agent do not change the worker's own speed, and repeating a keyed creation
+returns the original session settings.
+
 ## Codex subscription source
 
 Workspace model settings let you connect Codex subscriptions even when the
