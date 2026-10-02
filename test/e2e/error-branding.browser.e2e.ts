@@ -48,8 +48,8 @@ describe("native embedded error presentation", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
-  for (const { width, theme } of [390, 1440].flatMap((width) =>
-    ["light", "dark"].map((theme) => ({ width, theme })),
+  for (const { width, theme } of [390, 1440].flatMap((candidateWidth) =>
+    ["light", "dark"].map((candidateTheme) => ({ width: candidateWidth, theme: candidateTheme })),
   )) {
     test(`neutral defaults and host customization at ${width}px in ${theme}`, async () => {
       const context = await browser.newContext({
