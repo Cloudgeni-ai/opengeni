@@ -15,12 +15,57 @@ import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 
 // Local-only fixtures. No provider credentials or real payments are used.
 let previewModel: Record<string, unknown> | null = null;
+let previewCouponRedeemedAt: number | null = null;
 const previewMethods = {
   async getBilling() {
     return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
   },
-  async createBillingCheckout({ amountUsd }: { amountUsd: number }) {
-    return { url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}` };
+  async createBillingCheckout({
+    amountUsd,
+    promotionCode,
+  }: {
+    amountUsd?: number;
+    promotionCode?: string;
+  }) {
+    if (promotionCode) {
+      // `LAUNCH100` is a $100 code here; anything else is refused like Stripe would.
+      if (promotionCode.trim().toUpperCase() !== "LAUNCH100") {
+        throw new Error("That code isn't valid or has expired.");
+      }
+      previewCouponRedeemedAt = Date.now();
+      return {
+        checkoutSessionId: "cs_preview_coupon",
+        url: `${window.location.origin}/dev/onboarding?view=checkout&amount=100&coupon=1`,
+        amountUsd: 100,
+      };
+    }
+    return {
+      checkoutSessionId: "cs_preview_purchase",
+      url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}`,
+    };
+  },
+  // The coupon's credits "land" two seconds after redeeming.
+  async getBillingCheckout(checkoutSessionId: string) {
+    const granted =
+      previewCouponRedeemedAt !== null && Date.now() - previewCouponRedeemedAt > 2_000;
+    return {
+      checkoutSessionId,
+      status: granted ? "complete" : "open",
+      credit: {
+        state: granted ? "granted" : "pending",
+        amountMicros: 100_000_000,
+        currency: "usd",
+        free: true,
+      },
+      balance: granted
+        ? {
+            accountId: "preview-organization",
+            balanceMicros: 110_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          }
+        : null,
+    };
   },
   async codexConnectStart() {
     const state = crypto.randomUUID();

@@ -107,8 +107,8 @@ export function CreditsPrize({
       <span className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_80%_90%_at_0%_0%,var(--og-glow-teal),transparent_70%),radial-gradient(ellipse_80%_90%_at_100%_100%,var(--og-glow-peach),transparent_70%)]" />
       <span className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_60%_70%_at_0%_0%,var(--og-glow-teal),transparent_70%),radial-gradient(ellipse_60%_70%_at_100%_100%,var(--og-glow-peach),transparent_70%)]" />
       {/* Gift-card notches on both edges. */}
-      <span className="absolute top-1/2 -left-2.5 size-5 -translate-y-1/2 rounded-full border border-primary-border bg-bg" />
-      <span className="absolute top-1/2 -right-2.5 size-5 -translate-y-1/2 rounded-full border border-primary-border bg-bg" />
+      <span className="absolute top-1/2 -left-2.5 size-5 -translate-y-1/2 rounded-full border border-primary-border bg-surface" />
+      <span className="absolute top-1/2 -right-2.5 size-5 -translate-y-1/2 rounded-full border border-primary-border bg-surface" />
       <span
         ref={shineRef}
         className="pointer-events-none absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/45 to-transparent opacity-0 dark:via-white/15"
