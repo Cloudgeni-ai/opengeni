@@ -3940,6 +3940,23 @@ export const WorkspaceInsightsSnapshot = z.object({
   depth: z.array(InsightsDepthBucket),
   drivers: z.array(InsightsSpendDriver),
   projects: z.array(InsightsProjectRow).default([]),
+  /** Invisible chats, amounts only, grouped by opaque person key (never a session id). */
+  privateChats: z
+    .array(
+      z.object({
+        ownerKey: z.string().min(1),
+        name: z.string().nullable(),
+        you: z.boolean(),
+        calls: z.number().int().nonnegative(),
+        tokens: z.number().nonnegative(),
+        creditUsd: z.number().nonnegative(),
+        estimatedProviderUsd: z.number().nonnegative(),
+        estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+      }),
+    )
+    .max(200)
+    .default([]),
+  privateChatsTruncated: z.boolean().default(false),
   schedules: z.array(InsightsScheduleRow),
   recentCalls: z.array(InsightsModelCallRow),
   promptContributions: InsightsPromptContributions.default({

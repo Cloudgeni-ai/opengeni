@@ -35,6 +35,14 @@ export const OrganizationModelUsage = z.object({
   since: z.string().datetime(),
   until: z.string().datetime(),
   billing: z.array(OrganizationModelUsageTotals).max(2),
+  /** Exact uncapped per-fact payer split; independent of the top-model list. */
+  payers: z
+    .array(
+      OrganizationModelUsageTotals.omit({ billingPath: true }).extend({
+        payer: z.enum(["opengeni_credits", "subscription", "own_key"]),
+      }),
+    )
+    .default([]),
   models: z
     .array(
       z.object({
