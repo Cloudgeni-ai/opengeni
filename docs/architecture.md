@@ -951,7 +951,7 @@ approval requirements, regardless of loading, backend, or model/Codemode entry.
 The closed always-visible first-request local tool set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
 `request_human_input`, `list_models` (lists, never switches models), and optional
-[`code_search`](code-search.md). Other function tools and non-eager MCP schemas
+[`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
 require progressive search.
 
 Repository descriptors use sandbox-bound `repository_skill_read`, separate
