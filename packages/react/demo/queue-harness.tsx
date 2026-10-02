@@ -1,7 +1,13 @@
 import type { SessionTurn } from "@opengeni/sdk";
+import { MockOpenGeniClient } from "./mock";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { QueueSurface, type ComposerState, type UseTurnQueueResult } from "@opengeni/react";
+import {
+  OpenGeniProvider,
+  QueueSurface,
+  type ComposerState,
+  type UseTurnQueueResult,
+} from "@opengeni/react";
 import {
   QUEUE_BOUNDARY_CLUSTERS,
   queueBoundaryPrompt,
@@ -18,6 +24,10 @@ import {
 } from "./queue-fixtures";
 import "./styles.css";
 import "./queue-harness.css";
+
+// Only generated public presentation errors use host-approved copy.
+class QueueHarnessPublicError extends Error {}
+const client = new MockOpenGeniClient();
 
 declare global {
   interface Window {
@@ -165,10 +175,14 @@ function QueueHarness() {
   );
   const [loading, setLoading] = useState(params.get("loading") === "1");
   const [queueError, setQueueError] = useState<Error | null>(() =>
-    errorSource === "queue" && initialErrorMessage ? new Error(initialErrorMessage) : null,
+    errorSource === "queue" && initialErrorMessage
+      ? new QueueHarnessPublicError(initialErrorMessage)
+      : null,
   );
   const [mutationError, setMutationError] = useState<Error | null>(() =>
-    errorSource === "mutation" && initialErrorMessage ? new Error(initialErrorMessage) : null,
+    errorSource === "mutation" && initialErrorMessage
+      ? new QueueHarnessPublicError(initialErrorMessage)
+      : null,
   );
   const [refreshCount, setRefreshCount] = useState(0);
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
@@ -258,4 +272,14 @@ function QueueHarness() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<QueueHarness />);
+createRoot(document.getElementById("root")!).render(
+  <OpenGeniProvider
+    client={client}
+    workspaceId="11111111-1111-4111-8111-111111111111"
+    formatError={(error, neutral) =>
+      error instanceof QueueHarnessPublicError ? error.message : neutral
+    }
+  >
+    <QueueHarness />
+  </OpenGeniProvider>,
+);
