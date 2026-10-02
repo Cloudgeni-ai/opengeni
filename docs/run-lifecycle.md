@@ -925,6 +925,13 @@ that skips the revival event. Diagnostic text is decoded through the lossless
 storage codec before its bounded logical prefix is returned; omitted suffixes
 are disclosed and exact event bytes remain in storage.
 
+Session SSE and finite browser replay use `listSessionEventPage` byte selection.
+Interactive pages select bounded candidates, then size only the payload prefix
+needed for the page. They retain the exact full event and durable cursor; one
+oversized event is delivered alone. Explicit continuation determines completion;
+a short page never substitutes for that durable read result.
+The downstream one-frame queue cannot substitute for this upstream read bound.
+
 Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-

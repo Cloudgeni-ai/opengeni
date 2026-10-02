@@ -78,6 +78,8 @@ newer consumed activity or explicit mark-read supersedes it.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
 SSE replays durable events, subscribes to fanout, and backfills gaps from Postgres.
+Replay reads select a byte-bounded prefix before transferring payloads. One
+oversized event travels intact, alone; a short page does not prove EOF.
 NATS restarts affect delivery/reachability, never history or queued obligations.
 
 Raw-isolation rollback:
