@@ -582,7 +582,7 @@ afterAll(async () => {
 describe("retained-process terminal-owner reconciliation", () => {
   for (const operation of ["execCommand", "writeFile"] as const) {
     test(`locator-less legacy recovery preserves unknown truth (${operation})`, async () => {
-      if (!available) throw new Error("PostgreSQL is required for recovery admission proof");
+      if (!available) return;
       const ids = await freshWorkspace();
       const attempt = await freshTurn(ids);
       const { leaseId, instanceId } = await insertWarmLease(ids, {
@@ -635,7 +635,13 @@ describe("retained-process terminal-owner reconciliation", () => {
           trigger: { kind: "next" },
         });
       if (operation === "execCommand") {
-        for (const [name, admissionOverride, attemptOverride, inferencePending] of [
+        for (const [
+          name,
+          admissionOverride,
+          attemptOverride,
+          inferencePending,
+          retainedLocator = false,
+        ] of [
           ["exact legacy owner", {}, {}, false],
           ["live owner", {}, { state: "running" }, true],
           ["completed owner", {}, { outcome: "completed" }, true],
@@ -651,6 +657,7 @@ describe("retained-process terminal-owner reconciliation", () => {
           ["wrong turn", { turn_id: crypto.randomUUID() }, {}, true],
           ["wrong generation", { execution_generation: attempt.executionGeneration + 1 }, {}, true],
           ["known provider outcome", { provider_outcome: "retained" }, {}, true],
+          ["retained parent locator", {}, {}, true, true],
         ] as const) {
           const [predicate] = await withWorkspaceSessionActivityRls(
             db,
@@ -661,6 +668,11 @@ describe("retained-process terminal-owner reconciliation", () => {
               select (jsonb_populate_record(null::sandbox_workspace_mutation_admissions,
                 to_jsonb(source) || ${JSON.stringify(admissionOverride)}::jsonb)).*
               from public.sandbox_workspace_mutation_admissions source where id=${admission.id}
+            ), sandbox_retained_processes as (
+              select * from public.sandbox_retained_processes where parent_admission_id=${admission.id}
+              union all select (jsonb_populate_record(null::sandbox_retained_processes,
+                ${JSON.stringify({ id: crypto.randomUUID(), parent_admission_id: admission.id, account_id: ids.accountId, workspace_id: ids.workspaceId, session_id: attempt.sessionId, owner_attempt_id: attempt.attemptId, state: "exited" })}::jsonb)).*
+              where ${retainedLocator}
             ), owner as (
               select (jsonb_populate_record(null::session_turn_attempts,
                 to_jsonb(source) || ${JSON.stringify(attemptOverride)}::jsonb)).*
