@@ -6,7 +6,8 @@ type Observer = (
   upstreamModelId?: string,
   requestToken?: string | null,
 ) => void;
-type Prepare = (providerId: string, headers: Headers) => Promise<Headers>;
+type PreparedUsageRequest = { headers: Headers; observe: Observer };
+type Prepare = (providerId: string, headers: Headers) => Promise<Headers | PreparedUsageRequest>;
 const observers = new AsyncLocalStorage<{
   observe: Observer;
   prepare?: Prepare;
@@ -34,11 +35,26 @@ export async function prepareClaudeSubscriptionRequest(
   input: Parameters<typeof fetch>[0],
   init?: RequestInit,
 ) {
-  const prepare = observers.getStore()?.prepare;
-  if (!prepare) return init;
-  const headers = new Headers(input instanceof Request ? input.headers : undefined);
-  new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-  return { ...init, headers: await prepare(providerId, headers) };
+  const context = observers.getStore();
+  const upstreamModelId = modelRequests.getStore();
+  let observe = context?.observe;
+  if (context?.prepare) {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+    const prepared = await context.prepare(providerId, headers);
+    init = { ...init, headers: prepared instanceof Headers ? prepared : prepared.headers };
+    if (!(prepared instanceof Headers)) observe = prepared.observe;
+  }
+  return {
+    init,
+    observe(response: Response, requestToken?: string | null) {
+      try {
+        observe?.(providerId, response, upstreamModelId, requestToken);
+      } catch {
+        // Telemetry must neither consume nor change the model response.
+      }
+    },
+  };
 }
 export function captureClaudeRequestToken(input: Parameters<typeof fetch>[0], init?: RequestInit) {
   if (!observers.getStore()) return undefined;

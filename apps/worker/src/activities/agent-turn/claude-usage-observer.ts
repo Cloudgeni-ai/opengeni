@@ -85,14 +85,18 @@ export async function createClaudeUsageObserver(
       }),
   );
   const captured = new Map(bindings.filter((binding) => binding !== null));
-  const observe = (
-    providerId: string,
+  const observeBinding = (
+    binding:
+      | Pick<
+          CapturedClaudeUsage,
+          "scope" | "token" | "expectedConnectionId" | "expectedCredentialVersion"
+        >
+      | undefined,
     response: Response,
     upstreamModelId?: string,
     requestToken?: string | null,
   ) => {
     if (requestToken === null) return;
-    const binding = captured.get(providerId);
     if (!binding) return;
     const { scope, ...capturedIdentity } = binding;
     const identity = { ...capturedIdentity, token: requestToken ?? capturedIdentity.token };
@@ -126,37 +130,57 @@ export async function createClaudeUsageObserver(
           : {}),
       });
   };
+  const observe = (
+    providerId: string,
+    response: Response,
+    upstreamModelId?: string,
+    requestToken?: string | null,
+  ) => observeBinding(captured.get(providerId), response, upstreamModelId, requestToken);
+  const prepareRequestWithObserver = async (
+    providerId: string,
+    headers: Headers,
+    resolve: (binding: {
+      scope: Scope;
+      expectedConnectionId: string;
+      expectedCredentialVersion: number;
+    }) => Promise<ClaudeRequestCredential | null>,
+  ) => {
+    if (!managedProviderIds.has(providerId)) return { headers, observe };
+    const binding = captured.get(providerId);
+    if (!binding) throw new ClaudeSubscriptionConnectionUnavailable();
+    const credential = await resolve({
+      scope: binding.scope,
+      expectedConnectionId: binding.expectedConnectionId,
+      expectedCredentialVersion: binding.expectedCredentialVersion,
+    });
+    if (
+      !credential ||
+      credential.connectionId !== binding.expectedConnectionId ||
+      credential.credentialVersion !== binding.expectedCredentialVersion
+    )
+      throw new ClaudeSubscriptionConnectionUnavailable();
+    const dispatched = Object.freeze({ ...binding, token: credential.token });
+    captured.set(providerId, dispatched);
+    headers.set("authorization", `Bearer ${credential.token}`);
+    headers.delete("x-api-key");
+    return {
+      headers,
+      observe: (
+        _providerId: string,
+        response: Response,
+        upstreamModelId?: string,
+        requestToken?: string | null,
+      ) => observeBinding(dispatched, response, upstreamModelId, requestToken),
+    };
+  };
   return Object.assign(observe, {
-    async prepareRequest(
-      providerId: string,
-      headers: Headers,
-      resolve: (binding: {
-        scope: Scope;
-        expectedConnectionId: string;
-        expectedCredentialVersion: number;
-      }) => Promise<ClaudeRequestCredential | null>,
-    ) {
-      if (!managedProviderIds.has(providerId)) return headers;
-      const binding = captured.get(providerId);
-      if (!binding) throw new ClaudeSubscriptionConnectionUnavailable();
-      const credential = await resolve({
-        scope: binding.scope,
-        expectedConnectionId: binding.expectedConnectionId,
-        expectedCredentialVersion: binding.expectedCredentialVersion,
-      });
-      if (
-        !credential ||
-        credential.connectionId !== binding.expectedConnectionId ||
-        credential.credentialVersion !== binding.expectedCredentialVersion
-      )
-        throw new ClaudeSubscriptionConnectionUnavailable();
-      captured.set(providerId, { ...binding, token: credential.token });
-      headers.set("authorization", `Bearer ${credential.token}`);
-      headers.delete("x-api-key");
-      return headers;
+    prepareRequestWithObserver,
+    async prepareRequest(...args: Parameters<typeof prepareRequestWithObserver>) {
+      return (await prepareRequestWithObserver(...args)).headers;
     },
     binding(providerId: string) {
-      return captured.get(providerId);
+      const binding = captured.get(providerId);
+      return binding ? { ...binding } : undefined;
     },
     renew(
       providerId: string,
