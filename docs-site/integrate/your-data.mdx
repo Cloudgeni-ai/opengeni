@@ -65,6 +65,10 @@ Either way, the tool must also be **selected** in the session's `tools`. Nothing
 
 Make the token outlive one turn: agents can work for many minutes. `modelContext` is visible to the model and in the session's audit events, so never put secrets in it.
 
+Provider credentials must be independently scoped, not ordinary host login JWTs with a smaller tool list. A token using the normal login signing secret/user ID can still authorize the host's account/password endpoints. Prefer a separate signing key/token namespace, distinct issuer/audience, short expiry and exact operation/record scope. The bridge must verify them; ordinary host endpoints must reject this token. Merely adding audience claims is not enough if ordinary middleware ignores them. Tool allowlists and approval gates are not credential authorization.
+
+Test the real middleware: the provider token permits only the intended operation on an owned record and is rejected by ordinary account/password/admin APIs, foreign records and extra write fields; a normal login token is rejected by the bridge. Also test expiry, issuer/audience and operation scope. Reuse authorized business logic, not the ordinary login credential.
+
 To require human approval before a tool runs, set `requireApproval: true` on the server, or list specific tool names. See [Approvals & questions](/integrate/approvals-and-questions).
 
 ## OpenAPI Integration

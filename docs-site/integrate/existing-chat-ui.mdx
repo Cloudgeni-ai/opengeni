@@ -96,4 +96,12 @@ console.log(reply.status, reply.text); // "completed", "pending", or "cancelled"
 
 `og.client` is the full SDK client, and each chat exposes its `workspaceId` and `sessionId`. Render the same session with `SessionConversation` when you are ready. The [chat quickstart](/examples/chat-quickstart) is a runnable backend.
 
+## Custom polling or static renderers
+
+Backend authorization does not stop an account A response already in flight from arriving after account B signs in. On logout, login, tenant or session switch, stop polling, abort requests, reset private messages/approvals/cursors and cached session IDs, and increment an identity/session epoch. Guard both success and error rendering by the captured epoch: abort alone is insufficient, including for A → B → A. Never reuse A's session ID for B. These presentation guards do not replace server-side ownership checks.
+
+Fold ordered, deduplicated approval events instead of treating every replayed request as pending. Preserve the original approval and decision IDs; see [Approvals & questions](/integrate/approvals-and-questions). The full [client Skill](/reference/opengeni-client-skill) contains framework-neutral, tested identity-epoch and event-fold examples for your existing frontend module; no new app architecture is required.
+
+Catch SDK initialization, configuration, calls and local persistence inside the host route's error boundary. Return friendly host-branded notices, never upstream `error.message`, response bodies or stack traces. Keep redacted diagnostics server-only. An unknown outcome or accepted decision followed by local-save failure requires reconciliation, not a promise that nothing changed or a blind repeat action.
+
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>
