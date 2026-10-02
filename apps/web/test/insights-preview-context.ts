@@ -1,6 +1,7 @@
 // Deterministic data for the Insights preview: workspace Insights and the
 // organization usage page with all three payers and other people's private
-// chats. `?state=` picks data, empty, error or loading.
+// chats. `?state=` picks data, truncated (private list capped), empty, error
+// or loading.
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -260,7 +261,7 @@ function workspaceSnapshot(empty: boolean): WorkspaceInsightsSnapshot {
             estimatedProviderCostKnownCalls: 7,
           },
         ],
-    privateChatsTruncated: false,
+    privateChatsTruncated: state === "truncated",
   } as WorkspaceInsightsSnapshot;
 }
 
@@ -319,7 +320,7 @@ function organizationSummary(empty: boolean) {
             totals: cost(1.85),
           },
         ],
-    privateChatsTruncated: false,
+    privateChatsTruncated: state === "truncated",
   };
 }
 

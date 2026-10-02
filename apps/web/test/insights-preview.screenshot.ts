@@ -1,6 +1,7 @@
 // Captures the Insights preview: workspace and organization pages at 1440 and
-// 390, light and dark, plus the empty, error and loading states. Fails on a
-// page error or horizontal overflow. Start the server first:
+// 390, light and dark, plus the truncated private list and the empty, error
+// and loading states. Fails on a page error or horizontal overflow. Start the
+// server first:
 //   bun run vite dev . --config test/insights-preview.vite.config.ts --port 4291
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -31,6 +32,8 @@ async function settle(page: Page, state: string) {
       .getByText(/No (model calls|usage recorded)/)
       .first()
       .waitFor();
+  } else if (state === "truncated") {
+    await page.getByText("Showing the largest 200.").last().waitFor();
   } else {
     await page.getByText("Private chats", { exact: true }).last().waitFor();
   }
@@ -43,6 +46,7 @@ for (const page of ["workspace", "org"] as const) {
   for (const width of [1440, 390]) {
     for (const theme of ["light", "dark"]) shots.push({ page, state: "data", width, theme });
   }
+  shots.push({ page, state: "truncated", width: 1440, theme: "light" });
   for (const state of ["empty", "error", "loading"]) {
     shots.push({ page, state, width: 1440, theme: "light" });
     shots.push({ page, state, width: 390, theme: "dark" });
