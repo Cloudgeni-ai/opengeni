@@ -70252,10 +70252,12 @@ async function supersedeChildResultsConsumedByCompletedAttemptTx(
  *
  * The caller proves the read returned whole content to the model; this proves
  * the attempt is still the session's current one and that each sequence is a
- * direct child's result-bearing answer. Only the reading turn's row is locked,
- * never the session write prefix, and a read whose answers this attempt
- * already recorded writes nothing. It is best effort: a busy turn row skips it
- * and the result is then delivered normally.
+ * direct child's result-bearing answer. A read whose answers this attempt
+ * already recorded writes nothing. Metadata writes take the canonical session
+ * prefix: the archive guard on a turn UPDATE also locks its session, so taking
+ * only the turn first would invert claim/settlement and parallel tool writers.
+ * It is best effort: a busy ownership row skips it and the result is then
+ * delivered normally.
  */
 export async function recordConsumedChildAnswers(
   db: Database,
@@ -70358,28 +70360,24 @@ export async function recordConsumedChildAnswers(
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (scopedDb) =>
         await scopedDb.transaction(async (tx) => {
-          // A request-scoped writer never waits long on the turn row.
+          // A request-scoped writer never waits long on the ownership rows.
           await tx.execute(
             sql`select set_config('lock_timeout', ${`${Math.max(1, workspaceControlRequestLockTimeoutMs())}ms`}, true)`,
           );
-          // The turn row alone: settlement locks the session and then this
-          // row, so while it is held the attempt below cannot close.
-          const [turn] = await tx
-            .select({
-              accountId: schema.sessionTurns.accountId,
-              metadata: schema.sessionTurns.metadata,
-            })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                eq(schema.sessionTurns.id, input.turnId),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!turn || turn.accountId !== input.accountId) return { recorded: 0 };
+          // 0560's BEFORE UPDATE archive guard takes the session NO KEY UPDATE
+          // lock after PostgreSQL has locked the turn. Own that prefix first,
+          // including the cursor, to avoid session <-> turn inversion against
+          // pending results, event appends, system-update claim and settlement.
+          const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            controlLock: "none",
+            sessionIds: [input.sessionId],
+            turnIds: [input.turnId],
+            attemptIds: [input.attemptId],
+          });
+          const turn = locks.turns[0];
+          if (!turn || turn.accountId !== input.accountId || turn.sessionId !== input.sessionId)
+            return { recorded: 0 };
           const [current] = await tx
             .select({ id: schema.sessionTurnAttempts.id })
             .from(schema.sessionTurnAttempts)
