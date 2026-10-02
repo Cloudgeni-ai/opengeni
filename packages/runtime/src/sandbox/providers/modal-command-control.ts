@@ -330,7 +330,10 @@ export class ModalCommandControl {
   async verifyExecReadiness(signal: AbortSignal): Promise<number> {
     signal.throwIfAborted();
     const sandboxId = this.sandboxId;
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, { signal }),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     if (sandboxId !== this.sandboxId)
       throw new Error("Modal sandbox changed during readiness preparation");
@@ -340,7 +343,7 @@ export class ModalCommandControl {
         (error as { code?: number } | null)?.code ?? -1,
       );
     const pause = () => delay(100, undefined, { signal });
-    return await this.withRouter(task.taskId, signal, async (router) => {
+    return await this.withStartRouter(task.taskId, signal, async (router) => {
       for (;;) {
         signal.throwIfAborted();
         try {

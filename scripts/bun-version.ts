@@ -147,7 +147,11 @@ function majorMinor(version: string): string {
 }
 
 export function verifyWorkflowBunSetup(name: string, source: string): void {
-  const canonicalVersionFiles = [".bun-version", ".release/controller/.bun-version"];
+  const canonicalVersionFiles = [
+    ".bun-version",
+    ".release/controller/.bun-version",
+    ".ci/registry-export-guard/.bun-version",
+  ];
   const lines = source.split("\n");
   for (const [index, line] of lines.entries()) {
     if (!line.includes("oven-sh/setup-bun@")) continue;
@@ -163,7 +167,7 @@ export function verifyWorkflowBunSetup(name: string, source: string): void {
       .find((candidate) => candidate !== undefined);
     if (!versionFile || !canonicalVersionFiles.includes(versionFile)) {
       throw new Error(
-        `${name} setup-bun step must read the canonical source or retained-controller .bun-version file`,
+        `${name} setup-bun step must read the canonical source, retained-controller, or registry-guard .bun-version file`,
       );
     }
   }

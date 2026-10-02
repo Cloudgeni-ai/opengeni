@@ -221,6 +221,32 @@ describe("post-claim database recovery wire classification", () => {
     expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(providerDetail);
   });
 
+  test("accepts the setup no-replay checkpoint without new provider retry authority", () => {
+    const setupDetail = { ...detail, sandboxSetupOutcomeUnknown: true };
+    const failure = ApplicationFailure.create({
+      message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+      type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+      details: [setupDetail],
+    });
+    expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(setupDetail);
+    for (const invalid of [
+      { ...setupDetail, sandboxSetupOutcomeUnknown: false },
+      { ...setupDetail, providerFailureCode: "provider_unavailable", providerRecoveryCount: 1 },
+    ]) {
+      expect(
+        postClaimDatabaseRecoveryDetail(
+          activityFailure(
+            ApplicationFailure.create({
+              message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+              type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+              details: [invalid],
+            }),
+          ),
+        ),
+      ).toBeNull();
+    }
+  });
+
   test("rejects malformed identity, permanent codes, and unrelated activities", () => {
     const failure = (candidate: Record<string, unknown>) =>
       activityFailure(

@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(a.running(JobClass::Heavy), 10_000);
         assert_eq!(a.queued(JobClass::Heavy), 0);
         // And with no wait breaker configured, expire() can never reject.
-        assert!(a.expire(u64::MAX).is_empty());
+        assert_eq!(a.expire(u64::MAX), Vec::<(OpId, RefusalReason)>::new());
     }
 
     #[test]

@@ -1,5 +1,17 @@
 # @opengeni/ogtool
 
+## 0.3.50
+
+### Patch Changes
+
+- @opengeni/codemode@0.6.8
+
+## 0.3.49
+
+### Patch Changes
+
+- @opengeni/codemode@0.6.7
+
 ## 0.3.48
 
 ### Patch Changes

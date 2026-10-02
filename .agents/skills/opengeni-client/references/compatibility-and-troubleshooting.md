@@ -14,6 +14,39 @@ Documentation availability and deployed feature availability are separate.
 Inspect the installed package exports/types and `/v1/config/client`; verify the
 chosen contract against the intended deployment before implementing against it.
 
+To check the full Skill's HTTP Markdown export from a repository checkout:
+
+```bash
+bun scripts/check-client-skill-markdown-export.ts
+```
+
+This opt-in network check compares the published `.md` sections with the local
+generated mirror, including nested code fences. A mismatch may mean the docs
+deployment has not caught up with the checkout; it is not evidence of a runtime
+API failure. Use `--url` and `--expected` to check another deployment or a known
+matching mirror. The local HTTP regression tests run without external services.
+
+## CommonJS hosts
+
+The SDK is ESM-only. In an existing `.cjs` host, use dynamic `import()` inside
+an async initializer; `require("@opengeni/sdk")` is not the supported loading
+path. Do not change the entire project's module type just to load the SDK.
+
+```js
+// opengeni.cjs — callers await createOpenGeniClient().
+async function createOpenGeniClient() {
+  const { OpenGeniClient } = await import("@opengeni/sdk");
+  return new OpenGeniClient({
+    baseUrl: process.env.OPENGENI_API_BASE_URL,
+    apiKey: process.env.OPENGENI_API_KEY,
+  });
+}
+
+module.exports = { createOpenGeniClient };
+```
+
+Keep this initialization on the server: never send the API key to a browser.
+
 ## Decide what is being replaced
 
 | Customer dependency | Evidence needed |

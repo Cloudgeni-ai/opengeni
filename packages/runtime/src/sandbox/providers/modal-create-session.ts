@@ -17,11 +17,38 @@ import {
 import { materializeEnvironment, readOptionalString } from "@openai/agents-core/sandbox/internal";
 import { ModalClient, Sandbox, type Image, type CloudBucketMount } from "modal";
 import { createModalProviderCreateBoundary, type ModalCreateIntent } from "./modal-create-boundary";
+import { modalCommandStartCleanupIsSafe } from "./modal-command-start-errors";
 
 export type ModalCreateLifecycle = {
   beforeDispatch: (intent: ModalCreateIntent, providerContext: unknown) => Promise<void>;
   onCreated: (session: ModalSandboxSession, intent: ModalCreateIntent) => Promise<void>;
 };
+
+/** Release local transport after a failed create, but never stop a box whose
+ * original setup invocation may still be writing behind its durable fence. */
+export async function releaseModalCreateFailure(
+  session: Pick<ModalSandboxSession, "close"> | undefined,
+  modal: Pick<ModalClient, "close">,
+  error: unknown,
+): Promise<never> {
+  try {
+    if (session && modalCommandStartCleanupIsSafe(error)) {
+      try {
+        await session.close();
+      } catch (cleanupError) {
+        // eslint-disable-next-line preserve-caught-error -- Both failures remain exact AggregateError causes.
+        throw new AggregateError(
+          [error, cleanupError],
+          "Modal create failed and cleanup needs reconciliation",
+          { cause: cleanupError },
+        );
+      }
+    }
+  } finally {
+    modal.close();
+  }
+  throw error;
+}
 
 function defined<T extends object>(
   value: T,
@@ -325,22 +352,7 @@ export async function createModalSessionWithLifecycle(
     // Every synchronous failure releases the transport even if stopping the
     // provider fails; durable reconciliation uses a separate authenticated client.
     if (!timedOut) {
-      try {
-        if (session) {
-          try {
-            await session.close();
-          } catch (cleanupError) {
-            // eslint-disable-next-line preserve-caught-error -- Both failures are retained by AggregateError, with cleanupError also as cause.
-            throw new AggregateError(
-              [error, cleanupError],
-              "Modal create failed and cleanup needs reconciliation",
-              { cause: cleanupError },
-            );
-          }
-        }
-      } finally {
-        modal.close();
-      }
+      return await releaseModalCreateFailure(session, modal, error);
     }
     throw error;
   }

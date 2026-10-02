@@ -96,9 +96,8 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
-Temporal coordinates execution; activities read Postgres obligations, not signals.
-Conversation, goals, queues, usage and provider/tool transcripts stay outside
-workflow history.
+Temporal coordinates; activities read Postgres obligations, not signals.
+Conversation/goals/queues/usage/provider/tool transcripts never enter workflow history.
 
 Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
@@ -114,11 +113,11 @@ Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
 A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
 attempts append atomic batches: ordered, exactly-once history.
 
-`wait_for_input` ends execution after tool-batch settlement, preserving trusted
-wait authority and immutable same-turn deadlines. Command results remain durable;
-alone, they wake only explicit waits. Notices cannot block other inbox input.
-Batching preserves causal authority; messages/Steer inherit the sender’s human
-independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
+`wait_for_input` ends settled tool-batch execution, preserving trusted authority
+and immutable same-turn deadlines. Durable command results alone wake only
+explicit waits; notices never block inbox input. Batching preserves causal authority;
+messages/Steer inherit the sender’s human, independent of connections.
+See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable, attempt-fenced. Retry settlement, never unknown
 effects. Unknown Modal Starts return tool results, retaining exact invocation/writer
@@ -127,52 +126,49 @@ Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares prepared prefixes with both Responses compaction modes; Chat retains
-its transcript adapter.
+its transcript adapter. Both modes retain recent system-role input batches
+within existing budgets, preserving chronological accepted goal snapshots.
 
-Failed-session retry differs from Pause/Resume and prompt admission.
+Failed-session retry is not Pause/Resume or prompt admission:
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
-receipts, rejects unresolved execution and safety refusals, and re-enables the
-original turn with retained history/authority and selected model policy—never
-synthetic human input.
+receipts, rejects unresolved execution/safety refusals, and re-enables the
+original turn, history, authority and selected model policy—never synthetic input.
 
-Active-run writes prove the exact current attempt/generation. Stale workers may
-stay alive but cannot authoritatively write or settle replacements. Temporal
-cancellation is intent; durable quiescence gates replacements, including closed
-attempts' unresolved writers. After execution, finalization has per-stage
-containment and heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
+Active-run writes require the current exact attempt/generation; stale workers
+cannot write or settle replacements. Temporal cancellation is intent, not
+quiescence: unresolved writers, even on closed attempts, fence replacements.
+Finalization contains each stage with heartbeat/metric evidence
+(`agent-turn/finalization-monitor.ts`).
 
-Recoverable activity shutdown creates a transactional Postgres workflow-wake
-obligation. Delivery stays unacknowledged until the exact closed attempt is
-durably quiescent.
-Each attempt-owned retained-process settlement advances the outbox atomically.
-Workflow close or writer exit racing reconciliation cannot orphan recovery;
-repeated Pause re-arms missing quiescence wakes.
+Recoverable shutdown transactionally creates a Postgres workflow wake,
+unacknowledged until exact closed-attempt quiescence. Retained-process
+settlement atomically advances its outbox. Workflow-close/writer-exit races
+cannot orphan recovery; repeated Pause re-arms missing quiescence wakes.
 
-A command remains attempt-owned until durable adoption of its exact provider
-identity. Then turn completion and Steer detach; command cancellation, Pause,
-and terminal Cancel control its lifetime. Instance stop/revocation/replacement
-marks Connected Machine tracking `lost`, not process death. Temporary outages
-preserve tracking. Reconciliation batches a fixed due-time frontier with shared
-per-instance offline observations. Historical retirement preserves records
-without input or wakes.
-Terminal proof commits settlement and audit together. Nonterminal sessions receive
-fallback input unless observed. Terminal reads suppress pending notifications,
-never history; running reads do not. Failed/cancelled sessions retain audit only.
-Fanout is replaceable and post-commit. Conversation history remains separate:
-sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
-transfers large message scalars in bounded slices, not whole histories.
-Full-history Find (`packages/db/src/session-message-search.ts`) coalesces authorized
-scalar windows, returning bounded snippets/cursors, not histories. See
+A command stays attempt-owned until durable exact-provider-identity adoption.
+Turn completion/Steer then detach; command cancellation, Pause and terminal
+Cancel govern lifetime. Instance stop/revocation/replacement marks Connected
+Machine tracking `lost`, never process death; temporary outages preserve it.
+Reconciliation batches a fixed due-time frontier, sharing per-instance offline
+observations. Historical retirement retains records without input/wakes.
+Terminal proof atomically commits settlement/audit. Unobserved nonterminal
+sessions receive fallback input. Terminal reads suppress pending notifications,
+not history; running reads suppress neither. Failed/cancelled sessions retain
+audit only. Replaceable fanout follows commit. Separate conversation history
+uses sequence cursors; `packages/db/src/session-event-slices.ts` transfers bounded
+message-scalar slices, never whole histories. Full-history Find
+(`packages/db/src/session-message-search.ts`) coalesces authorized scalar windows
+into bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).
 
-Docker/local SDK processes expose turn-scoped handles after a bounded wait.
-They remain on the turn cancellation fence and stop before finalization, letting
-agents test preview servers without awaiting exit.
+Docker/local SDK processes expose bounded-wait, turn-scoped handles, stay
+cancellation-fenced and stop before finalization; agents can test preview
+servers without awaiting exit.
 
-`wait_for_input` persists its turn and deadline until input or timeout.
-Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
-drives working/recheck UI separately from unread. `session_wait`/`command_wait`
-are in-turn reads; child results carry final answers. See
+`wait_for_input` retains its turn/deadline until input/timeout; acknowledgment
+cannot strand eligible input/due waits. `Session.inputWait` drives working/recheck
+UI, not unread. `session_wait`/`command_wait` read in-turn; child results carry
+final answers. See
 [durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
@@ -477,15 +473,16 @@ missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
 Modal `TaskExecStart` recovery requires read-only task/router lookup or local
-channel-readiness failure before any Start RPC. Native and pinned-SDK
-setup/filesystem/archive commands share this rule. Typed proof and preserved SDK
-causes permit finite five-replacement same-turn recovery, including pre-eventing
-setup. Server DNS text and post-dispatch errors never prove non-execution.
-Uncertain Starts return typed outcome-unknown results, never transport retries.
-Supervised retries settle the exact never-started reservation first; retained or
-outcome-unknown causes block recovery. Published consumers use unpatched Modal:
-runtime owns its native error class and recognizes SDK boundaries by a local
-own-Symbol data marker, never patch-only imports, names, codes or diagnostic text.
+channel-readiness failure before any Start RPC, for native and pinned-SDK
+setup/filesystem/archive commands alike. Typed proof permits finite
+five-replacement same-turn recovery; server DNS text and post-dispatch errors
+never prove non-execution. Uncertain Starts return typed outcome-unknown
+results, never transport retries, and block replay. An unwound setup parks its
+turn as recovering with `sandboxSetupOutcomeUnknown`; peek and claim refuse
+redispatch, and exit/loss or deadlines never prove completion. Published
+consumers use unpatched Modal: the runtime owns its error class and recognizes
+SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
+codes or text.
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
@@ -1060,6 +1057,10 @@ The TypeScript system is a Bun workspace over `apps/*`, `examples/*`, and
 `packages/*`. Internal packages are consumed from source. The Connected Machine
 agent and relay are a separate Rust Cargo workspace under `agent/`.
 
+`examples/vue-conversation/app` sits below the root workspace glob: its
+standalone npm lock installs the published SDK rather than linking repository
+source, so the non-React recipe is also a real consumer build.
+
 Package manifests and `.changeset/config.json` own exact publication status and
 entrypoints. The lists below describe responsibility, not current publish
 metadata.
@@ -1125,6 +1126,7 @@ handlers because its host owns process lifecycle.
 | `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Backend-only chat example |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference (proxy, MCP, React, event streams) |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
+| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue SFC conversation; Bun same-origin session proxy, explicit host cookie/CSRF boundary, replay and decisions; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 
@@ -1250,29 +1252,21 @@ skip it. No hooks replay, provider creation, or manifest changes.
 Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
-Codemode adds only attempt scope, active-attempt fencing, its durable operation
-journal, sandbox delivery, and recovery semantics. Input and authorization
-preflight finish before its execution-start marker. The API exposes a stable
-pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
-and path/identity re-resolution without retrying an existing or ambiguous
-operation. Deterministic submission conflicts are never reconciled to an
-existing row; ambiguous submission failures may adopt a row only after exact
-attempt scope, catalog, identity, and canonical-argument comparison.
-Admitted-operation recovery never replays the tool; see
-[run lifecycle](run-lifecycle.md#codemode-recovery). The current-human gateway
-rebuilds live authority for each request. Browser callers use
-`client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
-parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
-credentials nor workspace routing context. The active immutable Site version's
-retained tool identities are its direct-call allowlist: the parent intersects
-them with the current viewer's live gateway, and the API revalidates the exact
-active version and identity on every call. Publishing grants no tool authority:
-requested identities are only a maximum allowlist, and ordinary live gateway
-approval still applies at execution. An agent-authored version may retain any
-identity present in its exact attempt catalog. The host
-injects a pre-application bootstrap receiver into the exact iframe document so
-a Site client constructed after `load` can use the retained document port; the
-port and every derived tool-call port are revoked on document navigation or replacement.
+Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
+sandbox delivery and recovery. Preflight finishes before the execution-start
+marker; a pre-creation `codemode_catalog_stale` allows one safe client refresh,
+never a retry of an existing or ambiguous operation. Submission conflicts never
+reconcile to an existing row; ambiguous failures adopt one only after exact
+scope, catalog, identity and argument comparison. Recovery never replays the
+tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
+gateway rebuilds live authority per request. Browsers use
+`client.tools.forWorkspace(...)`; opaque-origin Sites use the parent-held
+`@opengeni/sdk/site` MessagePort adapter with no bearer or workspace context.
+A Site version's retained tool identities are only a maximum allowlist: the
+parent intersects them with the viewer's live gateway, the API revalidates every
+call, and live approval still applies. Agent-authored versions may retain any
+identity in their exact attempt catalog. Ports are revoked on document
+navigation or replacement.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
@@ -1345,7 +1339,7 @@ Canonical: [`capabilities.md`](capabilities.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
 
 MCP OAuth redirects carry a short signed reference to encrypted, time-limited
-Postgres state under workspace RLS, then check the existing one-use nonce.
+Postgres state under workspace RLS, then check the one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
@@ -1356,14 +1350,16 @@ machine. Bounded reads/stills authenticate session/controller/target. SDK/viewer
 full observations; Code Mode receives local image handles. Human computer control
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
-Lightpanda supports semantic observations only.
+Lightpanda is semantic-only.
+
+Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
 
-Native macOS operations drain Cocoa pools and clean up pending capture starts.
-Desktop discovery proceeds independently of semantic inspection.
+Native macOS operations drain Cocoa pools and clear pending capture starts;
+desktop discovery is independent of semantic inspection.
 
-New capability negotiation advertises only `manual` and `on-verify` recording.
+Capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.

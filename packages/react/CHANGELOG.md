@@ -1,5 +1,24 @@
 # @opengeni/react
 
+## 7.6.1
+
+### Patch Changes
+
+- d03b4a8: Clarify that window app controls work in the background and label explicit foreground activation as “Bring to front”.
+- cf1570d: Keep desktop images usable in narrow panels by placing app controls below the image. Wider viewers retain their side panel. Keep the foreground activation button readable within the image bounds.
+- 09a991f: Hide Jump to latest when readers scroll back to the live bottom after returning to their question, preserving scroll intent across renders and releasing stale question focus.
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+
+## 7.6.0
+
+### Patch Changes
+
+- 9b3c40e: Show factual response-waiting copy once a model request is dispatched, while preserving the loading indicator and host customization.
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- Updated dependencies [e5b0123]
+  - @opengeni/sdk@7.6.0
+
 ## 7.5.0
 
 ### Minor Changes

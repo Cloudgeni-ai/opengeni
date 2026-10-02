@@ -36,6 +36,7 @@ export const handleChat = createChatHandler(og, {
     };
   },
   format: "vercel", // or "openai-chat", "openai-responses"; default "native"
+  toolParts: true, // optional Vercel activity indicators; off by default
 });
 ```
 
@@ -70,7 +71,7 @@ export async function POST(request: Request) {
       const chunks = chat.stream(lastUserText(messages), {
         modelContext: `Dashboard ${dashboardId}`,
       });
-      for await (const part of uiMessageStreamParts(chunks, { framing: false })) {
+      for await (const part of uiMessageStreamParts(chunks, { framing: false, toolParts: true })) {
         writer.write(part as never);
       }
     },
@@ -79,7 +80,7 @@ export async function POST(request: Request) {
 }
 ```
 
-The Vercel format speaks the UI message stream used by AI SDK 5 and later; tool approval requests need AI SDK 6 or later. Pass `toolParts: true` to include OpenGeni's own tool activity as dynamic tool parts.
+The Vercel format speaks the UI message stream used by AI SDK 5 and later; tool approval requests need AI SDK 6 or later. Ordinary tool activity is off by default. `toolParts: true` on the handler or `uiMessageStreamParts` emits `dynamic`, `providerExecuted` activity parts, so your app does not execute those tools. Successful outputs contain only `{ status }`, not actual tool results. This does not add artifacts or attachments. Approval requests are emitted even when `toolParts` is off. `framing: false` leaves message framing to the outer AI SDK stream.
 
 ## Server-side bots
 

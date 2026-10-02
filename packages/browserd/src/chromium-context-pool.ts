@@ -106,7 +106,7 @@ export class EphemeralChromiumContextPool {
             engine: "chromium",
             targetLifecycle: "cdp",
             browserContextId: contextId,
-            foregroundManagedTabs: false,
+            focusEmulation: true,
             connect: async (endpoint) => {
               assertLease();
               let connection: BrowserCdpConnection;
