@@ -18,9 +18,12 @@ import { isModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers
 import {
   MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
+  ModalCommandStartNotDispatchedError,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
   modalRouterWire,
+  type ModalRouterPreparedStart,
+  type ModalRouterStart,
 } from "../src/sandbox/providers/modal-command-router-wire";
 
 const service = "modal.task_command_router.TaskCommandRouter";
@@ -45,6 +48,9 @@ let directory: string;
 let endpoint: string;
 let certificate: Buffer;
 let startCalls = 0;
+let writeCalls = 0;
+const starts: object[] = [];
+let cancelledStartReceived: (() => void) | undefined;
 let cancelledReads = 0;
 const requests: Array<{ execId: string; offset: number; fileDescriptor: number }> = [];
 
@@ -86,6 +92,15 @@ beforeAll(async () => {
       start(call: any, callback: any) {
         startCalls++;
         expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        starts.push(modalRouterWire.lookupType("Start").toObject(call.request));
+        if (call.request.execId === "prepared-cancel") {
+          cancelledStartReceived?.();
+          return;
+        }
+        if (call.request.execId === "prepared") {
+          callback(null, {});
+          return;
+        }
         if (call.request.execId === "server-spoof") {
           callback({
             code: status.UNAVAILABLE,
@@ -130,6 +145,7 @@ beforeAll(async () => {
         );
       },
       write(call: any, callback: any) {
+        writeCalls++;
         expect(Number(call.request.offset)).toBe(17);
         expect(Buffer.from(call.request.data).toString()).toBe("input");
         callback(null, {});
@@ -157,6 +173,286 @@ function wire() {
   return new ModalCommandRouterWire({ url: endpoint, jwt: "test-token" }, certificate);
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
+
+test("TLS preparation sends no mutation and freezes exact parameters before single-use dispatch", async () => {
+  const client = wire();
+  const request: ModalRouterStart = {
+    ...identity("prepared"),
+    commandArgs: ["/bin/true", "é雪", "literal $value"],
+    workdir: "/workspace/original",
+    env: { ORIGINAL: "exact-value" },
+    ptyInfo: {
+      enabled: true,
+      winszRows: 24,
+      winszCols: 80,
+      envTerm: "xterm",
+      ptyType: 1,
+      noTerminateOnIdleStdin: true,
+    },
+  };
+  const beforeStart = startCalls,
+    beforeWrite = writeCalls;
+  try {
+    const pending = client.prepareStart(request);
+    request.commandArgs[0] = "substituted";
+    request.env.ORIGINAL = "substituted";
+    request.ptyInfo!.winszRows = 99;
+    const prepared = await pending;
+    expect(prepared).toEqual(identity("prepared"));
+    expect(Object.isFrozen(prepared)).toBe(true);
+    expect(startCalls).toBe(beforeStart);
+    expect(writeCalls).toBe(beforeWrite);
+    request.taskId = "other-task";
+    request.execId = "other-exec";
+    request.workdir = "/workspace/other";
+    // If dispatch secretly rejoins readiness, this actual TLS RPC cannot pass.
+    Object.defineProperty((client as any).client, "waitForReady", {
+      value: () => {
+        throw new Error("Readiness after the preparation boundary");
+      },
+    });
+    const dispatched = client.dispatchPreparedStart(prepared);
+    const duplicate = client.dispatchPreparedStart(prepared).catch((error) => error);
+    await dispatched;
+    expect(await duplicate).toHaveProperty(
+      "message",
+      "Invalid or consumed Modal prepared Start handle",
+    );
+    expect(startCalls - beforeStart).toBe(1);
+    expect(writeCalls).toBe(beforeWrite);
+    expect(starts.at(-1)).toEqual({
+      ...identity("prepared"),
+      commandArgs: ["/bin/true", "é雪", "literal $value"],
+      workdir: "/workspace/original",
+      env: { ORIGINAL: "exact-value" },
+      ptyInfo: {
+        enabled: true,
+        winszRows: 24,
+        winszCols: 80,
+        envTerm: "xterm",
+        ptyType: 1,
+        noTerminateOnIdleStdin: true,
+      },
+      stdoutConfig: 1,
+      stderrConfig: 1,
+    });
+  } finally {
+    client.close();
+  }
+});
+
+test("only the issuing factory's original handle can dispatch on its transport", async () => {
+  const issuer = wire(),
+    foreign = wire();
+  const before = startCalls;
+  try {
+    const prepared = await issuer.prepareStart({
+      ...identity("prepared"),
+      commandArgs: ["/bin/true"],
+      workdir: "/tmp",
+      env: {},
+    });
+    for (const candidate of [
+      { ...prepared },
+      JSON.parse(JSON.stringify(prepared)),
+      { command: prepared, admission: "not-authority" },
+    ]) {
+      const error = await issuer
+        .dispatchPreparedStart(candidate as ModalRouterPreparedStart)
+        .catch((failure) => failure);
+      expect(error).not.toBeInstanceOf(ModalCommandStartNotDispatchedError);
+      expect(error).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+      expect(error).toHaveProperty("message", "Invalid or consumed Modal prepared Start handle");
+    }
+    await expect(foreign.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
+    expect(startCalls).toBe(before);
+    await issuer.dispatchPreparedStart(prepared);
+    expect(startCalls - before).toBe(1);
+  } finally {
+    issuer.close();
+    foreign.close();
+  }
+});
+
+test("lost Start acknowledgement spends the original prepared handle permanently", async () => {
+  const client = wire();
+  const before = startCalls;
+  try {
+    const prepared = await client.prepareStart({
+      ...identity("prepared-unknown"),
+      commandArgs: ["/bin/true"],
+      workdir: "/tmp",
+      env: {},
+    });
+    const outcome = await client.dispatchPreparedStart(prepared).catch((error) => error);
+    expect(outcome).toMatchObject({
+      name: "CommandStartOutcomeUnknownError",
+      ...identity("prepared-unknown"),
+      cause: { code: status.UNAVAILABLE },
+    });
+    const duplicate = await client.dispatchPreparedStart(prepared).catch((error) => error);
+    expect(duplicate).not.toBeInstanceOf(ModalCommandStartNotDispatchedError);
+    expect(duplicate).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+    expect(duplicate).toHaveProperty("message", "Invalid or consumed Modal prepared Start handle");
+    expect(startCalls - before).toBe(1);
+  } finally {
+    client.close();
+  }
+});
+
+test("post-dispatch cancellation is ambiguous and never permits a second Start", async () => {
+  const client = wire(),
+    cancellation = new AbortController();
+  const reason = new Error("caller cancelled after Start");
+  const received = new Promise<void>((resolve) => {
+    cancelledStartReceived = resolve;
+  });
+  const before = startCalls;
+  try {
+    const prepared = await client.prepareStart({
+      ...identity("prepared-cancel"),
+      commandArgs: ["/bin/true"],
+      workdir: "/tmp",
+      env: {},
+    });
+    const pending = client
+      .dispatchPreparedStart(prepared, cancellation.signal)
+      .catch((error) => error);
+    await received;
+    cancellation.abort(reason);
+    expect(await pending).toMatchObject({
+      name: "CommandStartOutcomeUnknownError",
+      ...identity("prepared-cancel"),
+      cause: reason,
+    });
+    await expect(client.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
+    expect(startCalls - before).toBe(1);
+  } finally {
+    cancelledStartReceived = undefined;
+    client.close();
+  }
+});
+
+test("RPC-time serialization remains ambiguous and leaves the prepared handle spent", async () => {
+  const client = wire();
+  const codec = modalRouterWire.lookupType("Start");
+  const encodeStart = codec.encode;
+  const before = startCalls;
+  try {
+    const prepared = await client.prepareStart({
+      ...identity("serialization-failure"),
+      commandArgs: ["/bin/true"],
+      workdir: "/tmp",
+      env: {},
+    });
+    codec.encode = () => {
+      throw new Error("RPC serializer failed after preparation");
+    };
+    const error = await client.dispatchPreparedStart(prepared).catch((failure) => failure);
+    expect(error).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
+    expect(error).not.toBeInstanceOf(ModalCommandStartNotDispatchedError);
+    expect(error).not.toBeInstanceOf(ModalCommandStartPreDispatchUnavailableError);
+    expect(error).toMatchObject(identity("serialization-failure"));
+    expect(startCalls).toBe(before);
+    codec.encode = encodeStart;
+    await expect(client.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
+    expect(startCalls).toBe(before);
+  } finally {
+    codec.encode = encodeStart;
+    client.close();
+  }
+});
+
+test("abort or close after preparation sends zero Start but still spends the handle", async () => {
+  const before = startCalls;
+  for (const close of [false, true]) {
+    const client = wire(),
+      cancellation = new AbortController();
+    try {
+      const prepared = await client.prepareStart({
+        ...identity("prepared"),
+        commandArgs: ["/bin/true"],
+        workdir: "/tmp",
+        env: {},
+      });
+      if (close) client.close();
+      else cancellation.abort(new Error("caller stopped before dispatch"));
+      await expect(
+        client.dispatchPreparedStart(prepared, cancellation.signal),
+      ).rejects.toBeInstanceOf(ModalCommandStartNotDispatchedError);
+      await expect(client.dispatchPreparedStart(prepared)).rejects.toThrow("Invalid or consumed");
+      expect(startCalls).toBe(before);
+    } finally {
+      client.close();
+    }
+  }
+});
+
+test("preparation validation fails before readiness or any mutation", async () => {
+  const client = wire(),
+    before = startCalls,
+    beforeWrite = writeCalls;
+  let readinessCalls = 0;
+  Object.defineProperty((client as any).client, "waitForReady", {
+    value: () => {
+      readinessCalls++;
+      throw new Error("Must validate before readiness");
+    },
+  });
+  try {
+    for (const invalid of [
+      { ...identity(), commandArgs: [14], workdir: "/tmp", env: {} },
+      { ...identity(), commandArgs: [], workdir: "/tmp", env: {} },
+      { ...identity(), commandArgs: ["/bin/true"], workdir: "/tmp", env: { BAD: 14 } },
+      { ...identity(), commandArgs: ["x".repeat(4 * 1024 * 1024)], workdir: "/tmp", env: {} },
+    ]) {
+      await expect(client.prepareStart(invalid as ModalRouterStart)).rejects.toBeInstanceOf(
+        ModalCommandStartNotDispatchedError,
+      );
+    }
+    expect(readinessCalls).toBe(0);
+    expect(startCalls).toBe(before);
+    expect(writeCalls).toBe(beforeWrite);
+  } finally {
+    client.close();
+  }
+});
+
+test("preparation outage or in-flight cancellation never enters the dispatch callback", async () => {
+  const client = new ModalCommandRouterWire({
+    url: "https://task-notarealtask2707.w.modal.host",
+    jwt: "test-token",
+  });
+  const request = { ...identity(), commandArgs: ["/bin/true"], workdir: "/tmp", env: {} };
+  const before = startCalls,
+    beforeWrite = writeCalls;
+  let dispatchCallbacks = 0;
+  const prepareThenDispatch = async (signal?: AbortSignal) => {
+    const prepared = await client.prepareStart(request, signal);
+    dispatchCallbacks++;
+    await client.dispatchPreparedStart(prepared, signal);
+  };
+  try {
+    const cancellation = new AbortController();
+    const pending = prepareThenDispatch(cancellation.signal).catch((error) => error);
+    cancellation.abort(new Error("cancel during channel readiness"));
+    expect(await pending).toBeInstanceOf(ModalCommandStartNotDispatchedError);
+    await expect(prepareThenDispatch()).rejects.toBeInstanceOf(
+      ModalCommandStartPreDispatchUnavailableError,
+    );
+    expect(dispatchCallbacks).toBe(0);
+    expect(startCalls).toBe(before);
+    expect(writeCalls).toBe(beforeWrite);
+    expect(request).toEqual({
+      ...identity(),
+      commandArgs: ["/bin/true"],
+      workdir: "/tmp",
+      env: {},
+    });
+  } finally {
+    client.close();
+  }
+}, 15_000);
 
 test("both pinned SDK distributions dispatch ambiguous Start once without transient replay", async () => {
   const sdkServer = new Server();
