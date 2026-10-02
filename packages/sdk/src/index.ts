@@ -12,9 +12,12 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export type { Chats } from "./chats";
 export type { ServiceContext } from "./embedding-client";
 export {
+  OPENGENI_TEST_REQUEST_NIL_ID,
   OPENGENI_WEBHOOK_HEADERS,
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
   OpenGeniSignatureError,
   WORKSPACE_WEBHOOK_EVENT_TYPES,
   signOpenGeniPayload,
@@ -45,6 +48,7 @@ export type {
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   CredentialProviderRequest,
+  CredentialProviderInitiatorContext,
   CredentialProviderResponse,
   GetWorkspaceCredentialProviderResponse,
   ListWorkspaceWebhookDeliveriesResponse,
@@ -58,9 +62,44 @@ export type {
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEvent,
   WorkspaceWebhookEventType,
+  SessionWorkspaceWebhookEvent,
+  WorkspaceUsageWebhookEvent,
+  WorkspaceTestWebhookEvent,
+  IntegrationEndpointTestResult,
+  TestWorkspaceWebhookResponse,
+  TestWorkspaceCredentialProviderResponse,
+  WorkspaceInheritedIntegrationsResponse,
 } from "./workspace-integrations";
+export type {
+  AllowanceExhaustedRefusal,
+  ClearWorkspaceAllowanceRequest,
+  ClearWorkspaceAllowanceResponse,
+  GetUsageRequest,
+  GetMyUsageRequest,
+  GrantWorkspaceCreditsRequest,
+  MemberAllowance,
+  MemberAllowanceDefault,
+  MemberAllowanceRule,
+  MemberAllowanceUsage,
+  SetMemberAllowanceRequest,
+  SetWorkspaceAllowanceRequest,
+  UsageAllowancePeriod,
+  UsageAllowanceStatus,
+  UsageAllowanceWindow,
+  WorkspaceAllowance,
+  WorkspaceAllowanceConfig,
+  WorkspaceAllowanceState,
+  WorkspaceAllowanceUsage,
+  WorkspaceCreditGrant,
+  WorkspaceUsageResponse,
+} from "@opengeni/contracts/usage-allowances";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type { ToolDisplayMetadata } from "@opengeni/contracts";
+export {
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
+} from "@opengeni/contracts/session-final-reply";
+export type { EmptyFinalReplyCompletion } from "@opengeni/contracts/session-final-reply";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
 export type {
   PluginDiscoveryItem,
@@ -163,6 +202,8 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
+  OpenGeniAllowanceExhaustedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
@@ -179,8 +220,10 @@ export {
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
 export type {
+  AgentPromptModuleId,
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
+  ModelContextInstructionModule,
   ModelContextSkill,
   ModelContextSkillKind,
   ModelContextSnapshot,
@@ -197,7 +240,7 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
-export { createSessionProxyHandler } from "./session-proxy";
+export { artifactViewerCapability, createSessionProxyHandler } from "./session-proxy";
 export type {
   SessionProxyContext,
   SessionProxyCreateInput,
@@ -214,6 +257,7 @@ export {
   openGeniLinkScheme,
   parseRetainedFileReference,
   parseSandboxLink,
+  SESSION_SCOPE_HEADER,
 } from "./message-links";
 export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
@@ -541,6 +585,7 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  AccessCredential,
   ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
@@ -671,6 +716,11 @@ export type {
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
+  ClaudeSubscriptionUsage,
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
+  ClaudeUsageWindow,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -763,7 +813,13 @@ export type {
   UpdateSlackChannelRoutesRequest,
   SlackReactionChannel,
   SlackReactionChannelListResponse,
+  ApiKeyConnectionCredential,
+  ConnectionCredentialPlacement,
   CreateConnectionRequest,
+  InlineOpenApiDocumentSource,
+  IntegrationSourceInput,
+  IntegrationSourceProjection,
+  SessionApprovalRequest,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -1167,6 +1223,19 @@ export type {
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentCapabilityId,
+  AgentSkillsCapability,
+  AgentCapabilityToggles,
+  AgentCapabilities,
+  AgentRenderer,
+  AgentConfigRequest,
+  WorkspaceAgentDefaults,
+  ResolvedAgentCapabilities,
+  ResolvedAgentConfig,
+  AgentEffectiveTools,
+  ClientAgentConfig,
+  AgentConfigErrorCode,
   UpdateVariableSetRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,

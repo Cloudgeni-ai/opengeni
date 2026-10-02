@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use opengeni_computer_native::{
     open_native_adapter, ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue,
     NativeAdapterErrorCode, NativeCaptureOptions, NativeFrameFormat, NativeKeyboardAction,
-    NativeLocator, NativeNodeValue, NativeObservation, NativeSemanticAction, NativeSemanticNode,
-    NativeTarget, NativeTargetKind,
+    NativeLocator, NativeNodeValue, NativeObservation, NativePointerAction, NativePointerButton,
+    NativeSemanticAction, NativeSemanticNode, NativeTarget, NativeTargetKind,
 };
 
 static LIVE_FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -376,6 +376,291 @@ fn observation_summary(observation: &NativeObservation) -> Vec<String> {
             })
         })
         .collect()
+}
+
+fn launch_disposable_calculator(targets: &[NativeTarget]) -> FixtureProcess {
+    assert!(
+        !targets
+            .iter()
+            .any(|target| target.application_id.as_deref() == Some("com.apple.calculator")),
+        "close existing Calculator work before running this disposable fixture"
+    );
+    let directory = tempfile::tempdir().expect("create Calculator launcher directory");
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/macos");
+    let launcher = compile_launcher(directory.path(), &fixture_root);
+    let bundle = Path::new("/System/Applications/Calculator.app");
+    let executable = bundle.join("Contents/MacOS/Calculator");
+    let process_id = launch_bundle(&launcher, bundle, &[]);
+    FixtureProcess {
+        process_id,
+        executable,
+        _directory: directory,
+    }
+}
+
+async fn calculator_targets(
+    adapter: &dyn ComputerAdapter,
+    process_id: u32,
+) -> (NativeTarget, NativeTarget) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut previous: Option<(NativeTarget, NativeTarget)> = None;
+    loop {
+        let targets = adapter
+            .targets()
+            .await
+            .expect("discover Calculator targets");
+        let application = targets.iter().find(|target| {
+            target.kind == NativeTargetKind::App && target.process_id == Some(process_id)
+        });
+        let window = targets.iter().find(|target| {
+            target.kind == NativeTargetKind::Window && target.process_id == Some(process_id)
+        });
+        if let (Some(application), Some(window)) = (application, window) {
+            let current = (application.clone(), window.clone());
+            if previous.as_ref().is_some_and(|prior| {
+                same_target_generation(&prior.0, &current.0)
+                    && same_target_generation(&prior.1, &current.1)
+            }) {
+                if let Ok(observation) = adapter.observe(&window.id).await {
+                    let mut flattened = Vec::new();
+                    nodes(&observation.roots, &mut flattened);
+                    if flattened
+                        .iter()
+                        .any(|node| node.identifier.as_deref() == Some("StandardInputView"))
+                        && flattened.iter().any(|node| {
+                            matches!(node.identifier.as_deref(), Some("Clear" | "AllClear"))
+                        })
+                    {
+                        return current;
+                    }
+                }
+            }
+            previous = Some(current);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "disposable Calculator window did not appear"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn calculator_button<'a>(
+    observation: &'a NativeObservation,
+    label: &str,
+) -> &'a NativeSemanticNode {
+    let mut flattened = Vec::new();
+    nodes(&observation.roots, &mut flattened);
+    let matches = flattened
+        .into_iter()
+        .filter(|node| {
+            node.role == "button"
+                && (node.identifier.as_deref() == Some(label)
+                    || (label == "Clear" && node.identifier.as_deref() == Some("AllClear"))
+                    || node.name.as_deref() == Some(label)
+                    || node.description.as_deref() == Some(label))
+        })
+        .collect::<Vec<_>>();
+    let available = observation
+        .roots
+        .iter()
+        .flat_map(|root| {
+            let mut flattened = Vec::new();
+            nodes(std::slice::from_ref(root), &mut flattened);
+            flattened
+                .into_iter()
+                .filter(|node| node.role == "button")
+                .filter_map(|node| node.identifier.as_deref())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "Calculator button {label} must resolve uniquely; button identifiers: {available:?}"
+    );
+    matches[0]
+}
+
+async fn calculator_press(adapter: &dyn ComputerAdapter, target: &NativeTarget, label: &str) {
+    let observation = adapter.observe(&target.id).await.unwrap_or_else(|error| {
+        let process_is_running = target.process_id.is_some_and(|process_id| {
+            process_matches(
+                process_id,
+                "/System/Applications/Calculator.app/Contents/MacOS/Calculator",
+            )
+        });
+        panic!(
+            "observe Calculator button: {error:?}; owned process is running: {process_is_running}"
+        )
+    });
+    let reference = &calculator_button(&observation, label).r#ref;
+    adapter
+        .dispatch(&semantic_command(
+            &observation,
+            reference,
+            NativeSemanticAction::Invoke,
+            None,
+        ))
+        .await
+        .expect("invoke Calculator button");
+}
+
+async fn assert_calculator_result(adapter: &dyn ComputerAdapter, target_id: &str, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let observation = adapter
+            .observe(target_id)
+            .await
+            .expect("read Calculator result independently");
+        let mut flattened = Vec::new();
+        nodes(&observation.roots, &mut flattened);
+        let input = flattened
+            .into_iter()
+            .find(|node| node.identifier.as_deref() == Some("StandardInputView"))
+            .expect("Calculator numeric input region");
+        let mut input_nodes = Vec::new();
+        nodes(&input.children, &mut input_nodes);
+        let displayed = input_nodes
+            .into_iter()
+            .filter(|node| node.role == "static_text")
+            .filter_map(|node| match &node.value {
+                Some(NativeNodeValue::Text(value)) => {
+                    Some(value.trim_matches(['\u{200e}', '\u{200f}']))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if displayed.contains(&expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Calculator numeric input did not become {expected}; displayed: {displayed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn calculator_keyboard(target: &NativeTarget) -> NativeActionCommand {
+    NativeActionCommand {
+        target_id: target.id.clone(),
+        expected_target_generation: target.target_generation.clone(),
+        expected_observation_id: None,
+        expected_frame_id: None,
+        action: NativeAction::Keyboard {
+            action: NativeKeyboardAction::Type,
+            value: "8*9=".to_string(),
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an idle local macOS GUI, native permission grants, and no existing Calculator work"]
+async fn calculator_background_semantics_and_window_pointer_are_causal() {
+    let _fixture_guard = LIVE_FIXTURES.lock().await;
+    let frontmost = FrontmostRestore::capture();
+    assert!(
+        frontmost.process_id.is_some(),
+        "original foreground process must be restorable"
+    );
+    let adapter = open_native_adapter()
+        .await
+        .expect("open default macOS adapter");
+    let calculator =
+        launch_disposable_calculator(&adapter.targets().await.expect("discover existing apps"));
+    let (application, window) = calculator_targets(adapter.as_ref(), calculator.process_id).await;
+    frontmost.restore_now();
+    for label in ["Clear", "Seven", "Add", "Five", "Equals"] {
+        calculator_press(adapter.as_ref(), &application, label).await;
+    }
+    assert_calculator_result(adapter.as_ref(), &application.id, "12").await;
+    assert!(
+        !adapter
+            .targets()
+            .await
+            .expect("verify background semantics")
+            .iter()
+            .find(|target| target.id == application.id)
+            .expect("Calculator remains present")
+            .focused
+    );
+
+    frontmost.restore_now();
+    let observation = adapter
+        .observe(&window.id)
+        .await
+        .expect("observe Clear geometry");
+    let clear = calculator_button(&observation, "Clear")
+        .bounds
+        .expect("Clear bounds");
+    let frame = adapter
+        .capture(&window.id)
+        .await
+        .expect("fresh Calculator window capture");
+    let bounds = observation.target.bounds.expect("Calculator window bounds");
+    let x = (clear.x + clear.width / 2.0 - bounds.x) * f64::from(frame.width) / bounds.width;
+    let y = (clear.y + clear.height / 2.0 - bounds.y) * f64::from(frame.height) / bounds.height;
+    adapter
+        .dispatch(&NativeActionCommand {
+            target_id: window.id.clone(),
+            expected_target_generation: frame.target_generation.clone(),
+            expected_observation_id: None,
+            expected_frame_id: Some(frame.frame_id.clone()),
+            action: NativeAction::Pointer {
+                frame_id: frame.frame_id,
+                action: NativePointerAction::Click,
+                x,
+                y,
+                end_x: None,
+                end_y: None,
+                delta_x: None,
+                delta_y: None,
+                button: Some(NativePointerButton::Left),
+            },
+        })
+        .await
+        .expect("fresh-frame Clear click must confirm window focus and dispatch");
+    assert_calculator_result(adapter.as_ref(), &application.id, "0").await;
+}
+
+async fn assert_calculator_whole_text(kind: NativeTargetKind) {
+    let _fixture_guard = LIVE_FIXTURES.lock().await;
+    let frontmost = FrontmostRestore::capture();
+    assert!(
+        frontmost.process_id.is_some(),
+        "original foreground process must be restorable"
+    );
+    let adapter = open_native_adapter()
+        .await
+        .expect("open default macOS adapter");
+    let calculator =
+        launch_disposable_calculator(&adapter.targets().await.expect("discover existing apps"));
+    let (application, window) = calculator_targets(adapter.as_ref(), calculator.process_id).await;
+    calculator_press(adapter.as_ref(), &application, "Clear").await;
+    frontmost.restore_now();
+    let target = if kind == NativeTargetKind::Window {
+        &window
+    } else {
+        &application
+    };
+    adapter
+        .dispatch(&calculator_keyboard(target))
+        .await
+        .expect("whole text must confirm focus and dispatch");
+    assert_calculator_result(adapter.as_ref(), &application.id, "72").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an idle local macOS GUI, native permission grants, and no existing Calculator work"]
+async fn calculator_window_whole_text_is_consumed() {
+    assert_calculator_whole_text(NativeTargetKind::Window).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an idle local macOS GUI, native permission grants, and no existing Calculator work"]
+async fn calculator_application_whole_text_is_consumed() {
+    assert_calculator_whole_text(NativeTargetKind::App).await;
 }
 
 fn semantic_command(

@@ -39,21 +39,38 @@ function fakeSession(id: string, workspaceId: string): Session {
 }
 
 describe("OpenGeniClient organization sessions", () => {
-  test("createOrganizationApiKey forwards the access tier and keeps the old shape", async () => {
+  test.each(["full", "read", "developer_setup"] as const)(
+    "createOrganizationApiKey forwards %s access and keeps the old shape",
+    async (access) => {
+      const { client, requests } = makeClient(() =>
+        jsonResponse({ apiKey: { id: "key-1", name: "key", access }, token: "ogk_secret" }, 201),
+      );
+      const created = await client.createOrganizationApiKey("org-1", {
+        name: "key",
+        access,
+      });
+      expect(created.apiKey.access).toBe(access);
+      expect(JSON.parse(requests[0]!.body!)).toEqual({ name: "key", access });
+      await client.createOrganizationApiKey("org-1", { name: "admin" });
+      expect(JSON.parse(requests[1]!.body!)).toEqual({ name: "admin" });
+    },
+  );
+
+  test("createOrganizationApiKey forwards the optional setup alias and explicit expiry", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse(
-        { apiKey: { id: "key-1", name: "reader", access: "read" }, token: "ogk_secret" },
+        { apiKey: { id: "key-1", access: "developer_setup" }, token: "ogk_secret" },
         201,
       ),
     );
-    const created = await client.createOrganizationApiKey("org-1", {
-      name: "reader",
-      access: "read",
-    });
-    expect(created.apiKey.access).toBe("read");
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ name: "reader", access: "read" });
-    await client.createOrganizationApiKey("org-1", { name: "admin" });
-    expect(JSON.parse(requests[1]!.body!)).toEqual({ name: "admin" });
+    const input = {
+      name: "Setup",
+      preset: "developer_setup" as const,
+      expiresAt: "2026-10-01T13:00:00Z",
+    };
+    const created = await client.createOrganizationApiKey("org-1", input);
+    expect(created.apiKey.access).toBe("developer_setup");
+    expect(JSON.parse(requests[0]!.body!)).toEqual(input);
   });
 
   test("listOrganizationSessions encodes limit, cursor, end user, and status", async () => {

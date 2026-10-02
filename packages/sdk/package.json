@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "7.3.0",
+  "version": "7.6.1",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -22,6 +22,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./allowance-refusal": {
+      "types": "./src/allowance-refusal.ts",
+      "default": "./src/allowance-refusal.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -50,9 +54,17 @@
       "types": "./src/knowledge.ts",
       "default": "./src/knowledge.ts"
     },
+    "./usage-allowances": {
+      "types": "./src/usage-allowances.ts",
+      "default": "./src/usage-allowances.ts"
+    },
     "./workspace-integrations": {
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
+    },
+    "./session-history-import": {
+      "types": "./src/session-history-import.ts",
+      "default": "./src/session-history-import.ts"
     },
     "./document-authority": {
       "types": "./src/document-authority.ts",
@@ -121,6 +133,14 @@
     "./chat": {
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
+    },
+    "./tenant-workspaces": {
+      "types": "./src/tenant-workspaces.ts",
+      "default": "./src/tenant-workspaces.ts"
+    },
+    "./session-proxy": {
+      "types": "./src/session-proxy.ts",
+      "default": "./src/session-proxy.ts"
     },
     "./next": {
       "types": "./src/adapters/next.ts",

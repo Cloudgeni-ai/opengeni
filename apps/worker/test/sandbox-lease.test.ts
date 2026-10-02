@@ -42,6 +42,8 @@ import {
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  authorizeAutomaticSandboxCheckpointRecovery,
+  getSandboxRecoveryDiscontinuity,
   retainedProviderCommandPersistence,
   appendSessionEvents,
   authorizeHistoricalSandboxCheckpointRecovery,
@@ -6560,6 +6562,134 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${admission.id}`;
     expect(settled?.provider_outcome).toBe("rejected");
     expect(settled?.settled_at).not.toBeNull();
+  }, 60_000);
+
+  test("(5c) a reaper-committed deadline loss with no checkpoint continues the whole group on an empty workspace", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const createModalSession = (sandboxGroupId?: string) =>
+      createSession(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        initialMessage: "continue after the sandbox deadline",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        ...(sandboxGroupId ? { sandboxGroupId } : {}),
+      });
+    const parent = await createModalSession();
+    const children = [
+      await createModalSession(parent.sandboxGroupId),
+      await createModalSession(parent.sandboxGroupId),
+    ];
+    ws.groupId = parent.sandboxGroupId;
+    const instanceId = "sb-killed-at-provider-deadline";
+    await insertLease(ws, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 21,
+      expiresInMs: -1_000,
+      instanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: instanceId } },
+      },
+    });
+    // Created a day ago; its stamped provider deadline is what just passed.
+    await admin`update sandbox_leases set provider_created_at = now() - interval '26 hours',
+      provider_deadline_at = now() - interval '2 hours'
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    const observability = createObservability(REAPER_SETTINGS, { component: "worker-test" });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(
+      reaperServices(REAPER_SETTINGS, observability),
+      {
+        // The provider killed the box at its deadline while the drain capture
+        // was being taken: capture and stop both see NotFound.
+        terminateBox: async () => ({ terminated: true, providerMissingBeforeCapture: true }),
+      },
+    );
+    await reapSandboxLeases();
+    // This is the exact row older workers then dead-ended on every turn.
+    const lost = await readLease(db, ws.workspaceId, ws.groupId);
+    expect(lost).toMatchObject({
+      liveness: "cold",
+      recovery: {
+        provider: { status: "missing", diagnostic: "provider_not_found_before_workspace_capture" },
+        restore: { status: "unrecoverable", failureCode: "archive_unavailable", retryable: false },
+      },
+    });
+    expect(lost?.recovery.lateArchiveCapture).toBeTruthy();
+    expect(lost?.resumeState?.opengeniProviderLoss).toMatchObject({
+      source: "drain_probe",
+      instanceId,
+      lostEpoch: 21,
+    });
+
+    await initializeSessionStartAtomically(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sessionId: parent.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    expect(
+      await claimSessionWorkForAttempt(db, ws.workspaceId, {
+        sessionId: parent.id,
+        workflowId: `session-${parent.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `deadline-loss-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+        filesystemDiscontinuityProtocol: 3,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    const decide = () =>
+      authorizeAutomaticSandboxCheckpointRecovery(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sessionId: parent.id,
+        attemptId,
+      });
+    // The in-flight drain capture could still publish the exact lost files.
+    expect(await decide()).toEqual({ status: "not_eligible" });
+    // A session stuck since before this release: the capture window elapsed.
+    await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
+      '{opengeniRecovery,lateArchiveCapture,recordedAt}',
+      to_jsonb(to_char(now() - interval '2 hours', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    const decision = await decide();
+    expect(decision).toMatchObject({
+      status: "authorized",
+      lane: "fresh_workspace",
+      reason: "archive_unavailable",
+      groupSessionCount: 3,
+    });
+    for (const child of children) {
+      expect(await getSandboxRecoveryDiscontinuity(db, ws.workspaceId, child.id)).toContain(
+        "new empty workspace",
+      );
+    }
+    expect(
+      (await readRecentSandboxRecoveryObservations(db)).freshWorkspaceSelections,
+    ).toBeGreaterThanOrEqual(1);
+    // The cold row now elects an archive-free spawner for this decision.
+    const elected = await acquireLease(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      kind: "turn",
+      holderId: sandboxLeaseHolderIdForAttempt(attemptId),
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected).toMatchObject({ role: "spawner" });
+    expect(elected.lease.freshWorkspaceRecoveryId).toBeTruthy();
   }, 60_000);
 
   test("(5b) a failed exact cold commit does not count a provider loss", async () => {

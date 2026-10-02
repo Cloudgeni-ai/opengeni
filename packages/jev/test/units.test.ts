@@ -111,7 +111,7 @@ describe("text / variants", () => {
 
 // ---------------------------------------------------------------------------
 describe("config", () => {
-  test("defaults are scout-0.3.1's Jev configuration", () => {
+  test("defaults: scout-0.3.1's Jev configuration plus the scout-0.4 sections", () => {
     expect(DEFAULT_CODE_SEARCH_CONFIG.thresholds).toEqual({ T1: 0.6, T2: 0.5, T3: 0.5 });
     expect(DEFAULT_CODE_SEARCH_CONFIG.recall).toMatchObject({
       maxCandidates: 240,
@@ -127,6 +127,7 @@ describe("config", () => {
       extraExcludes: [],
       searchHidden: true,
       changelogWeight: 0.6,
+      ripgrepTimeoutMs: 30_000,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.wave1).toEqual({
       filesPerRequest: 60,
@@ -138,6 +139,7 @@ describe("config", () => {
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.wave2).toEqual({
       windowsPerFile: 5,
+      windowsPerRelevantFile: 12,
       seedHitsPerFile: 24,
       maxUp: 40,
       maxDown: 120,
@@ -148,11 +150,28 @@ describe("config", () => {
       minWindowLines: 12,
       passagesPerRequest: 4,
       maxRequestChars: 24_000,
-      maxPassages: 80,
+      maxPassages: 200,
       maxLineChars: 400,
       maxProseLineChars: 1600,
       maxWindowChars: 8000,
       maxProseWindowChars: 4000,
+      tileMaxLines: 900,
+      tileMaxWindows: 24,
+      tileMaxFiles: 6,
+      tileTargetLines: 20,
+    });
+    expect(DEFAULT_CODE_SEARCH_CONFIG.symbols).toEqual({
+      enabled: true,
+      maxRounds: 1,
+      maxJudged: 160,
+      maxFollowed: 10,
+      threshold: 0.5,
+      maxRefFiles: 40,
+      maxNewFilesTriaged: 40,
+      maxNewFilesSelected: 6,
+      triage: false,
+      tileNewMaxLines: 300,
+      windowsPerFile: 3,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.wave3).toEqual({
       enabled: true,
@@ -160,6 +179,8 @@ describe("config", () => {
       maxLeadsFollowed: 6,
       seedPassages: 12,
       defsPerLead: 1,
+      callersPerLead: 3,
+      seedFloor: 0.3,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.status).toEqual({
       enabled: true,
@@ -181,13 +202,45 @@ describe("config", () => {
       docPrior: 0.85,
       testPrior: 1,
       lexWeight: 0,
+      importPrior: 0.5,
+      fillBelowRating: 0.7,
+      fillMinRelevance: 0.3,
+      followBelowRating: 0.4,
+      wholeFileMaxChars: 5000,
+      stitchGap: 12,
+      coverageFiles: 16,
+      footerShare: 0.22,
+      subFloor: 0.3,
+      subFallback: 2,
+      outlineNames: 16,
     });
     expect(DEFAULT_CODE_SEARCH_CONFIG.jev).toEqual({
       inlineQuestionMaxChars: 600,
       fileCriteriaPerQuestion: false,
       warmConnections: 12,
     });
+    expect(DEFAULT_CODE_SEARCH_CONFIG.change).toEqual({
+      enabled: true,
+      files: 3,
+      perFile: 25,
+      maxJudged: 60,
+      threshold: 0.5,
+      maxChosen: 6,
+    });
+    expect(Object.keys(DEFAULT_CODE_SEARCH_CONFIG).sort()).toEqual([
+      "change",
+      "jev",
+      "pack",
+      "recall",
+      "status",
+      "symbols",
+      "thresholds",
+      "wave1",
+      "wave2",
+      "wave3",
+    ]);
     expect(Object.isFrozen(DEFAULT_CODE_SEARCH_CONFIG.recall)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_CODE_SEARCH_CONFIG.symbols)).toBe(true);
   });
   test("partial override merges per section", () => {
     const c = codeSearchConfig({ wave1: { maxFiles: 10 }, thresholds: { T2: 0.4 } });
@@ -206,6 +259,54 @@ describe("config", () => {
     );
     expect(() => codeSearchConfig({ thresholds: { T1: 1.5 } })).toThrow(/must be in \[0,1\]/);
     expect(() => codeSearchConfig({ wave1: { minFiles: 30 } })).toThrow(/minFiles/);
+  });
+  test("scout-0.4 keys are overridable and validated", () => {
+    const c = codeSearchConfig({
+      symbols: { enabled: false, maxRounds: 1 },
+      wave2: { tileTargetLines: 30, windowsPerRelevantFile: 4 },
+      wave3: { callersPerLead: 0 },
+      pack: { stitchGap: 0, wholeFileMaxChars: 0, subFallback: 1 },
+    });
+    expect(c.symbols).toMatchObject({ enabled: false, maxRounds: 1, maxJudged: 160 });
+    expect(c.wave2.tileTargetLines).toBe(30);
+    expect(c.wave2.windowsPerRelevantFile).toBe(4);
+    expect(c.wave3.callersPerLead).toBe(0);
+    expect(c.pack).toMatchObject({ stitchGap: 0, wholeFileMaxChars: 0, subFallback: 1 });
+    expect(() => codeSearchConfig({ symbols: { maxJudged: 251 } })).toThrow(
+      /symbols.maxJudged must be <= 250/,
+    );
+    expect(() => codeSearchConfig({ symbols: { threshold: 1.2 } })).toThrow(
+      /symbols.threshold must be in \[0,1\]/,
+    );
+    expect(() => codeSearchConfig({ symbols: { threshold: -0.1 } })).toThrow(/symbols.threshold/);
+    expect(() => codeSearchConfig({ wave2: { tileTargetLines: 4 } })).toThrow(
+      /wave2.tileTargetLines must be >= 5/,
+    );
+    expect(() => codeSearchConfig({ pack: { importPrior: 0 } })).toThrow(
+      /pack.importPrior must be in \(0,1\]/,
+    );
+    expect(() => codeSearchConfig({ pack: { importPrior: 1.5 } })).toThrow(/pack.importPrior/);
+    expect(() => codeSearchConfig({ pack: { footerShare: 0 } })).toThrow(
+      /pack.footerShare must be in \(0,0.5\)/,
+    );
+    expect(() => codeSearchConfig({ pack: { footerShare: 0.5 } })).toThrow(/pack.footerShare/);
+    expect(() => codeSearchConfig({ symbols: { maxRoundz: 1 } as never })).toThrow(
+      /unknown code_search config key: symbols.maxRoundz/,
+    );
+    expect(() => codeSearchConfig({ symbols: { enabled: "yes" } as never })).toThrow(
+      /expected boolean/,
+    );
+    expect(() => codeSearchConfig({ symbolz: {} } as never)).toThrow(
+      /unknown code_search config section/,
+    );
+    // the boundaries themselves are valid
+    expect(codeSearchConfig({ symbols: { maxJudged: 250, threshold: 1 } }).symbols.threshold).toBe(
+      1,
+    );
+    expect(
+      codeSearchConfig({ pack: { importPrior: 1 }, wave2: { tileTargetLines: 5 } }).pack
+        .importPrior,
+    ).toBe(1);
   });
 });
 
@@ -539,10 +640,12 @@ describe("pack", () => {
       ev(`p${i}`, i * 10 + 1, i * 10 + 5, 0.4, [], `src/very/long/path/number/${i}/file.ts`),
     );
     const out = renderFooter({
+      coverage: [],
+      cuts: [],
       excluded,
       otherFiles: [],
       leadsNotFollowed: [],
-      zeroHitKeywords: [{ raw: "nope", fragments: [] }],
+      keywords: [{ raw: "nope", fragments: [], suggestions: [], status: "zero" }],
       cfg,
       maxChars: 300,
     });

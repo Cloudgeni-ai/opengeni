@@ -1,6 +1,9 @@
 import type { FetchLike } from "../client";
+import type { Chats } from "../chats";
+import type { WorkspaceIdResolverOptions } from "../tenant-workspaces";
 import type {
   CreateSessionRequest,
+  AgentConfigRequest,
   HumanInputAnswer,
   LatencyMode,
   ReasoningEffort,
@@ -16,7 +19,7 @@ export type ChatAgentAccess = "session" | "user" | "workspace";
 /**
  * Compatibility option for personal or workspace Knowledge. `false` initializes
  * Knowledge authoring to Off; authorized retrieval remains available. Omitted
- * follows user/workspace agent reach; session-only reach defaults to false.
+ * follows `chats`: private with a user, or legacy reach-based defaults without one.
  * Task notes cover temporary session-tree data.
  */
 export type ChatMemory = "user" | "workspace" | false;
@@ -36,6 +39,14 @@ export type OpenGeniOptions = {
   fetch?: FetchLike | undefined;
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
+  /**
+   * Permissions for newly provisioned isolated users. Replaces the default
+   * workspace read, session create/read/control (including sending messages),
+   * file upload/read, and per-session MCP attachment permissions; no admin
+   * permissions by default. Does not update existing or revoked memberships.
+   * The organization API key must also allow these permissions.
+   */
+  memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
 };
 
 export type ChatTarget =
@@ -50,7 +61,15 @@ export type ChatOptions = ChatTarget & {
   /** Prefer the actual OpenGeni session ID for shared or existing conversations.
    * The acting user is independent of the conversation's identity. */
   sessionId?: string | undefined;
-  /** Defaults to `"session"`: the agent sees only this conversation. */
+  /**
+   * Private (default with a user) uses personal Knowledge and session-only reach;
+   * shared uses workspace Knowledge/reach, isolated adds a workspace per tenant/user.
+   * Without a user, omission keeps workspace visibility, session reach and Knowledge off.
+   */
+  chats?: Chats | undefined;
+  /** Agent identity, capabilities and instructions; implicit markdown falls back on older servers. */
+  agent?: AgentConfigRequest | undefined;
+  /** Explicit agent reach overrides the `chats` default. */
   agentAccess?: ChatAgentAccess | undefined;
   memory?: ChatMemory | undefined;
   model?: string | undefined;
@@ -87,6 +106,10 @@ export type ChatReply = {
   status: ChatReplyStatus;
   /** Set when the turn is waiting on `chat.respond` instead of finished. */
   pending: ChatPending | null;
+  /** A non-destructive completion without a model-authored final answer. */
+  emptyFinalReply?: true;
+  /** Display this informational notice when emptyFinalReply is present. */
+  notice?: string;
   /** Every event consumed while folding this turn. */
   events: SessionEvent[];
   toString(): string;
@@ -153,6 +176,8 @@ export type ChatSendOptions = {
 
 export type ChatSessionListOptions = ChatTarget & {
   user?: string | undefined;
+  /** Match the chat's mode; isolated lists that user's separate workspace. */
+  chats?: Chats | undefined;
   limit?: number | undefined;
 };
 

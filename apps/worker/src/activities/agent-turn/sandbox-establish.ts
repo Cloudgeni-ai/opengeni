@@ -49,6 +49,8 @@ import {
 } from "../../sandbox-routing";
 import {
   makeMachineOpObserver,
+  recordSandboxAutomaticRecoverySelected,
+  sandboxAutomaticRecoveryOutcome,
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
   recordSandboxSharedPreparation,
@@ -100,6 +102,7 @@ export type SandboxRouteOk = {
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];
   groupBoxImage: ReturnType<typeof rigProviderImageSourceImage>;
+  groupBoxImagePolicy: "new_creates_only";
   sandboxCreationBackend: Settings["sandboxBackend"];
   effectiveRunCredentialBackend: Settings["sandboxBackend"];
 };
@@ -297,6 +300,7 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     machinePrimary,
     groupBoxBackend,
     groupBoxImage,
+    groupBoxImagePolicy: "new_creates_only",
     sandboxCreationBackend,
     effectiveRunCredentialBackend,
   };
@@ -339,6 +343,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     machinePrimary,
     groupBoxBackend,
     groupBoxImage,
+    groupBoxImagePolicy,
     rigVersion,
     turnResources,
   } = deps;
@@ -379,34 +384,52 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   ) {
     const sandboxEstablishStartedAt = performance.now();
     let sandboxEstablishOutcome: "completed" | "failed" = "completed";
+    // A committed system recovery decision is rematerialized in this turn even
+    // when the sandbox is otherwise on-demand: the decision pins group
+    // membership until publication, and the next turn must not dead-end.
+    let automaticRecoveryPending = false;
     try {
       if (!machinePrimary && groupBoxBackend === "modal" && activeSandboxBackend !== "selfhosted") {
         // This happens before buildTurnAgent reads the durable instruction
-        // tail, even for an on-demand sandbox. The DB admits only a verified,
-        // provider-lost singleton with no unresolved workspace writers.
+        // tail, even for an on-demand sandbox. The DB admits only a provider-
+        // lost group with no unresolved workspace writers in ANY member: the
+        // latest verified checkpoint, or a new empty workspace when none is
+        // usable. Every group member receives its durable warning receipt.
         const fallback = await authorizeAutomaticSandboxCheckpointRecovery(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           attemptId: input.attemptId,
         });
+        automaticRecoveryPending = fallback.status !== "not_eligible";
         if (fallback.status === "authorized") {
           try {
-            observability.incrementCounter({
-              name: "opengeni_sandbox_checkpoint_fallback_total",
-              help: "System-selected verified historical checkpoints after managed provider loss.",
-              labels: { backend: "modal", outcome: "selected" },
-            });
+            recordSandboxAutomaticRecoverySelected(
+              observability,
+              "modal",
+              sandboxAutomaticRecoveryOutcome(fallback),
+            );
           } catch {
             // Telemetry must not turn a committed recovery into another failure.
           }
-          observability.warn("managed sandbox selected an older verified checkpoint", {
-            backend: "modal",
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            archiveGeneration: fallback.selection.archiveGeneration,
-            workspaceGeneration: fallback.selection.workspaceGeneration,
-          });
+          if (fallback.lane === "checkpoint") {
+            observability.warn("managed sandbox selected an older verified checkpoint", {
+              backend: "modal",
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              archiveGeneration: fallback.selection.archiveGeneration,
+              workspaceGeneration: fallback.selection.workspaceGeneration,
+              groupSessionCount: fallback.groupSessionCount,
+            });
+          } else {
+            observability.warn("managed sandbox continues on an empty workspace after loss", {
+              backend: "modal",
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              reason: fallback.reason,
+              groupSessionCount: fallback.groupSessionCount,
+            });
+          }
         }
       }
       const managedOwnership = managedSandboxOwnershipForTurn(
@@ -646,6 +669,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 ...(groupBoxImage
                   ? {
                       image: groupBoxImage,
+                      imagePolicy: groupBoxImagePolicy,
                     }
                   : {}),
                 // The lazy acquire must enforce the same frozen rig authority
@@ -664,6 +688,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               hasRepositoryResources: turnResources.some(
                 (resource) => resource.kind === "repository",
               ),
+              automaticRecoveryPending,
             })
           ) {
             startRunGitCredentialsMint();
@@ -725,17 +750,17 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 backend: groupBoxBackend,
                 os: groupBoxOs,
                 environment: sandboxEnvironment,
-                // IMAGE IS SHARED STATE (B3): the container image
-                // this run resolves. The lease stamps it + conflicts on a live shared box
-                // running a DIFFERENT image (solo → durable rotation; N-holders →
-                // SandboxImageConflictError surfaced as an actionable turn error). Select
-                // the image for the actual group-box backend; a configured Modal image must
+                // Deployment/workspace pins select NEW creates only. The lease
+                // retains a live group's image through between-turn repins, even
+                // with other holders; only rotation/reaping elects a new image.
+                // Select the image for the actual group-box backend; a configured Modal image must
                 // never override a Docker run. The selfhosted branch
                 // (establishSelfhostedTurnSession) NEVER passes
                 // an image — B3 lives only on this managed-box branch.
                 ...(groupBoxImage
                   ? {
                       image: groupBoxImage,
+                      imagePolicy: groupBoxImagePolicy,
                     }
                   : {}),
                 // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease

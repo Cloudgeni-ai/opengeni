@@ -28,7 +28,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export type { ComposerPlusProps } from "./composer-mobile-plus-panel";
+export type { ComposerPlusProps, Panel as ComposerPlusPanel } from "./composer-mobile-plus-panel";
 
 type PanelProps = ComponentProps<typeof ComposerMobilePlusPanelType>;
 
@@ -74,10 +74,23 @@ function ComposerPanelLoadFailed(props: ComposerPlusProps) {
 }
 
 /** Keep the composer trigger/state eager; load its optional menu only when opened. */
-export function ComposerMobilePlus(props: ComposerPlusProps) {
+export function ComposerMobilePlus(
+  props: ComposerPlusProps & {
+    /** Opens the menu on one panel, for example from the capabilities chip. */
+    openRequest?: { panel: Panel; nonce: number } | undefined;
+  },
+) {
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogFocusOwnerRef = useRef(false);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
+  const openNonce = props.openRequest?.nonce;
+  useEffect(() => {
+    if (openNonce === undefined || !props.openRequest) return;
+    setPanel(props.openRequest.panel);
+    setOpen(true);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- react to a new request only
+  }, [openNonce]);
   // Warm the menus once the composer is idle, so "+" never opens onto a load.
   useEffect(() => {
     const idleWindow = window as Window & {
@@ -95,9 +108,13 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
     open &&
     panel !== "root" &&
     panel !== "tools" &&
+    panel !== "capabilities" &&
     panel !== "settings" &&
     panel !== "visibility" &&
     props.expandedPanelPresentation === "dialog";
+  // The retired menu's deferred callback must observe the current owner,
+  // including after the lazy panel has changed presentation or unmounted.
+  dialogFocusOwnerRef.current = dialogOpen;
 
   return (
     <Dialog
@@ -141,6 +158,7 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
               setPanel={setPanel}
               setOpen={setOpen}
               dialogOpen={dialogOpen}
+              dialogFocusOwnerRef={dialogFocusOwnerRef}
             />
           </Suspense>
         ) : null}

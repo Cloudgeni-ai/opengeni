@@ -35,6 +35,7 @@ import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  sessionHoldsFreshWorkspaceRecovery,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   failSandboxRematerialization,
@@ -213,6 +214,9 @@ export type ResumeBoxIds = {
    * never conflicts).
    */
   image?: string;
+  /** Deployment/workspace image pins apply only to new creates; an existing
+   * group keeps its image. Omission preserves explicit image matching (B3). */
+  imagePolicy?: "require_match" | "new_creates_only";
   /**
    * RIG IS SHARED STATE (M3): the frozen rig version this run rides. Threaded to
    * acquireLease, which stamps it on the cold-create and conflicts on a live box
@@ -448,9 +452,10 @@ export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
   identity: { sandboxGroupId?: string | null } = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await verifySandboxExecReadiness(established, timeoutMs);
+    await verifySandboxExecReadiness(established, timeoutMs, signal);
   } catch (error) {
     if (error instanceof SandboxExecReadinessError && error.code === "exec_probe_timeout") {
       throw new SandboxExecReadinessTimeoutError(established.backendId, timeoutMs, {
@@ -634,8 +639,9 @@ async function materializeSpawnEnvelopeArchive(
   }
   if (!objectStorage) {
     throw new WorkspaceArchiveIntegrityError(
-      "archive_base64_invalid",
+      "archive_storage_unavailable",
       "workspace archive object storage is not configured",
+      { retryable: true },
     );
   }
   const descriptor = parseWorkspaceArchiveDescriptor(sessionState.workspaceArchiveMeta);
@@ -1349,11 +1355,12 @@ async function resumeBoxForTurnOnce(
     },
     os,
     // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
-    // conflicts on a live box already running a different image. A
+    // conflicts on a live box already running a different required image. A
     // SandboxImageConflictError propagates while another holder is active; a
     // solo change requests a capture-and-drain rotation and this attempt retries
     // after the cold successor can safely stamp the new image.
     ...(ids.image ? { image: ids.image } : {}),
+    ...(ids.imagePolicy ? { imagePolicy: ids.imagePolicy } : {}),
     // RIG IS SHARED STATE (M3): thread the frozen rig version so the lease stamps it
     // + conflicts on a live box under a different rig. A SandboxRigConflictError
     // propagates while another holder is active; a solo change uses the same
@@ -1582,30 +1589,53 @@ async function resumeBoxForTurnOnce(
       > | null;
     } | null = null;
     try {
-      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      // An audited decision to continue a definitively lost workspace on a new
+      // EMPTY box: hydrate nothing (not even a per-session legacy archive) and
+      // resume no prior provider identity. Every group member was already told
+      // the workspace is empty; the DB accepts only this exact publication.
+      const freshWorkspaceRecoveryId = acquired.lease.freshWorkspaceRecoveryId ?? null;
+      const envelope = freshWorkspaceRecoveryId
+        ? null
+        : await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // The lease is authoritative. A legacy per-session fallback archive may
       // only be used after beginSandboxRematerialization imports its archive
       // fields under the warming-row lock and records one selected revision.
       // Select the fallback only when the lease has no archive truth at all. A
       // lease-carried unverified/invalid archive must fail closed rather than
       // silently substituting another revision.
+      // Backstop: a session already told its workspace is empty never gets a
+      // legacy per-session archive back, even if the lease marker was lost.
+      const legacyFallbackRefused =
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status === "none" &&
+        workspaceArchiveFieldsFromEnvelope(envelope) !== null &&
+        (await sessionHoldsFreshWorkspaceRecovery(db, ids.workspaceId, ids.sessionId));
       const fallbackArchiveEnvelope =
+        !freshWorkspaceRecoveryId &&
+        !legacyFallbackRefused &&
         acquired.lease.recovery.archive.status === "none" &&
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutSandboxProviderIdentity(envelope)
           : null;
-      let spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      let spawnEnvelope = freshWorkspaceRecoveryId
+        ? null
+        : legacyFallbackRefused
+          ? (acquired.lease.resumeState ?? null)
+          : (fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope);
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
           : acquired.lease.resumeState;
       const continuityRecovery = acquired.lease.recovery.continuity;
+      // A fresh-workspace spawn is deliberately archive-free; commitWarmingToWarm
+      // verifies the exact decision before publication.
       if (
-        (acquired.lease.recovery.archive.status === "available" &&
+        !freshWorkspaceRecoveryId &&
+        ((acquired.lease.recovery.archive.status === "available" &&
           (acquired.lease.archiveComplete ||
             acquired.lease.historicalRecoveryAuthorized === true)) ||
-        (acquired.lease.recovery.archive.status === "none" &&
-          workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
+          (acquired.lease.recovery.archive.status === "none" &&
+            workspaceArchiveFieldsFromEnvelope(archiveSource) !== null))
       ) {
         const rematerializationId = crypto.randomUUID();
         const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -1648,7 +1678,11 @@ async function resumeBoxForTurnOnce(
           legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
           legacyProviderBinding: null,
         };
-      } else if (acquired.lease.recovery.archive.status !== "none" && !continuityRecovery) {
+      } else if (
+        !freshWorkspaceRecoveryId &&
+        acquired.lease.recovery.archive.status !== "none" &&
+        !continuityRecovery
+      ) {
         throw new SandboxLeaseRecoveryBlockedError(
           ids.sandboxGroupId,
           expectedEpoch,
@@ -1892,9 +1926,14 @@ async function resumeBoxForTurnOnce(
           sandboxGroupId: ids.sandboxGroupId,
         });
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
@@ -1941,16 +1980,18 @@ async function resumeBoxForTurnOnce(
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
-        ...(established.providerContinuity
-          ? { continuityRecovery: established.providerContinuity }
-          : rematerialization
-            ? {
-                rematerialization: {
-                  id: rematerialization.id,
-                  verifiedRevision: rematerialization.selectedRevision,
-                },
-              }
-            : {}),
+        ...(freshWorkspaceRecoveryId
+          ? { freshWorkspace: { operationId: freshWorkspaceRecoveryId } }
+          : established.providerContinuity
+            ? { continuityRecovery: established.providerContinuity }
+            : rematerialization
+              ? {
+                  rematerialization: {
+                    id: rematerialization.id,
+                    verifiedRevision: rematerialization.selectedRevision,
+                  },
+                }
+              : {}),
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -2090,9 +2131,14 @@ async function resumeBoxForTurnOnce(
       if (services.verifyAttachedSandboxReadiness) {
         await services.verifyAttachedSandboxReadiness(established);
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       providerRenewalTarget = {
         backend: ids.backend,

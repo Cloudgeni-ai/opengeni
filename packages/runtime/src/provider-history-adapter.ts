@@ -71,6 +71,24 @@ function isChatIncompatibleHostedToolCall(item: Record<string, unknown>): boolea
   return item.type === "hosted_tool_call" && item.name !== "file_search_call";
 }
 
+/** The Chat SDK passes system content through instead of converting Responses
+ * text parts. Normalize only text-only content; preserve canonical input.
+ */
+function chatSystemContent(content: unknown): unknown {
+  if (
+    !Array.isArray(content) ||
+    !content.every(
+      (part) =>
+        part !== null &&
+        typeof part === "object" &&
+        (part.type === "input_text" || part.type === "output_text" || part.type === "text") &&
+        typeof part.text === "string",
+    )
+  )
+    return content;
+  return content.map((part) => part.text).join("\n");
+}
+
 /**
  * Build the one attempt-local history view required by the target wire API.
  * Canonical history remains untouched. SDK-unsupported developer messages use
@@ -114,9 +132,12 @@ export function projectHistoryForProvider(
 
   let changed = false;
   const projected = items.map((item) => {
-    if (item.type === "message" && item.role === "developer") {
-      changed = true;
-      return { ...item, role: "system" };
+    if (item.type === "message" && (item.role === "developer" || item.role === "system")) {
+      const content = chatSystemContent(item.content);
+      if (item.role === "developer" || content !== item.content) {
+        changed = true;
+        return { ...item, role: "system", content };
+      }
     }
     const resultId = item.type === "function_call_result" ? callId(item) : null;
     if (

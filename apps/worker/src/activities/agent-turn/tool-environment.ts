@@ -68,8 +68,10 @@ import {
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
+  loadWorkspaceCodexModelAvailability,
   withFrozenPersonalConnectionDelegations,
-  resolveSessionToolPolicy,
+  resolveTurnToolPolicy,
+  scheduledTurnMcpServerIds,
   hasPermission,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
@@ -87,6 +89,7 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  resolveAgentToolFamilies,
   type ResourceRef,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
@@ -124,6 +127,7 @@ import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./cod
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
+import { turnCredentialRestriction } from "./credential-restriction";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -223,38 +227,36 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   // sessions follow the current configured MCP set,
   // while explicit, inherited-fixed, and legacy sessions remain narrowed
   // to their stored materialized allow-list.
-  const scheduledEffectiveMcpServerIds = (() => {
-    const value =
-      turn.metadata && typeof turn.metadata === "object" && !Array.isArray(turn.metadata)
-        ? (turn.metadata as Record<string, unknown>).scheduledEffectiveMcpServerIds
-        : null;
-    return Array.isArray(value) && value.every((id) => typeof id === "string")
-      ? [...new Set(value)].sort()
-      : null;
-  })();
-  const currentMcpServerIds = new Set(runSettings.mcpServers.map((server) => server.id));
-  const resolvedToolPolicy = resolveSessionToolPolicy({
+  const resolvedToolPolicy = resolveTurnToolPolicy({
     toolPolicy: session.toolPolicy,
-    sessionTools: scheduledEffectiveMcpServerIds ? turn.tools : session.tools,
-    availableMcpServerIds: scheduledEffectiveMcpServerIds
-      ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
-      : [...currentMcpServerIds],
+    session,
+    turn,
+    availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
     defaultMcpServerIds:
-      scheduledEffectiveMcpServerIds ??
-      (session.toolPolicy.mode === "workspace_default"
+      scheduledTurnMcpServerIds(turn) === null && session.toolPolicy.mode === "workspace_default"
         ? await workspaceSessionToolPolicyDefaultServerIds(
             db,
             input.workspaceId,
             capabilitySettings,
             fileAuthoritySubjectId ?? undefined,
           )
-        : []),
+        : [],
   });
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
     droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
   });
-  const effectivePolicyTools = resolvedToolPolicy.toolRefs;
+  const families = resolveAgentToolFamilies(session.agent, {
+    productServerIds: new Set([
+      ...session.mcpServers.map((server) => server.id),
+      ...(session.toolPolicy.mode !== "workspace_default"
+        ? session.tools.map((tool) => tool.id)
+        : []),
+    ]),
+  });
+  const effectivePolicyTools = resolvedToolPolicy.toolRefs.filter(
+    (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
+  );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
   // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
   // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
@@ -421,6 +423,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
@@ -590,14 +593,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         (permission) => hasPermission(linkedAuthority.permissions, permission),
       )
     : session.firstPartyMcpPermissions;
-  const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
-    runSettings,
-    session.firstPartyMcpTools,
+  const toolFamilies = resolveAgentToolFamilies(session.agent);
+  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
+    allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
   const titleToolPlan = sessionTitleToolPlan({
+    agentConfig: session.agent,
     tools: turnTools,
     selectedFirstPartyMcpTools,
     shouldRequestTitle: shouldRequestMissingSessionTitle({
+      agentConfig: session.agent,
       title: session.title,
       titleSource: session.titleSource,
       firstPartyMcpTools: selectedFirstPartyMcpTools,
@@ -669,20 +674,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     workspaceId: input.workspaceId,
     ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
   });
-  const skillCatalog = [
-    ...sharedSkillDescriptors
-      .filter((entry) => entry.activationMode === "workspace_managed")
-      .map((entry) => ({
-        id: entry.id,
-        name: entry.title,
-        description: entry.description,
-      })),
-    ...selectedSkills.map((entry) => ({
-      id: entry.id,
-      name: entry.artifact.name,
-      description: entry.artifact.description || entry.artifact.name,
-    })),
-  ];
+  const skillCatalog =
+    toolFamilies.skills === false
+      ? []
+      : [
+          ...sharedSkillDescriptors
+            .filter((entry) => entry.activationMode === "workspace_managed")
+            .map((entry) => ({
+              id: entry.id,
+              name: entry.title,
+              description: entry.description,
+            })),
+          ...selectedSkills.map((entry) => ({
+            id: entry.id,
+            name: entry.artifact.name,
+            description: entry.artifact.description || entry.artifact.name,
+          })),
+        ];
   const skillTools = createWorkspaceSkillTools({
     db,
     settings: runSettings,
@@ -861,6 +869,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       );
     },
   });
+  const attemptToolFamilies = resolveAgentToolFamilies(session.agent, {
+    hasSkills: skillCatalog.length > 0,
+  });
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -908,6 +919,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           organizationGatewayCustomModels,
           organizationOpenRouterConnectionActive,
           organizationOpenRouterCustomModels,
+          codexModelAvailability,
         ] = await Promise.all([
           getWorkspaceConnectionModelRestrictions(
             db,
@@ -953,9 +965,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             workspaceId: input.workspaceId,
             providerKind: "openrouter",
           }),
+          loadWorkspaceCodexModelAvailability(db, currentSettings, input.workspaceId),
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
+            observations: codexModelAvailability,
             connectionModelRestrictions,
             settings: currentSettings,
             policy,
@@ -997,6 +1011,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
       settings: runSettings,
+      ...(credentialRestriction ? { credentialRestriction } : {}),
       scope: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1017,7 +1032,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ? [googleDrivePublicationTool]
       : []),
     ...codeSearchTools,
-  ];
+  ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1092,6 +1107,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
+        ...(credentialRestriction ? { credentialRestriction } : {}),
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1110,7 +1126,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionAttachedRemoteMcpTargets: selectedSessionRemoteMcpTargets(
           githubRestMcp.settings,
           session.mcpServers ?? [],
-          turn.tools ?? [],
+          githubRestMcp.tools,
           localMcpServers,
         ),
         ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),

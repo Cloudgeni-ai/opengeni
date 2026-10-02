@@ -228,4 +228,36 @@ describe("OpenGeni object links inside an embedding host", () => {
     ).toBeNull();
     expect(resolve({ kind: "site", artifactId: SITE, workspaceId: WORKSPACE })).toBeNull();
   });
+  test("a pending open keeps focus on the link and ignores repeated activation", async () => {
+    let calls = 0;
+    let release: () => void = () => undefined;
+    const r = await renderComponent(
+      <Markdown
+        resolveLink={() => ({
+          open: () => {
+            calls += 1;
+            return new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          },
+        })}
+      >
+        {`[Open weekly report](/workspaces/${WORKSPACE}/artifacts/editable/${EDITABLE})`}
+      </Markdown>,
+    );
+    await flush();
+    const button = r.container.querySelector("button") as HTMLButtonElement;
+    button.focus();
+    await actRun(() => button.click());
+    await actRun(() => button.click());
+    await flush();
+    expect(calls).toBe(1);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(button);
+    await actRun(() => release());
+    await flush();
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    await r.unmount();
+  });
 });

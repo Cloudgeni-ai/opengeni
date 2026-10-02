@@ -32,6 +32,26 @@ import {
 } from "./fixtures";
 
 describe("authoritative editable artifact transactions", () => {
+  test("reference stores fail closed on transactional source authority while native calls stay unchanged", async () => {
+    const { service, store, kernel } = await artifactFixture();
+    const request = await transactionRequest(service);
+    const authorizeCommit = async () => undefined;
+    await expect(
+      service.applyTransaction({
+        scope,
+        artifactId,
+        actor: humanActor,
+        request,
+        authorizeCommit,
+      }),
+    ).rejects.toThrow("Transactional artifact authority requires a PostgreSQL store");
+    expect(kernel.calls).toHaveLength(0);
+    expect((await store.getArtifact(scope, artifactId))!.headSequence).toBe(0);
+    expect(
+      await service.applyTransaction({ scope, artifactId, actor: humanActor, request }),
+    ).toMatchObject({ replayed: false, receipt: { sequenceStart: 1 } });
+  });
+
   test("atomically advances delivery head and causal frontier without conflating them", async () => {
     const { service, store, kernel } = await artifactFixture();
     const firstRequest = await transactionRequest(service, {

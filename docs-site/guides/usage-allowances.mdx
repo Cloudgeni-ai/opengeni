@@ -1,0 +1,84 @@
+---
+title: "Usage allowances"
+description: "Give each team a monthly pool and each person a share of it, then show people where they stand with drop-in React components."
+---
+
+A usage allowance caps what a workspace, and each person in it, can spend from
+your OpenGeni credits in a period. Use it to sell plans per seat, to keep one
+person from using a team's month on day one, or to give a project a fixed
+monthly budget.
+
+## The model
+
+- **The workspace pool is the hard cap.** Set an included amount per month
+  (or a one-off amount). When the pool is used up, new work stops for
+  everyone in the workspace until it resets or you add credits.
+- **Each person gets a share.** By default everyone gets an equal share of
+  the pool. An admin can give someone more or less, as a share of the pool or
+  a fixed amount.
+- **Shares may add up to more than 100%.** They are ceilings, not
+  reservations: three people at 50% each is fine, because the pool still caps
+  what everyone spends together.
+- **Top-ups are extra.** One-off credits add to the pool until they are used,
+  across resets. Shares grow with them; fixed amounts don't.
+- **Enforcement happens between calls.** A model call that is already running
+  finishes; the next one is refused. Expect a small overshoot, never a cut-off
+  answer.
+- **Running out is calm.** Conversations, history and exports stay available.
+  The person sees who can raise the limit and when it resets.
+
+## Plans as multiples
+
+If your product sells a baseline plan and multiples of it, keep the money on
+your side and let OpenGeni count usage:
+
+1. On a plan or seat change, set the workspace's included amount to
+   `seats × baseline × multiple`.
+2. When a customer buys a top-up, grant it once with your own operation ID.
+3. When their admin moves a slider, set that member's share.
+
+Show people percentages and multiples ("2× your share", "38% left"), never
+the underlying amounts. Every read includes a `fraction` and a `status` for
+exactly this.
+
+## Drop-in React components
+
+`@opengeni/react/usage` reads the signed-in person's own usage through your
+session proxy (it serves only that read; budgets and member limits stay on
+your backend):
+
+```tsx
+import { ChatComposer } from "@opengeni/react";
+import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
+
+<UsageMeter workspaceId={workspaceId} />              // "38% left · Resets Nov 1"
+<ChatComposer header={<UsageLimitNotice workspaceId={workspaceId} />} />
+```
+
+- `useUsage()` returns the raw reading and a summary of which limit binds
+  first (the person's own share, or the shared pool).
+- `UsageMeter` shows shares only. Pass `formatAmount` to show money, credits
+  or plan multiples in your own unit; `density="hero"` leads a page with it.
+- `UsageLimitNotice` stays silent until someone is near or at a limit. Near:
+  a dismissible heads-up. At: who can fix it and when it resets. Reword it
+  with `labels`, or add your own button ("Upgrade", "Ask for more") with
+  `action`.
+- `UsageMemberList` is the admin roster: everyone's usage against their own
+  limit, a share-of-budget slider, and an always-visible note when shares add
+  up to more than the pool. Your backend saves the rule.
+
+When a turn is refused, the conversation shows a "usage limit reached" row.
+Reword it with `allowanceExhaustedLabels`, or replace it with
+`renderAllowanceExhausted` on `SessionConversation` or `MessageTimeline`; you
+receive the typed refusal (which limit, when it resets).
+
+## In OpenGeni
+
+Organization owners set each shared workspace's monthly budget under
+**Organization settings → Billing & usage**, in the same dollars as the
+credit balance. Workspace admins shape member limits under **Workspace
+settings → Usage**, where everyone also sees their own limit. The account
+menu and the composer show your own usage when you're close.
+
+For units, authority, the API and SDK, webhooks and recipes, see the
+[usage allowances reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/usage-allowances.md).

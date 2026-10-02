@@ -30,13 +30,17 @@
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
-import { ModalCommandStartPreDispatchUnavailableError } from "../providers/modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartNotDispatchedError,
+} from "../providers/modal-command-router-wire";
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
   withCommandSupervisionReady,
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
+  ProviderCommandStartOutcomeUnknownError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -247,11 +251,11 @@ export interface RoutingSandboxSessionDeps {
     op: string;
     backend: ResolvedActiveBackend;
     admission: unknown;
-    outcome: "resolved" | "rejected";
-    /** Provider result for a resolved call. Never present for rejection. */
+    outcome: "resolved" | "rejected" | "outcome_unknown";
+    /** Provider result for a resolved call. Absent when Start is unknown. */
     result?: unknown;
-    /** Stable candidate generated before durable promotion is attempted. It is
-     * supplied only when the provider returned a positive yielded-session id. */
+    /** Exact candidate for a yielded process or a client-chosen unknown Start.
+     * Unknown Start settlement retains this writer; it does not prove exit. */
     retainedProcess?: RoutingRetainedProcess;
   }) => Promise<void | RoutingMutationSettlementResult>;
   /** Admit one model/user-visible stdin mutation under the already-durable
@@ -519,6 +523,15 @@ export class RoutingRetainedProcessNotFoundError extends Error {
   constructor(public readonly providerSessionId: number) {
     super(`retained sandbox process ${providerSessionId} is not tracked on its original route`);
   }
+}
+
+export function renderRoutingMutationOutcomeUnknownToolResult(
+  error: RoutingMutationOutcomeUnknownError,
+): string {
+  const locator = error.retainedProcess
+    ? ` Inspect the exact invocation with write_stdin using session_id ${error.retainedProcess.providerSessionId} and empty chars.`
+    : " Inspect state before deciding how to proceed.";
+  return `Sandbox operation outcome unknown; the operation was not replayed. Do not blindly retry the command.${locator} Error: ${error}`;
 }
 
 type PendingParentPromotion = Parameters<
@@ -1070,7 +1083,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         { cause: error },
       );
     }
-    await this.captureRetainedOutput(record, formatExecResult(pending.result));
+    if (pending.result !== undefined)
+      await this.captureRetainedOutput(record, formatExecResult(pending.result));
   }
 
   private confirmDurableRejectedPromotion(
@@ -1710,9 +1724,50 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        if (
+          !reservedProcess &&
+          error instanceof ProviderCommandStartOutcomeUnknownError &&
+          mutatesWorkspace &&
+          this.deps.afterMutation
+        ) {
+          const handle = this.deps.providerCommandHandle?.(admission);
+          if (!handle) throw error;
+          const process: RoutingRetainedProcess = {
+            id: crypto.randomUUID(),
+            providerSessionId: handle,
+            providerCommand: error.command,
+          };
+          const record = this.registerRetainedProcess(process, backend);
+          const settlement: PendingParentPromotion = {
+            op,
+            backend,
+            admission,
+            outcome: "outcome_unknown",
+            retainedProcess: process,
+          };
+          record.pendingParentPromotion = settlement;
+          try {
+            const rejected = await this.deps.afterMutation(settlement);
+            if (rejected) this.confirmDurableRejectedPromotion(record, rejected);
+            else record.durable = true;
+            record.pendingParentPromotion = null;
+          } catch (cause) {
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              "Command Start outcome is unknown and exact invocation promotion remains unresolved; it was not replayed",
+              { cause: new AggregateError([error, cause]), retainedProcess: process },
+            );
+          }
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Command Start outcome is unknown; its exact invocation is retained and was not replayed",
+            { cause: error, retainedProcess: process },
+          );
+        }
         if (reservedProcess) {
           if (
             (error instanceof ProviderCommandStartRejectedError ||
+              error instanceof ModalCommandStartNotDispatchedError ||
               error instanceof ModalCommandStartPreDispatchUnavailableError) &&
             reservedProcess.providerCommand?.kind === "modal-router-v1"
           ) {
@@ -2349,9 +2404,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writePlacementPrivate(args: unknown): Promise<unknown> {
     const input = placementPrivateWrite(args);
     return this.dispatch("writePlacementPrivate", false, async (session, backend) => {
-      if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
-      if (session.writeFile) return await session.writeFile(input);
-      return await streamPlacementPrivateFile(session, input, backend.kind);
+      return await writePlacementPrivateOnBackend(session, input, backend.kind);
     });
   }
 
@@ -2359,36 +2412,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * control operation cannot be repurposed into a generic mutation bypass. */
   async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
     const privatePath = placementPrivatePath(path);
-    await this.dispatch("deletePlacementPrivate", false, async (session) => {
-      if (session.deletePlacementPrivate) {
-        await session.deletePlacementPrivate(privatePath, runAs);
-        return;
-      }
-      const args = {
-        cmd: `rm -f ${shellSingleQuote(privatePath)}`,
-        ...(runAs ? { runAs } : {}),
-      };
-      if (session.exec) {
-        const result = await session.exec(args);
-        if (
-          result &&
-          typeof result === "object" &&
-          typeof (result as { exitCode?: unknown }).exitCode === "number" &&
-          (result as { exitCode: number }).exitCode !== 0
-        ) {
-          throw new Error("placement-private cleanup failed");
-        }
-        return;
-      }
-      if (session.execCommand) {
-        const result = await session.execCommand(args);
-        const exitCode = parseExecBannerExitCode(result);
-        if (exitCode !== null && exitCode !== 0) {
-          throw new Error("placement-private cleanup failed");
-        }
-        return;
-      }
-      throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    await this.dispatch("deletePlacementPrivate", false, async (session, backend) => {
+      await deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind);
     });
   }
 
@@ -2400,7 +2425,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<WorkspaceFileImportReceipt> {
     return await this.dispatch("importWorkspaceFile", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: withPlacementPrivateControl(session, backend.kind),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2421,7 +2446,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[]> {
     return await this.dispatch("importWorkspaceFiles", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: withPlacementPrivateControl(session, backend.kind),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2748,6 +2773,80 @@ function placementPrivateWrite(value: unknown): {
     createParents: input.createParents ?? false,
     ...(typeof input.runAs === "string" ? { runAs: input.runAs } : {}),
   };
+}
+
+/** Preserve private staging on the already resolved provider. Calling the
+ * routing proxy here would re-resolve between staging, import and cleanup. */
+function withPlacementPrivateControl(
+  session: RoutableBackendSession,
+  backendKind: string,
+): ChannelASession {
+  return new Proxy(session, {
+    get(target, property) {
+      if (property === "writePlacementPrivate") {
+        return async (args: unknown) =>
+          await writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind);
+      }
+      if (property === "deletePlacementPrivate") {
+        return async (path: string, runAs?: string) =>
+          await deletePlacementPrivateOnBackend(
+            target,
+            placementPrivatePath(path),
+            runAs,
+            backendKind,
+          );
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as ChannelASession;
+}
+
+async function writePlacementPrivateOnBackend(
+  session: RoutableBackendSession,
+  input: ReturnType<typeof placementPrivateWrite>,
+  backendKind: string,
+): Promise<unknown> {
+  if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
+  if (session.writeFile) return await session.writeFile(input);
+  return await streamPlacementPrivateFile(session, input, backendKind);
+}
+
+async function deletePlacementPrivateOnBackend(
+  session: RoutableBackendSession,
+  privatePath: string,
+  runAs: string | undefined,
+  backendKind: string,
+): Promise<void> {
+  if (session.deletePlacementPrivate) {
+    await session.deletePlacementPrivate(privatePath, runAs);
+    return;
+  }
+  const args = {
+    cmd: `rm -f ${shellSingleQuote(privatePath)}`,
+    ...(runAs ? { runAs } : {}),
+  };
+  if (session.exec) {
+    const result = await session.exec(args);
+    if (
+      result &&
+      typeof result === "object" &&
+      typeof (result as { exitCode?: unknown }).exitCode === "number" &&
+      (result as { exitCode: number }).exitCode !== 0
+    ) {
+      throw new Error("placement-private cleanup failed");
+    }
+    return;
+  }
+  if (session.execCommand) {
+    const result = await session.execCommand(args);
+    const exitCode = parseExecBannerExitCode(result);
+    if (exitCode !== null && exitCode !== 0) {
+      throw new Error("placement-private cleanup failed");
+    }
+    return;
+  }
+  throw new RoutingUnsupportedError("deletePlacementPrivate", backendKind);
 }
 
 async function streamPlacementPrivateFile(

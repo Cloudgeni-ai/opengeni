@@ -1,10 +1,13 @@
 import { claudeProviderId } from "@opengeni/config";
+import { refreshClaudeSubscriptionUsage } from "../claude-subscription-usage";
+import { requireSameOriginBrowserMutation } from "./codex";
 import { createHash } from "node:crypto";
 import {
   CreateWorkspaceGatewayCustomModelRequest,
   DeleteWorkspaceGatewayCustomModelRequest,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
+  ClaudeSubscriptionUsage,
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
@@ -19,6 +22,7 @@ import {
   nestedPostgresSqlState,
   WorkspaceClaudeCustomModelLimitError,
   type WorkspaceProviderCustomModel,
+  readClaudeSubscriptionUsage,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -56,6 +60,32 @@ export function registerWorkspaceModelProviderRoutes(app: Hono, deps: ApiRouteDe
     const input = await scope(c, false);
     const models = await listWorkspaceProviderCustomModels(deps.db, input);
     return c.json(WorkspaceGatewayCustomModelsResponse.parse({ models: models.map(modelJson) }));
+  });
+  const usagePath = "/v1/workspaces/:workspaceId/model-providers/:providerKind/usage";
+  app.get(usagePath, async (c) => {
+    const input = await scope(c, false);
+    if (input.providerKind !== "claude_subscription")
+      throw new HTTPException(404, { message: "Usage not available for this provider" });
+    return c.json(
+      ClaudeSubscriptionUsage.parse(
+        await readClaudeSubscriptionUsage(deps.db, { ...input, scope: "workspace" }),
+      ),
+    );
+  });
+  app.post(`${usagePath}/refresh`, async (c) => {
+    requireSameOriginBrowserMutation(c, deps);
+    const input = await scope(c, false);
+    if (input.providerKind !== "claude_subscription")
+      throw new HTTPException(404, { message: "Usage not available for this provider" });
+    await requireAccessGrant(c, deps, input.workspaceId, "connections:write");
+    return c.json(
+      ClaudeSubscriptionUsage.parse(
+        await refreshClaudeSubscriptionUsage(deps.db, deps.settings, {
+          ...input,
+          scope: "workspace",
+        }),
+      ),
+    );
   });
   app.post(path, async (c) => {
     const input = await scope(c, true);

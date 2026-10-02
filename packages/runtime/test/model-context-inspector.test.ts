@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
+import { allAgentCapabilities, ModelContextInstructionLayer } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import {
@@ -189,5 +190,71 @@ describe("model context inspector", () => {
     expect(snapshot.tools.map((tool) => tool.name)).toEqual(["exec_command"]);
     expect(snapshot.tools.every((tool) => tool.visibility === "eager")).toBe(true);
     expect(snapshot.tokens.prefix).toBe(snapshot.tokens.instructions + snapshot.tokens.tools);
+  });
+});
+
+describe("model context inspector: modular instructions (AC17)", () => {
+  const agentConfig = {
+    version: 1 as const,
+    from: "all" as const,
+    capabilities: allAgentCapabilities(),
+    unavailable: [],
+    identity: "You are Acme Assistant.",
+    renderer: "opengeni" as const,
+    source: "request" as const,
+  };
+
+  test("modular layers survive SDK wrapping with module metadata", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      agentConfig,
+      activeSandboxBackend: "docker",
+      sessionInstructions: "Be terse.",
+    });
+    const captured = [
+      "You are operating inside an isolated sandbox workspace.",
+      "",
+      "# Agent instructions",
+      "",
+      inspection.composed,
+      "",
+      "# Filesystem",
+      "",
+      "You have access to a container with a filesystem.",
+    ].join("\n");
+    const layers = splitCapturedInstructions({
+      persistentLayers: inspection.layers,
+      capturedInstructions: captured,
+      genesisTitleDirective: "TITLE DIRECTIVE",
+    });
+    expect(layers.map((layer) => layer.id)).toEqual([
+      "sandbox_preamble",
+      "identity",
+      "operational_contract",
+      "session_instructions",
+      "sandbox_filesystem",
+    ]);
+    const contract = layers.find((layer) => layer.id === "operational_contract")!;
+    expect(contract.title).toBe("Operational contract");
+    expect(contract.modules?.map((module) => module.id)).toContain("sandbox");
+    expect(contract.modules?.map((module) => module.id).slice(0, 2)).toEqual([
+      "base_behavior",
+      "runtime_mechanics",
+    ]);
+    const moduleChars = contract.modules!.reduce((total, module) => total + module.chars, 0);
+    expect(moduleChars + (contract.modules!.length - 1) * 2).toBe(contract.content.length);
+    expect(layers.find((layer) => layer.id === "identity")?.content).toBe(
+      "You are Acme Assistant.",
+    );
+    for (const layer of layers) expect(ModelContextInstructionLayer.parse(layer)).toEqual(layer);
+  });
+
+  test("a modular capture never falls back to one unlabelled blob", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), { agentConfig });
+    const layers = splitCapturedInstructions({
+      persistentLayers: inspection.layers,
+      capturedInstructions: inspection.composed,
+      genesisTitleDirective: "",
+    });
+    expect(layers.map((layer) => layer.id)).toEqual(["identity", "operational_contract"]);
   });
 });

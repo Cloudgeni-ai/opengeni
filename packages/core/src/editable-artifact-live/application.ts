@@ -19,7 +19,10 @@ import type {
   EditableArtifactLiveServer,
   OpenEditableArtifactLiveInput,
 } from "./server";
-import type { EditableArtifactLiveTicket } from "./types";
+import type {
+  EditableArtifactLiveSourceSessionAuthority,
+  EditableArtifactLiveTicket,
+} from "./types";
 
 export type EditableArtifactLiveCompatibilityRequest = Readonly<{
   artifact: EditableArtifact;
@@ -83,6 +86,7 @@ export type MintEditableArtifactApplicationTicketInput = ReadEditableArtifactApp
     commandProtocolVersion: number;
     committedTransactionProtocolVersion: number;
     allowEdit: boolean;
+    sourceSessionAuthority?: EditableArtifactLiveSourceSessionAuthority;
   }>;
 
 /** Exact application seam used by standalone API and embedding hosts. */
@@ -176,6 +180,9 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
       modality: artifact.modality,
       actor: input.actor,
       allowEdit: input.allowEdit,
+      ...(input.sourceSessionAuthority
+        ? { sourceSessionAuthority: input.sourceSessionAuthority }
+        : {}),
     });
   }
 

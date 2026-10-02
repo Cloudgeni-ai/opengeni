@@ -28,11 +28,13 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
+const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const COMPOSER_KEYBOARD_E2E = "test/e2e/composer-keyboard.browser.e2e.ts";
+const COMPOSER_FOCUS_HANDOFF_E2E = "test/e2e/composer-focus-handoff.browser.e2e.ts";
 const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
@@ -113,6 +115,27 @@ describe("fail-closed change impact", () => {
       expect(plan.integrationTests, path).not.toContain(suite);
     }
     expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(suite);
+  });
+
+  test("Claude connection coverage follows its web and shared dependencies without widening leaf plans", () => {
+    for (const path of [
+      CLAUDE_SUBSCRIPTION_E2E,
+      "apps/web/src/components/models/workspace-models-page.tsx",
+      "apps/web/src/components/models/claude-usage.tsx",
+      "apps/web/test/claude-subscription-fixture.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(CLAUDE_SUBSCRIPTION_E2E);
+      expect(plan.unitTests, path).not.toContain(CLAUDE_SUBSCRIPTION_E2E);
+      expect(plan.integrationTests, path).not.toContain(CLAUDE_SUBSCRIPTION_E2E);
+    }
+    expect(usesBrowserRunner(CLAUDE_SUBSCRIPTION_E2E)).toBe(true);
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      CLAUDE_SUBSCRIPTION_E2E,
+    );
   });
 
   test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
@@ -266,8 +289,10 @@ describe("fail-closed change impact", () => {
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
+      CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
       COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
@@ -275,6 +300,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/developer-settings.browser.e2e.ts",
+      "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -304,6 +331,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
@@ -667,6 +695,34 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("composer focus handoff follows its real keyboard fixture without widening leaf plans", () => {
+    expect(discoverTestFiles().e2e).toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+    expect(usesBrowserRunner(COMPOSER_FOCUS_HANDOFF_E2E)).toBe(true);
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${COMPOSER_FOCUS_HANDOFF_E2E}"`,
+    );
+    for (const path of [
+      COMPOSER_FOCUS_HANDOFF_E2E,
+      "apps/web/test/composer-keyboard.html",
+      "apps/web/test/composer-keyboard-fixture.tsx",
+      "apps/web/test/composer-keyboard-context.ts",
+      "apps/web/test/composer-keyboard.vite.config.ts",
+      "apps/web/src/components/composer-mobile-plus.tsx",
+      "apps/web/src/components/composer-mobile-plus-panel.tsx",
+      "apps/web/src/components/session/new-session-settings-menu.tsx",
+      "packages/react/src/index.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+      expect(plan.unitTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+      expect(plan.integrationTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([]);
+  });
+
   test("connector account controls follow web dependencies without widening leaf plans", () => {
     for (const path of [
       CONNECTOR_ACCOUNTS_E2E,
@@ -777,8 +833,10 @@ describe("fail-closed change impact", () => {
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
+      CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
       COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
@@ -786,6 +844,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/developer-settings.browser.e2e.ts",
+      "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -815,6 +875,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);

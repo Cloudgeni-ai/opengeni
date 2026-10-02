@@ -28,6 +28,10 @@ export {
   sandboxReaperWorkflowV2,
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export {
+  browserDeadlineCheckpointWorkflow,
+  browserDeadlineCheckpointSweepWorkflow,
+} from "./workflows/browser-deadline-checkpoint";
 export { siteAuthMaintenanceWorkflow } from "./workflows/site-auth-maintenance";
 export {
   videoGenerationWorkflow,

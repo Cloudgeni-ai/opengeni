@@ -1,0 +1,55 @@
+---
+title: "For AI agents"
+description: "The opengeni-client skill, machine-readable docs, and what to treat as authoritative when integrating OpenGeni."
+icon: "robot"
+---
+
+If you are a coding agent integrating OpenGeni into a product, start with the `opengeni-client` skill. It covers the default embed, onboarding, tools, isolation, background work, verification, and the decisions to ask your user about.
+
+## Install the skill
+
+For native Claude Code, Codex, Cursor, or supported ChatGPT plugin installation,
+use the [developer plugin](/guides/developer-plugin). It includes both SDK setup
+and product integration skills without an MCP server.
+
+One command, from the root of the product repository:
+
+```bash
+npx skills add Cloudgeni-ai/opengeni --skill opengeni-client
+```
+
+`bunx skills add Cloudgeni-ai/opengeni --skill opengeni-client` works the same way. Without that CLI, copy the directory with git:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/Cloudgeni-ai/opengeni /tmp/opengeni
+git -C /tmp/opengeni sparse-checkout set .agents/skills/opengeni-client
+mkdir -p .agents/skills && cp -R /tmp/opengeni/.agents/skills/opengeni-client .agents/skills/
+```
+
+Without git, read the whole skill as plain Markdown at [`https://docs.opengeni.ai/reference/opengeni-client-skill.md`](/reference/opengeni-client-skill). It mirrors every file of the skill, and a CI check keeps it identical to the repository copy.
+
+The skill is for the agent building the integration. Do not attach it to the customer-facing OpenGeni agent.
+
+## Machine-readable docs
+
+| Resource                                                   | Contents                                                |
+| ---------------------------------------------------------- | ------------------------------------------------------- |
+| [`/llms.txt`](https://docs.opengeni.ai/llms.txt)           | Index of every page with a one-line description         |
+| [`/llms-full.txt`](https://docs.opengeni.ai/llms-full.txt) | Every page in one file                                  |
+| Any page URL + `.md`                                       | That page as Markdown, for example `/embed-manually.md` |
+| `https://docs.opengeni.ai/mcp`                             | An MCP server that searches these docs                  |
+
+## What is authoritative
+
+When sources disagree, trust them in this order:
+
+1. **The live deployment.** `GET /v1/config/client` and `GET /v1/access/me` show what the target deployment supports and what the credential may do.
+2. **The installed packages.** The exported types of the installed `@opengeni/sdk` and `@opengeni/react` define the exact API you can call.
+3. **The skill and the canonical repository docs**, such as [`docs/product-integration.md`](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/product-integration.md).
+4. **These pages**, which summarize the above for people.
+
+## Where to start reading
+
+- [How it fits together](/integrate/how-it-fits-together) for the architecture.
+- [Embed manually](/embed-manually) for the default integration code.
+- [SDK](/reference/sdk) and [React components](/reference/react) for the API surface.

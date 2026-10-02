@@ -5,6 +5,12 @@ Normal preparation shows the MIT-licensed `thinking-orbs` React component (`sear
 randomly selected every five seconds. After 30 seconds, factual waiting copy
 replaces the phrases. Failure and cancellation stop the animation; actual
 reasoning/tool activity replaces it. Reduced-motion preferences disable animation.
+Once the model request is dispatched, the same indicator reads “Waiting for a
+response…” and later “Still waiting for a response…” rather than implying setup
+is still running. This transition uses the recorded provider request phase,
+preserves the existing elapsed time and orb, and does not claim model progress.
+The waiting-state disclosure reads “Show details”. Explicit host phrase/message
+overrides still apply in both states.
 
 Startup phase events and their projection remain unchanged. The Debug inspector's
 Startup tab displays recorded durations, including overlapping phases. Its
@@ -67,9 +73,10 @@ For an entirely different visual, supply `genieLoading.render`:
 />
 ```
 
-The renderer receives `startedAt`, `detailsOpen`, and `onShowDetails` to optionally
-keep the diagnostics affordance. The SDK still owns loading visibility and exit
-transitions. Returning `null` hides the visual.
+The renderer receives `startedAt`, `phase` (`preparing` or `waiting`),
+`detailsOpen`, and `onShowDetails` to optionally keep the diagnostics affordance.
+The SDK still owns loading visibility and exit transitions. Returning `null`
+hides the visual.
 
 ## Readable turns (`turnSummary.rolling`)
 
@@ -127,19 +134,21 @@ There is no forced answer stop and no automatic repin on subsequent work.
 
 An expanded outer work header sticks inside the timeline viewport while its
 details scroll, keeping collapse reachable. It releases at the end of its own
-section, stays below Latest question when present, and never makes nested work
+section, stays separate from the contextual navigation pill, and never makes nested work
 headers sticky. This is section-scoped CSS, not another scroll owner.
 
-One **Latest question** button targets the newest actual user message, never the
-question nearest the viewport. Hosts with bounded history wire
-`onJumpToLatestQuestion={events.jumpToLatestQuestion}` from `useSessionEvents`.
-It resolves the newest durable user message with a filtered forensic read (paging
-past legacy worker-completion records using the canonical timeline projection), then uses
-the existing bounded `jumpToSequence` path only when needed. Target placement
-wins over prepend correction without enabling tip-follow. Lookup failures are
-retryable; stale history/identity requests cannot replace the current window.
-Without the callback, local navigation is limited to the live window and does
-not substitute an older page's last question. There are no previous/next arrows.
+One **Back to your message** button targets the loaded user prompt associated
+with the response/work being read: the latest prompt before the viewport midpoint.
+It appears only once that prompt's start is more than 24 px above the viewport
+and its entire body and attachments have left the viewport.
+Clicking synchronously places and focuses the exact mounted prompt near the top,
+without enabling tip-follow. Incoming messages and queued prompts do not redirect
+an older-answer reader. Bounded history uses only its mounted prompts; without an
+associated prompt there is no action, even when newer history exists. There is no
+global lookup, queue redirect, or history-window replacement. The public
+`onJumpToLatestQuestion` prop remains deprecated and inert; the separate public
+hook remains available for custom host actions. **Jump to latest** still returns
+to the live bottom. There are no previous/next arrows.
 
 Tool labels reuse `ActivityDisclosure` through its compact presentation context;
 reasoning keeps a stable Thinking label with a live text preview. Step changes roll
@@ -155,7 +164,7 @@ recorded exchange whose answer (with an image and a question) is followed by one
 more machine-triggered turn. `/rolling-steps.html` loops sample commands. Neither
 needs model calls. `test/e2e/timeline-exchange-fold.browser.e2e.ts` covers, in the
 readable presentation and in Chromium, normal long-answer following, manual
-scroll retention, phase-less progress, older-history anchoring, newest-question
+scroll retention, phase-less progress, older-history anchoring, contextual prompt
 navigation across bounded windows, and answers surviving machine turns. It also
 checks desktop/mobile light/dark layouts and disclosures. Set
 `OPENGENI_TIMELINE_PREVIEW_DIR` to retain actual-component screenshots.

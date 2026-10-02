@@ -6,6 +6,8 @@ import {
   DEFAULT_OPENROUTER_MODEL_ID,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   configuredModels,
+  applyModelCatalogDocument,
+  withCodexCatalogProvider,
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
@@ -92,6 +94,45 @@ const previousClientModelSchema = z
   .passthrough();
 
 describe("workspace model catalog availability", () => {
+  test("live database catalog projects fast/vision for GPT-6 point releases and Luna", () => {
+    const base = testSettings({ codexSubscriptionEnabled: true });
+    const capabilities = {
+      ...configuredModels(base)[0]!.capabilities,
+      inputModalities: ["text"],
+      latencyModes: [{ id: "standard", upstream: "unknown", runnable: true }],
+    };
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-luna"],
+      codexModels: ["gpt-6.1-sol", "gpt-6-luna"].map((slug) => ({
+        id: `codex/${slug}`,
+        upstreamModelId: slug,
+        label: slug,
+        capabilities,
+      })),
+    });
+    const catalog = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: true,
+    });
+    for (const id of ["codex/gpt-6.1-sol", "codex/gpt-6-luna"]) {
+      const model = catalog.models.find((candidate) => candidate.id === id)!;
+      expect(model.capabilities.inputModalities).toEqual(["text", "image"]);
+      expect(model.capabilities.latencyModes).toContainEqual(
+        expect.objectContaining({ id: "fast", upstream: "supported", runnable: true }),
+      );
+      expect(model.billing).toEqual({
+        upstreamPayer: "connected_subscription",
+        metering: "external",
+      });
+      expect(model.definitionVersion).toBe(
+        configuredModels(withCodexCatalogProvider(settings)).find(
+          (candidate) => candidate.id === id,
+        )!.definitionVersion,
+      );
+    }
+  });
   test("projects anonymous providers as ready external routes", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,

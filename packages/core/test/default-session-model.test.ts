@@ -1,5 +1,12 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
+import {
+  applyModelCatalogDocument,
+  configuredModels,
+  DEFAULT_OPENROUTER_MODEL_ID,
+  withCodexCatalogProvider,
+  type Settings,
+} from "@opengeni/config";
 import type { AccessGrant, WorkspaceModelPolicyContract } from "@opengeni/contracts";
 import {
   applyCreditDebitAfterUse,
@@ -93,6 +100,52 @@ describe("default model precedence", () => {
     expect(decide(settings)).toEqual({
       model: DEFAULT_OPENROUTER_MODEL_ID,
       reasoningEffort: settings.openaiReasoningEffort,
+      source: "deployment",
+    });
+  });
+
+  test("a stably blocked deployment default falls back with the model's own effort", () => {
+    const settings = hostedSettings({
+      openaiModel: "codex/gpt-6-sol",
+      openaiAllowedModels: "gpt-6-luna",
+      openaiReasoningEffort: "low",
+    });
+    const catalog = selections(settings).map((selection) => ({
+      ...selection,
+      model: {
+        ...selection.model,
+        capabilities: {
+          ...selection.model.capabilities,
+          reasoning: { ...selection.model.capabilities.reasoning, defaultEffort: "high" as const },
+        },
+      },
+    }));
+    const result = selectDefaultSessionModel({
+      settings,
+      selections: catalog,
+      workspaceDefaults: null,
+      creditsAvailable: false,
+    });
+    expect(result).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "high",
+      source: "deployment",
+    });
+    expect(result.reasoningEffort).not.toBe(settings.openaiReasoningEffort);
+  });
+
+  test("provider health and resolver uncertainty preserve the stably admissible default", () => {
+    const settings = hostedSettings({
+      openaiProvider: "azure",
+      openaiModel: "gpt-6-luna",
+      azureOpenaiBaseUrl: "https://fixture.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: undefined,
+      azureOpenaiAdToken: undefined,
+      openaiReasoningEffort: "low",
+    });
+    expect(decide(settings)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "low",
       source: "deployment",
     });
   });
@@ -239,9 +292,19 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let db: Database;
 
+let restoreModelsProbe = () => {};
 beforeAll(async () => {
+  const modelsProbe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+    ok: true,
+    status: 200,
+    slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+  });
+  restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("core-default-session-model");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Default model integration tests require real PostgreSQL");
+    }
     available = false;
     return;
   }
@@ -250,6 +313,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  restoreModelsProbe();
   await client?.close();
   await shared?.release();
 }, 180_000);
@@ -301,7 +365,7 @@ async function connectCodex(settings: Settings, grant: AccessGrant & { workspace
     scopes: null,
     planType: "pro",
     isFedramp: false,
-    expiresAt: new Date(Date.now() + 60_000),
+    expiresAt: new Date(Date.now() + 3_600_000),
     lastRefreshAt: new Date(),
   });
   await ensureCodexRotationSettings(db, grant.accountId, grant.workspaceId);
@@ -395,6 +459,37 @@ function routeDeps(settings: Settings): ApiRouteDeps {
 }
 
 describe("server-side default model resolution", () => {
+  test("automatic defaults skip a configured Codex model absent from the live account catalog", async () => {
+    if (!available) return;
+    const base = hostedSettings();
+    const capabilities = configuredModels(withCodexCatalogProvider(base))[0]!.capabilities;
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-sol"],
+      codexModels: [
+        {
+          id: "codex/gpt-6.1-sol",
+          upstreamModelId: "gpt-6.1-sol",
+          label: "GPT-6.1 Sol",
+          capabilities,
+        },
+        { id: "codex/gpt-6-sol", upstreamModelId: "gpt-6-sol", label: "GPT-6 Sol", capabilities },
+      ],
+    });
+    const grant = await workspaceFixture();
+    await connectCodex(settings, grant);
+    expect(
+      await resolveDefaultSessionModel(db, settings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        workspaceSettings: {
+          sessionDefaults: { model: "codex/gpt-6.1-sol", reasoningEffort: "high" },
+        },
+      }),
+    ).toMatchObject({ model: "codex/gpt-6-sol", source: "subscription" });
+  }, 180_000);
+
   test("resolves deployment, credits, and subscription defaults from workspace state", async () => {
     if (!available) return;
     const settings = hostedSettings();

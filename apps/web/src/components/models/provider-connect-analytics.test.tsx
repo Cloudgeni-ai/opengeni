@@ -9,6 +9,7 @@ import {
   ReplaceKeyDialog,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
+import { modelsScopeLabels } from "./models-ui";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.
@@ -77,6 +78,7 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   const places: SuperGrokPlaces = {
     scopeName: "Local",
     organizationName: "Organization",
+    scope: modelsScopeLabels("Organization", false),
     openAccount: () => undefined,
     openConnect: () => undefined,
     openAccess: () => undefined,
@@ -96,7 +98,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   );
   expect(clickedAction(submitButton())).toBe("connect_supergrok");
 
-  // "Open xAI again" reopens the same sign-in; it is not another connect.
+  // While the code waits, the step holds its own actions: no second connect
+  // button that could be counted again.
   await act(async () =>
     root.render(
       <SuperGrokConnectPage
@@ -106,7 +109,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
       />,
     ),
   );
-  expect(submitButton().hasAttribute("data-analytics-action")).toBe(false);
+  expect(container.querySelector('button[type="submit"]')).toBeNull();
+  expect(container.querySelector("[data-analytics-action]")).toBeNull();
 });
 
 test("Claude credentials use distinct accessible forms and explain subscription expiry", async () => {
@@ -116,6 +120,10 @@ test("Claude credentials use distinct accessible forms and explain subscription 
     const state = {
       config,
       canManageConnection: true,
+      accessTarget: {
+        client: {},
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+      },
       saveKey: async () => true,
     } as unknown as ProviderConnection;
     await act(async () =>
@@ -123,6 +131,19 @@ test("Claude credentials use distinct accessible forms and explain subscription 
         <ProviderConnectPage key={kind} state={state} onClose={() => {}} onConnected={() => {}} />,
       ),
     );
+    if (kind === "claude_subscription") {
+      expect(submitButton().textContent).toContain("Sign in to Claude");
+      expect(submitButton().disabled).toBe(false);
+      expect(
+        container
+          .querySelector('input[aria-label="Claude subscription setup token"]')
+          ?.closest('[data-state="closed"]') !== null,
+      ).toBe(true);
+      const setup = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent?.includes("Use a setup token"),
+      )!;
+      await act(async () => setup.click());
+    }
     const input = container.querySelector<HTMLInputElement>(
       `input[aria-label="${config.keyAriaLabel}"]`,
     )!;
@@ -131,12 +152,14 @@ test("Claude credentials use distinct accessible forms and explain subscription 
     expect(submitButton().disabled).toBe(true);
     expect(container.textContent).toContain(config.title);
     if (kind === "claude_subscription") {
-      expect(container.querySelector<HTMLInputElement>('input[type="file"]')?.hidden).toBe(true);
+      expect(container.querySelector('input[type="file"]')).toBeNull();
+      expect(container.textContent).not.toContain("Account UUID");
+      expect(container.textContent).not.toContain("Device ID");
       expect(
         container.querySelector<HTMLInputElement>('input[aria-label="Create a Claude setup token"]')
           ?.value,
       ).toBe("claude setup-token");
-      expect(container.textContent).toContain("does not refresh");
+      expect(container.textContent).toContain("cannot check current usage");
     }
   }
 });
@@ -150,7 +173,7 @@ test("subscription replacement identifies the credential as a token", async () =
   await act(async () =>
     root.render(<ReplaceKeyDialog state={state} open onOpenChange={() => {}} />),
   );
-  expect(document.body.textContent).toContain("Replace the Claude subscription token");
+  expect(document.body.textContent).toContain("Replace Claude setup token");
   expect(document.body.textContent).not.toContain("Replace the Claude subscription key");
   expect(
     document
@@ -191,101 +214,13 @@ test("failed subscription rotation never treats another administrator's version 
   }
   await act(async () => root.render(<Harness />));
   let saved: boolean | undefined;
-  const identity = {
-    accountUuid: "10000000-0000-4000-8000-000000000001",
-    deviceId: "a".repeat(64),
-  };
   await act(async () => {
-    saved = await state.saveKey("sk-ant-oat01-fixture", identity);
+    saved = await state.saveKey("sk-ant-oat01-fixture");
   });
   expect(saved).toBe(false);
   expect(sent).toHaveLength(2);
   expect(sent[0]!.operationId).toBe(sent[1]!.operationId);
-  expect(sent[0]!.claudeIdentity).toEqual(identity);
-});
-
-test("Claude settings import extracts identifiers only and fails closed", async () => {
-  const { parseClaudeSettings } = await import("./claude-setup");
-  const identity = {
-    accountUuid: "10000000-0000-4000-8000-000000000001",
-    deviceId: "a".repeat(64),
-  };
-  expect(
-    parseClaudeSettings(
-      JSON.stringify({
-        oauthAccount: {
-          accountUuid: identity.accountUuid,
-          emailAddress: "not-submitted@example.com",
-        },
-        userID: identity.deviceId,
-        projects: { private: "never-submit" },
-      }),
-    ),
-  ).toEqual(identity);
-  for (const input of [
-    "invalid",
-    "null",
-    "{}",
-    JSON.stringify({ oauthAccount: { accountUuid: identity.accountUuid }, userID: "invalid" }),
-  ])
-    expect(() => parseClaudeSettings(input)).toThrow();
-});
-
-test("Claude import ignores a stale file and invalid replacement clears readiness", async () => {
-  const { useClaudeIdentityFields } = await import("./claude-setup");
-  let current: ReturnType<typeof useClaudeIdentityFields>;
-  function Harness() {
-    current = useClaudeIdentityFields(true);
-    return <>{current.fields}</>;
-  }
-  await act(async () => root.render(<Harness />));
-  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
-  const importButton = container.querySelector<HTMLButtonElement>(
-    'button[aria-label="Import Claude account details"]',
-  )!;
-  expect(importButton.id).not.toBe("");
-  expect(
-    [...container.querySelectorAll("label")].find((label) => label.htmlFor === importButton.id)
-      ?.textContent,
-  ).toBe("Claude account details");
-  expect(
-    document.getElementById(importButton.getAttribute("aria-describedby")!)?.textContent,
-  ).toContain("Only the two account identifiers are read");
-  const text = JSON.stringify({
-    oauthAccount: { accountUuid: "10000000-0000-4000-8000-000000000001" },
-    userID: "a".repeat(64),
-  });
-  let finish!: (value: string) => void;
-  const slow = new Promise<string>((resolve) => {
-    finish = resolve;
-  });
-  async function select(read: () => Promise<string>) {
-    Object.defineProperty(input, "files", {
-      configurable: true,
-      value: [{ size: 100, text: read }],
-    });
-    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
-  }
-  await select(() => slow);
-  await select(async () => "{}");
-  await act(async () => finish(text));
-  expect(current!.valid).toBe(false);
-  expect(container.textContent).toContain("Account details are missing");
-  expect(importButton.getAttribute("aria-invalid")).toBe("true");
-  expect(
-    document.getElementById(importButton.getAttribute("aria-describedby")!)?.textContent,
-  ).toContain("Account details are missing");
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-    "Account details are missing",
-  );
-  await select(async () => text);
-  expect(current!.valid).toBe(true);
-  expect(container.textContent).toContain("Account details ready");
-  expect(importButton.hasAttribute("aria-invalid")).toBe(false);
-  expect(container.querySelector('[role="alert"]')).toBeNull();
-  await select(async () => "bad json");
-  expect(current!.valid).toBe(false);
-  expect(current!.identity?.accountUuid).toBe("");
+  expect(sent[0]!.claudeIdentity).toBeUndefined();
 });
 
 test("named Claude model additions persist a friendly picker label", async () => {
@@ -353,7 +288,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
         codexAvailable={false}
         grok="hidden"
         gateways={gateways}
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,
@@ -370,7 +307,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,
@@ -379,7 +318,7 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
   expect(container.textContent).not.toContain("Claude subscription");
 });
 
-test("workspace Claude saves identity only inside the credential and stays off without network activity", async () => {
+test("workspace Claude submits only a setup token and stays off without network activity", async () => {
   const { useProviderConnection, PROVIDER_CONNECTION_CONFIGS } =
     await import("../ai-gateway-connection");
   const listConnections = mock(async () => []);
@@ -425,23 +364,19 @@ test("workspace Claude saves identity only inside the credential and stays off w
     accountUuid: "10000000-0000-4000-8000-000000000001",
     deviceId: "a".repeat(64),
   };
-  expect(await state.saveKey("sk-ant-oat01-fixture", identity)).toBe(false);
+  expect(await state.saveKey("sk-ant-oat01-fixture")).toBe(false);
   expect(createConnection).not.toHaveBeenCalled();
   await act(async () => root.render(<Harness enabled />));
   expect(listModels).toHaveBeenCalledWith("workspace", "claude_subscription");
   await act(async () => {
-    expect(await state.saveKey("sk-ant-oat01-fixture", identity)).toBe(true);
+    expect(await state.saveKey("sk-ant-oat01-fixture")).toBe(true);
   });
   const payload = createConnection.mock.calls[0]![1] as {
     credential: { apiKey: string };
     metadata: unknown;
     subjectId: unknown;
   };
-  expect(JSON.parse(payload.credential.apiKey)).toEqual({
-    version: 1,
-    token: "sk-ant-oat01-fixture",
-    identity,
-  });
+  expect(payload.credential.apiKey).toBe("sk-ant-oat01-fixture");
   expect(JSON.stringify(payload.metadata)).not.toContain(identity.accountUuid);
   expect(payload.subjectId).toBeNull();
   expect(state.accessTarget.kind).toBe("claude_subscription");

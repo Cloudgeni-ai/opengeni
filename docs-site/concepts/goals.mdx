@@ -17,6 +17,11 @@ A goal is `active`, `paused`, or `completed`.
 
 Pausing the session (the workstream) is separate from pausing the goal: it holds inference without changing goal state.
 
+Continuation keeps the session's effective model, reasoning effort, and speed.
+If that model is retired, unavailable, or disallowed, the goal pauses with an
+explanation; choose an available model before resuming. Failed sessions keep
+their goal for explicit recovery before work continues.
+
 ## Reports
 
 The agent answers in chat by default, including summaries and reports. It

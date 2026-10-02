@@ -536,6 +536,8 @@ export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
+export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export type { TimelineSearchTarget } from "./components/timeline-search";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
 export type {
@@ -557,13 +559,20 @@ export {
   chainLinkResolvers,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
+  viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
 } from "./components/open-geni-links";
 export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
@@ -588,6 +597,19 @@ export { PierreDiff } from "./components/pierre-diff";
 // Opt in to the optional `@pierre/diffs` peer with `enablePierreDiffs()` from
 // `@opengeni/react/diffs`; the root entry never names the peer.
 export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-loader";
+// Bundler-visible optional workbench imports live only on opt-in subpaths.
+export {
+  registerSandboxTerminal,
+  registerCodeEditor,
+  registerDesktopViewer,
+} from "./lib/workbench-peers";
+export type {
+  WorkbenchPeerLoader,
+  SandboxTerminalPeers,
+  CodeEditorPeers,
+  CodeEditorLanguage,
+  CodeEditorLanguages,
+} from "./lib/workbench-peers";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";

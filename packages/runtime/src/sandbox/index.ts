@@ -2,6 +2,11 @@ export type {
   ProviderCommandPersistence,
   ProviderCommandSession,
 } from "./provider-command-session";
+export {
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
+  isProviderCommandObservationUnavailableError,
+} from "./provider-command-session";
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
@@ -177,6 +182,7 @@ export {
   deleteModalCheckpointSnapshot,
   inspectModalSandboxLifecycle,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   modalSessionMatchesCheckpointProviderBinding,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
@@ -195,6 +201,11 @@ export {
   type ModalSandboxAttribution,
   type RevalidateModalOrphanTermination,
 } from "./providers/modal";
+export {
+  getModalCommandStartInvocation,
+  withModalCommandStartSignal,
+  type ModalCommandStartInvocation,
+} from "./providers/modal-command-start-errors";
 export {
   OpenSandboxClient,
   OpenSandboxSession,
@@ -592,6 +603,7 @@ export {
   isRoutingMutationOutcomeUnknownError,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
+  renderRoutingMutationOutcomeUnknownToolResult,
   RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
@@ -1277,9 +1289,12 @@ function sandboxExecProbeSessionId(result: unknown): number | null {
 export async function verifySandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   if (established.backendId !== "modal" && established.backendId !== "opensandbox") return;
   const session = established.session as {
+    verifyExecReadiness?: (signal: AbortSignal) => Promise<number>;
     exec?: (args: {
       cmd: string;
       yieldTimeMs?: number;
@@ -1298,7 +1313,9 @@ export async function verifySandboxExecReadiness(
     }) => Promise<unknown>;
   };
   const run = session.exec ?? session.execCommand;
-  if (!run) {
+  const nativeModalProbe =
+    established.backendId === "modal" ? session.verifyExecReadiness : undefined;
+  if (!run && !nativeModalProbe) {
     throw new SandboxExecReadinessError(
       established.backendId,
       "exec_probe_unavailable",
@@ -1317,24 +1334,53 @@ export async function verifySandboxExecReadiness(
     );
   const deadline = Date.now() + timeoutMs;
   const withinDeadline = async <T>(operation: () => Promise<T>): Promise<T> => {
+    signal?.throwIfAborted();
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let abort: (() => void) | undefined;
     try {
-      return await Promise.race([
-        operation(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(timeoutError()), remainingMs);
-          if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
-        }),
-      ]);
+      const interrupted = new Promise<never>((_, reject) => {
+        abort = () => reject(signal?.reason);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+        timer = setTimeout(() => reject(timeoutError()), remainingMs);
+        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      });
+      const result = await Promise.race([operation(), interrupted]);
+      signal?.throwIfAborted();
+      return result;
     } finally {
       if (timer) clearTimeout(timer);
+      if (abort) signal?.removeEventListener("abort", abort);
     }
   };
+  if (nativeModalProbe) {
+    const cancellation = new AbortController();
+    const abort = () => cancellation.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      const exitCode = await withinDeadline(() =>
+        nativeModalProbe.call(session, cancellation.signal),
+      );
+      if (exitCode !== 0)
+        throw new SandboxExecReadinessError(
+          established.backendId,
+          "exec_probe_failed",
+          timeoutMs,
+          exitCode,
+          established.instanceId,
+        );
+      return;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      cancellation.abort(new Error("Sandbox readiness observation finished"));
+    }
+  }
   const execProbe = () =>
     withinDeadline(() =>
-      run.call(session, {
+      run!.call(session, {
         cmd: "true",
         yieldTimeMs: Math.min(1_000, Math.max(1, deadline - Date.now())),
         maxOutputTokens: 1_000,

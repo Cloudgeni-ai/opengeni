@@ -3,10 +3,41 @@
  *
  * Migration `0532_product_lifecycle_fact_export.sql` captures one fact per
  * product change with row triggers and writes it to the durable host export as
- * the `lifecycle_fact` kind. Every value is drawn from a fixed list; the
+ * the `lifecycle_fact` kind; `0565_usage_analytics_presence_and_facts.sql` adds
+ * `user.active`, `credits.granted` and `connection.revoked`. Every value is drawn from a fixed list; the
  * database function `opengeni_private.product_lifecycle_fact_valid` enforces
  * the same lists and a test keeps the two copies identical.
  */
+
+/**
+ * Closed class of a positive credit grant (`grant` or `manual_credit_grant`
+ * ledger row). `opengeni_private.credit_grant_class` mirrors this mapping:
+ * - `signup_trial`: the one-time verified-signup trial (source `verified_signup_trial`).
+ * - `coupon`: a fully discounted Stripe checkout (source `stripe_checkout_coupon`).
+ * - `manual`: an operator grant (`manual_credit_grant` or source `operator_adjustment`).
+ * - `other`: any other grant source.
+ */
+export const CREDIT_GRANT_CLASSES = ["signup_trial", "coupon", "manual", "other"] as const;
+export type CreditGrantClass = (typeof CREDIT_GRANT_CLASSES)[number];
+
+const CONNECTION_PROVIDER_CLASSES = [
+  "slack",
+  "github",
+  "gitlab",
+  "azure_devops",
+  "bitbucket",
+  "google",
+  "microsoft",
+  "linear",
+  "atlassian",
+  "notion",
+  "supabase",
+  "datadog",
+  "posthog",
+  "openai",
+  "x",
+  "other",
+] as const;
 
 /** Each fact type and the fixed values its `attribute` may carry. */
 export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
@@ -32,25 +63,15 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
   ],
   /** A credit top-up payment was granted. */
   "credits.purchased": [],
+  /** Credits were granted without a purchase. Attribute: grant class. */
+  "credits.granted": CREDIT_GRANT_CLASSES,
   /** An integration connection was created. Attribute: provider class. */
-  "connection.created": [
-    "slack",
-    "github",
-    "gitlab",
-    "azure_devops",
-    "bitbucket",
-    "google",
-    "microsoft",
-    "linear",
-    "atlassian",
-    "notion",
-    "supabase",
-    "datadog",
-    "posthog",
-    "openai",
-    "x",
-    "other",
-  ],
+  "connection.created": CONNECTION_PROVIDER_CLASSES,
+  /**
+   * An integration connection was revoked, or deleted while still live.
+   * Attribute: provider class, the same list as `connection.created`.
+   */
+  "connection.revoked": CONNECTION_PROVIDER_CLASSES,
   "scheduled_task.created": [],
   /** A catalog Skill was installed into a workspace. */
   "skill.installed": [],
@@ -60,6 +81,11 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
   "machine.enrolled": [],
   /** A person became an active member of an organization that already had one. */
   "member.joined": [],
+  /**
+   * A managed person was active in an authenticated browser session on a new
+   * UTC day: at most one fact per person per UTC day, with no organization.
+   */
+  "user.active": [],
 } as const satisfies Record<string, readonly string[]>;
 
 export type ProductLifecycleFactType = keyof typeof PRODUCT_LIFECYCLE_FACT_ATTRIBUTES;

@@ -1,6 +1,8 @@
 import {
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -9,6 +11,10 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
+import {
+  allowanceExhaustedMessage,
+  parseAllowanceExhaustedRefusal,
+} from "@opengeni/sdk/allowance-refusal";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   presentFailure,
@@ -145,6 +151,34 @@ export function buildTimeline(
   options: { partialStart?: boolean } = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
+  const allowanceNotices = new Set<string>();
+  const allowanceNotice = (event: SessionEvent, turnId: string | null) => {
+    const refusal = parseAllowanceExhaustedRefusal(event.payload);
+    if (!refusal) return null;
+    const text = allowanceExhaustedMessage(refusal);
+    const key = JSON.stringify([
+      turnId,
+      event.turnAttemptId,
+      startupRecoveryRevisionByTurn.get(turnId ?? "") ?? 0,
+      refusal.scope,
+      refusal.subjectId,
+      refusal.resetsAt,
+    ]);
+    if (!allowanceNotices.has(key)) {
+      allowanceNotices.add(key);
+      items.push({
+        kind: "notice",
+        id: `${event.id}-allowance`,
+        tone: "failed",
+        text,
+        // The canonical sentence replaces upstream prose, so a host renderer
+        // reading `message` never shows a wrapper's private wording.
+        allowance: { ...refusal, message: text },
+        occurredAt: event.occurredAt,
+      });
+    }
+    return text;
+  };
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
   // A bounded replay can begin halfway through a message (including inside an
@@ -1200,6 +1234,11 @@ export function buildTimeline(
         break;
       }
 
+      case "usage.exhausted": {
+        allowanceNotice(event, turnId);
+        break;
+      }
+
       case "turn.completed": {
         // A standalone manual compaction uses the turn ledger for fencing and
         // recovery, but it is maintenance rather than a conversational turn.
@@ -1218,6 +1257,15 @@ export function buildTimeline(
         // Rendering it as a clean "complete" turn is a lie that leaves the
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
+        const allowance = parseAllowanceExhaustedRefusal(payload);
+        if (allowance) {
+          finalizeOpen(turnId, "complete", event.occurredAt);
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT));
+          allowanceNotice(event, turnId);
+          break;
+        }
         if (isCreditExhaustionPayload(payload)) {
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
@@ -1283,6 +1331,16 @@ export function buildTimeline(
         finalizeOpen(turnId, "complete", event.occurredAt);
         const completedTurn = turnEndItem(event, "complete", null);
         items.push(completedTurn);
+        if (turnCompletedWithEmptyFinalReply(payload)) {
+          items.push({
+            kind: "notice",
+            id: `${event.id}-empty-final-reply`,
+            tone: "input",
+            text: EMPTY_FINAL_REPLY_NOTICE,
+            recordedOutcome: true,
+            occurredAt: event.occurredAt,
+          });
+        }
         const hasCompletedFinalResponse =
           latestAgentResponse?.completed === true &&
           latestAgentResponse.item.phase !== "commentary" &&
@@ -1317,16 +1375,21 @@ export function buildTimeline(
         // Credit death can hide behind fields `failureMessage` doesn't read
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
-        const failureText = isCreditExhaustionPayload(payload)
-          ? CREDIT_EXHAUSTION_MESSAGE
-          : failureMessage(payload);
+        const allowance = parseAllowanceExhaustedRefusal(payload);
+        const failureText = allowance
+          ? ALLOWANCE_TURN_END_TEXT
+          : isCreditExhaustionPayload(payload)
+            ? CREDIT_EXHAUSTION_MESSAGE
+            : failureMessage(payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
-        if (!hadActivity) {
+        if (allowance) {
+          allowanceNotice(event, turnId);
+        } else if (!hadActivity) {
           items.push({
             kind: "notice",
             id: event.id,
@@ -1688,8 +1751,16 @@ export function stripOpaqueCitationTokens(text: string): string {
   return text.replace(/\s*cite(?:[^]+)+/gu, "");
 }
 
+/**
+ * The turn summary's short outcome for a usage ceiling. The adjacent notice row
+ * carries who can raise it and when it resets (and is host-customizable), so
+ * the summary line stays a neutral fact instead of repeating remedy prose.
+ */
+const ALLOWANCE_TURN_END_TEXT = "Usage limit reached";
+
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
+  if (payload.code === "allowance_exhausted") return false;
   return isCreditExhaustion({
     error: typeof payload.error === "string" ? payload.error : null,
     detail: typeof payload.detail === "string" ? payload.detail : null,
@@ -1946,8 +2017,19 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
     } else {
-      groups.push({ kind: "item", item });
       const current = turns.get(currentTurn)?.work;
+      // A live approval wait is carried by the turn header ("Waiting for you")
+      // and decided in the host's approval surface; a second in-timeline banner
+      // only repeats it. Once resolved it returns as the quiet recorded marker.
+      const liveApprovalWait =
+        item.kind === "notice" &&
+        item.tone === "waiting" &&
+        !item.recordedOutcome &&
+        !item.resolvedAt &&
+        item.text.startsWith("Approval needed") &&
+        current !== undefined &&
+        !current.endedAt;
+      if (!liveApprovalWait) groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
@@ -2348,6 +2430,9 @@ export function isTurnExecutionEvidence(type: string): boolean {
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
     type === "turn.failed" ||
+    // An admission refusal can settle a queued turn before it ever starts:
+    // its prompt still belongs above the "usage limit reached" row.
+    type === "usage.exhausted" ||
     type === "turn.superseded" ||
     type === "turn.recovery.requested" ||
     type === "turn.capacity_waiting" ||

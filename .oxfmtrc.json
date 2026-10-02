@@ -2,6 +2,7 @@
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "ignorePatterns": [
     "**/*.md",
+    "docs-site/reference/opengeni-client-skill.mdx",
     "**/*.yaml",
     "**/*.yml",
     "**/*.toml",

@@ -15,10 +15,21 @@ import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { installModalCommandSession } from "./modal-command-session";
 import { ModalCommandControl } from "./modal-command-control";
-import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartNotDispatchedError,
+} from "./modal-command-router-wire";
 import { createModalSessionWithLifecycle, type ModalCreateLifecycle } from "./modal-create-session";
 import { isRoutingMutationOutcomeUnknownError } from "../routing/routing-session";
 import type { ModalClient } from "modal";
+import {
+  hasModalCommandStartBoundary,
+  hasModalCommandStartOutcomeUnknownBoundary,
+  installModalCommandStartContext,
+  installModalCommandStartRetention,
+  modalCommandStartHasOwnAccessor,
+  modalCommandStartOwnData,
+} from "./modal-command-start-errors";
 import { ModalProcessObservationUnavailableError, SandboxConfigError } from "../errors";
 export { ModalProcessObservationUnavailableError } from "../errors";
 import { markTypedExecHandleLoss } from "../exec-banner";
@@ -224,15 +235,11 @@ function modalHttpStatus(value: unknown): number | null {
 }
 
 function hasContradictoryModalHttpStatus(record: Record<string, unknown>): boolean {
-  const values = [record.status, record.statusCode, record.httpStatus, record.httpStatusCode];
-  const response = record.response;
+  const keys = ["status", "statusCode", "httpStatus", "httpStatusCode"];
+  const values = keys.map((key) => modalCommandStartOwnData(record, key));
+  const response = modalCommandStartOwnData(record, "response");
   if (response && typeof response === "object") {
-    values.push(
-      Reflect.get(response, "status"),
-      Reflect.get(response, "statusCode"),
-      Reflect.get(response, "httpStatus"),
-      Reflect.get(response, "httpStatusCode"),
-    );
+    values.push(...keys.map((key) => modalCommandStartOwnData(response, key)));
   }
   return values.some((value) => modalHttpStatus(value) !== null);
 }
@@ -262,24 +269,42 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
     let nested: unknown[];
     try {
       const record = current.value as Record<string, unknown>;
+      if (
+        [
+          "cause",
+          "error",
+          "errors",
+          "response",
+          "status",
+          "statusCode",
+          "httpStatus",
+          "httpStatusCode",
+        ].some((key) => modalCommandStartHasOwnAccessor(record, key))
+      )
+        return false;
       if (isRoutingMutationOutcomeUnknownError(current.value)) return false;
+      if (hasModalCommandStartBoundary(current.value, "outcome-unknown")) return false;
+      if (current.value instanceof ModalCommandStartNotDispatchedError) return false;
       if (hasContradictoryModalHttpStatus(record)) return false;
 
       // This instance is created only by the client's readiness gate before
       // Start dispatch; an RPC's own status or details never enters this path.
-      if (current.value instanceof ModalCommandStartPreDispatchUnavailableError) {
+      if (
+        current.value instanceof ModalCommandStartPreDispatchUnavailableError ||
+        hasModalCommandStartBoundary(current.value, "pre-dispatch-unavailable")
+      ) {
         matchingLeaves += 1;
         continue;
       }
 
       nested = [];
       for (const key of ["cause", "error"] as const) {
-        const value = record[key];
+        const value = modalCommandStartOwnData(record, key);
         if (value !== undefined) nested.push(value);
       }
 
-      if (current.value instanceof AggregateError || record.name === "AggregateError") {
-        const errors = record.errors;
+      const errors = modalCommandStartOwnData(record, "errors");
+      if (errors !== undefined) {
         if (
           !Array.isArray(errors) ||
           errors.length === 0 ||
@@ -287,7 +312,8 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
         ) {
           return false;
         }
-        nested.push(...errors);
+        for (let index = 0; index < errors.length; index++)
+          nested.push(modalCommandStartOwnData(errors, String(index)));
       }
 
       if (nested.length === 0) return false;
@@ -302,6 +328,12 @@ export function isModalTaskExecStartPreDispatchUnavailableError(error: unknown):
   }
 
   return matchingLeaves > 0;
+}
+
+/** Any typed ambiguous Start in a bounded wrapper graph vetoes generic provider
+ * retries. Its original IDs are observation authority, never replay authority. */
+export function isModalCommandStartOutcomeUnknownError(error: unknown): boolean {
+  return hasModalCommandStartOutcomeUnknownBoundary(error);
 }
 
 /**
@@ -568,6 +600,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     throw new Error("Modal session does not expose workspace persistence");
   }
   assertPinnedModalSdk(mutable);
+  if (mutable.modal) installModalCommandStartContext(mutable.modal);
   installModalTerminationConfirmation(mutable);
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
@@ -649,6 +682,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     }
   };
   modalRetentionWrappedSessions.add(session);
+  installModalCommandStartRetention(session);
   return session;
 }
 

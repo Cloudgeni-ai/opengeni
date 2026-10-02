@@ -28,7 +28,7 @@ import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
-import { useAvailableModels } from "../src/hooks/use-available-models";
+import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
@@ -4408,7 +4408,7 @@ describe("useComposer durable draft and control binding", () => {
   });
 
   for (const delivery of ["send", "steer"] as const) {
-    test(`${delivery} preserves its draft and file after a definite payment rejection, then retries once with Codex`, async () => {
+    test(`${delivery} preserves a credit-refused draft and file for a fresh submission with the selected model`, async () => {
       const resource = {
         kind: "file" as const,
         fileId: "55555555-5555-4555-8555-555555555555",
@@ -4470,6 +4470,7 @@ describe("useComposer durable draft and control binding", () => {
           state: "failed",
           resources: [resource],
           outcomeUnknown: false,
+          retryable: false,
         });
       } else {
         expect(hook.result.current.error).toMatchObject({
@@ -4498,6 +4499,13 @@ describe("useComposer durable draft and control binding", () => {
         expect(failed).toBeDefined();
         await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
         await flush();
+        expect(attempts).toHaveLength(1);
+        await flushing(() => hook.result.current.restoreOptimisticMessage?.(failed!.clientEventId));
+        expect(hook.result.current.value).toBe("read the exact attached bytes");
+        expect(hook.result.current.restoredResources).toEqual([resource]);
+        expect(hook.result.current.optimisticMessages).toEqual([]);
+        await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+        await flush();
       } else {
         await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
       }
@@ -4506,9 +4514,9 @@ describe("useComposer durable draft and control binding", () => {
       expect(attempts[1]).toMatchObject({
         text: "read the exact attached bytes",
         resources: [resource],
-        // Send retries the frozen failed operation; a rejected Steer restores
-        // the composer, so the next explicit Steer uses its newly selected policy.
-        model: delivery === "send" ? "gpt-5.6-sol" : "codex/gpt-5.6-sol",
+        // Edit restores a refused Send without replacing the user's new policy;
+        // a rejected Steer already preserves its composer for the next explicit send.
+        model: "codex/gpt-5.6-sol",
       });
       expect(attempts[1]!.clientEventId).not.toBe(attempts[0]!.clientEventId);
       expect(accepted).toBe(1);
@@ -5715,6 +5723,27 @@ describe("useBillingUsage", () => {
 });
 
 describe("useAvailableModels", () => {
+  test("workspace model catalog passes the exact workspace to both catalog and config", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      getWorkspaceModelCatalog: async (workspaceId) => {
+        calls.push(`catalog:${workspaceId}`);
+        return { models: [] } as never;
+      },
+      getClientConfig: async (options) => {
+        calls.push(`config:${options?.workspaceId}`);
+        return { models: [], defaultModel: "workspace-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(calls).toEqual([`catalog:${WORKSPACE_ID}`, `config:${WORKSPACE_ID}`]);
+    expect(hook.result.current.defaultModel).toBe("workspace-default");
+    await hook.unmount();
+  });
   test("returns the host-exposed models and the default model from getClientConfig", async () => {
     let calls = 0;
     const client = fakeClient({

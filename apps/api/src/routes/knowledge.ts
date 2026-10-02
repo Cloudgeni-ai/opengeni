@@ -116,20 +116,29 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     c: Context,
     write: boolean,
     fn: (context: Awaited<ReturnType<typeof knowledgeContextForAccess>>) => Promise<T>,
+    readPermission: "documents:search" | "workspace:read" = "documents:search",
   ) {
     try {
       const access = await requireAccessGrantAuthorization(
         c,
         deps,
         c.req.param("workspaceId")!,
-        write ? "documents:manage" : "documents:search",
+        write
+          ? "documents:manage"
+          : readPermission === "workspace:read"
+            ? undefined
+            : readPermission,
       );
+      // Preserve existing document-reader access to the settings read while
+      // admitting workspace readers to that one endpoint as well.
+      const permission = write
+        ? "documents:manage"
+        : readPermission === "workspace:read" &&
+            hasPermission(access.grant.permissions, "documents:search")
+          ? "documents:search"
+          : readPermission;
       return await withAccessGrantSessionRlsContext(deps, access.grant, async () => {
-        const context = await knowledgeContextForAccess(
-          deps,
-          access,
-          write ? "documents:manage" : "documents:search",
-        );
+        const context = await knowledgeContextForAccess(deps, access, permission);
         c.header("cache-control", "private, no-store");
         return fn(context);
       });
@@ -424,12 +433,20 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     ),
   );
   app.post(`${learning}/read`, (c) =>
-    run(c, false, async (context) => {
-      const request = await parseRequestJson(c, ReadSettings);
-      return c.json(
-        await getAgentLearningSettings(deps.db, context, request.scope, request.source),
-      );
-    }),
+    // Members can inspect the settings relevant to their admitted workspace or
+    // owner context without gaining Knowledge search or settings-write access.
+    // The database still requires a human and checks each source's owner layer.
+    run(
+      c,
+      false,
+      async (context) => {
+        const request = await parseRequestJson(c, ReadSettings);
+        return c.json(
+          await getAgentLearningSettings(deps.db, context, request.scope, request.source),
+        );
+      },
+      "workspace:read",
+    ),
   );
   app.get(`${learning}/overrides`, (c) =>
     run(c, false, async (context) => {

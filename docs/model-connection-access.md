@@ -37,7 +37,13 @@ policy. Rotation-off catalogs use the effective active subscription; rotating
 pools combine permissions from eligible subscriptions. An assigned paused or
 unhealthy default remains selected when rotation is off, so disabling rotation
 never silently changes the billed account. Codex and SuperGrok allocation filter
-accounts by the requested model.
+accounts by the requested model. The workspace catalog and automatic new-session
+defaults also intersect Codex definitions with live `/codex/models` support on
+every permitted serving account. A successful catalog omitting a model makes that
+choice unavailable; a catalog read failure never proves support. Catalog probes
+use the shared refreshing token resolver and cache public model support briefly
+per workspace and returned credential revision. The browser, automatic defaults,
+and agent model list share these observations.
 The worker checks the exact selected connection again before model execution,
 including pins and recovered leases. Workspace Gateway and OpenRouter key loading
 also checks the exact credential ID. Their catalog and startup checks follow the
@@ -49,8 +55,34 @@ assigned organization pool resolves to the first eligible assigned account,
 without changing the organization default. Policy never authorizes a fallback
 to a different provider or payment source.
 
-In the web app, Settings > Models shows one row per connected account; each
-account's own page carries "Available in" and "Models it can serve"
+In the web app every model setting lives on Organization settings > Models
+(`apps/web/src/components/models/organization-models-section.tsx`); a
+workspace's old Settings > Models URL opens that workspace's page there. The
+page lists every account that pays (credits, the organization's accounts tagged
+"Everyone in <organization>" or "Selected workspaces", and each workspace's own
+accounts tagged "<workspace> only"), then every workspace with its default
+model and Allowed models, each opening that workspace's model page, which lists
+the accounts the workspace uses ("Shared by <organization>" when the viewer
+can't read the policy, "Only you" for a private SuperGrok account). Owners and
+admins see everything; a workspace admin who isn't one sees the workspaces they
+administer and, read-only, the accounts those use; a member sees only their own
+Personal workspace and, read-only, the accounts it can use. Only organization
+owners and admins add accounts; they connect organization accounts:
+the connect step asks which workspaces can use it, every workspace by default
+or "Only selected workspaces" (shared workspaces plus one all-or-nothing
+"Personal workspaces" choice, shown off with its reason for organization API
+keys), and saves that as the account's "Available in" right after connecting
+(`apps/web/src/components/models/connect-audience.tsx`; the connect routes
+take no policy, so it is a second request). Owning an account by one
+workspace is not a choice on that step, because it would read the same as
+"Only selected workspaces" with that workspace ticked; it is offered only where
+it is needed, explained there: Codex Apps (they need an account owned by the
+workspace), redeeming Codex usage limit resets, an API key in a Personal
+workspace (organization keys can't reach one) or for a team with its own key.
+Anyone else who can change a workspace's own account may sign it in again or
+replace its key, but not add one. Owners and admins also see the organization's accounts
+that don't reach this workspace, muted with the reason. Each account's own
+page carries "Available in" and "Models it can serve"
 (`apps/web/src/components/connection-access-settings.tsx`), edited on a form
 page. In a workspace the per-account model list shows only once an account is
 limited; the workspace-wide "Allowed models" row (the workspace policy) is the

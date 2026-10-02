@@ -57,6 +57,7 @@ export function usageValueText(
   const level = usageLevel(percent, measure, lowAt);
   if (level === "unknown") return "Not reported yet";
   if (level === "exhausted") return "Limit reached";
+  if (percent! > 0 && percent! < 1) return `<1% ${measure}`;
   return `${clampPercent(percent as number)}% ${measure}`;
 }
 
@@ -121,6 +122,8 @@ export interface UsageMeterProps {
   measure?: "left" | "used";
   /** Overrides the value text, for example "5.1 of 16 GB". */
   valueLabel?: string;
+  /** Explicit provider rejection, independent of a missing or approximate percentage. */
+  limitReached?: boolean;
   /** Formatted reset time, "Mon 28 Sep, 09:00". */
   resetsLabel?: string;
   /** A (bar, default), B (text) or C (ring). */
@@ -139,6 +142,7 @@ export function UsageMeter({
   percent,
   measure = "left",
   valueLabel,
+  limitReached = false,
   resetsLabel,
   variant = "bar",
   density = "full",
@@ -146,29 +150,32 @@ export function UsageMeter({
   loading = false,
   className,
 }: UsageMeterProps) {
-  const level = usageLevel(percent, measure, lowAt);
-  const value = valueLabel ?? usageValueText(percent, measure, lowAt);
+  const level = limitReached ? "exhausted" : usageLevel(percent, measure, lowAt);
+  const value =
+    valueLabel ?? (limitReached ? "Limit reached" : usageValueText(percent, measure, lowAt));
+  const hasPercent = percent !== null && Number.isFinite(percent);
   const shown = level === "unknown" ? 0 : clampPercent(percent as number);
   const fill = level === "exhausted" ? 0 : shown;
   const meterProps =
-    loading || level === "unknown"
+    loading || !hasPercent
       ? { role: "group" as const, "aria-label": `${label} usage` }
       : {
           role: "meter" as const,
           "aria-label": `${label} usage`,
           "aria-valuemin": 0,
           "aria-valuemax": 100,
-          "aria-valuenow": shown,
+          "aria-valuenow": Math.min(100, Math.max(0, percent!)),
           "aria-valuetext": usageAccessibleText({
             label,
             percent,
             measure,
-            valueLabel,
+            valueLabel: value,
             resetsLabel,
             lowAt,
           }),
         };
-  const parts = { label, value, level, fill, resetsLabel, loading };
+  const percentDisplay = hasPercent && percent! > 0 && percent! < 1 ? "<1" : String(shown);
+  const parts = { label, value, level, fill, resetsLabel, loading, hasPercent, percentDisplay };
   const Root = density === "compact" ? "span" : "div";
 
   return (
@@ -213,6 +220,7 @@ export function UsageReadout({
   resetsLabel,
   loading = false,
   fallback = "No usage yet",
+  limitReached = false,
   className,
 }: {
   /** Share left, 0-100, or null when there is no reading. */
@@ -223,9 +231,10 @@ export function UsageReadout({
   loading?: boolean;
   /** Words for a missing reading: "No usage yet", "Usage unavailable". */
   fallback?: string;
+  limitReached?: boolean;
   className?: string;
 }) {
-  const level = usageLevel(percent);
+  const level = limitReached ? "exhausted" : usageLevel(percent);
   if (loading) {
     return (
       <span
@@ -248,17 +257,24 @@ export function UsageReadout({
       </span>
     );
   }
-  const shown = clampPercent(percent as number);
-  const text = level === "exhausted" ? "Limit reached" : `${shown}% left ${windowLabel}`;
+  const shown = percent === null ? 0 : clampPercent(percent);
+  const text =
+    level === "exhausted" ? "Limit reached" : `${usageValueText(percent)} ${windowLabel}`;
+  const meterProps =
+    percent === null
+      ? { role: "group" as const }
+      : {
+          role: "meter" as const,
+          "aria-valuemin": 0,
+          "aria-valuemax": 100,
+          "aria-valuenow": shown,
+          "aria-valuetext": `${text}${resetsLabel ? `, resets ${resetPhrase(resetsLabel)}` : ""}`,
+        };
   return (
     <span
       data-slot="usage-readout"
-      role="meter"
       aria-label={`Usage ${windowLabel}`}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={shown}
-      aria-valuetext={`${text}${resetsLabel ? `, resets ${resetPhrase(resetsLabel)}` : ""}`}
+      {...meterProps}
       title={resetsLabel ? `Resets ${resetPhrase(resetsLabel)}` : undefined}
       className={cn("inline-flex min-w-0 items-center justify-end gap-3", className)}
     >
@@ -281,6 +297,8 @@ export function UsageReadout({
 }
 
 interface Parts {
+  hasPercent: boolean;
+  percentDisplay: string;
   label: string;
   value: string;
   level: UsageLevel;
@@ -484,16 +502,25 @@ function Ring({
   );
 }
 
-function RingFull({ label, value, level, fill, resetsLabel, loading }: Parts) {
+function RingFull({
+  label,
+  value,
+  level,
+  fill,
+  resetsLabel,
+  loading,
+  hasPercent,
+  percentDisplay,
+}: Parts) {
   const center =
-    level === "unknown" || loading ? null : (
+    !hasPercent || loading ? null : (
       <span
         className={cn(
           "text-2xs font-semibold tabular-nums",
           level === "healthy" ? "text-fg" : "text-danger",
         )}
       >
-        {level === "exhausted" ? "0%" : `${fill}%`}
+        {percentDisplay}%
       </span>
     );
   return (
@@ -550,6 +577,8 @@ export interface UsageWindowReading {
   label: string;
   percent: number | null;
   resetsLabel?: string;
+  limitReached?: boolean;
+  valueLabel?: string;
 }
 
 export interface UsageMeterGroupProps {
@@ -599,6 +628,8 @@ export function UsageMeterGroup({
             key={reading.label}
             label={reading.label}
             percent={reading.percent}
+            limitReached={reading.limitReached}
+            valueLabel={reading.valueLabel}
             resetsLabel={reading.resetsLabel}
             variant={variant}
             density="compact"
@@ -625,6 +656,8 @@ export function UsageMeterGroup({
             key={reading.label}
             label={reading.label}
             percent={reading.percent}
+            limitReached={reading.limitReached}
+            valueLabel={reading.valueLabel}
             resetsLabel={reading.resetsLabel}
             variant={variant}
             density="full"

@@ -195,10 +195,9 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
-        "Models",
+        "Usage",
         "API keys",
         "Developer",
-        "Agents",
         "Insights",
         "Variable sets",
         "Sandbox environments",
@@ -212,7 +211,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([7, 3]);
+      ).toEqual([6, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -221,6 +220,7 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
+        // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
         "Billing & usage",
@@ -234,6 +234,23 @@ describe("settings rail", () => {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
       }
+
+      // The same concept wears the same icon at every scope it appears in.
+      const iconOf = (section: HTMLElement | null, label: string) =>
+        Array.from(section?.querySelectorAll("a") ?? [])
+          .find((link) => link.textContent === label)
+          ?.querySelector("svg")
+          ?.getAttribute("class")
+          ?.split(" ")
+          .find((name) => name.startsWith("lucide-") && name !== "lucide");
+      for (const label of ["General", "Developer"]) {
+        const workspaceIcon = iconOf(workspaceSection, label);
+        expect(workspaceIcon).toBeDefined();
+        expect(iconOf(organizationSection, label)).toBe(workspaceIcon);
+      }
+      expect(iconOf(organizationSection, "Security & data")).toBe(
+        iconOf(view.section("account"), "Security"),
+      );
 
       expect(linkLabels(view.section("account"))).toEqual(["Security"]);
       expect(view.section("account")?.querySelector("a")?.getAttribute("href")).toBe(
@@ -254,14 +271,16 @@ describe("settings rail", () => {
     workspacePermissions = ["sessions:create"];
     const view = await renderShell({ kind: "settings", section: null });
     try {
+      // Models shows a member their own Personal workspace's model settings.
       expect(linkLabels(view.section("organization"))).toEqual([
         "Organization identity",
+        "Models",
         "Security & data",
       ]);
-      // Two pages stay one group, not two lone rows.
+      // A short list stays one group, not lone rows.
       expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
       // Insights needs workspace admin.
-      expect(linkLabels(view.section("workspace"))).toContain("Agents");
+      expect(linkLabels(view.section("workspace"))).toContain("General");
       expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
     } finally {
       await view.unmount();
@@ -315,9 +334,10 @@ describe("settings rail", () => {
       const labels = menuItems().map((item) => item.textContent ?? "");
       expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
       expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
-      expect(labels).toContain("New workspace in Acme Robotics");
-      expect(labels).toContain("Organization settings");
-      expect(labels.slice(-3)).toEqual(["Beta Partners", "Northwind Labs", "New organization"]);
+      // Admins get the one quiet "New workspace" row; everyone else does not (see the picker tests).
+      expect(labels.filter((label) => label.startsWith("New workspace"))).toHaveLength(1);
+      expect(labels).not.toContain("Organization settings");
+      expect(labels.slice(-2)).toEqual(["Beta Partners", "Northwind Labs"]);
       // Switching workspace keeps the settings page.
       await act(async () =>
         menuItems()
@@ -378,7 +398,7 @@ describe("settings rail", () => {
     }
   });
 
-  test("settings, the Agents and Insights dashboards, runtime pages and organization pages open in settings mode", () => {
+  test("settings, the Insights dashboard, runtime pages and organization pages open in settings mode", () => {
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId, "api-keys")).toEqual({
       kind: "settings",
       section: "api-keys",
@@ -400,7 +420,7 @@ describe("settings rail", () => {
       kind: "organization",
       section: null,
     });
-    for (const route of ["agents", "insights", "variable-sets", "rigs", "machines"]) {
+    for (const route of ["insights", "variable-sets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
@@ -415,7 +435,6 @@ describe("settings rail", () => {
       "state",
       "schedules",
       "artifacts",
-      "priority",
       "rigs-archive",
       "organization-archive",
     ]) {
@@ -465,19 +484,19 @@ describe("settings rail", () => {
     }
   });
 
-  test("Agents keeps the settings rail, with Agents current and a way back to sessions", async () => {
+  test("Insights keeps the settings rail, with Insights current and a way back to sessions", async () => {
     workspacePermissions = ["workspace:admin"];
-    const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/agents" });
+    const view = await renderShell({ kind: "page", target: "/workspaces/$workspaceId/insights" });
     try {
       const rail = view.rail();
       expect(rail).not.toBeNull();
-      expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Agents");
+      expect(rail.querySelector('a[aria-current="page"]')?.textContent).toBe("Insights");
       const back = Array.from(rail.querySelectorAll("a")).find(
         (link) => link.textContent === "Back to sessions",
       );
       expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
       // The dashboard brings its own page; the shell adds no settings header.
-      const content = view.container.querySelector('section[aria-label="Agents"]');
+      const content = view.container.querySelector('section[aria-label="Insights"]');
       expect(content).not.toBeNull();
       expect(content?.querySelector("h1")).toBeNull();
       expect(content?.textContent).toContain("Settings content");

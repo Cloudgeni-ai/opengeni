@@ -728,9 +728,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       [exec, functionTool("write_stdin", async () => running(34))],
       session,
     ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
-    await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: command, yield_time_ms: 0 })),
-    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    const result = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: command, yield_time_ms: 0 }),
+    );
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("session_id 34");
     await wrappedWrite!.invoke(
       runContext,
       JSON.stringify({ session_id: 34, chars: "", yield_time_ms: 0 }),
@@ -781,9 +784,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
-    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(
+      await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
+    ).toContain("outcome unknown");
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
 
@@ -852,14 +855,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    const error = await wrappedExec!
+    const result = await wrappedExec!
       .invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }))
       .catch((caught) => caught);
-    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
-    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
-      id: expect.any(String),
-      providerSessionId: 34,
-    });
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("session_id 34");
 
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
@@ -1982,6 +1982,7 @@ describe("retained-process stdin faults stay model-visible", () => {
     );
     expect(typeof result).toBe("string");
     expect(result).toContain("RoutingMutationOutcomeUnknownError");
-    expect(result).toContain("outcome is unknown");
+    expect(result).toContain("outcome unknown");
+    expect(result).not.toContain("Please try again");
   });
 });

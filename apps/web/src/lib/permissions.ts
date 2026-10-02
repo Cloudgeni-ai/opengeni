@@ -45,6 +45,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
   "api_keys:manage": "Admin & account",
+  "usage_allowances:manage": "Admin & account",
   "connections:read": "Connections",
   "connections:write": "Connections",
   "capabilities:manage": "Connections",
@@ -166,6 +167,7 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   const notFirstPartyMcp = new Set<string>(["codemode:call"]);
   return buildApiKeyPermissionGroups()
@@ -199,6 +201,7 @@ export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   // Membership itself is the workspace-access boundary. `workspace:read` is
   // the baseline capability that lets an admitted human discover and open the
@@ -223,15 +226,18 @@ export function workspaceMemberPermissionGroups(): PermissionGroup[] {
 }
 
 /**
- * The default permission set for a newly-added workspace member: full
- * collaborator access minus the admin/management powers (which an admin grants
- * deliberately). Mirrors the API-key default set plus goals management.
+ * The default permission set for a newly-added workspace member: everything a
+ * Viewer holds plus full collaborator access, minus the admin/management powers
+ * (which an admin grants deliberately). Mirrors the server's named `member`
+ * preset (migration 0555) exactly, order included.
  */
 export const defaultWorkspaceMemberPermissions = new Set<string>([
   "workspace:read",
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "stream:view",
+  "stream:acknowledge",
   "files:upload",
   "files:read",
   "documents:manage",
@@ -248,6 +254,9 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "secrets:list",
   "secrets:write",
   "goals:manage",
+  "rigs:use",
+  "artifacts:read",
+  "artifacts:publish",
 ]);
 
 export type WorkspaceAccessLevel = "viewer" | "member" | "admin";
@@ -346,6 +355,22 @@ export function hasWorkspacePermission(
     grant &&
     (grant.permissions.includes(permission) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
+  );
+}
+
+/**
+ * True only when the viewer's loaded grant for this workspace provably lacks
+ * `permission`. A missing grant (still loading, local mode, or no access at
+ * all) is not evidence of a narrower role.
+ */
+export function lacksWorkspacePermission(
+  context: AccessContext | null,
+  workspaceId: string,
+  permission: string,
+): boolean {
+  return (
+    Boolean(context?.workspaceGrants?.some((grant) => grant.workspaceId === workspaceId)) &&
+    !hasWorkspacePermission(context, workspaceId, permission)
   );
 }
 

@@ -175,7 +175,9 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   messagePlaceholder: "Message the agent…",
   pausedPlaceholder: "Message the agent — it will wait in the queue…",
   inputLabel: "Message the agent",
-  keyboardHint: "Enter to queue · Cmd/Ctrl+Enter to steer · Shift+Enter for a new line",
+  // Shortcuts live in the send button's title; the footer stays quiet unless
+  // the host supplies its own hint.
+  keyboardHint: "",
   slashCommandBlocked:
     "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
   controlChangedError:

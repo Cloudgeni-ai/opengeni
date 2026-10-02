@@ -11,6 +11,9 @@ subdirectory `/docs-site`).
   to the canonical engineering docs under [`../docs`](../docs/README.md) for
   volatile details (commands, env vars, SDK signatures) instead of restating
   them.
+- `reference/opengeni-client-skill.mdx` is generated from
+  `.agents/skills/opengeni-client` by `bun run sync:client-skill`. Do not edit
+  it; `bun run check:client-skill` and the unit suite fail when it drifts.
 
 Preview locally from this directory:
 

@@ -58,13 +58,12 @@ PTY render against a real Modal sandbox, modify a file after the previous
 checkpoint, and verify the replacement has that file. It should also force a
 capture failure and verify the old sandbox stays live for retry.
 
-## Follow-up: idle containment (30 September 2026)
+## Idle command containment
 
-Boxes held warm only by legacy commands still died uncaptured at the deadline
-after this change shipped. The deadline owner test required a completed owner or
-a quiescence receipt, so a cancelled, failed or superseded owner without one
-blocked capture until the provider expired. The backstop now accepts any closed
-owner with no pending quiescence.
+Legacy commands can keep a box warm until its provider deadline. Requiring a
+completed owner or a quiescence receipt can block capture for a cancelled,
+failed or superseded owner even when it has stopped writing. The deadline
+backstop accepts any closed owner with no pending quiescence.
 
 A single idle rule also contains those commands long before the deadline: once
 the whole sandbox group has been unused for

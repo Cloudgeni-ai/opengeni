@@ -2,6 +2,8 @@ export { managedUserEmailAllowed } from "./managed-user-admission";
 import {
   BillingMode,
   CAPABILITY_DESCRIPTORS,
+  agentConfigDeploymentLimitsFromAllowlist,
+  type AgentConfigDeploymentLimits,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   DEFAULT_OPENGENI_DOCUMENTATION_URL,
   currentAgentLearningToolSelection,
@@ -388,6 +390,9 @@ const SettingsSchema = z.object({
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
+  // Gate new allowance policies until every API/worker in the fleet enforces
+  // them. Persisted-policy enforcement and recovery reads/clears stay active.
+  usageAllowancesEnabled: EnvBoolean.default(false),
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
@@ -826,6 +831,17 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Agent configuration rollout (packages/contracts/src/agent-config.ts).
+  // Admission: when false the API rejects every `agent` input (and the
+  // mid-session update) with 422 agent_config_not_enabled, and stored
+  // workspace agent defaults are ignored. Enable only after every worker
+  // understands sessions.agent_config (migration 0559). Workers always honor
+  // stored configurations regardless of this switch.
+  agentConfigAdmissionEnabled: EnvBoolean.default(false),
+  // When true, a new top-level session that omits `agent` (and has no
+  // legacy parent) resolves `{ capabilities: "all" }`. Old workers ignoring an
+  // "all" configuration still produce today's full tool set.
+  agentConfigDefaultForNewSessions: EnvBoolean.default(false),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -1673,6 +1689,28 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
   return usableDeploymentSecret(settings.jevApiKey);
 }
 
+/** Deployment half of agent configuration: rollout switches plus hard capability limits. */
+export function agentConfigDeploymentPolicy(
+  settings: Pick<
+    Settings,
+    | "agentConfigAdmissionEnabled"
+    | "agentConfigDefaultForNewSessions"
+    | "webSearchEnabled"
+    | "defaultFirstPartyMcpTools"
+    | "allowedFirstPartyMcpTools"
+  >,
+): AgentConfigDeploymentLimits & { admissionEnabled: boolean; defaultForNewSessions: boolean } {
+  const limits = agentConfigDeploymentLimitsFromAllowlist(
+    resolveFirstPartyMcpToolPolicy(settings).allowed,
+    settings.webSearchEnabled ? {} : { webSearch: "web search is turned off on this server" },
+  );
+  return {
+    ...limits,
+    admissionEnabled: settings.agentConfigAdmissionEnabled === true,
+    defaultForNewSessions: settings.agentConfigDefaultForNewSessions === true,
+  };
+}
+
 /**
  * Deployment half of the `code_search` decision. `available` is false when
  * the mode is off or no usable Jev key is configured; workspaces then cannot
@@ -2156,7 +2194,7 @@ const RegistryModelSchema = z
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
 export const ClaudeSubscriptionIdentity = z
   .object({
-    accountUuid: z.string().uuid(),
+    accountUuid: z.union([z.string().uuid(), z.literal("")]),
     deviceId: z.string().regex(/^[a-f0-9]{64}$/),
   })
   .strict();
@@ -2166,10 +2204,26 @@ export const ClaudeSubscriptionCredential = z
     version: z.literal(1),
     token: z.string().regex(/^sk-ant-oat[0-9]+-\S+$/),
     identity: ClaudeSubscriptionIdentity,
+    oauth: z
+      .object({
+        refreshToken: z.string().min(1).max(16384),
+        expiresAt: z.string().datetime(),
+        scopes: z.array(z.string().min(1).max(256)).min(1).max(32),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 const AnthropicProviderOptions = z.object({
   identity: ClaudeSubscriptionIdentity.optional(),
+  // Native connection provenance only; never included in Anthropic request bodies.
+  credentialBinding: z
+    .object({
+      connectionId: z.string().uuid(),
+      credentialVersion: z.number().int().positive(),
+    })
+    .strict()
+    .optional(),
   auth: z.enum(["api-key", "oauth"]).default("api-key"),
   cacheTtl: z.enum(["5m", "1h", "off"]).default("5m"),
   maxOutputTokens: z.number().int().positive().default(32000),
@@ -2431,7 +2485,11 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
         message: "Codex product id must match its upstream model slug",
       });
     }
-  });
+  })
+  .transform((model) => ({
+    ...model,
+    capabilities: reviewedCodexCatalogCapabilities(model.upstreamModelId, model.capabilities),
+  }));
 
 export const ModelCatalogDocument = z
   .object({
@@ -3268,6 +3326,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
+    usageAllowancesEnabled: optional("OPENGENI_USAGE_ALLOWANCES_ENABLED"),
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
@@ -3428,6 +3487,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    agentConfigAdmissionEnabled: optional("OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED"),
+    agentConfigDefaultForNewSessions: optional("OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
@@ -4560,7 +4621,10 @@ export function withWorkspaceOpenRouterCredential(
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
 export function withOrganizationGatewayCatalogProvider(
   settings: Settings,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (customModels.length === 0) return settings;
   const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
@@ -4576,7 +4640,10 @@ export function withOrganizationGatewayCatalogProvider(
 export function withOrganizationGatewayCredential(
   settings: Settings,
   apiKey: string,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (!apiKey.trim()) throw new Error("organization AI Gateway credential is empty");
   const catalog = withOrganizationGatewayCatalogProvider(settings, customModels);
@@ -4589,7 +4656,10 @@ export function withOrganizationGatewayCredential(
 /** Secret-free organization OpenRouter catalog overlay. */
 export function withOrganizationOpenRouterCatalogProvider(
   settings: Settings,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
     (provider) => provider.id !== ORGANIZATION_OPENROUTER_PROVIDER_ID,
@@ -4606,7 +4676,10 @@ export function withOrganizationOpenRouterCatalogProvider(
 export function withOrganizationOpenRouterCredential(
   settings: Settings,
   apiKey: string,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (!apiKey.trim()) throw new Error("organization OpenRouter credential is empty");
   const catalog = withOrganizationOpenRouterCatalogProvider(settings, customModels);
@@ -4710,9 +4783,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
-    modelId.startsWith("gpt-6-") ||
+    /^gpt-6(?:\.\d+)?-/u.test(modelId) ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId.startsWith("codex/gpt-6-")
+    /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4725,6 +4798,31 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+function isReviewedGptVisionModel(slug: string): boolean {
+  return slug.startsWith("gpt-5.6-") || /^gpt-6(?:\.\d+)?-/u.test(slug);
+}
+
+/** Repair missing reviewed capabilities in live/stored Codex definitions.
+ * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ */
+function reviewedCodexCatalogCapabilities(
+  slug: string,
+  capabilities: ModelCapabilitiesV1,
+): ModelCapabilitiesV1 {
+  if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
+  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
+    (mode) => mode.id === "fast",
+  );
+  return normalizeCapabilities({
+    ...capabilities,
+    inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    latencyModes:
+      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
+        ? [...capabilities.latencyModes, fast]
+        : capabilities.latencyModes,
+  });
 }
 
 function builtinPromptCachingForModel(
@@ -4820,9 +4918,22 @@ function assertLatencyModeRunnable(
 ): void {
   const runnable = runnableLatencyModesForModel(settings, modelId);
   if (!runnable.includes(latencyMode)) {
-    throw new Error(
-      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    throw new UnsupportedLatencyModeError(modelId, latencyMode, runnable);
+  }
+}
+
+export class UnsupportedLatencyModeError extends Error {
+  readonly code = "UNSUPPORTED_LATENCY_MODE";
+
+  constructor(
+    readonly modelId: string,
+    readonly latencyMode: LatencyMode,
+    readonly allowedLatencyModes: readonly LatencyMode[],
+  ) {
+    super(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${allowedLatencyModes.join(", ")})`,
     );
+    this.name = "UnsupportedLatencyModeError";
   }
 }
 
@@ -4925,7 +5036,10 @@ function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   const publicQuery = new Set(provider.publicDefaultQueryNames ?? []);
   return {
     ...(provider.anthropic
-      ? { anthropic: (({ identity: _identity, ...options }) => options)(provider.anthropic) }
+      ? {
+          anthropic: (({ identity: _identity, credentialBinding: _binding, ...options }) =>
+            options)(provider.anthropic),
+        }
       : {}),
     headers: Object.entries(provider.defaultHeaders ?? {})
       .sort(([left], [right]) => left.localeCompare(right))
@@ -5155,7 +5269,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
-            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
+            vision: isReviewedGptVisionModel(slug),
           }),
           ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
             ? {
@@ -5422,7 +5536,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
+          vision: isReviewedGptVisionModel(id),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
@@ -6971,7 +7085,11 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
   );
 }
 
-export type TrustedProxyCidr = { address: string; prefix: number; family: "ipv4" | "ipv6" };
+export type TrustedProxyCidr = {
+  address: string;
+  prefix: number;
+  family: "ipv4" | "ipv6";
+};
 
 /**
  * Parse `OPENGENI_API_TRUSTED_PROXY_CIDRS`: comma-separated IPv4/IPv6 CIDRs or
@@ -8215,6 +8333,7 @@ export function withClaudeConnectionCredential(
   kind: ClaudeConnectionKind,
   credential: string,
   scope: "workspace" | "organization" = "organization",
+  credentialBinding?: { connectionId: string; credentialVersion: number },
 ): Settings {
   if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled)
     throw new Error("Claude subscriptions are not enabled on this deployment");
@@ -8236,6 +8355,12 @@ export function withClaudeConnectionCredential(
                     anthropic: {
                       ...provider.anthropic,
                       identity: bundle?.identity,
+                      credentialBinding: credentialBinding
+                        ? {
+                            connectionId: credentialBinding.connectionId,
+                            credentialVersion: credentialBinding.credentialVersion,
+                          }
+                        : undefined,
                     },
                   }
                 : {}),
@@ -8245,3 +8370,5 @@ export function withClaudeConnectionCredential(
     ),
   };
 }
+export * from "./claude-subscription-usage";
+export * from "./claude-subscription-oauth";

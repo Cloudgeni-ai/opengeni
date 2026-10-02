@@ -37,11 +37,11 @@ inventing results or exposing unrestricted database access.
 The normal workspace-scoped API Integration flow is deterministic control-plane work, not a model repeatedly reading and approving documentation:
 
 1. Host the API description and provider endpoint where the OpenGeni control plane can reach them under the deployment's network policy.
-2. Create or resolve the appropriate encrypted Connection when authentication is required.
-3. Call previewApiIntegration with the source and, when needed, the Connection.
+2. Create or resolve the appropriate encrypted Connection when authentication is required. An `api_key` Connection must say where the secret goes: `credential: { headers: { Authorization: "Token ..." } }`, or `credential: { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }` (query and cookie placements work for API Integrations only). Match `preview.auth.carrier`/`name` from step 3; a bare `{ apiKey }` is rejected with 422, and preview adds a warning when the Connection's placement differs from the description.
+3. Call previewApiIntegration with the source and, when needed, the Connection. The source can be a URL or an inline document: `{ kind: "openapi_document", sourceKey: "<stable id>", document: "<OpenAPI JSON/YAML>", baseUrl? }` (8 MiB max, absolute server URLs or `baseUrl`; resend it on install; the preview echoes only its digest). Inlining does not make a localhost or private API reachable: tool calls still follow the deployment network policy, so a local product needs a public tunnel.
 4. Apply the customer's policy to the compiled operation list, safety classification, warnings, and approval modes. Select only intended operations.
-5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations.
-6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions.
+5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). Use the exact compiled identifiers from `preview.tools[].id`, not a guessed OpenAPI operationId or model-facing prefixed name. The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
+6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions: omit `tools` to follow the workspace defaults, or list it explicitly as `tools: [{ kind: "mcp", id: serverId }]`. An explicit `tools` array is an exact allow-list; `[]` selects no workspace server.
 
 Preview and install are ordinary backend API calls and can be automated. Human review is required only when the customer's policy or the operation risk requires it. The immutable revision/digest fence ensures that automation cannot install a different schema from the one it evaluated.
 
@@ -52,6 +52,17 @@ An agent-focused API description is often helpful: concise descriptions, stable 
 ## MCP lifecycle
 
 A workspace MCP capability is suitable when many sessions in that workspace use the same server and authority. A session may also receive an explicit mcpServers definition with URL, allowed tools, approval policy, and write-only credential headers or a non-secret Connection reference.
+
+For a per-session MCP server, `requireApproval: ["update_ticket"]` matches the
+original tool name returned by the server's `tools/list`, not the model-facing
+`acme__update_ticket` name (for server id `acme`). `true` gates every tool.
+This MCP name list is distinct from an API Integration's compiled
+`autoApprovedTools` identifiers; a session MCP policy does not override an API
+Integration's install-time approval policy.
+
+A server attached through a top-level createSession `mcpServers` entry is selected by that attachment, whether `tools` is omitted or explicit (including `tools: []`); there is no separate selection step. Every other MCP server (workspace capability, installed API Integration, deployment server) is reachable only when `tools` selects it or the omitted-`tools` workspace default includes it. A selected server the model never finds usually means it was not selected: check `session.effectiveToolPolicy`.
+
+Selected MCP servers are prepared lazily by default: the model discovers their tools through `tool_search`. For a small, always-needed server (for example a product's own data tools), add `eager: true` to its ref, such as `tools: [{ kind: "mcp", id: "product", eager: true }]`, so its schemas are on the first model request. `eager` is a startup choice only and grants nothing. `optional: true` makes a connect or list failure skip that server instead of failing the demanding turn.
 
 For session-specific MCP credentials, createSession stores header values encrypted and returns only metadata such as header names and credential version. Later accepted message requests can rotate those values through the supported MCP credential-update field without recreating the session. For workspace Connections, rotate or reconnect the Connection with optimistic versioning; installed Integrations continue to reference its stable ID.
 
@@ -148,6 +159,23 @@ or rotation through the authorized owner.
 ## Authorization belongs at every layer
 
 Tool selection is not data authorization. The customer API must validate the presented credential on every operation and derive or verify the allowed tenant, user, report, and row scope. Do not trust model-supplied tenant IDs. Prefer endpoints whose server derives scope from token claims; when an ID is accepted, verify it belongs to those claims.
+
+An agent bridge needs an independently scoped provider credential, not an
+ordinary host login JWT with fewer tools listed. A token signed with the host's
+normal login secret and user ID may still authorize its account/password APIs;
+an OpenAPI/MCP allowlist does not restrict that bearer outside the tool surface.
+Prefer a separate signing key/token namespace plus a distinct issuer/audience,
+short expiry and explicit operation/record scope. Verify those claims on the
+bridge, and make ordinary host endpoints reject this credential entirely. Adding
+an audience claim is ineffective if the ordinary host verifier never checks it.
+Reuse authorized business logic, not the ordinary login credential or middleware.
+
+Before launch, test the actual middleware in both directions: the provider token
+can perform only its allowed read/title-only operation on an owned record; it
+cannot call the ordinary account/password/admin APIs, another user's record or
+an extra body field; an ordinary login token is not a bridge credential. Check
+expiry, issuer/audience and operation scope with negative tests. These are host
+authorization tests, not proof supplied by OpenGeni's tool selection or approval.
 
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 

@@ -443,6 +443,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       (pathname === "/v1/auth/get-session" ||
         pathname === "/v1/auth/session-set" ||
         pathname === "/v1/workspaces" ||
+        pathname === "/v1/organization-invitations" ||
         (pathname === "/v1/billing" &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
             requestUrl.searchParams.get("accountId") ?? "",
@@ -3105,6 +3106,21 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const invitationRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/organization-invitations?limit=100`,
+    };
+    expect(requestFailureProblem(invitationRead)).toBeNull();
+    for (const changed of [
+      { actorEpoch: null },
+      { dispatchPhase: "initialization", responsePhase: "initialization" },
+      { failure: "net::ERR_CONNECTION_RESET" },
+      { method: "POST" },
+      { url: `${publicOrigin}/v1/organization-invitations/invitation/accept` },
+      { url: `${publicOrigin}/v1/organization-invitations-other` },
+    ]) {
+      expect(requestFailureProblem({ ...invitationRead, ...changed })).not.toBeNull();
+    }
     const billingRead = {
       ...oldActorRead,
       url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
@@ -5094,6 +5110,9 @@ describe("provider-neutral browser account acceptance", () => {
       ]);
       setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
+      // The independent set still polls while the other set signs out. Settle
+      // its finite reads before reload can tear down their owning document.
+      await waitForFiniteReadQuiescence(otherProblems);
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(otherPage, beta.displayName).waitFor();

@@ -24,8 +24,10 @@ This map defines who each doc tier serves and where volatile facts belong.
 | HTTP route families | `docs/http-api.md` | `README.md`, `packages/sdk/README.md`, and topic docs link instead of re-listing routes; typed method details stay in `packages/sdk/README.md`. |
 | Roadmap | `docs/roadmap.md` | `README.md` links; issues carry discussion. |
 | Standalone product integration, organization keys/workspaces, and external Skill ownership | `docs/product-integration.md` | `README.md`, package READMEs, the Northstar example, and both integration Skills link here; `packages/sdk/README.md` owns typed method details, while `docs/embedding-workbench.md` owns the optional workbench. |
+| Developer plugin packaging and installation | `docs/developer-plugin.md` | The shared `plugins/opengeni` package uses contained generated canonical guides; `README.md` and the public developer-plugin guide link here. |
 | Advanced in-process embedding & ports | `docs/embedding.md` | `README.md` and `CONTRIBUTING.md` should not present it as the default customer path. |
 | Workspace credential provider, webhooks, MCP call identity, and default sandbox image | `docs/workspace-integrations.md` | `docs/product-integration.md`, `docs/credentials.md`, `docs/embedding.md`, and `packages/sdk/README.md` should link instead of restating the protocol or signature scheme. |
+| Workspace/member usage allowances, plan recipes, top-ups, and usage meters | `docs/usage-allowances.md` | `docs/product-integration.md`, architecture, the integration-agent Skill, and public product guides link here; SDK types/contracts and deployed debit/reset behavior remain authoritative. |
 | Shared connection UI and conversation setup | `docs/connection-presentation.md` | Console and SDK discovery, OAuth details, personal consent, and shared controls. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
@@ -42,6 +44,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Jev-backed `code_search` tool and Jev settings | `docs/code-search.md` | Architecture, deployment notes, and the `@opengeni/jev` README should link instead of restating the switches or the sandbox command contract. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
+| Agent behavior eval (real model, manual/nightly) | `scripts/agent-behavior-eval/README.md` | Scenario scoring, variants, and the prompt/agent-configuration release gate; not a CI lane. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
 | Personal GitHub identity, repository authority, local setup, and propagation | `docs/personal-github.md` | `docs/github-app.md`, `docs/deployment.md`, API/runtime/UI copy should link instead of restating token custody or grant semantics. |

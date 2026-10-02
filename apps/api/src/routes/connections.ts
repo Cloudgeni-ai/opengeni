@@ -1,5 +1,8 @@
 import { createHash, createHmac } from "node:crypto";
-import { assertClaudeWorkspaceCredential } from "../claude-workspace-connection";
+import {
+  assertClaudeWorkspaceCredential,
+  prepareClaudeWorkspaceCredential,
+} from "../claude-workspace-connection";
 import {
   createConnectionIdempotently,
   upsertWorkspaceProviderApiKeyConnection,
@@ -95,6 +98,7 @@ import {
   withWorkspaceSubjectRls,
   type Database,
   encryptEnvironmentValue,
+  brokeredCredentialBundleProblem,
   getConnectionMetadata,
   listConnectionsMetadata,
   listSlackInstallationBindings,
@@ -256,6 +260,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         assertPersonalConnectionOwnerPrincipal(access);
       }
       const providerDomain = canonicalProviderDomain(payload.providerDomain);
+      payload.credential = prepareClaudeWorkspaceCredential(
+        settings,
+        workspaceId,
+        payload.metadata,
+        payload.credential,
+      );
       assertClaudeWorkspaceCredential(settings, {
         subjectId,
         providerDomain,
@@ -274,6 +284,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         kind: payload.kind,
         metadata: payload.metadata,
       });
+      // The model-key lane stores its own `{ apiKey }`; every other api_key
+      // Connection is brokered and must say where the secret goes.
+      if (!workspaceProviderKind) assertBrokeredApiKeyCredential(payload.kind, payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
             const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
@@ -1134,6 +1147,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message: `updating a ${provider.label} connection requires expectedVersion and operationId`,
               });
             }
+            payload.credential = prepareClaudeWorkspaceCredential(
+              settings,
+              workspaceId,
+              existing.metadata,
+              payload.credential,
+            );
             assertClaudeWorkspaceCredential(settings, {
               subjectId,
               providerDomain,
@@ -1215,6 +1234,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               (payload.status === "active" && existing.status !== "active"))
           ) {
             assertOrganizationIntegrationAllowed(policy, null);
+          }
+          if (payload.credential !== undefined) {
+            assertBrokeredApiKeyCredential(payload.kind ?? existing?.kind, payload.credential);
           }
           const connection = await updateConnection(db, {
             workspaceId,
@@ -1820,6 +1842,20 @@ function workspaceProviderApiKeyConnectionKind(input: {
     return "openrouter";
   }
   return null;
+}
+
+/**
+ * A brokered api_key Connection is usable only through `headers` or
+ * `placements`; anything else was previously accepted and then failed every
+ * tool call with a misleading "connect an account" auth-needed notice.
+ */
+function assertBrokeredApiKeyCredential(
+  kind: string | undefined,
+  credential: Record<string, unknown>,
+): void {
+  if (kind !== "api_key") return;
+  const problem = brokeredCredentialBundleProblem(credential);
+  if (problem) throw new HTTPException(422, { message: problem });
 }
 
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {

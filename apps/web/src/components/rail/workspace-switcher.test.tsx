@@ -56,10 +56,13 @@ mock.module("@tanstack/react-router", () => ({
 }));
 // A configured deployment (key or token) has no organization administrator session.
 let authMode = "managedSession";
+let singleOrganization = false;
 const createRequests: unknown[] = [];
 mock.module("@/context", () => ({
   useAppContext: () => ({
-    workspaces,
+    workspaces: singleOrganization
+      ? workspaces.filter((candidate) => candidate.accountId === acme)
+      : workspaces,
     managedSelfContext: null,
     clientConfig: { productAccessMode: "managed", auth: { mode: authMode } },
     captureWorkspaceInvocation: () => ({ token: 1 }),
@@ -72,12 +75,14 @@ mock.module("@/context", () => ({
       mode: "managed",
       subjectId: "user:alex",
       defaultAccountId: acme,
-      accountGrants: [
-        grant(acme, "Acme Robotics", "owner"),
-        grant(northwind, "Northwind Labs", "owner"),
-        grant(beta, "Beta Partners", "member"),
-        grant(empty, "Empty Org", "member"),
-      ],
+      accountGrants: singleOrganization
+        ? [grant(acme, "Acme Robotics", "owner")]
+        : [
+            grant(acme, "Acme Robotics", "owner"),
+            grant(northwind, "Northwind Labs", "owner"),
+            grant(beta, "Beta Partners", "member"),
+            grant(empty, "Empty Org", "member"),
+          ],
       workspaceGrants: [],
     },
   }),
@@ -93,12 +98,13 @@ afterAll(() => {
 });
 beforeEach(() => {
   authMode = "managedSession";
+  singleOrganization = false;
   createRequests.length = 0;
   localStorage.clear();
   document.body.replaceChildren();
 });
 
-async function renderPicker(workspaceId: string, onCreateOrganization?: () => void) {
+async function renderPicker(workspaceId: string) {
   const selected: string[] = [];
   const host = document.createElement("div");
   document.body.append(host);
@@ -110,7 +116,6 @@ async function renderPicker(workspaceId: string, onCreateOrganization?: () => vo
         collapsed={false}
         align="start"
         onSelect={(id) => selected.push(id)}
-        onCreateOrganization={onCreateOrganization}
       />,
     ),
   );
@@ -170,7 +175,7 @@ describe("workspace picker", () => {
   });
 
   test("lists only the current organization's workspaces, then the other organizations", async () => {
-    const picker = await renderPicker("ws-design", () => undefined);
+    const picker = await renderPicker("ws-design");
     try {
       const group = document.body.querySelector(
         '[role="group"][aria-label="Workspaces in Acme Robotics"]',
@@ -184,7 +189,11 @@ describe("workspace picker", () => {
       expect(workspaceRows[0]).toContain("Design preview");
       expect(workspaceRows[1]).toContain("Personal workspace");
       expect(workspaceRows[2]).toContain("Production");
-      expect(workspaceRows[3]).toBe("New workspace in Acme Robotics");
+      // An owner gets one quiet quick path to the organization's create page.
+      expect(workspaceRows[3]).toBe("New workspace");
+      const create = item("New workspace");
+      expect(create?.getAttribute("href")).toContain("/organization");
+      expect(create?.getAttribute("href")).toContain("view=new-workspace");
       expect(menuText()).not.toContain("Launch room");
 
       const switchGroup = document.body.querySelector(
@@ -194,12 +203,27 @@ describe("workspace picker", () => {
         Array.from(switchGroup!.querySelectorAll('[role="menuitem"]')).map(
           (row) => row.textContent,
         ),
-      ).toEqual(["Beta Partners", "Northwind Labs", "New organization"]);
+      ).toEqual(["Beta Partners", "Northwind Labs"]);
       // An organization with nothing open to this person can't be switched to.
       expect(menuText()).not.toContain("Empty Org");
+      // Administering lives elsewhere.
+      expect(item("Organization settings")).toBeUndefined();
+      expect(item("New organization")).toBeUndefined();
+    } finally {
+      await picker.unmount();
+    }
+  });
 
-      const settings = item("Organization settings");
-      expect(settings?.getAttribute("href")).toBe("/workspaces/ws-design/organization");
+  test("a person in one organization sees no organization switcher", async () => {
+    singleOrganization = true;
+    const picker = await renderPicker("ws-design");
+    try {
+      expect(menuText()).toContain("Design preview");
+      expect(
+        document.body.querySelector('[role="group"][aria-label="Switch organization"]'),
+      ).toBeNull();
+      expect(menuText()).not.toContain("Switch organization");
+      expect(item("New organization")).toBeUndefined();
     } finally {
       await picker.unmount();
     }
@@ -210,15 +234,6 @@ describe("workspace picker", () => {
     try {
       await act(async () => item("Northwind Labs")!.click());
       expect(picker.selected).toEqual(["ws-northwind"]);
-    } finally {
-      await picker.unmount();
-    }
-  });
-
-  test("New organization shows only when the person can create one", async () => {
-    const picker = await renderPicker("ws-design");
-    try {
-      expect(item("New organization")).toBeUndefined();
     } finally {
       await picker.unmount();
     }
@@ -243,39 +258,6 @@ describe("workspace picker", () => {
       expect(again.selected).toEqual(["ws-launch"]);
     } finally {
       await again.unmount();
-    }
-  });
-
-  test("New workspace opens the organization's one create page, named and returning here", async () => {
-    const picker = await renderPicker("ws-design");
-    try {
-      const create = item("New workspace in Acme Robotics")!;
-      const href = new URL(create.getAttribute("href")!, "http://homeserver");
-      expect(href.pathname).toBe("/workspaces/ws-design/organization");
-      expect(Object.fromEntries(href.searchParams)).toEqual({
-        section: "workspaces",
-        view: "new-workspace",
-        from: "/workspaces/ws-design/sessions",
-        fromLabel: "Design preview",
-      });
-    } finally {
-      await picker.unmount();
-    }
-  });
-
-  test("a member can't create a workspace in their organization, and nothing is created elsewhere", async () => {
-    const picker = await renderPicker("ws-launch");
-    try {
-      const create = item("New workspace in Beta Partners")!;
-      expect(create.hasAttribute("data-disabled")).toBe(true);
-      expect(create.textContent).toContain("Only owners and admins can create workspaces here.");
-      expect(create.getAttribute("href")).toBeNull();
-      await act(async () => create.click());
-      expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-      // Creating in an organization they administer starts by switching to it.
-      expect(item("Acme Robotics")).toBeDefined();
-    } finally {
-      await picker.unmount();
     }
   });
 

@@ -13,6 +13,7 @@ import {
   EditableArtifactUndoTargetError,
 } from "./errors";
 import type {
+  EditableArtifactCommitAuthorizer,
   AuthoritativeEditableArtifactKernelPort,
   EditableArtifactAuthorizationPort,
   EditableArtifactClockPort,
@@ -547,6 +548,8 @@ export class EditableArtifactService {
     artifactId: EditableArtifact["id"];
     actor: EditableArtifactActor;
     request: ApplyEditableArtifactTransactionRequest;
+    /** Authenticated backend authority, not part of the client mutation envelope. */
+    authorizeCommit?: EditableArtifactCommitAuthorizer;
   }): Promise<ApplyEditableArtifactTransactionResult> {
     const context = normalizeBoundaryContext(input);
     const request = normalizeTransactionEnvelope(input.request);
@@ -570,6 +573,19 @@ export class EditableArtifactService {
     }
     const intentBytes = request.intentBytes.slice();
     const actorKey = editableArtifactActorKey(context.actor);
+    // A source-bound caller must prove its own authority on commit/replay.
+    // Sharing another caller's in-flight result would skip that proof.
+    if (input.authorizeCommit) {
+      return await this.applyTransactionOptimistically({
+        context,
+        actorKey,
+        request,
+        intent,
+        intentBytes,
+        authorizationRevision,
+        authorizeCommit: input.authorizeCommit,
+      });
+    }
     const inFlightKey = transactionInFlightKey(
       context.scope,
       context.artifactId,
@@ -631,6 +647,7 @@ export class EditableArtifactService {
     intent: ValidatedEditableArtifactMutationIntent;
     intentBytes: Uint8Array;
     authorizationRevision: number;
+    authorizeCommit?: EditableArtifactCommitAuthorizer;
   }): Promise<ApplyEditableArtifactTransactionResult> {
     const { context, actorKey, request, intent, intentBytes } = input;
     let authorizationRevision = input.authorizationRevision;
@@ -643,6 +660,7 @@ export class EditableArtifactService {
           clientTransactionId: intent.clientTransactionId,
           previousLocalTransactionId: intent.previousLocalTransactionId,
           selectiveUndoOperationIds: intent.selectiveUndoOperationIds,
+          ...(input.authorizeCommit ? { authorizeCommit: input.authorizeCommit } : {}),
         },
       );
       if (basisRead.kind === "existing") {
@@ -797,6 +815,7 @@ export class EditableArtifactService {
           expectedLifecycle: "active",
           expectedAuthorizationRevision: authorizationRevision,
           authorizationActor: context.actor,
+          ...(input.authorizeCommit ? { authorizeCommit: input.authorizeCommit } : {}),
           expectedHeadSequence: artifact.headSequence,
           actorKey,
           clientTransactionId: intent.clientTransactionId,
@@ -1037,6 +1056,7 @@ export class EditableArtifactService {
         expectedLifecycle: "active",
         expectedAuthorizationRevision: authorizationRevision,
         authorizationActor: context.actor,
+        ...(input.authorizeCommit ? { authorizeCommit: input.authorizeCommit } : {}),
         expectedHeadSequence: artifact.headSequence,
         actorKey,
         clientTransactionId: intent.clientTransactionId,

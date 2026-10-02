@@ -502,7 +502,7 @@ function afterPersistableHomeMutation(
       op: string;
       backend: ResolvedActiveBackend;
       admission: unknown;
-      outcome: "resolved" | "rejected";
+      outcome: "resolved" | "rejected" | "outcome_unknown";
       result?: unknown;
       retainedProcess?: RoutingRetainedProcess;
     }) => Promise<void | RoutingMutationSettlementResult>)
@@ -529,7 +529,7 @@ function afterPersistableHomeMutation(
     ) {
       throw new Error("Persistable home mutation settlement lacked its bound admission");
     }
-    if (outcome === "resolved" && retainedProcess) {
+    if ((outcome === "resolved" || outcome === "outcome_unknown") && retainedProcess) {
       try {
         await retainWorkspaceProviderCommand(services.db, {
           accountId: fence.accountId,
@@ -588,6 +588,8 @@ function afterPersistableHomeMutation(
       }
       return;
     }
+    if (outcome === "outcome_unknown")
+      throw new Error("Outcome-unknown command settlement requires its exact retained invocation");
     await verifyWorkspaceMutationSettlement(services.db, {
       accountId: fence.accountId,
       workspaceId: ids.workspaceId,

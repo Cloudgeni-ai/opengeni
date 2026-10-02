@@ -99,6 +99,10 @@ import {
   SANDBOX_REAPER_V2_WORKFLOW_ID,
   sandboxLifecycleTaskQueue,
 } from "./sandbox-reaper-contract";
+import {
+  BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+  browserDeadlineCheckpointTaskQueue,
+} from "./browser-deadline-checkpoint-contract";
 
 export {
   createHostExportPump,
@@ -323,28 +327,39 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         return { worker, connection };
       }
 
+      const ownedWorkers = [worker];
       try {
-        const sandboxLifecycleWorker = await Worker.create({
-          ...sharedWorkerOptions,
-          ...workflowDefinition,
-          taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
-          reuseV8Context: true,
-          workflowThreadPoolSize: 1,
-          maxCachedWorkflows: CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
-          maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-          maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-        });
+        // The new activity type has its own queue. Retain the V1 poller so old
+        // drain histories finish; old binaries never receive checkpoint work.
+        for (const taskQueue of [
+          sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
+          browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
+        ]) {
+          const lifecycleWorker = await Worker.create({
+            ...sharedWorkerOptions,
+            ...workflowDefinition,
+            taskQueue,
+            reuseV8Context: true,
+            workflowThreadPoolSize: 1,
+            maxCachedWorkflows: CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
+            maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+            maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+          });
+          ownedWorkers.push(lifecycleWorker);
+        }
         return {
-          worker: combineWorkerRunTargets([worker, sandboxLifecycleWorker]),
+          worker: combineWorkerRunTargets(ownedWorkers),
           connection,
         };
       } catch (error) {
-        try {
-          worker.shutdown();
-        } catch {
-          // Preserve the lifecycle worker construction failure. The base poller
-          // still received its shutdown request; a secondary synchronous
-          // shutdown error must not replace the startup root cause.
+        for (const ownedWorker of ownedWorkers) {
+          try {
+            ownedWorker.shutdown();
+          } catch {
+            // Preserve the lifecycle worker construction failure. The base poller
+            // still received its shutdown request; a secondary synchronous
+            // shutdown error must not replace the startup root cause.
+          }
         }
         throw error;
       }
@@ -478,20 +493,33 @@ export async function createWorkerWorkflowSignaler(
       return normalizeTurnTaskQueueStats(response.stats);
     },
     startSandboxReaperWorkflow: async () => {
-      try {
-        await temporal.workflow.start("sandboxReaperWorkflowV2", {
+      // Same backend tick, no additional schedule. A bounded independent
+      // inventory cannot prevent the existing per-box drain from starting.
+      const starts = await Promise.allSettled([
+        temporal.workflow.start("sandboxReaperWorkflowV2", {
           taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
           workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [],
-        });
-        return "started";
-      } catch (error) {
-        if (error instanceof WorkflowExecutionAlreadyStartedError) {
-          return "already_running";
+        }),
+        temporal.workflow.start("browserDeadlineCheckpointSweepWorkflow", {
+          taskQueue: browserDeadlineCheckpointTaskQueue(settings.temporalTaskQueue),
+          workflowId: BROWSER_DEADLINE_CHECKPOINT_SWEEP_ID,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [],
+        }),
+      ]);
+      for (const start of starts) {
+        if (
+          start.status === "rejected" &&
+          !(start.reason instanceof WorkflowExecutionAlreadyStartedError)
+        ) {
+          // The other start already settled. Retry the router without losing
+          // ordinary draining or silently omitting the checkpoint sweep.
+          throw start.reason;
         }
-        throw error;
       }
+      return starts[0].status === "fulfilled" ? "started" : "already_running";
     },
     startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
       try {

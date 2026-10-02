@@ -16,6 +16,10 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
+import {
+  readLinuxManagedBrowserIdentity,
+  type LinuxManagedBrowserIdentity,
+} from "./linux-process-identity";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -676,10 +680,15 @@ async function terminateManagedBrowser(input: {
     return;
   }
   const executablePath = input.executablePath ?? discovered?.executablePath ?? null;
-  await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath);
+  const startTime = await assertManagedBrowserIdentity(
+    pid,
+    input.profileDirectory,
+    executablePath,
+    discovered?.startTime,
+  );
   signalProcess(pid, "SIGTERM");
   if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
-    await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath);
+    await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath, startTime);
     signalProcess(pid, "SIGKILL");
     if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
       throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
@@ -692,27 +701,27 @@ async function assertManagedBrowserIdentity(
   pid: number,
   profileDirectory: string,
   executablePath: string | null,
-): Promise<void> {
-  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
+  expectedStartTime?: string,
+): Promise<string | undefined> {
   if (process.platform === "linux") {
-    const argv = await linuxProcessArguments(pid);
-    if (
-      !argv.includes(profileArgument) ||
-      argv.some((argument) => argument.startsWith("--type="))
-    ) {
+    const identity =
+      executablePath === null
+        ? null
+        : await readLinuxManagedBrowserIdentity({
+            pid,
+            profileDirectory,
+            executablePath,
+            ...(expectedStartTime !== undefined ? { expectedStartTime } : {}),
+          });
+    if (!identity) {
       throw new AgentBrowserCommandError(
         "process_failed",
-        "managed browser PID does not identify the exact private profile",
+        "managed browser PID does not identify the exact live private profile and executable",
       );
     }
-    if (!executablePath || !(await sameExecutable(pid, executablePath))) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "managed browser PID does not identify the configured executable",
-      );
-    }
-    return;
+    return identity.startTime;
   }
+  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
   const command = await boundedProcessOutput("/bin/ps", [
     "-ww",
     "-p",
@@ -743,39 +752,18 @@ async function assertManagedBrowserIdentity(
 async function findLinuxManagedBrowserProcess(
   profileDirectory: string,
   executablePath: string | null,
-): Promise<{ pid: number; executablePath: string } | null> {
+): Promise<LinuxManagedBrowserIdentity | null> {
   const procEntries = await readdir("/proc", { withFileTypes: true });
-  const matches: Array<{ pid: number; executablePath: string }> = [];
-  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
+  const matches: LinuxManagedBrowserIdentity[] = [];
   for (const entry of procEntries) {
     if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
     const pid = Number(entry.name);
-    let argv: string[];
-    let resolvedExecutable: string;
-    try {
-      argv = await linuxProcessArguments(pid);
-      resolvedExecutable = await realpath(await readlink(`/proc/${pid}/exe`));
-    } catch (error) {
-      // A process can exit after readdir or while procfs is reading its cmdline.
-      if (
-        ["EACCES", "ENOENT", "EPERM", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")
-      ) {
-        continue;
-      }
-      throw error;
-    }
-    if (
-      !argv.includes(profileArgument) ||
-      argv.some((argument) => argument.startsWith("--type="))
-    ) {
-      continue;
-    }
-    if (executablePath) {
-      if (resolvedExecutable !== (await realpath(executablePath))) continue;
-    } else if (!isRecognizedLinuxBrowserExecutable(resolvedExecutable)) {
-      continue;
-    }
-    matches.push({ pid, executablePath: resolvedExecutable });
+    const identity = await readLinuxManagedBrowserIdentity({
+      pid,
+      profileDirectory,
+      executablePath,
+    });
+    if (identity) matches.push(identity);
   }
   if (matches.length > 1) {
     throw new AgentBrowserCommandError(
@@ -784,24 +772,6 @@ async function findLinuxManagedBrowserProcess(
     );
   }
   return matches[0] ?? null;
-}
-
-async function linuxProcessArguments(pid: number): Promise<string[]> {
-  const commandLine = await readFile(`/proc/${pid}/cmdline`);
-  return commandLine
-    .toString("utf8")
-    .split("\0")
-    .filter((argument) => argument.length > 0);
-}
-
-function isRecognizedLinuxBrowserExecutable(executablePath: string): boolean {
-  return [
-    "chrome",
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "chrome-headless-shell",
-  ].includes(basename(executablePath));
 }
 
 async function readManagedBrowserPid(path: string): Promise<number | null> {
@@ -1061,6 +1031,9 @@ export function browserLaunchArguments(
   }
   return [
     "--restore-last-session",
+    // Compiled Chromium testing experiments can alter offscreen rendering.
+    // Keep managed automation on the browser's deterministic default behavior.
+    "--disable-field-trial-config",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     // Component-update suppression does not stop Chromium's on-demand local

@@ -4,7 +4,14 @@ import type {
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
 } from "@opengeni/sdk";
-import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
+import {
+  ArtifactSandbox,
+  SiteView,
+  artifactLoadErrorMessage,
+  artifactLoadErrorView,
+  type PublishedHtmlArtifactToolBridge,
+  type SiteToolBridgeFactory,
+} from "@opengeni/react/artifacts";
 import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -19,7 +26,6 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { artifactRouteErrorMessage, mapArtifactRouteError } from "@/lib/artifact-route-error";
 import { ArtifactLibrary } from "@/components/artifacts/artifact-library";
 import {
   ARTIFACT_DETAIL_FRAME,
@@ -28,7 +34,6 @@ import {
 } from "@/components/artifacts/artifact-page-chrome";
 import { artifactKinds, defaultArtifactFilters, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
-import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -50,8 +55,9 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useAppContext } from "@/context";
+import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasWorkspacePermission, lacksWorkspacePermission } from "@/lib/permissions";
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
 
@@ -61,8 +67,18 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function SiteLoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
-  const view = mapArtifactRouteError(error, "site");
+function SiteLoadError({
+  error,
+  accessDenied,
+  onRetry,
+}: {
+  error: unknown;
+  accessDenied: boolean;
+  onRetry: () => void;
+}) {
+  if (accessDenied)
+    return <Notice title="You can't open this Site">{ARTIFACT_ACCESS_REQUIRED}</Notice>;
+  const view = artifactLoadErrorView(error, "site");
   return (
     <Notice
       tone="failed"
@@ -78,7 +94,7 @@ function SiteLoadError({ error, onRetry }: { error: unknown; onRetry: () => void
         ) : undefined
       }
     >
-      {artifactRouteErrorMessage(view)}
+      {artifactLoadErrorMessage(view)}
     </Notice>
   );
 }
@@ -120,6 +136,12 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     context.accessKeyVersion,
   );
   const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "sessions:create");
+  // The catalog quietly omits Sites and editable artifacts without `artifacts:read`.
+  const artifactKindsHidden = lacksWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "artifacts:read",
+  );
   const startSession = async () => {
     const created = await context.startSession(workspaceId, {
       text:
@@ -179,6 +201,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
             onLoadMore={catalog.loadMore}
             emptyAction={newArtifact}
             onEmptyChange={setEmpty}
+            artifactKindsHidden={artifactKindsHidden}
           />
         </LineTabsContent>
       </LineTabs>
@@ -189,15 +212,60 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
 type SiteTab = "site" | "versions" | "conversations";
 
 export function ArtifactDetailRoute({
-  workspaceId,
-  artifactId,
-  fromSession,
   embedded = false,
+  ...props
 }: {
   workspaceId: string;
   artifactId: string;
   fromSession?: string | undefined;
   embedded?: boolean;
+}) {
+  return embedded ? <EmbeddedSiteDetail {...props} /> : <ArtifactDetailPage {...props} />;
+}
+
+/** The session dock's Site view: the shared SiteView with console tool access. */
+function EmbeddedSiteDetail({
+  workspaceId,
+  artifactId,
+}: {
+  workspaceId: string;
+  artifactId: string;
+}) {
+  const { client } = useAppContext();
+  const toolBridge = useCallback<SiteToolBridgeFactory>(
+    (site) => {
+      const scope = { workspaceTools: client.tools.forWorkspace(workspaceId), workspaceId };
+      return site
+        ? createSiteToolBridge({
+            ...scope,
+            artifactId: site.artifactId,
+            siteVersionId: site.siteVersionId,
+            requestedTools: site.requestedTools,
+          })
+        : createSiteToolBridge(scope);
+    },
+    [client, workspaceId],
+  );
+  return (
+    <SiteView
+      client={client}
+      workspaceId={workspaceId}
+      siteId={artifactId}
+      toolBridge={toolBridge}
+      showTitle={false}
+      archivedMessage="This Site is archived. Open it full-page to restore it."
+    />
+  );
+}
+
+function ArtifactDetailPage({
+  workspaceId,
+  artifactId,
+  fromSession,
+}: {
+  workspaceId: string;
+  artifactId: string;
+  fromSession?: string | undefined;
 }) {
   const context = useAppContext();
   const canPublish = hasWorkspacePermission(
@@ -323,38 +391,15 @@ export function ArtifactDetailRoute({
     }
   };
   const archived = detail?.artifact.status === "archived";
-  if (embedded) {
-    if (error) return <SiteLoadError error={error} onRetry={() => void load()} />;
-    if (!detail || !content)
-      return (
-        <div role="status" className="p-4 text-sm text-fg-muted">
-          Loading Site…
-        </div>
-      );
-    if (archived)
-      return (
-        <div className="p-4 text-sm text-fg-muted">
-          This Site is archived. Open it full-page to restore it.
-        </div>
-      );
-    return (
-      <ArtifactSandbox
-        html={content.html}
-        title={detail.artifact.title}
-        versionLabel={`v${detail.artifact.currentVersion?.revision}`}
-        toolBridge={siteToolBridge}
-        connectedToolCount={content.requestedTools.length}
-        fill
-        className="h-full rounded-none border-0"
-      />
-    );
-  }
-
   if (error) {
     return (
       <ContentPage width="standard" className={ARTIFACT_DETAIL_FRAME}>
         <DetailPage back={back}>
-          <SiteLoadError error={error} onRetry={() => void load()} />
+          <SiteLoadError
+            error={error}
+            accessDenied={isArtifactReadDenied(error, context.accessContext, workspaceId)}
+            onRetry={() => void load()}
+          />
         </DetailPage>
       </ContentPage>
     );

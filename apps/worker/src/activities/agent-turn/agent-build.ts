@@ -10,6 +10,7 @@ import {
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
+  sessionHasToolRouterHistory,
 } from "@opengeni/db";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
@@ -52,7 +53,7 @@ import {
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
-import { VideoGenerationRejectedResult } from "@opengeni/contracts";
+import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
 
 import {
   structuredToolTransportForTurn,
@@ -111,6 +112,7 @@ export type BuildTurnAgentDeps = {
   supportsImageInput: GovernanceModelOk["supportsImageInput"];
   agentHumanInputEnabled: GovernanceModelOk["agentHumanInputEnabled"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
+  workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
@@ -173,6 +175,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     supportsImageInput,
     agentHumanInputEnabled,
     workspaceAgentInstructions,
+    workspaceAgentIdentity,
     workspaceGovernance,
     structuredWorkspacePolicyActive,
     workspaceMemory,
@@ -284,7 +287,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     // Never expose a paid image operation unless its permanent artifact can
     // be committed. Failing after provider execution would leave an
     // unrecoverable outcome-unknown operation with no user-visible image.
-    if (!objectStorage) return {};
+    if (!objectStorage || !resolveAgentToolFamilies(session.agent).media) return {};
     if (nativeImageProviderBinding) {
       media.nativeImageGenerationRetention = {
         ...nativeImageProviderBinding,
@@ -405,7 +408,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     videoGenerationPolicy.defaultModelId !== null &&
     videoGenerationPolicy.enabledModelIds.length > 0;
   let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
-  if (objectStorage && videoGenerationEnabled) {
+  if (objectStorage && videoGenerationEnabled && resolveAgentToolFamilies(session.agent).media) {
     if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
       videoGenerationCredential = managedVideoGenerationCredentialLease(eventing.modelRunSettings);
     } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
@@ -626,6 +629,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           effort: turn.reasoningEffort,
         })
       : turn.reasoningEffort;
+  const toolRouterInHistory = session.agent
+    ? await sessionHasToolRouterHistory(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : false;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -652,6 +662,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
+        ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
         reasoningEffort: requestReasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
@@ -757,6 +768,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,
         skillCatalogInHistory: true,
+        // A session with an agent configuration composes the modular prompt
+        // (identity, base behavior, runtime mechanics, capability modules);
+        // its workspace identity survives instruction policies. Null keeps
+        // the legacy composition below byte-for-byte.
+        ...(session.agent
+          ? {
+              agentConfig: session.agent,
+              ...(workspaceAgentIdentity ? { workspaceAgentIdentity } : {}),
+            }
+          : {}),
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),

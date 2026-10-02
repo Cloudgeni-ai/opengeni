@@ -26,6 +26,13 @@ const webSocketFactory =
     : undefined;
 
 async function renderHarness() {
+  if (client instanceof MockOpenGeniClient && params.get("lost") === "1") {
+    const session = await client.getBrowserSession(workspaceId, DEMO_BROWSER_SESSION_ID);
+    client.listBrowserSessions = async () => ({
+      revision: 1,
+      sessions: [{ ...session, lifecycle: "lost", failureCode: "provider_deadline_rotation" }],
+    });
+  }
   if (client instanceof MockOpenGeniClient && params.get("controlFailure") === "1") {
     // Keep the independent frame channel healthy to reproduce stale "Live"
     // status when a controller rejects clicks or typing.

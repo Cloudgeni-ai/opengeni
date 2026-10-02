@@ -4,7 +4,9 @@ import {
   appendSessionInstructions,
   appendWorkspaceGovernance,
   appendWorkspaceMemory,
+  agentPromptResourcesFor,
   composeAgentInstructions,
+  inspectPersistentAgentInstructions,
   requestRemoteCompactionV2,
   preparedCompactionRequest,
   queuePreparedCompaction,
@@ -86,6 +88,7 @@ export type CompactionPrepDeps = {
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
+  workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
@@ -131,6 +134,59 @@ export type PostAgentCompactionOutcome =
   | { exit: RunAgentTurnResult }
   | { ok: PostAgentCompactionOk };
 
+/**
+ * System instructions for the standalone (chat-provider) compaction request.
+ * A session with an agent configuration uses the same modular composer and
+ * module selection as its turns; a legacy session keeps the historical
+ * persona + CORE + governance + session + memory string byte-for-byte.
+ */
+export function standaloneCompactionInstructions(input: {
+  settings: Settings;
+  session: Pick<ClaimTurnOk["session"], "agent" | "instructions" | "resources">;
+  workspaceAgentInstructions: string | null | undefined;
+  workspaceAgentIdentity: string | null;
+  workspaceGovernance: string | null | undefined;
+  structuredWorkspacePolicyActive: boolean;
+  workspaceMemory: string | null | undefined;
+  rig: { name: string; version: number } | undefined;
+}): string {
+  if (input.session.agent) {
+    return inspectPersistentAgentInstructions(input.settings, {
+      agentConfig: input.session.agent,
+      ...(input.workspaceAgentIdentity
+        ? { workspaceAgentIdentity: input.workspaceAgentIdentity }
+        : {}),
+      ...(input.workspaceGovernance ? { workspaceGovernance: input.workspaceGovernance } : {}),
+      ...(input.workspaceMemory ? { workspaceMemory: input.workspaceMemory } : {}),
+      ...(input.session.instructions ? { sessionInstructions: input.session.instructions } : {}),
+      ...(input.rig ? { rig: input.rig } : {}),
+      // Session-level facts only: per-turn attachments do not apply to a
+      // standalone compaction request.
+      agentPromptResources: agentPromptResourcesFor(
+        input.settings,
+        input.session.resources.filter((resource) => resource.kind !== "file"),
+        input.rig ? { rig: input.rig } : {},
+      ),
+    }).composed;
+  }
+  return appendWorkspaceMemory(
+    appendSessionInstructions(
+      appendWorkspaceGovernance(
+        composeAgentInstructions(
+          input.structuredWorkspacePolicyActive
+            ? input.settings.agentInstructionsTemplate
+            : (input.workspaceAgentInstructions ?? input.settings.agentInstructionsTemplate),
+          undefined,
+          input.rig,
+        ),
+        input.workspaceGovernance ?? undefined,
+      ),
+      input.session.instructions ?? undefined,
+    ),
+    input.workspaceMemory ?? undefined,
+  );
+}
+
 export async function prepareCompaction(deps: CompactionPrepDeps): Promise<CompactionPrepOutcome> {
   const {
     input,
@@ -155,6 +211,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     turnExecutionPolicy,
     resolvedModel,
     workspaceAgentInstructions,
+    workspaceAgentIdentity,
     workspaceGovernance,
     structuredWorkspacePolicyActive,
     workspaceMemory,
@@ -334,22 +391,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     !remoteV2CompactionNeedsAgentPrefix &&
     !portableResponsesNeedsAgentPrefix
   ) {
-    const compactionInstructions = appendWorkspaceMemory(
-      appendSessionInstructions(
-        appendWorkspaceGovernance(
-          composeAgentInstructions(
-            structuredWorkspacePolicyActive
-              ? eventing.modelRunSettings.agentInstructionsTemplate
-              : (workspaceAgentInstructions ?? eventing.modelRunSettings.agentInstructionsTemplate),
-            undefined,
-            rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
-          ),
-          workspaceGovernance ?? undefined,
-        ),
-        session.instructions ?? undefined,
-      ),
-      workspaceMemory ?? undefined,
-    );
+    const compactionInstructions = standaloneCompactionInstructions({
+      settings: eventing.modelRunSettings,
+      session,
+      workspaceAgentInstructions,
+      workspaceAgentIdentity,
+      workspaceGovernance,
+      structuredWorkspacePolicyActive,
+      workspaceMemory,
+      rig: rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
+    });
     const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
     if (requested) {

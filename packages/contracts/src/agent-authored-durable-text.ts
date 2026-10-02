@@ -1,3 +1,5 @@
+import { WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "./workspace-instruction-policies";
+
 /**
  * Budgets and authoring style for durable text an **agent** writes on a user's
  * behalf.
@@ -9,12 +11,12 @@
  *   charter or global policy applies to every session in the workspace; a role
  *   policy applies to every session bound to that role. At most three entries
  *   compose at once (charter, global policy, matching role policy), so the
- *   standing ceiling this budget implies is three times the per-entry cap.
+ *   storage limit is shared with the human editor; prompt composition retains
+ *   its separate UTF-8 byte bound.
  * - A preference is cheaper and in a different way: only its short title and
  *   description descriptors are prompt-composed, while the full content is
  *   retrieved on demand behind the exact attempt's retrieval handle. Its length
- *   is therefore retrieval cost, not standing prompt cost, which is why it gets
- *   more room rather than less.
+ *   is therefore retrieval cost, not standing prompt cost.
  * - Organization identity and mission are always-on context for root sessions
  *   across the whole organization. Historical company-profile list fields stay
  *   in the storage contract for compatibility; nonempty values on an already-
@@ -22,9 +24,9 @@
  *   label until an organization owner replaces the profile.
  * - Knowledge is retrieval evidence and never joins the always-composed prefix.
  *
- * These caps deliberately bind only agent-authored writes. The human-facing
- * limits (`WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS`,
- * `PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`, `COMPANY_PROFILE_SCALAR_MAX_CHARS`,
+ * Instruction writes share the human limit so localized edits can preserve
+ * existing long policies. The other caps bind only agent-authored writes.
+ * The human-facing limits (`PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`, `COMPANY_PROFILE_SCALAR_MAX_CHARS`,
  * `COMPANY_PROFILE_ENTRY_MAX_CHARS`, `COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES`)
  * are unchanged: a person editing in the UI is making a deliberate, visible
  * choice, and lowering their limit would reject text they already typed.
@@ -32,10 +34,11 @@
  * bounded.
  */
 
-/** One imperative rule, in 1-3 sentences, fits comfortably under this. */
-export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS = 600;
+/** Compatibility export: agents and humans use the same instruction storage limit. */
+export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS =
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS;
 
-/** Retrieved on demand rather than always composed, so a little more room. */
+/** Retrieved on demand rather than always composed. */
 export const AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS = 1_200;
 
 /** `identity` and `mission`: a couple of sentences, not a positioning document. */
@@ -50,8 +53,8 @@ export const AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES = 4_096;
 export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE =
   "A workspace rule is composed verbatim into the prompt of every session it applies to (every session " +
   "for a global charter or policy, every session bound to the role for a role policy), for as long as it " +
-  `stays active. Keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters: one rule, ` +
-  "imperative, no numbered procedure. Split unrelated rules into separate entries.";
+  `stays active. The instruction must contain at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} ` +
+  "characters, the same limit as the human editor. Keep new rules concise and preserve unrelated content.";
 
 export const AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE =
   "A Skill is durable Agent Knowledge that agents retrieve on demand, so its length is " +

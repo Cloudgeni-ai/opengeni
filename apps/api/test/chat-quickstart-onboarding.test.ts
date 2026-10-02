@@ -44,6 +44,17 @@ async function fixture() {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Chat quickstart') returning id`;
   const accountId = String(account!.id);
+  // The SDK's authenticated chat default is private. Operator readiness and
+  // the organization owner's product setting must both exist before onboarding.
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'chat-quickstart-test')`;
+  await shared.admin`
+    insert into organization_private_session_settings (
+      account_id, enabled, version, updated_by_membership_id
+    ) values (${accountId}, true, 1, null)
+    on conflict (account_id) do update set enabled = excluded.enabled`;
   const token = crypto.randomUUID();
   await createOrganizationApiKey(db.db, {
     accountId,
@@ -111,8 +122,8 @@ type History = {
 /**
  * Send one message through the quickstart handler and stop reading its stream
  * once the durable timeline shows the message (no worker runs the turn here).
- * Progress is watched with the organization key so the only request made as
- * the product user is the send itself.
+ * Progress is watched as the onboarded product user: organization keys do not
+ * gain access to the SDK's default private chat.
  */
 async function send(
   f: Awaited<ReturnType<typeof fixture>>,
@@ -128,8 +139,9 @@ async function send(
     () => "",
   );
   let delivered = false;
+  const viewer = f.og.client.asUser("u_42", { source: f.og.source });
   for (let attempt = 0; attempt < 200 && !delivered; attempt += 1) {
-    const page = await f.og.client
+    const page = await viewer
       .listEventPage(target.workspaceId, target.sessionId, { includeTypes: ["user.message"] })
       .catch(() => null);
     delivered =

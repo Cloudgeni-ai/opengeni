@@ -25,10 +25,10 @@ or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
 `gpt-6-astra,gpt-6-sol,gpt-6-luna`). A custom base URL still speaks
 Responses; it does not become Chat Completions.
 
-| | OpenAI | Azure |
-| --- | --- | --- |
-| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`) | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN` |
-| URL | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
+|            | OpenAI                                                                                        | Azure                                                                                                                |
+| ---------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`)                                                  | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN`                                                  |
+| URL        | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
 
 Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `https://api.openai.com/v1`. Built-in Responses knobs:
@@ -68,14 +68,14 @@ singleton owns membership.
 
 ### Reviewed overlays — not generic JSON
 
-| Route | Enable | Wire | Catalog |
-| --- | --- | --- | --- |
-| OpenGeni-managed AI Gateway | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` | Responses | Curated DeepSeek / Kimi, OpenGeni credits |
-| Workspace AI Gateway | member connects a Gateway key in Settings | Responses | Same curated models plus optional workspace slugs, workspace-paid |
-| Deployment OpenRouter | `OPENGENI_OPENROUTER_API_KEY` | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter) |
-| Workspace OpenRouter | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid |
-| Codex ChatGPT subscription | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` | Responses | `codex/…` after the workspace connection is ready |
-| SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED` | Responses | `supergrok/…` after the workspace connection is ready |
+| Route                        | Enable                                        | Wire             | Catalog                                                           |
+| ---------------------------- | --------------------------------------------- | ---------------- | ----------------------------------------------------------------- |
+| OpenGeni-managed AI Gateway  | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`          | Responses        | Curated DeepSeek / Kimi, OpenGeni credits                         |
+| Workspace AI Gateway         | member connects a Gateway key in Settings     | Responses        | Same curated models plus optional workspace slugs, workspace-paid |
+| Deployment OpenRouter        | `OPENGENI_OPENROUTER_API_KEY`                 | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter)             |
+| Workspace OpenRouter         | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid                          |
+| Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
+| SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
 Workspace BYOK for an arbitrary OpenAI-compatible server is not a registry
 switch. Voice input, image, and video use separate provider settings.
@@ -508,8 +508,8 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                                  | Conservative retail fallback (+5%)                                 |
-| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                             | Conservative retail fallback (+5%)                                 |
+| ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
 | DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.13 / $0.26; Novita $0.14 / $0.028 / $0.14 / $0.28; DeepInfra $0.09 / $0.018 / $0.09 / $0.18 per 1M | $0.147 / $0.0294 / $0.147 / $0.294 per 1M (highest approved route) |
 | Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $3 / $15 per 1M on both routes                                                                                        | $3.15 / $0.315 / $3.15 / $15.75 per 1M                            |
 
@@ -853,10 +853,47 @@ the intent is an explicit fixed allow-list instead.
 
 ## Static catalog and workspace availability
 
-`GET /v1/config/client` is public deployment bootstrap configuration. Its
-`models` array exposes client-safe static definitions and the legacy
-`allowedModels` list. It never contains workspace credential readiness,
-workspace policy, concrete connected-account identity, or provider secrets.
+`GET /v1/config/client` remains public bootstrap configuration. Signed-out
+responses expose stably admissible deployment models, never disconnected
+subscription models. Bearer or actor-epoch authenticated responses resolve the
+caller's default workspace; `?workspaceId=<id>` selects an exact authorized workspace (required
+for organization keys without a default). The SDK accepts this selector through
+`getClientConfig({ workspaceId })`, and the embedded session proxy pins its host
+workspace. A managed-browser cookie alone remains unscoped deployment bootstrap
+so account/session-set reconciliation can load before scoped reads; it never
+discloses a workspace model catalog.
+
+`models` contains exactly the canonical IDs that
+direct fresh session creation accepts through the shared stable admission
+predicate. It rejects only absent/retired definitions, unsupported text/SSE,
+workspace policy or connection model permissions, inactive/reauth-required
+connections, and missing deployment API keys. Unknown, stale or unavailable
+provider health (including xAI freshness) and deployment credential-resolver
+observations never reject creation. Azure AD/managed identity credentials are
+resolved at execution, not assumed absent when no observation exists.
+
+Client config and omitted-model creation use the complete same default
+decision, including reasoning effort. When the configured deployment default
+is stably blocked, the shared decision falls back to the first admitted model
+with that model's default reasoning effort. A transiently unavailable but
+stably admitted deployment default is not replaced by this fallback.
+
+Each config model carries an optional `availability` observation for degraded
+UI display. Its status/reason/checkedAt and transient `selectable` flag do not
+override membership in `models`: a model may remain creatable while
+reported unavailable. A caller lacking `sessions:create` receives no models.
+`models` is authoritative and may be empty. Normally `allowedModels` has the
+same IDs; only when `models` is empty, it retains the one `defaultModel` hint so
+older clients with a nonempty-list parser still load. The additive
+`legacyModelFallback: { id, availability }` explicitly marks that hint
+unavailable and not selectable, with its stable reason. It grants no admission;
+creation still rejects it. New clients use `models`, not this legacy fallback,
+for choices. Older string-list-only clients may show the unusable hint but
+receive the ordinary rejection instead of failing bootstrap parsing.
+Billing/usage admission and a provider's live response are separate from model
+selection. Changes between listing and creating are re-evaluated at creation.
+Responses contain no connected-account identity, provider secrets, or execution
+topology. Child inheritance and keyed repair keep their accepted-work rules.
 
 Authenticated callers use:
 
@@ -1253,12 +1290,14 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 ## Native Claude Messages
 
 Workspace and organization Models support **Anthropic API** keys and **Claude subscription**
-setup tokens as separate connections. Generate a subscription token with
-`claude setup-token`; OpenGeni does not refresh it. Replace expired or revoked
-credentials on the connection page. Claude setup offers a copyable terminal command
-and a local import of `~/.claude.json`; only its account/device identifiers are
-submitted with the token, never the settings file. Manual entry remains available
-in the setup disclosure. Token replacement uses the same full-page form. Named
+sign-in as separate connections. **Sign in to Claude** opens Claude's approval page;
+paste its authorization code back into OpenGeni. This grants model and profile
+access, enables direct usage checks and reset times, and stores an encrypted refresh
+token for automatic renewal. Account files and terminal commands are not needed.
+**Sign in again** reconnects through the same flow while retaining native access policy.
+The disclosed **Use a setup token** option accepts `claude setup-token` credentials,
+which allow model calls but cannot query current usage or renew automatically.
+Replace expired or revoked setup tokens through the connection's actions menu. Named
 Opus/Sonnet choices add models without requiring model IDs; other IDs remain
 available under the model disclosure. Workspace setup creates a workspace-owned connection;
 organization setup creates a separate connection for shared workspaces. The two
@@ -1334,12 +1373,11 @@ Stainless SDK 0.127.0, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
 the captured v2d dispatch selector. These are compatibility headers, not a
 statement about the actual worker runtime. API-key requests do not use this profile.
 
-Subscription connections also require the real account UUID and device ID from
-`oauthAccount.accountUuid` and `userID` in the signed-in machine's `~/.claude.json`.
-Both are encrypted with the token in the existing credential column; API reads
-return neither. Legacy token-only connections must be replaced with this metadata
-before use. Registry OAuth providers supply the same fields through
-`anthropic.identity`. Never hardcode a user's account IDs into source or borrow
+Subscription setup creates a stable installation device ID and uses an empty
+account UUID, the fallback used by Claude Code for inference-only setup tokens.
+Both are encrypted with the token; API reads return neither. Existing explicit
+account/device bundles remain supported. Registry OAuth providers supply the
+same fields through `anthropic.identity`. Never hardcode a user's account IDs into source or borrow
 another connection's identity. The worker passes its stable session cache key to
 native Claude, preserving session identity across turns and activity retries;
 prompt IDs persist through the run's tool loop and client request IDs are fresh.
@@ -1366,3 +1404,42 @@ are not advertised without those features. Normal agent calls stream; title and
 compaction calls remain nonstreaming. The default output ceiling remains 32k,
 within the adapter's conservative context budget, rather than copying 128k from
 an unrelated request. No live subscription probe is part of these tests.
+
+### Claude subscription usage
+
+Model responses, including quota errors, report observed 5-hour, weekly and optional
+model-specific usage windows. The worker saves these through the existing connection
+RLS boundary, fenced against credential replacement, without changing credential or
+admission versions. Settings reuse the shared usage meters, reset times and refresh
+controls. Past reset times invalidate the displayed balance until Claude reports
+another reading; missing windows are never shown as zero usage.
+
+Setup tokens have `user:inference` scope. The separate `/api/oauth/usage` endpoint
+requires `user:profile`, so inference-only tokens update their readings through model
+responses. Browser sign-in requests `user:inference user:profile` using the installed
+Claude Code OAuth client and PKCE. Manual refresh reads that endpoint without making model calls; a scope
+error retains the readings and disables further unsupported refreshes until the
+credential is replaced. Browser sign-in credentials can refresh usage directly.
+A read-only quota check runs after sign-in so the connection initially shows
+provider readings when available.
+
+Sign-in attempts reuse encrypted, expiring OAuth pending states. They bind the exact
+human, browser session, scope and current connection generation. The one-use code
+is spent once; a committed connection has a secret-free, generation-fenced replay
+receipt. Authority is freshly checked after exchange, before native connection writes.
+Organization attempts require organization administration and are not readable from
+a shared workspace's runtime scope.
+
+`packages/db/src/claude-subscription-tokens.ts` serializes renewal across replicas,
+re-reads the captured generation and writes only encrypted token material. Renewal
+keeps connection identity, admission/credential generations, access policy and usage
+cache. Each physical Claude model request resolves its original binding before
+dispatch, including title and compaction requests; replacement credentials are never
+lent to an older turn. Catalog loading is offline, so Claude renewal failures do not
+block turns using another provider. Invalid refresh grants require sign-in again;
+transient failures retain credentials and existing usage readings.
+
+Cached usage reads are available to workspace readers; live refresh requires
+connection-management permission. Organization usage follows the existing
+organization provider administration boundary. Credentials and identities are
+never returned in usage responses.

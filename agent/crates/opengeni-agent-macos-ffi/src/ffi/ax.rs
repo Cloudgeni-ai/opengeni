@@ -1187,7 +1187,7 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
             ))
         })?;
         if !was_application_frontmost || !was_window_main {
-            window.perform_action("AXRaise").map_err(|error| {
+            window.raise_if_supported().map_err(|error| {
                 MacFfiError::OutcomeUnknown(format!("AXRaise could not be confirmed: {error}"))
             })?;
         }
@@ -1240,7 +1240,7 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
                         "Accessibility could not reassert the exact window after exact process activation: {error}"
                     ))
                 })?;
-                window.perform_action("AXRaise").map_err(|error| {
+                window.raise_if_supported().map_err(|error| {
                     MacFfiError::OutcomeUnknown(format!(
                         "AXRaise could not be confirmed after exact process activation: {error}"
                     ))

@@ -16,6 +16,32 @@ import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publi
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
 
+/** Any exact publication from this session establishes the Site association. */
+export async function hasWorkspaceArtifactSessionLink(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  artifactId: string,
+): Promise<boolean> {
+  return withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const rows = await scoped
+      .select({ id: schema.workspaceArtifacts.id })
+      .from(schema.workspaceArtifacts)
+      .where(
+        and(
+          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+          eq(schema.workspaceArtifacts.id, artifactId),
+          sql`exists (select 1 from ${schema.workspaceArtifactVersions} as published_version
+            where published_version.artifact_id = ${schema.workspaceArtifacts.id}
+              and published_version.workspace_id = ${schema.workspaceArtifacts.workspaceId}
+              and published_version.source_session_id = ${sessionId}::uuid)`,
+        ),
+      )
+      .limit(1);
+    return rows.length === 1;
+  });
+}
+
 /** Validate a published Site identity without loading its HTML or version history. */
 export async function getWorkspaceSiteSessionOrigin(
   db: Database,

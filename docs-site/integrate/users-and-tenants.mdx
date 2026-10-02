@@ -1,0 +1,80 @@
+---
+title: "Users, tenants & privacy"
+description: "Map tenants to workspaces, onboard users, and choose what each conversation can see and share."
+icon: "users-gear"
+---
+
+## Choose the workspace boundary
+
+A workspace is where sessions, files, knowledge, connections, and integrations are shared. Pick it from who may share those things:
+
+| Your product                                              | Workspace per | Notes                                                               |
+| --------------------------------------------------------- | ------------- | ------------------------------------------------------------------- |
+| A team or customer shares data and may share chats        | Tenant        | The usual choice                                                    |
+| Users share data but their chats are private              | Tenant        | `chats: "private"`, the proxy's default                             |
+| Each user is their own boundary                           | User          | `chats: "isolated"`, or the user id as `externalId`                 |
+| Every conversation must have its own data and connections | Chat          | Most isolation, most lifecycle work: automate creation and deletion |
+
+A workspace is configuration, not a running machine. Hundreds of workspaces are normal. Call `ensureWorkspace` with a stable `externalSource` and `externalId` and persist the returned id; repeat calls return the same workspace.
+
+## Onboard users
+
+Make each user a member once, when your product admits them, not on every request:
+
+```ts
+await og.addExternalWorkspaceMember(workspaceId, {
+  identity: { externalId: user.id, source },
+  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
+  operationId, // a UUID you persist first; reuse it only to retry this exact request
+});
+```
+
+Add `files:upload` and `files:read` for attachments and `mcp_servers:attach` for [per-session tools](/integrate/your-data). To change permissions, call `updateExternalWorkspaceMember` with a new `operationId` and the complete new set; do not revoke and re-add. Use `cancelExternalWorkspaceMemberGrant` only to remove access: it also cancels the user's running turns.
+
+Use the same `source` everywhere: onboarding, `asUser`, and the proxy's `resolve`.
+
+To inspect the current inventory without granting or restoring membership:
+
+```ts
+const members = await og.listWorkspaceMembers(workspaceId);
+console.log(members.length); // WorkspaceMember[], not an object with .members
+```
+
+The raw REST `GET /v1/workspaces/:workspaceId/members` response is `{ members: WorkspaceMember[] }`. The SDK unwraps that envelope: iterate its returned array directly, not `(await og.listWorkspaceMembers(workspaceId)).members`. This read requires `workspace:read`; check each SDK method's own return type rather than assuming every list method has this shape.
+
+## Choose who shares chats
+
+Set `chats` on the session proxy or the chat facade:
+
+| `chats`               | Who sees a chat           | The agent reaches | Knowledge is saved to         | Workspace    |
+| --------------------- | ------------------------- | ----------------- | ----------------------------- | ------------ |
+| `"private"` (default) | Only the user             | Its own session   | The user's personal knowledge | The tenant's |
+| `"shared"`            | Everyone in the workspace | The workspace     | The workspace                 | The tenant's |
+| `"isolated"`          | Only the user             | Its own session   | The user's personal knowledge | One per user |
+
+```ts
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
+  chats: "private",
+  resolve, // returns { workspaceId, user } for the signed-in user
+});
+```
+
+- Private chats need private sessions enabled for your organization. Without it the SDK throws `OpenGeniSetupError`, which says who can turn it on and where.
+- `"isolated"` gives each user their own workspace. Pass the `OpenGeni` facade from `@opengeni/sdk/chat` to the proxy and return `{ tenant, user }` from `resolve`; `og.workspaceIdFor({ tenant, user }, { isolation: "user" })` provisions the workspace and membership.
+- `chats` sets `visibility`, `agentAccess`, and `memoryScope` on sessions it creates. Values your `createSession` hook returns still win, and OpenGeni still authorizes each one.
+
+What the agent can do is separate: see [Configure the agent](/integrate/configure-the-agent).
+
+## What is enforced where
+
+**OpenGeni enforces:** workspace membership on every call, private session ownership, the agent's session reach, and each member's permissions intersected with your API key's.
+
+**Your product enforces:** who your users are, which tenant they belong to, and which conversations they may open. Use the proxy's `resolve` for identity and `authorizeSession` for per-session checks, and authorize every tool call in your own API.
+
+The organization API key can read every session in the organization's shared workspaces. Keep it on your server.
+
+## Sign-out and account changes
+
+On sign-out or a user or tenant switch, abort in-flight requests and remount the conversation. When you remove a user, revoke their membership; when you remove a tenant, delete its workspace (see [Going to production](/integrate/production#clean-up)).
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>
