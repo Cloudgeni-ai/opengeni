@@ -7,6 +7,20 @@ import {
 } from "@opengeni/config";
 
 type Scope = "workspace" | "organization";
+type ClaudeRequestCredential = {
+  token: string;
+  connectionId: string;
+  credentialVersion: number;
+};
+export class ClaudeSubscriptionConnectionUnavailable extends Error {
+  readonly status = 409;
+  readonly code = "claude_subscription_connection_changed";
+  constructor() {
+    super(
+      "Claude connection changed or was disconnected. Start a new turn with the current connection.",
+    );
+  }
+}
 export type CapturedClaudeUsage = {
   token: string;
   expectedConnectionId: string;
@@ -25,6 +39,15 @@ export async function createClaudeUsageObserver(
     credentialVersion: number;
   } | null>,
 ) {
+  const managedProviderIds = new Set(
+    providers
+      .filter(
+        (provider) =>
+          provider.kind === "claude-subscription-workspace" ||
+          provider.kind === "claude-subscription-organization",
+      )
+      .map((provider) => provider.id),
+  );
   const bindings = await Promise.all(
     providers
       .filter(
@@ -88,6 +111,34 @@ export async function createClaudeUsageObserver(
       });
   };
   return Object.assign(observe, {
+    async prepareRequest(
+      providerId: string,
+      headers: Headers,
+      resolve: (binding: {
+        scope: Scope;
+        expectedConnectionId: string;
+        expectedCredentialVersion: number;
+      }) => Promise<ClaudeRequestCredential | null>,
+    ) {
+      if (!managedProviderIds.has(providerId)) return headers;
+      const binding = captured.get(providerId);
+      if (!binding) throw new ClaudeSubscriptionConnectionUnavailable();
+      const credential = await resolve({
+        scope: binding.scope,
+        expectedConnectionId: binding.expectedConnectionId,
+        expectedCredentialVersion: binding.expectedCredentialVersion,
+      });
+      if (
+        !credential ||
+        credential.connectionId !== binding.expectedConnectionId ||
+        credential.credentialVersion !== binding.expectedCredentialVersion
+      )
+        throw new ClaudeSubscriptionConnectionUnavailable();
+      captured.set(providerId, { ...binding, token: credential.token });
+      headers.set("authorization", `Bearer ${credential.token}`);
+      headers.delete("x-api-key");
+      return headers;
+    },
     binding(providerId: string) {
       return captured.get(providerId);
     },

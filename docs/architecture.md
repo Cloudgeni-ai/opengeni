@@ -361,6 +361,9 @@ catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
 provider/billing identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
+The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
+native model effort vocabularies, defaults, context windows and output ceilings;
+both catalog projection and request shaping consume it.
 Accepted turns freeze provider identity, not cost; drain/fence before changing
 `free`/`credits`. Database `codexModels` changes membership, not credentials;
 retirement preserves exact accepted execution.

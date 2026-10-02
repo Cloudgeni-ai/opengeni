@@ -40,6 +40,7 @@ import {
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
+  AnthropicProviderRejection,
   CompactionNeededError,
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
@@ -5579,6 +5580,42 @@ describe("transient provider error classifier", () => {
       retryable: false,
       detail: "content_policy_violation",
     });
+  });
+
+  test("Claude model suspension retains authored guidance and never retries or rotates credentials", () => {
+    const error = new AnthropicProviderRejection(
+      "anthropic_model_access_suspended",
+      403,
+      "req_synthetic_suspended",
+      "2031-04-05T06:07:08.000Z",
+    );
+    expect(agentRunFailurePayload(error)).toEqual({
+      error: error.message,
+      code: "anthropic_model_access_suspended",
+      retryable: false,
+      requestId: "req_synthetic_suspended",
+    });
+    expect(isTransientProviderError(error)).toBe(false);
+    expect(classifyCodexCredentialFailure(error)).toBeNull();
+    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(error.message).toContain("2031-04-05 06:07:08 UTC");
+  });
+
+  test("Claude HTTP-200 refusal uses the shared policy-refusal UI without automatic replay", () => {
+    const error = new AnthropicProviderRejection(
+      "content_policy_violation",
+      200,
+      "req_synthetic_refusal",
+    );
+    expect(agentRunFailurePayload(error)).toEqual({
+      error: error.message,
+      code: "provider_safety_refusal",
+      retryable: false,
+      requestId: "req_synthetic_refusal",
+    });
+    expect(isTransientProviderError(error)).toBe(false);
+    expect(classifyCodexCredentialFailure(error)).toBeNull();
+    expect(classifyXaiCredentialFailure(error)).toBeNull();
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {

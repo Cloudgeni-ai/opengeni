@@ -56,6 +56,10 @@ test("public Claude catalog preserves provider and payment identity without leak
     const client = projectClientModel(model);
     expect(client.provider).toBe(providerId);
     expect(client.providerLabel).toBe(label);
+    expect(client.capabilities?.reasoning).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
     expect(client.source).toBeUndefined();
     expect(modelPickerBillingClassFor(client)).toBe(billingClass);
     expect(JSON.stringify(client)).not.toContain("secret");
