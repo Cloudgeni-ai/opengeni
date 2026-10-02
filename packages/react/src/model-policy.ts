@@ -24,10 +24,11 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
 export type LatencyModeId = "standard" | "priority" | "fast";
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
-  opengeni_credits: "OpenGeni",
+  opengeni_credits: "Opengeni",
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
+  claude_subscription: "Claude subscription",
   byok: "Workspace providers",
   organization_byok: "Organization providers",
 };
@@ -46,6 +47,11 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
   if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
     return "organization_byok";
   }
+  if (
+    model.provider?.startsWith("workspace-openai-") ||
+    model.provider?.startsWith("workspace-azure-openai-")
+  )
+    return "byok";
   if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
     return "byok";
   }
@@ -127,7 +133,7 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Free in this deployment";
   }
   if (model.cost === "credits") {
-    return "OpenGeni credits";
+    return "Opengeni credits";
   }
   if (model.cost === "subscription") {
     return model.source === "supergrok"
@@ -148,7 +154,7 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Route unknown";
   }
   if (billing.metering === "opengeni_credits") {
-    return "OpenGeni credits · automatic managed route";
+    return "Opengeni credits · automatic managed route";
   }
   if (billing.upstreamPayer === "connected_subscription") {
     return model.source === "supergrok"
@@ -162,8 +168,8 @@ export function payerSummaryForModel(model: ClientModel): string {
     return organizationProviderPayerSummary(model);
   }
   return billing.upstreamPayer === "deployment"
-    ? "OpenGeni · no model credits"
-    : "External provider · no OpenGeni credits";
+    ? "Opengeni · no model credits"
+    : "External provider · no Opengeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {
@@ -196,6 +202,10 @@ export function advancedSourceSummary(model: ClientModel): string | null {
 }
 
 function workspaceProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "workspace-anthropic")
+    return "Billed to the workspace Anthropic API account";
+  if (model.provider === "workspace-claude-subscription")
+    return "Uses the workspace Claude subscription · no OpenGeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
   }
@@ -206,6 +216,10 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
 }
 
 function organizationProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "organization-anthropic")
+    return "Billed to the organization Anthropic API account";
+  if (model.provider === "organization-claude-subscription")
+    return "Uses the connected Claude subscription · no OpenGeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
   }

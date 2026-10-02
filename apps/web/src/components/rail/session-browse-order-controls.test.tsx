@@ -34,4 +34,28 @@ describe("compact session view menu", () => {
       expect(markup).not.toContain("Filter by");
     },
   );
+
+  test("offers a Needs you status with the waiting count", () => {
+    const render = (needsYouCount: number, status: "active" | "needs-you" = "active") =>
+      renderToStaticMarkup(
+        <DropdownMenu open>
+          <Primitive.Content forceMount>
+            <SessionBrowseOrderControls
+              groupBy="project"
+              onGroupByChange={() => {}}
+              sortBy="updatedAt"
+              onSortByChange={() => {}}
+              status={status}
+              onStatusChange={() => {}}
+              needsYouCount={needsYouCount}
+              showEmptyGroups={false}
+              onShowEmptyGroupsChange={() => {}}
+            />
+          </Primitive.Content>
+        </DropdownMenu>,
+      );
+    expect(render(0, "needs-you")).toContain("Needs you");
+    expect(render(3)).not.toContain("3 waiting");
+    expect(render(0)).not.toContain("waiting");
+  });
 });

@@ -247,6 +247,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings);
     const authority = controllerAuthorityRoot(deps);
+    let prepared: Awaited<ReturnType<typeof prepareComputerSessionCreate>> | null = null;
 
     try {
       const existing = await findComputerSessionControlRecordByOperation(deps.db, {
@@ -260,7 +261,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
-      let prepared = existing
+      prepared = existing
         ? await prepareComputerSessionCreate(
             deps.db,
             computerCreateInput(grant, workspaceId, request, existing.session.placement),
@@ -426,6 +427,18 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
       );
     } catch (error) {
+      if (prepared) {
+        // A concurrent dispatch owns its exact binding, even if this request's
+        // placement failed. Settle only the still-undispatched create receipt.
+        await failComputerSessionOperation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          operationId: request.operationId,
+          computerSessionId: prepared.session.id,
+          onlyIfPreparedCreate: true,
+          error: interactionFailure(error),
+        }).catch(() => undefined);
+      }
       throw computerRouteError(error);
     }
   });
@@ -1451,6 +1464,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       },
       os: placement.lease.os,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       rigVersionId: sourceSession.rigVersionId,
       leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
       expectedEpoch: placement.lease.leaseEpoch,

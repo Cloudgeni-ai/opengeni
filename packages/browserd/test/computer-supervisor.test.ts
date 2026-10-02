@@ -19,6 +19,61 @@ const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
 describe("ComputerSupervisor", () => {
+  test.each([false, true])(
+    "protects accepted create and pending shutdown from idle proof (shared seat: %s)",
+    async (displaceExistingSessions) => {
+      const rootDirectory = await mkdtemp("/tmp/og-computer-update-idle-");
+      const started = Promise.withResolvers<void>(),
+        startGate = Promise.withResolvers<void>();
+      const ending = Promise.withResolvers<void>(),
+        endGate = Promise.withResolvers<void>();
+      const supervisor = await ComputerSupervisor.open({
+        rootDirectory,
+        displaceExistingSessions,
+        environmentAllocator: fixtureEnvironmentAllocator(),
+        createDriver: async (context) => {
+          started.resolve();
+          await startGate.promise;
+          const driver = new FixtureComputerDriver(
+            context.computerSessionId,
+            context.controllerGeneration,
+          );
+          const close = driver.close.bind(driver);
+          driver.close = async () => {
+            ending.resolve();
+            await endGate.promise;
+            await close();
+          };
+          return driver;
+        },
+      });
+      try {
+        expect(supervisor.isIdle()).toBe(true);
+        const creating = supervisor.createSession(options());
+        // The shared-seat request is still queued, before creating has an entry.
+        expect(supervisor.isIdle()).toBe(false);
+        await started.promise;
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(false);
+        startGate.resolve();
+        await creating;
+        expect(supervisor.isIdle()).toBe(false);
+        const closing = supervisor.endSession(options());
+        await ending.promise;
+        expect(supervisor.listSessions()).toEqual([]);
+        expect(supervisor.isIdle()).toBe(false);
+        endGate.resolve();
+        await closing;
+        expect(supervisor.isIdle()).toBe(true);
+      } finally {
+        startGate.resolve();
+        endGate.resolve();
+        await supervisor.close();
+        await rm(rootDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("hosts workspace sessions and replays durable terminal receipts without redispatch", async () => {
     const rootDirectory = await mkdtemp("/tmp/og-computer-supervisor-");
     const drivers: FixtureComputerDriver[] = [];

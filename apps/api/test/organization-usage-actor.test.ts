@@ -331,4 +331,45 @@ test("actual HTTP summary and workspace pages preserve owner-private vs other bi
   const accounting = (await reconciled.json()) as OrganizationUsageSummary;
   expect(accounting.totals.find((row) => row.eventType === "model.cost")?.quantity).toBe("30");
   expect(JSON.stringify(accounting)).not.toContain(personalIds[0]!);
+  // Billing readers see that usage as a Personal row keyed by the owner's
+  // organization membership: amounts only, never the workspace id or name.
+  const [ownerMembership] = await shared.admin<Array<{ id: string }>>`select id
+    from organization_memberships where account_id = ${grant.accountId}
+      and personal_workspace_id = ${personalIds[0]!}`;
+  for (const authorization of [
+    `Bearer ${rawKey}`,
+    await token("user:other-billing-reader", grant.accountId, grant.workspaceId!),
+  ]) {
+    const response = await app.request(url("usage-summary", grant.accountId), {
+      headers: { authorization },
+    });
+    expect(response.status).toBe(200);
+    const summary = (await response.json()) as OrganizationUsageSummary;
+    expect(summary.personalWorkspaceCount).toBe(1);
+    expect(summary.personalWorkspaces).toEqual([
+      {
+        membershipId: ownerMembership!.id,
+        totals: [{ eventType: "model.cost", unit: "usd_micros", quantity: "7", eventCount: "1" }],
+      },
+    ]);
+    const wire = JSON.stringify(summary);
+    expect(wire).not.toContain("SECRET PERSONAL WORKSPACE");
+    for (const id of personalIds) expect(wire).not.toContain(id);
+    const page = await app.request(
+      `${url("usage-workspaces", grant.accountId, summary.until)}&afterWorkspaceId=${summary.nextWorkspaceCursor}`,
+      { headers: { authorization } },
+    );
+    expect(page.status).toBe(200);
+    expect("personalWorkspaces" in ((await page.json()) as object)).toBe(false);
+  }
+  // Without billing:read there is no organization usage at all, Personal rows included.
+  const denied = await app.request(url("usage-summary", grant.accountId), {
+    headers: {
+      authorization: await token("user:member", grant.accountId, grant.workspaceId!, [
+        "workspace:read",
+        "sessions:read",
+      ]),
+    },
+  });
+  expect(denied.status).toBe(403);
 }, 180_000);

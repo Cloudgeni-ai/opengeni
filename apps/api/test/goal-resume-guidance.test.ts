@@ -42,4 +42,8 @@ test("goal_resume tells the agent that a question alone does not resume a paused
   expect(description).not.toContain("regardless of who paused it or why");
   expect(description).toContain("A user's question alone is not a reason to resume");
   expect(description).toContain("Already active is a successful no-op");
+  const complete = registered.goal_complete?.description ?? "";
+  expect(complete).toContain("evidence: at most 8192 characters");
+  expect(complete).toContain("Evidence is not the deliverable");
+  expect(complete).toContain("reply to the user");
 });

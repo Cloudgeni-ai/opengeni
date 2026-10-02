@@ -16,6 +16,37 @@ export function markdownTableWidth({
   return Math.max(columnWidth, Math.min(preferredWidth, available));
 }
 
+function measurementCopy(source: Node, document: Document): Node {
+  if (source.nodeType === Node.ELEMENT_NODE) {
+    const element = source as Element;
+    // Inert prevents focus, not custom-element construction, media loading or
+    // embedded browsing contexts. Do not clone those host-rendered surfaces.
+    if (
+      element.localName.includes("-") ||
+      ["iframe", "object", "embed", "video", "audio", "canvas", "script"].includes(
+        element.localName,
+      )
+    ) {
+      const bounds = element.getBoundingClientRect();
+      const placeholder = document.createElement("span");
+      placeholder.style.display = "inline-block";
+      placeholder.style.width = `${bounds.width}px`;
+      placeholder.style.height = `${bounds.height}px`;
+      return placeholder;
+    }
+  }
+  const copy = document.importNode(source, false);
+  if (copy.nodeType === Node.ELEMENT_NODE) {
+    const element = copy as Element;
+    element.removeAttribute("id");
+    for (const attribute of [...element.attributes]) {
+      if (attribute.name.startsWith("on")) element.removeAttribute(attribute.name);
+    }
+  }
+  for (const child of source.childNodes) copy.appendChild(measurementCopy(child, document));
+  return copy;
+}
+
 /** Loaded only for assistant tables. Keep prose and nested scroll owners intact. */
 export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLTableElement) {
   const body = wrapper.parentElement;
@@ -24,6 +55,8 @@ export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLT
     ?.closest<HTMLElement>("[data-og-timeline-scroller]");
   if (!body?.classList.contains("og-markdown-body") || !scroller) return;
 
+  // Build the static copy without a browsing context before inserting its probe.
+  const measurementDocument = table.ownerDocument.implementation.createHTMLDocument("");
   let width: number | null = null;
   const reset = () => {
     width = null;
@@ -50,14 +83,25 @@ export function observeMarkdownTableLayout(wrapper: HTMLDivElement, table: HTMLT
     const right =
       panel.left + scroller.clientLeft + scroller.clientWidth - parseFloat(panelStyle.paddingRight);
 
-    // Measure the original table, preserving its wrapping and TSV copy DOM.
-    const previousWidth = table.style.width;
+    // Even a temporary max-content width on the live table changes its height
+    // during forced layout. Browser scroll anchoring can retain that displacement
+    // after the width is restored. Measure a copy without touching live geometry.
+    const probe = table.ownerDocument.createElement("div");
+    probe.setAttribute("aria-hidden", "true");
+    probe.inert = true;
+    // A zero-sized, contained box cannot extend the scroller's overflow area,
+    // including inside transformed ancestors. Keep the same inherited styling.
+    probe.style.cssText =
+      "position:absolute;width:0;height:0;overflow:hidden;contain:layout size paint;visibility:hidden;pointer-events:none";
+    const copy = measurementCopy(table, measurementDocument) as HTMLTableElement;
+    copy.style.width = "max-content";
+    probe.append(copy);
     let preferred: number;
     try {
-      table.style.width = "max-content";
-      preferred = table.getBoundingClientRect().width;
+      table.parentElement!.append(probe);
+      preferred = copy.getBoundingClientRect().width;
     } finally {
-      table.style.width = previousWidth;
+      probe.remove();
     }
     const next = markdownTableWidth({
       columnLeft: column.left,

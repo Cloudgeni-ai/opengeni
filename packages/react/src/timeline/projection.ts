@@ -1,6 +1,8 @@
 import {
   parseMediaGenerationResult,
   parseToolDisplayMetadata,
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -9,6 +11,10 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
+import {
+  allowanceExhaustedMessage,
+  parseAllowanceExhaustedRefusal,
+} from "@opengeni/sdk/allowance-refusal";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   presentFailure,
@@ -145,6 +151,34 @@ export function buildTimeline(
   options: { partialStart?: boolean } = {},
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
+  const allowanceNotices = new Set<string>();
+  const allowanceNotice = (event: SessionEvent, turnId: string | null) => {
+    const refusal = parseAllowanceExhaustedRefusal(event.payload);
+    if (!refusal) return null;
+    const text = allowanceExhaustedMessage(refusal);
+    const key = JSON.stringify([
+      turnId,
+      event.turnAttemptId,
+      startupRecoveryRevisionByTurn.get(turnId ?? "") ?? 0,
+      refusal.scope,
+      refusal.subjectId,
+      refusal.resetsAt,
+    ]);
+    if (!allowanceNotices.has(key)) {
+      allowanceNotices.add(key);
+      items.push({
+        kind: "notice",
+        id: `${event.id}-allowance`,
+        tone: "failed",
+        text,
+        // The canonical sentence replaces upstream prose, so a host renderer
+        // reading `message` never shows a wrapper's private wording.
+        allowance: { ...refusal, message: text },
+        occurredAt: event.occurredAt,
+      });
+    }
+    return text;
+  };
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
   // A bounded replay can begin halfway through a message (including inside an
@@ -174,6 +208,7 @@ export function buildTimeline(
   // receipts have no row. Carry resume evidence on the attention landmarks so
   // grouping cannot mistake historical approval for a live wait.
   const presentationWaits = new Map<string | null, Array<NoticeItem | SessionStatusItem>>();
+  const presentationFailures = new Map<string | null, SessionStatusItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -482,10 +517,17 @@ export function buildTimeline(
           }
         }
         if (inputs.length === 0) break;
-        // Goal continuations already land as `goal.continuation` GoalRows.
-        // A solo continuation batch would duplicate that landmark + dump the
-        // model-facing prompt — skip chrome for that case only.
-        if (inputs.every((member) => member.kind === "goal_continuation")) {
+        // Background command receipts are agent-facing inputs, not chat messages.
+        // The durable event remains available to the agent and audit history.
+        const visibleInputs = inputs.filter(
+          (member) => member.kind !== "background_command_result",
+        );
+        // Goal continuations already have GoalRows. A batch with no other
+        // visible update must not interrupt an in-flight streaming message.
+        if (
+          visibleInputs.length === 0 ||
+          visibleInputs.every((member) => member.kind === "goal_continuation")
+        ) {
           break;
         }
         closeStreamingTail();
@@ -493,7 +535,7 @@ export function buildTimeline(
           kind: "machine-input-batch",
           id: event.id,
           turnId,
-          members: inputs,
+          members: visibleInputs,
           occurredAt: event.occurredAt,
         });
         break;
@@ -1000,7 +1042,15 @@ export function buildTimeline(
           occurredAt: event.occurredAt,
         };
         if (status === "requires_action") rememberPresentationWait(item, turnId);
-        else items.push(item);
+        else {
+          items.push(item);
+          if (status === "failed") {
+            const key = turnId ?? presentationTurnId;
+            const failures = presentationFailures.get(key) ?? [];
+            failures.push(item);
+            presentationFailures.set(key, failures);
+          }
+        }
         break;
       }
 
@@ -1097,6 +1147,23 @@ export function buildTimeline(
             turnId,
             (startupRecoveryRevisionByTurn.get(turnId) ?? 0) + 1,
           );
+          if (
+            !event.duplicateOfEventId &&
+            (!event.turnAssociation || event.turnAssociation === "current")
+          ) {
+            // Human Retry reopens the existing logical turn, unlike a new
+            // prompt. Keep failure evidence, but do not let its old settlement
+            // close the recovered turn's work surface.
+            for (const item of items) {
+              if (item.kind === "turn-end" && item.turnId === turnId && item.outcome === "failed") {
+                item.resumedAt ??= event.occurredAt;
+              }
+            }
+            for (const item of presentationFailures.get(turnId) ?? []) {
+              item.resolvedAt = event.occurredAt;
+            }
+            presentationFailures.delete(turnId);
+          }
         }
         break;
       }
@@ -1167,6 +1234,11 @@ export function buildTimeline(
         break;
       }
 
+      case "usage.exhausted": {
+        allowanceNotice(event, turnId);
+        break;
+      }
+
       case "turn.completed": {
         // A standalone manual compaction uses the turn ledger for fencing and
         // recovery, but it is maintenance rather than a conversational turn.
@@ -1185,6 +1257,15 @@ export function buildTimeline(
         // Rendering it as a clean "complete" turn is a lie that leaves the
         // session looking healthy while every future turn silently dies, so it
         // projects exactly like a failed turn plus an explicit notice.
+        const allowance = parseAllowanceExhaustedRefusal(payload);
+        if (allowance) {
+          finalizeOpen(turnId, "complete", event.occurredAt);
+          takeAgentResponse(turnId);
+          takePendingWaitOutcome(turnId);
+          items.push(turnEndItem(event, "failed", ALLOWANCE_TURN_END_TEXT));
+          allowanceNotice(event, turnId);
+          break;
+        }
         if (isCreditExhaustionPayload(payload)) {
           finalizeOpen(turnId, "complete", event.occurredAt);
           takeAgentResponse(turnId);
@@ -1250,6 +1331,16 @@ export function buildTimeline(
         finalizeOpen(turnId, "complete", event.occurredAt);
         const completedTurn = turnEndItem(event, "complete", null);
         items.push(completedTurn);
+        if (turnCompletedWithEmptyFinalReply(payload)) {
+          items.push({
+            kind: "notice",
+            id: `${event.id}-empty-final-reply`,
+            tone: "input",
+            text: EMPTY_FINAL_REPLY_NOTICE,
+            recordedOutcome: true,
+            occurredAt: event.occurredAt,
+          });
+        }
         const hasCompletedFinalResponse =
           latestAgentResponse?.completed === true &&
           latestAgentResponse.item.phase !== "commentary" &&
@@ -1284,16 +1375,21 @@ export function buildTimeline(
         // Credit death can hide behind fields `failureMessage` doesn't read
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
-        const failureText = isCreditExhaustionPayload(payload)
-          ? CREDIT_EXHAUSTION_MESSAGE
-          : failureMessage(payload);
+        const allowance = parseAllowanceExhaustedRefusal(payload);
+        const failureText = allowance
+          ? ALLOWANCE_TURN_END_TEXT
+          : isCreditExhaustionPayload(payload)
+            ? CREDIT_EXHAUSTION_MESSAGE
+            : failureMessage(payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "failed", failureText));
-        if (!hadActivity) {
+        if (allowance) {
+          allowanceNotice(event, turnId);
+        } else if (!hadActivity) {
           items.push({
             kind: "notice",
             id: event.id,
@@ -1305,11 +1401,12 @@ export function buildTimeline(
         break;
       }
 
+      case "turn.superseded":
       case "turn.cancelled": {
         // A retraction of a never-started queued turn is not a turn ending —
         // the message was withdrawn before any work happened; show nothing.
         // A null turnId proves nothing, so it keeps the legacy finalize path.
-        if (turnId && !prescan.startedTurnIds.has(turnId)) {
+        if (event.type === "turn.cancelled" && turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
         takeAgentResponse(turnId);
@@ -1654,8 +1751,16 @@ export function stripOpaqueCitationTokens(text: string): string {
   return text.replace(/\s*cite(?:[^]+)+/gu, "");
 }
 
+/**
+ * The turn summary's short outcome for a usage ceiling. The adjacent notice row
+ * carries who can raise it and when it resets (and is host-customizable), so
+ * the summary line stays a neutral fact instead of repeating remedy prose.
+ */
+const ALLOWANCE_TURN_END_TEXT = "Usage limit reached";
+
 /** The turn-end payload shape, as `isCreditExhaustion` wants it. */
 function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
+  if (payload.code === "allowance_exhausted") return false;
   return isCreditExhaustion({
     error: typeof payload.error === "string" ? payload.error : null,
     detail: typeof payload.detail === "string" ? payload.detail : null,
@@ -1768,51 +1873,118 @@ export function groupTimeline(
   return groups;
 }
 
-/** Prose and attention surfaces never enter a work fold. */
+/** Live prose stays primary; settled progress joins its own turn's work history. */
 function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
+  // Turn identity and settlement exist even when a final-only turn has no
+  // disclosure. A late receipt must not become a new turn or revive its clock.
+  const seenTurns = new Set<string>();
+  const settlements = new Map<
+    string,
+    { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
+  >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   const messages = new Map<string, AgentMessageItem[]>();
   const inputs = new Map<string, Extract<TimelineItem, { kind: "machine-input-batch" }>>();
+  const itemOrder = new Map(items.map((item, index) => [item.id, index]));
   let legacyTurn = "start";
   let currentTurn = legacyTurn;
   for (const item of items) {
     if (item.kind === "user-message") legacyTurn = item.id;
     const key = ("turnId" in item && item.turnId) || legacyTurn;
-    // Legacy activity still establishes a work boundary using its prompt key.
+    // Legacy work still establishes a boundary using its prompt key.
     // A human message alone does not: it may be steering the existing turn.
     if (
-      (("turnId" in item && item.turnId) || isActivityItem(item)) &&
-      key !== currentTurn &&
-      !turns.has(key)
+      ("turnId" in item && item.turnId) ||
+      isActivityItem(item) ||
+      (item.kind === "agent-message" && item.text.trim())
     ) {
-      const previous = turns.get(currentTurn);
-      if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
-      currentTurn = key;
+      if (key !== currentTurn && !seenTurns.has(key)) {
+        const previous = turns.get(currentTurn);
+        if (!settlements.has(currentTurn)) {
+          settlements.set(currentTurn, { endedAt: item.occurredAt });
+        }
+        if (previous?.work && !previous.work.endedAt) previous.work.endedAt = item.occurredAt;
+        currentTurn = key;
+      }
+      seenTurns.add(key);
     }
     const workForTurn = () => {
       let group = turns.get(key);
+      const firstMessage = messages.get(key)?.[0];
+      const messageStart = firstMessage?.startedAt ?? firstMessage?.occurredAt;
+      const startedAt =
+        messageStart && Date.parse(messageStart) < Date.parse(item.occurredAt)
+          ? messageStart
+          : item.occurredAt;
       if (!group) {
+        const settlement = settlements.get(key);
         group = {
           kind: "activity",
           id: `work-${key}`,
           items: [],
-          work: { startedAt: item.occurredAt, details: [] },
+          work: { startedAt, details: [] },
         };
+        if (settlement) {
+          group.work!.endedAt = settlement.endedAt;
+          if (settlement.outcome) group.outcome = settlement.outcome;
+          if (settlement.failureText) group.failureText = settlement.failureText;
+        }
         turns.set(key, group);
-        groups.push(group);
+        const firstMessageIndex =
+          settlement && firstMessage
+            ? groups.findIndex((entry) => entry.kind === "item" && entry.item === firstMessage)
+            : -1;
+        if (firstMessageIndex >= 0) groups.splice(firstMessageIndex, 0, group);
+        else groups.push(group);
+      } else if (Date.parse(startedAt) < Date.parse(group.work!.startedAt)) {
+        // Completion-only startup receipts can reveal an earlier phase start
+        // after another activity has already established the work row.
+        group.work!.startedAt = startedAt;
       }
       return group;
     };
     if (isActivityItem(item)) {
       const group = workForTurn();
       group.items.push(item);
+      const previous = group.work!.details.at(-1);
+      const preparing = (entry: ActivityItem) =>
+        entry.kind === "startup-phase" || (entry.kind === "reasoning" && !entry.text.trim());
+      if (
+        preparing(item) &&
+        previous?.kind === "activity" &&
+        previous.items.every(preparing) &&
+        previous.items.at(-1) === items[(itemOrder.get(item.id) ?? 0) - 1]
+      )
+        previous.items.push(item);
+      else
+        group.work!.details.push({ kind: "activity", id: `work-item-${item.id}`, items: [item] });
       delete group.work!.waiting;
     } else if (item.kind === "turn-end") {
+      if (!item.resumedAt) {
+        settlements.set(key, {
+          endedAt: item.occurredAt,
+          outcome: item.outcome,
+          ...(item.failureText ? { failureText: item.failureText } : {}),
+        });
+      }
       const group = turns.get(key);
       if (group?.work) {
+        if (item.resumedAt) {
+          group.work.details.push({
+            kind: "item",
+            item: {
+              kind: "notice",
+              id: item.id,
+              tone: "failed",
+              text: item.failureText ?? "The turn failed before retrying.",
+              occurredAt: item.occurredAt,
+            },
+          });
+          continue;
+        }
         group.outcome = item.outcome;
         if (item.failureText) group.failureText = item.failureText;
         group.work.endedAt = item.occurredAt;
@@ -1845,8 +2017,19 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
     } else {
-      groups.push({ kind: "item", item });
       const current = turns.get(currentTurn)?.work;
+      // A live approval wait is carried by the turn header ("Waiting for you")
+      // and decided in the host's approval surface; a second in-timeline banner
+      // only repeats it. Once resolved it returns as the quiet recorded marker.
+      const liveApprovalWait =
+        item.kind === "notice" &&
+        item.tone === "waiting" &&
+        !item.recordedOutcome &&
+        !item.resolvedAt &&
+        item.text.startsWith("Approval needed") &&
+        current !== undefined &&
+        !current.endedAt;
+      if (!liveApprovalWait) groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
@@ -1866,7 +2049,8 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
           current.waiting = { label: "Waiting for you", since: item.occurredAt };
         } else if (
           item.kind === "session-status" &&
-          ["paused", "cancelled", "failed"].includes(item.status)
+          ["paused", "cancelled", "failed"].includes(item.status) &&
+          !item.resolvedAt
         ) {
           current.endedAt = item.occurredAt;
           delete current.waiting;
@@ -1876,6 +2060,13 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         const prose = messages.get(key) ?? [];
         prose.push(item);
         messages.set(key, prose);
+        // A text-only turn still has one overall activity surface. An explicit
+        // final-only response does not manufacture an empty work disclosure.
+        if (
+          (item.phase !== "final_answer" || prose.length > 1) &&
+          (turns.has(key) || !settlements.has(key))
+        )
+          workForTurn();
       }
     }
   }
@@ -1889,8 +2080,10 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
   });
   // A declared answer starts the response clock immediately. Without a phase,
   // only settlement identifies the last response; text length never does.
-  const responseRows = new Map<AgentMessageItem, Work>();
+  const beforeRows = new Map<TimelineGroup, Work>();
+  const afterRows = new Map<TimelineGroup, Work>();
   const movedRows = new Set<Work>();
+  const foldedProse = new Set<AgentMessageItem>();
   const positions = new Map<TimelineGroup | TimelineItem, number>();
   const nextBoundary = new Map<Work, number>();
   let boundary = groups.length;
@@ -1916,10 +2109,31 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         )
       : prose;
     const response =
-      responseCandidates.find((message) => message.phase === "final_answer") ??
+      responseCandidates.filter((message) => message.phase === "final_answer").at(-1) ??
       (settledAt
-        ? (responseCandidates.at(-1) ?? prose.find((message) => message.phase === "final_answer"))
+        ? (responseCandidates.at(-1) ??
+          prose.filter((message) => message.phase === "final_answer").at(-1))
         : undefined);
+    if (settledAt) {
+      for (const message of responseCandidates) {
+        // Markdown image syntax also carries retained video/audio previews.
+        // Keep potential primary media visible rather than guessing whether a
+        // partial/reference-style embed can safely disappear into history.
+        if (message === response || message.text.includes("![")) continue;
+        foldedProse.add(message);
+        group.work!.details.push({ kind: "item", item: message });
+      }
+    }
+    // Preserve event chronology, not completion timestamps or activity kinds.
+    group.work!.details.sort((a, b) => {
+      const first = (entry: TimelineGroup) =>
+        entry.kind === "item"
+          ? entry.item.id
+          : entry.kind === "activity"
+            ? entry.items[0]?.id
+            : undefined;
+      return (itemOrder.get(first(a) ?? "") ?? 0) - (itemOrder.get(first(b) ?? "") ?? 0);
+    });
     if (response) {
       const responseAt = response.startedAt ?? response.occurredAt;
       // A delayed completion-only receipt cannot extend a settled work clock.
@@ -1927,19 +2141,48 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         settledAt && Date.parse(responseAt) > Date.parse(settledAt) ? settledAt : responseAt;
       // A late completion may belong to an older turn. Keep its work at its
       // original boundary rather than moving it across a newer turn's input.
-      if ((positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)) {
-        responseRows.set(response, group);
+      if (
+        settledAt &&
+        (positions.get(response) ?? groups.length) < (nextBoundary.get(group) ?? groups.length)
+      ) {
+        beforeRows.set(groups[positions.get(response)!]!, group);
+        movedRows.add(group);
+      }
+    }
+    if (!settledAt) {
+      // Keep the same row at the tail of this turn, after every live progress
+      // message and attention surface, without crossing a newer input/turn.
+      // A visible steer is not a turn boundary when later prose still belongs
+      // to this turn. New input without that evidence remains a hard boundary.
+      const lastProseIndex = Math.max(...prose.map((message) => positions.get(message) ?? -1));
+      let tailIndex = groups.length - 1;
+      for (let index = (positions.get(group) ?? 0) + 1; index <= tailIndex; index += 1) {
+        const entry = groups[index]!;
+        if (
+          (entry.kind === "activity" && entry.work) ||
+          (entry.kind === "item" &&
+            (("turnId" in entry.item && entry.item.turnId && entry.item.turnId !== key) ||
+              (index > lastProseIndex &&
+                (entry.item.kind === "user-message" || entry.item.kind === "machine-input-batch"))))
+        ) {
+          tailIndex = index - 1;
+          break;
+        }
+      }
+      const tail = groups[tailIndex];
+      if (tail && tail !== group) {
+        afterRows.set(tail, group);
         movedRows.add(group);
       }
     }
   }
   return groups.flatMap((group) => {
     if (group.kind === "activity" && movedRows.has(group)) return [];
-    const row =
-      group.kind === "item" && group.item.kind === "agent-message"
-        ? responseRows.get(group.item)
-        : undefined;
-    return row ? [row, group] : [group];
+    const hidden =
+      group.kind === "item" && group.item.kind === "agent-message" && foldedProse.has(group.item);
+    const before = beforeRows.get(group);
+    const after = afterRows.get(group);
+    return [...(before ? [before] : []), ...(hidden ? [] : [group]), ...(after ? [after] : [])];
   });
 }
 
@@ -2187,6 +2430,10 @@ export function isTurnExecutionEvidence(type: string): boolean {
     isAgentActivityEvent(type) ||
     type === "turn.completed" ||
     type === "turn.failed" ||
+    // An admission refusal can settle a queued turn before it ever starts:
+    // its prompt still belongs above the "usage limit reached" row.
+    type === "usage.exhausted" ||
+    type === "turn.superseded" ||
     type === "turn.recovery.requested" ||
     type === "turn.capacity_waiting" ||
     type === "session.requiresAction" ||

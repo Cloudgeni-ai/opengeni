@@ -9,10 +9,14 @@ export type RailFooterMenuConfig = {
   managed: boolean;
   analytics: boolean;
   documentationUrl: string | null;
+  /** Grants sessions:create in the workspace, which is what enables Send feedback. */
+  canSendFeedback?: boolean;
+  pendingInvitations?: number;
 };
 
 export async function loadRailFooterMenuHarness() {
   let footer: RailFooterMenuConfig = { managed: false, analytics: false, documentationUrl: null };
+  let pendingInvitations = 0;
 
   mock.module("@tanstack/react-router", () => ({
     Link: ({ children }: { children: ReactNode }) => <a href="#settings">{children}</a>,
@@ -31,6 +35,12 @@ export async function loadRailFooterMenuHarness() {
     WorkspaceNav: () => null,
   }));
 
+  // The usage row renders only while the workspace has a limit for you; it
+  // has its own coverage and would otherwise fetch usage here.
+  mock.module("@/components/usage/usage-entry", () => ({
+    AccountUsageMenuItem: () => null,
+  }));
+
   mock.module("@/context", () => ({
     useAppContext: () => ({
       client: {},
@@ -47,7 +57,9 @@ export async function loadRailFooterMenuHarness() {
         mode: "local",
         subjectId: "local",
         subjectLabel: "Local user",
-        workspaceGrants: [],
+        workspaceGrants: footer.canSendFeedback
+          ? [{ workspaceId: "workspace-1", permissions: ["sessions:create"] }]
+          : [],
         accountGrants: [],
       },
       keyAuthRequired: false,
@@ -59,20 +71,24 @@ export async function loadRailFooterMenuHarness() {
 
   mock.module("@/components/organization-invitations", () => ({
     accountMenuAriaLabel: () => "Account menu",
-    OrganizationInvitationCountBadge: () => null,
-    OrganizationInvitationRailNotice: () => null,
+    OrganizationInvitationDot: () => null,
     OrganizationInvitationsDialog: () => null,
-    OrganizationInvitationsMenuItem: () => null,
-    useOrganizationInvitations: () => ({ pendingCount: 0 }),
+    OrganizationInvitationsMenuItem: ({ controller }: { controller: { pendingCount: number } }) =>
+      controller.pendingCount > 0 ? (
+        <DropdownMenuItem>Invitations{controller.pendingCount}</DropdownMenuItem>
+      ) : null,
+    useOrganizationInvitations: () => ({ pendingCount: pendingInvitations }),
   }));
 
   GlobalRegistrator.register();
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
   const { RailFooter } = await import("./rail-footer");
+  const { DropdownMenuItem } = await import("@/components/ui/dropdown-menu");
 
   async function renderOpenAccountMenu(config: RailFooterMenuConfig): Promise<() => Promise<void>> {
     footer = config;
+    pendingInvitations = config.pendingInvitations ?? 0;
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -100,6 +116,22 @@ export async function loadRailFooterMenuHarness() {
     );
   }
 
+  /** Opens the submenu whose trigger reads `name` (keyboard, as a user would) and lists its rows. */
+  async function openSubmenu(name: string): Promise<string[]> {
+    const trigger = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[data-slot="dropdown-menu-sub-trigger"]'),
+    ).find((element) => element.textContent?.includes(name));
+    if (!trigger) throw new Error(`Missing submenu ${name}`);
+    await act(async () => {
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowRight" }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const menus = document.body.querySelectorAll<HTMLElement>('[role="menu"]');
+    const sub = menus[menus.length - 1];
+    return Array.from(sub?.children ?? []).map((child) => child.textContent?.trim() ?? "");
+  }
+
   function expectNoAdjacentSeparators(sequence: string[]) {
     sequence.forEach((entry, index) => {
       if (entry === "|") expect(sequence[index + 1]).not.toBe("|");
@@ -111,5 +143,5 @@ export async function loadRailFooterMenuHarness() {
     GlobalRegistrator.unregister();
   }
 
-  return { renderOpenAccountMenu, menuSequence, expectNoAdjacentSeparators, teardown };
+  return { renderOpenAccountMenu, menuSequence, openSubmenu, expectNoAdjacentSeparators, teardown };
 }

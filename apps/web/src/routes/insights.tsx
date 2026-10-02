@@ -1,6 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { XIcon } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 
 import { AreaChart, UsageMeter } from "@/components/insights/charts";
@@ -41,13 +42,16 @@ import {
   type InsightsSearch,
 } from "@/components/insights/search";
 import { Button } from "@/components/ui/button";
+import { BackLink } from "@/components/ui/detail-page";
 import { ContentPage, DataScroller } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import type { ReturnTo } from "@/lib/return-to";
 import { cn } from "@/lib/utils";
 
 function inputSeriesHeading(seriesLabel: string, subject: string): string {
@@ -122,13 +126,17 @@ export function InsightsRoute({
   workspaceId,
   search,
   onSearchChange,
+  returnTo,
 }: {
   workspaceId: string;
   search?: Record<string, unknown>;
   /** Filter changes push history; `replace` only normalizes an invalid URL. */
   onSearchChange?: (next: InsightsSearch, options?: { replace?: boolean }) => void;
+  /** Where a cross-scope link came from ("Billing & usage"); the back link returns there. */
+  returnTo?: ReturnTo | undefined;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const workspace = context.workspaces.find((w) => w.id === workspaceId);
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
   const reduceMotion = useReducedMotion();
@@ -148,7 +156,7 @@ export function InsightsRoute({
   const [floorFilter, setFloorFilter] = useState<"all" | "active">("all");
   const [snapshot, setSnapshot] = useState<WorkspaceInsightsSnapshot | null>(null);
   const [loadedFilters, setLoadedFilters] = useState<InsightsFilters>(filters);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
   const [scopeLabels, setScopeLabels] = useState<Record<string, string>>({});
@@ -192,7 +200,7 @@ export function InsightsRoute({
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setLoadError(error instanceof Error ? error.message : String(error));
+        setLoadError(error);
         setLoading(false);
       });
     return () => {
@@ -279,35 +287,44 @@ export function InsightsRoute({
   });
 
   const heading = (
-    <PageHeader
-      title="Insights"
-      description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
-    />
+    <div className="min-w-0">
+      {returnTo ? (
+        <BackLink
+          back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
+        />
+      ) : null}
+      <PageHeader
+        title="Insights"
+        description={`Usage and activity in ${workspace?.name ?? "this workspace"}.`}
+      />
+    </div>
   );
 
   if (!canRead || (loadError && !snapshot)) {
+    // A refusal from the server reads like missing access: no red, no Try again.
+    const failed = canRead && !isPermissionDenied(loadError);
     return (
       <ContentPage width="wide" data-insights className="gap-6">
         {heading}
         <div role="alert">
           <Notice
-            tone={canRead ? "failed" : "muted"}
-            title={canRead ? "Insights couldn't load" : "Workspace access required"}
+            tone={failed ? "failed" : "muted"}
+            title={failed ? "Insights couldn't load" : "Workspace access required"}
             action={
-              canRead ? (
+              failed ? (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
                   onClick={() => setRetry((value) => value + 1)}
                 >
-                  Retry
+                  Try again
                 </Button>
               ) : undefined
             }
           >
-            {canRead
-              ? `Try again to load workspace usage. ${loadError}`
+            {failed
+              ? apiErrorAdvice(loadError)
               : "Workspace admin permission is required to view Insights."}
           </Notice>
         </div>
@@ -467,11 +484,11 @@ export function InsightsRoute({
                 variant="outline"
                 onClick={() => setRetry((value) => value + 1)}
               >
-                Retry
+                Try again
               </Button>
             }
           >
-            Showing the last successful selection. {loadError}
+            Showing the last successful selection. {userErrorText(loadError)}
           </Notice>
         </div>
       ) : null}

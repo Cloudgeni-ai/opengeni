@@ -1,9 +1,16 @@
+import { measureMcpPhase } from "@opengeni/observability";
+import { createMcpTransportLogger } from "./mcp-transport-logger";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
+import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
+import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
+export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
@@ -95,6 +102,9 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  resolveAgentToolFamilies,
+  resolveAgentMediaToolSurface,
+  type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
   type AttemptToolResult as AttemptToolResultValue,
@@ -262,6 +272,33 @@ import { z } from "zod";
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
+  composeModularAgentInstructions,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptResources,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
+export {
+  AGENT_PROMPT_MODULES,
+  DEFAULT_AGENT_IDENTITY,
+  INSTRUCTION_PRECEDENCE,
+  SESSION_INSTRUCTIONS_PREAMBLE,
+  composeModularAgentInstructions,
+  composeOperationalContract,
+  identityFromLegacyTemplate,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptContext,
+  type AgentPromptResources,
+  type ComposeModularAgentInstructionsInput,
+  type ModularInstructionLayer,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
+import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionSummaryOutputTokens,
@@ -274,7 +311,10 @@ import {
 import {
   createSandboxClient,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
+  renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setOpenSandboxApplyDiff,
@@ -363,10 +403,13 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelRequestCapture,
+  withModelCallLifecycle,
+  type ModelCallLifecycle,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
+export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,
@@ -452,6 +495,7 @@ export {
   MultiProviderModelProvider,
   OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  ResponsesStreamingTerminalError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
@@ -1028,13 +1072,20 @@ export async function generateSessionTitle(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
-  const response = binding
-    ? await new CompactionResponsesModel(
-        binding.client,
-        binding.modelId,
-        binding.provider,
-      ).fetchResponse(request)
-    : await options.model!.getResponse(request);
+  const response =
+    binding?.provider.api === "anthropic-messages"
+      ? await new AnthropicMessagesModel(
+          binding.provider,
+          binding.modelId,
+          instrumentedModelFetch(binding.provider.id, globalThis.fetch),
+        ).getResponse(request)
+      : binding
+        ? await new CompactionResponsesModel(
+            binding.client,
+            binding.modelId,
+            binding.provider,
+          ).fetchResponse(request)
+        : await options.model!.getResponse(request);
   return {
     title: normalizeGeneratedSessionTitle(
       extractResponseOutputText(response),
@@ -1091,7 +1142,10 @@ async function generateChatSessionTitle(
  */
 function responseStoppedAtOutputLimit(response: unknown): boolean {
   if (!response || typeof response !== "object") return false;
-  return (response as { status?: unknown }).status === "incomplete";
+  return (
+    (response as { status?: unknown }).status === "incomplete" ||
+    (response as ModelResponse).providerData?.anthropic?.stopReason === "max_tokens"
+  );
 }
 
 const INLINE_REASONING_CLOSE_TAG = /<\/(?:think|thinking|reasoning)>/giu;
@@ -1268,7 +1322,14 @@ export async function summarizeForCompaction(
       };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+    response =
+      provider.api === "anthropic-messages"
+        ? await new AnthropicMessagesModel(
+            provider,
+            model,
+            instrumentedModelFetch(provider.id, globalThis.fetch),
+          ).getResponse(request)
+        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1276,7 +1337,10 @@ export async function summarizeForCompaction(
   if (usage) {
     await options.onUsage?.(usage);
   }
-  if (isFailedCompactionProviderResponse(response)) {
+  if (
+    (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
+    isFailedCompactionProviderResponse(response)
+  ) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
   }
   const summary = extractResponseOutputText(response).trim();
@@ -1969,6 +2033,8 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Durable router use survives capability and tool-policy changes. */
+  toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2186,6 +2252,24 @@ export type BuildAgentOptions = {
    * metadata no longer enters the prompt-cache-critical system instructions.
    */
   persistentSessionSettings?: PersistentSessionSettings;
+  /**
+   * The session's frozen agent configuration. Absent or null keeps the legacy
+   * instructions byte-for-byte and the historical tool/provider request surface;
+   * a configuration selects the modular composer (identity, base behavior,
+   * runtime mechanics, capability modules) and gates tool families.
+   */
+  agentConfig?: ResolvedAgentConfig | null;
+  /**
+   * Modular composer only: the workspace identity tier (explicit workspace
+   * default identity, else the legacy `agentInstructions` persona). Unlike
+   * `instructionsTemplate`, workspace governance never drops it.
+   */
+  workspaceAgentIdentity?: string;
+  /**
+   * Modular composer only: resource facts for module selection. Derived from
+   * the build resources and options when omitted.
+   */
+  agentPromptResources?: AgentPromptResources;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -2222,62 +2306,10 @@ export type BuildAgentOptions = {
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
-/**
- * Operator-facing metadata for the workspace environment attached to a run.
- * Surfaced verbatim in the agent instructions: the description is where
- * operators document how the exported credentials are meant to be used
- * (e.g. which variable holds a deploy key and how to clone with it), so an
- * agent must not have to rediscover that by enumerating `env` and guessing.
- * Only metadata belongs here — never variable values.
- */
-export type WorkspaceEnvironmentContext = {
-  name: string;
-  description?: string | null;
-  variableNames?: string[];
-};
-
 /** @deprecated Persistent display metadata is no longer model-visible. */
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
-
-/**
- * The rig a session rides (M3): its name + the active version pinned onto the
- * session. Surfaced verbatim in the non-bypassable CORE instructions so the
- * agent understands its sandbox is a disposable fork of a shared, versioned
- * machine definition and how to promote a durable change. Absent for rig-less
- * sessions (the block never renders).
- */
-export type RigInstructionsContext = {
-  name: string;
-  version: number;
-};
-
-export function rigInstructions(rig: RigInstructionsContext): string[] {
-  return [
-    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
-    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
-    "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
-    "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
-  ];
-}
-
-export function workspaceEnvironmentInstructions(
-  environment: WorkspaceEnvironmentContext,
-): string[] {
-  const lines = [
-    `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
-  ];
-  const variableNames = (environment.variableNames ?? []).filter((name) => name.length > 0);
-  if (variableNames.length > 0) {
-    lines.push(`Exported environment variables: ${[...variableNames].sort().join(", ")}.`);
-  }
-  const description = environment.description?.trim();
-  if (description) {
-    lines.push(`Environment notes from the operator: ${description}`);
-  }
-  return lines;
-}
 
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
@@ -2296,6 +2328,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
+    "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
     'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
     "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
@@ -2376,10 +2409,84 @@ function gitBindingDiscoveryApplies(
   return [...bindingsByProvider.values()].some((ids) => ids.size > 1);
 }
 
+/**
+ * Resource facts for modular module selection. Every input is a session- or
+ * turn-level fact, so the composed prefix changes only when they change.
+ */
+export function agentPromptResourcesFor(
+  settings: Settings,
+  resources: readonly ResourceRef[],
+  options: Pick<
+    BuildAgentOptions,
+    | "activeSandboxBackend"
+    | "fileResourceDownloads"
+    | "gitCredentialBindings"
+    | "gitTokenSeed"
+    | "gitTokenSeeds"
+    | "workspaceEnvironment"
+    | "rig"
+  >,
+): AgentPromptResources {
+  const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const connectedMachine = backend === "selfhosted";
+  const managedSandbox = backend !== "none" && !connectedMachine;
+  const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
+  return {
+    managedSandbox,
+    connectedMachine,
+    // A Connected Machine never receives platform clones.
+    repositories: managedSandbox && resources.some((resource) => resource.kind === "repository"),
+    gitCredentials:
+      managedSandbox &&
+      (Boolean(options.gitTokenSeed) ||
+        gitTokenSeeds.length > 0 ||
+        (options.gitCredentialBindings?.length ?? 0) > 0),
+    attachments:
+      (managedSandbox || connectedMachine) &&
+      (resources.some((resource) => resource.kind === "file") ||
+        (options.fileResourceDownloads?.length ?? 0) > 0),
+    ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
+    ...(options.rig ? { rig: options.rig } : {}),
+  };
+}
+
+function inspectModularAgentInstructions(
+  settings: Settings,
+  config: ResolvedAgentConfig,
+  options: BuildAgentOptions,
+): PersistentAgentInstructionInspection {
+  const identity = resolveAgentIdentity({
+    sessionIdentity: config.identity,
+    workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
+    deploymentTemplate: settings.agentInstructionsTemplate,
+  });
+  const composed = composeModularAgentInstructions({
+    capabilities: config.capabilities,
+    renderer: config.renderer,
+    identity,
+    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
+    ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
+      ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
+      : {}),
+    ...(options.skillCatalog && !options.skillCatalogInHistory
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+      : {}),
+    workspaceGovernance: options.workspaceGovernance,
+    workspaceMemory: options.workspaceMemory,
+    sessionInstructions: options.sessionInstructions,
+  });
+  return { layers: composed.layers, composed: composed.composed };
+}
+
 export function inspectPersistentAgentInstructions(
   settings: Settings,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  if (options.agentConfig) {
+    return inspectModularAgentInstructions(settings, options.agentConfig, options);
+  }
   const personaAndCore = composeAgentInstructions(
     options.instructionsTemplate ?? settings.agentInstructionsTemplate,
     options.workspaceEnvironment,
@@ -2653,6 +2760,10 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (resolveAgentToolFamilies(options.agentConfig).skills === false) {
+    const { skillActivations: _disabledActivations, ...withoutSkills } = options;
+    options = { ...withoutSkills, skillCatalog: [] };
+  }
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   }
@@ -2686,12 +2797,24 @@ export function buildOpenGeniAgent(
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+    ...(options.agentConfig && !options.agentPromptResources
+      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
   // resolved provider's api/window/web-search instead.
-  const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
+  const toolFamilies = resolveAgentToolFamilies(options.agentConfig, {
+    hasSkills: (skillCatalog?.length ?? 0) > 0,
+    webSearch: options.hostedWebSearch ?? settings.webSearchEnabled,
+    humanInput: options.humanInputEnabled !== false,
+  });
+  const hostedWebSearch = toolFamilies.webSearch;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image: options.imageGeneration?.kind ?? null,
+    video: Boolean(options.videoGeneration),
+  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -2713,28 +2836,29 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
-  if (options.imageGeneration?.kind === "native_hosted") {
+  if (mediaTools.hosted.includes("image_generation")) {
     hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
   }
-  const providerImageGenerationTool =
-    options.imageGeneration?.kind === "provider_adapter"
-      ? agentTool({
-          name: "generate_image",
-          description:
-            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
-          parameters: GenerateImageToolInput,
-          errorFunction: null,
-          execute: async (input, _context, details) => {
-            const toolCallId = details?.toolCall?.callId;
-            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
-            if (options.imageGeneration?.kind !== "provider_adapter") {
-              throw new Error("Image-generation adapter changed during execution");
-            }
-            return await options.imageGeneration.execute(input, { toolCallId });
-          },
-        })
-      : null;
-  const videoGenerationCapabilityTool = options.videoGeneration
+  const providerImageGenerationTool = mediaTools.runtime.includes("generate_image")
+    ? agentTool({
+        name: "generate_image",
+        description:
+          "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
+        parameters: GenerateImageToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+          if (options.imageGeneration?.kind !== "provider_adapter") {
+            throw new Error("Image-generation adapter changed during execution");
+          }
+          return await options.imageGeneration.execute(input, { toolCallId });
+        },
+      })
+    : null;
+  const videoGenerationCapabilityTool = mediaTools.runtime.includes(
+    "get_video_generation_capabilities",
+  )
     ? agentTool({
         name: "get_video_generation_capabilities",
         description:
@@ -2748,7 +2872,7 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
-  const videoGenerationTool = options.videoGeneration
+  const videoGenerationTool = mediaTools.runtime.includes("generate_video")
     ? agentTool({
         name: "generate_video",
         description:
@@ -2764,54 +2888,53 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
-  const humanInputTool =
-    options.humanInputEnabled === false
-      ? null
-      : agentTool({
-          name: HUMAN_INPUT_TOOL_NAME,
-          description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
-          parameters: RequestHumanInputToolInput,
-          needsApproval: true,
-          inputGuardrails: [
-            {
-              name: "validate_human_input_request",
-              run: async ({ toolCall }) => {
-                let input: unknown;
-                try {
-                  input = JSON.parse(toolCall.arguments);
-                } catch {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                  );
-                }
-                if (!RequestHumanInputToolInput.safeParse(input).success) {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                  );
-                }
-                return ToolGuardrailFunctionOutputFactory.allow();
-              },
+  const humanInputTool = !toolFamilies.humanInput
+    ? null
+    : agentTool({
+        name: HUMAN_INPUT_TOOL_NAME,
+        description:
+          "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
+        parameters: RequestHumanInputToolInput,
+        needsApproval: true,
+        inputGuardrails: [
+          {
+            name: "validate_human_input_request",
+            run: async ({ toolCall }) => {
+              let input: unknown;
+              try {
+                input = JSON.parse(toolCall.arguments);
+              } catch {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                );
+              }
+              if (!RequestHumanInputToolInput.safeParse(input).success) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                );
+              }
+              return ToolGuardrailFunctionOutputFactory.allow();
             },
-          ],
-          // A missing/mismatched durable response is a protocol integrity failure,
-          // not model-visible tool output the agent may reason past.
-          errorFunction: null,
-          execute: (_input, _context, details) => {
-            const settled = options.humanInputResponse;
-            if (!settled) {
-              throw new Error("Human-input tool resumed without a durable response");
-            }
-            const resumedCallId = details?.toolCall?.callId;
-            if (resumedCallId && resumedCallId !== settled.toolCallId) {
-              throw new Error("Human-input response does not belong to the resumed tool call");
-            }
-            return JSON.stringify({
-              requestId: settled.requestId,
-              ...settled.response,
-            });
           },
-        });
+        ],
+        // A missing/mismatched durable response is a protocol integrity failure,
+        // not model-visible tool output the agent may reason past.
+        errorFunction: null,
+        execute: (_input, _context, details) => {
+          const settled = options.humanInputResponse;
+          if (!settled) {
+            throw new Error("Human-input tool resumed without a durable response");
+          }
+          const resumedCallId = details?.toolCall?.callId;
+          if (resumedCallId && resumedCallId !== settled.toolCallId) {
+            throw new Error("Human-input response does not belong to the resumed tool call");
+          }
+          return JSON.stringify({
+            requestId: settled.requestId,
+            ...settled.response,
+          });
+        },
+      });
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -2820,7 +2943,9 @@ export function buildOpenGeniAgent(
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const embeddedSkillReadTool =
-    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+    toolFamilies.allowsFunctionTool("skill_read") &&
+    !hostSuppliedSkillCatalog &&
+    skillComposition.artifacts.length > 0
       ? agentTool({
           name: "skill_read",
           description:
@@ -3081,11 +3206,13 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport = options.lazyToolTransport;
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
   if (!transport) return;
   const enabled =
     transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled) return;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -3115,6 +3242,8 @@ function maybeInstallLazyToolTransport(
       }
       return identities;
     },
+    options.agentConfig != null,
+    options.toolRouterInHistory === true,
   );
 }
 
@@ -3846,7 +3975,19 @@ function buildAgentCapabilitiesFromComposition(
       // Preserve that behavior except for client-side, pre-dispatch Modal
       // readiness proof, which reaches bounded same-turn recovery.
       execCommandErrorFunction: (_context, error) => {
+        if (isProviderCommandObservationUnavailableError(error)) {
+          return "Managed sandbox command observation unavailable. Outcome unknown. Do not replay the command or resend stdin; observe the existing invocation.";
+        }
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        if (isRoutingMutationOutcomeUnknownError(error)) {
+          // The outer physical fence must retain the exact process before
+          // rendering uncertainty. Platform/setup calls still throw normally.
+          if (toolCancellation) throw error;
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        }
+        if (isModalCommandStartOutcomeUnknownError(error)) {
+          return "Managed sandbox command start outcome unknown. The command may have executed. Do not blindly retry it; inspect the existing sandbox state before taking further action.";
+        }
         const details = error instanceof Error ? error.toString() : String(error);
         return `An error occurred while running the tool. Please try again. Error: ${details}`;
       },
@@ -3983,12 +4124,18 @@ export type PrepareToolsOptions = {
   executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
+  /** Trusted immutable setup ceiling from the accepted execution policy. */
+  credentialRestriction?: "developer_setup";
   // Immutable human authority used only for subject-owned connection lookup.
   // This is intentionally separate from the worker's first-party MCP identity.
   credentialSubjectId?: string;
-  // The turn's frozen causal human, advertised to MCP servers in the
-  // `_meta.opengeni` identity of every tools/call. Informational, never authority.
+  // The turn's frozen causal human. Informational, never authority.
   initiatingHumanSubjectId?: string | null;
+  initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
+  /** Trusted selected session-attached remote identities, never workspace defaults. */
+  sessionAttachedRemoteMcpTargets?: readonly { id: string; url: string }[];
+  /** Renewable, attempt-local headers; never copied into the MCP registry. */
+  runMcpCredentials?: RunMcpCredentials;
   // Overrides the fixed first-party MCP permission set for this session's
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
@@ -4337,6 +4484,23 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  const identityTargets = selectedSessionRemoteMcpTargets(
+    settings,
+    options.sessionAttachedRemoteMcpTargets ?? [],
+    tools,
+    options.localMcpServers,
+  );
+  options = { ...options, sessionAttachedRemoteMcpTargets: identityTargets };
+  options.runMcpCredentials?.assertRemoteTargets(
+    settings.mcpServers.filter(
+      (config) =>
+        tools.some((tool) => tool.id === config.id) &&
+        !config.connectionRef &&
+        !localRegistry.has(config.id) &&
+        !isFirstPartyMcpServer(settings, config) &&
+        !isCodexAppsMcpServer(config),
+    ),
+  );
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // Codex Apps retains its sanitizer-specific Bun fetch path. Ordinary MCP
   // traffic uses @opengeni/network's explicit undici.request() adapter under
@@ -4407,7 +4571,7 @@ export async function prepareAgentTools(
         const baseFetch = isCodexAppsMcpServer(config)
           ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
           : mcpFetchImpl;
-        const guardedFetch = guardedMcpFetch(
+        const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
@@ -4419,6 +4583,34 @@ export async function prepareAgentTools(
                 : {}),
           },
         );
+        const guardedFetch: typeof guardedTransport = async (input, init) => {
+          const requestInit = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          let response: Response;
+          try {
+            response = await guardedTransport(input, requestInit);
+          } catch (error) {
+            if (!options.runMcpCredentials?.has(config.id)) throw error;
+            // Transport failures may echo request headers in their message or
+            // cause chain. This exception can reach required-tool history.
+            // eslint-disable-next-line preserve-caught-error -- the raw cause can expose credentials
+            throw new Error("MCP credentialed transport request failed");
+          }
+          if (!response.ok && options.runMcpCredentials?.has(config.id)) {
+            await response.body?.cancel().catch(() => undefined);
+            return new Response("MCP credentialed transport request failed", {
+              status: response.status,
+              // Keep only the structural denial. Provider-controlled scope,
+              // resource, realm and descriptions may echo request secrets,
+              // and the broker publishes scope/resource in auth-needed events.
+              headers:
+                parseWwwAuthenticate(response.headers.get("www-authenticate")).error ===
+                "insufficient_scope"
+                  ? { "www-authenticate": 'Bearer error="insufficient_scope"' }
+                  : {},
+            });
+          }
+          return response;
+        };
         const optional = tool.optional === true;
         const fetchImpl = isCodexAppsMcpServer(config)
           ? codexAppsAuthFetch(guardedFetch, settings, options)
@@ -4511,6 +4703,7 @@ export async function prepareAgentTools(
                 }
               : {}),
           });
+        if (bridge) options.runMcpCredentials?.excludeLocalTarget(config.id);
         const server = configureMcpOperationRecovery(
           new PrefixedMcpServer(
             innerServer,
@@ -4531,6 +4724,7 @@ export async function prepareAgentTools(
               ? options.refreshOwnedCommand
               : undefined,
             options.mcpAccountLabels?.get(config.id),
+            options.runMcpCredentials,
           ),
           config,
           options,
@@ -4903,6 +5097,58 @@ function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null
   };
 }
 
+/** Narrow trusted attachments to exact selected remote routes, never ID aliases. */
+export function selectedSessionRemoteMcpTargets(
+  settings: Settings,
+  attachments: readonly { id: string; url: string }[],
+  tools: readonly ToolRef[],
+  localServers: readonly Pick<LocalMcpServerRegistration, "id">[] = [],
+): { id: string; url: string }[] {
+  return attachments.flatMap((target) => {
+    const url = normalizedCredentialTargetUrl(target.url);
+    if (
+      !url ||
+      !tools.some((tool) => tool.kind === "mcp" && tool.id === target.id) ||
+      localServers.some((server) => server.id === target.id)
+    ) {
+      return [];
+    }
+    const configs = settings.mcpServers.filter(
+      (config) => config.id === target.id && normalizedCredentialTargetUrl(config.url) === url,
+    );
+    if (configs.length !== 1) return [];
+    const config = configs[0]!;
+    if (
+      config.connectionRef ||
+      isFirstPartyMcpServer(settings, config) ||
+      isCodexAppsMcpServer(config) ||
+      BUILT_IN_MCP_BRIDGE_ADAPTERS.some((adapter) =>
+        adapter.matches({
+          url: config.url,
+          ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
+        }),
+      )
+    ) {
+      return [];
+    }
+    if (
+      attachments.filter((candidate) => normalizedCredentialTargetUrl(candidate.url) === url)
+        .length !== 1
+    ) {
+      return [];
+    }
+    return [{ id: target.id, url }];
+  });
+}
+
+function normalizedCredentialTargetUrl(value: string): string | null {
+  try {
+    return normalizeCredentialProviderMcpUrl(value);
+  } catch {
+    return null;
+  }
+}
+
 async function prepareAttemptToolEnvironment(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
@@ -4911,13 +5157,20 @@ async function prepareAttemptToolEnvironment(
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
-  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry, {
-    workspaceId: scope.workspaceId,
-    sessionId: scope.sessionId,
-    turnId: scope.turnId,
-    attemptId: scope.attemptId,
-    initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
-  });
+  const prepared = await prepareToolGatewayDefinitionsFromServers(
+    servers,
+    registry,
+    {
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      attemptId: scope.attemptId,
+      initiatingHumanSubjectId: options.initiatingHumanSubjectId ?? null,
+      initiatingHumanExternalIdentity: options.initiatingHumanExternalIdentity ?? null,
+    },
+    options.sessionAttachedRemoteMcpTargets,
+    options.runMcpCredentials,
+  );
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
       ...prepared.definitions.map((definition) => ({
@@ -5169,12 +5422,15 @@ export type McpCallIdentity = {
   turnId: string;
   attemptId: string;
   initiatingHumanSubjectId: string | null;
+  initiatingHumanExternalIdentity?: { source: string; externalId: string } | null;
 };
 
 async function prepareToolGatewayDefinitionsFromServers(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   callIdentity?: McpCallIdentity,
+  externalIdentityTargets: readonly { id: string; url: string }[] = [],
+  runMcpCredentials?: RunMcpCredentials,
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: ToolGatewayDefinition[];
@@ -5193,6 +5449,29 @@ async function prepareToolGatewayDefinitionsFromServers(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
     async ({ server, config }): Promise<ToolGatewayDefinition[]> => {
+      const internalIdentity = callIdentity ? { ...callIdentity } : undefined;
+      if (internalIdentity) delete internalIdentity.initiatingHumanExternalIdentity;
+      const serverIdentity = callIdentity
+        ? {
+            workspaceId: callIdentity.workspaceId,
+            sessionId: callIdentity.sessionId,
+            turnId: callIdentity.turnId,
+            attemptId: callIdentity.attemptId,
+            initiatingHumanSubjectId: callIdentity.initiatingHumanSubjectId,
+            ...internalIdentity,
+            ...(externalIdentityTargets.some(
+              (target) =>
+                target.id === config.id &&
+                normalizedCredentialTargetUrl(target.url) ===
+                  normalizedCredentialTargetUrl(config.url),
+            )
+              ? {
+                  initiatingHumanExternalIdentity:
+                    callIdentity.initiatingHumanExternalIdentity ?? null,
+                }
+              : {}),
+          }
+        : undefined;
       const listed = await server.freezeTools();
       return listed.map((tool) => {
         const toolName = server.unprefixedToolName(tool.name);
@@ -5229,11 +5508,20 @@ async function prepareToolGatewayDefinitionsFromServers(
               }
             : {}),
           execute: async (args, context) => {
+            try {
+              runMcpCredentials?.assertAvailable(config.id);
+            } catch (error) {
+              if (!isRunMcpCredentialError(error)) throw error;
+              return {
+                isError: true,
+                content: [{ type: "text", text: error.message }],
+              };
+            }
             const execute = async () =>
               await server.executeCatalogTool(
                 toolName,
                 args,
-                attemptToolCallMeta(server.registryId, context, callIdentity),
+                attemptToolCallMeta(server.registryId, context, serverIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                 },
@@ -5290,7 +5578,13 @@ export function attemptToolCallMeta(
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
-    ...(callIdentity ? { opengeni: { ...callIdentity } } : {}),
+    ...(callIdentity
+      ? {
+          opengeni: Object.fromEntries(
+            Object.entries(callIdentity).filter(([, value]) => value !== undefined),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -5562,7 +5856,11 @@ async function authorizeResolvedProviderRequest(
   result: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
 ): Promise<boolean> {
   try {
-    return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+    return await measureMcpPhase(
+      "provider_authorization",
+      () => (result.authorizeProviderRequest ? result.authorizeProviderRequest() : true),
+      (allowed) => (allowed ? "completed" : "rejected"),
+    );
   } catch {
     return false;
   }
@@ -5655,7 +5953,11 @@ async function resolveConnectionForRequest(
     ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
   };
   try {
-    return await options.resolveCredential(request);
+    return await measureMcpPhase(
+      "credential_resolution",
+      () => options.resolveCredential!(request),
+      (result) => (result.status === "ok" ? "completed" : "rejected"),
+    );
   } catch {
     return {
       status: "auth_needed",
@@ -6126,6 +6428,7 @@ type McpPublicErrorFields = {
 };
 
 type McpPublicFailureCode =
+  | "mcp_cleanup_failed"
   | "mcp_connect_failed"
   | "mcp_close_failed"
   | "mcp_transport_failed"
@@ -6486,27 +6789,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
 }
 
 function mcpTransportLogger(serverId: string) {
-  const logFailure = (_message: string, ...args: unknown[]) => {
-    let error: unknown;
-    for (let index = args.length - 1; index >= 0; index -= 1) {
-      if (args[index] instanceof Error) {
-        error = args[index];
-        break;
-      }
-    }
-    console.warn(
-      "[mcp] transport operation failed",
-      mcpErrorFields(error, "mcp_transport_failed", serverId),
-    );
-  };
-  return {
-    namespace: "opengeni:mcp-transport",
-    debug: () => undefined,
-    error: logFailure,
-    warn: logFailure,
-    dontLogModelData: true,
-    dontLogToolData: true,
-  };
+  return createMcpTransportLogger(serverId, mcpErrorFields);
 }
 
 async function mcpServerRequestInit(
@@ -6594,6 +6877,9 @@ async function signFirstPartyDelegatedBearer(
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
+    ...(options.credentialRestriction
+      ? { credentialRestriction: options.credentialRestriction }
+      : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -7191,6 +7477,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
     private readonly accountLabel?: string,
+    private readonly runMcpCredentials?: RunMcpCredentials,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -7226,7 +7513,7 @@ export class PrefixedMcpServer implements MCPServer {
       if (this.inner instanceof PrefixedMcpServer) {
         await this.inner.connectWithLifecycleMetric(false);
       } else {
-        await this.inner.connect();
+        await measureMcpPhase("client_setup", () => this.inner.connect());
       }
       delete this.lifecycleFailures.connect;
     } catch (error) {
@@ -7518,6 +7805,7 @@ export class PrefixedMcpServer implements MCPServer {
     const completeWait =
       unprefixed === "wait_for_input" ? this.inputWaitYield?.beginWait() : undefined;
     try {
+      this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         const projected = this.inner.callToolResult
           ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
@@ -7570,6 +7858,13 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      if (isRunMcpCredentialError(error)) {
+        recordOutcome("auth_needed");
+        return boundedMcpToolResult({
+          isError: true,
+          content: [{ type: "text", text: error.message }],
+        });
+      }
       // A brokered tools/call that receives 401 may already have changed provider
       // state. The broker refreshed credentials for future requests but did not
       // replay this call. Preserve that ambiguity as an explicit model-visible
@@ -7858,6 +8153,10 @@ export async function prepareRunInput(
 }
 
 export type RunAgentStreamOptions = {
+  /** Producer-side gate before calling any resolved model/provider. */
+  beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
+  /** Register terminal response settlement before the next producer model request. */
+  onModelResponse?: ModelCallLifecycle["onModelResponse"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -8069,6 +8368,8 @@ function bindModelVisibleContextCapture(
         body,
         ...(unavailableReason ? { unavailableReason } : {}),
         requestIndex: index ?? nextModelContextCaptureIndex(agent),
+        persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
+        genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
       }),
     );
   };
@@ -8101,8 +8402,17 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
-    const stream = await withPreparedCompactionRequest(agent, () =>
-      runAgentStreamInternal(agent, input, settings, overrides, scope),
+    const stream = await withModelCallLifecycle(
+      {
+        ...(overrides.beforeModelRequest
+          ? { beforeModelRequest: overrides.beforeModelRequest }
+          : {}),
+        ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+      },
+      () =>
+        withPreparedCompactionRequest(agent, () =>
+          runAgentStreamInternal(agent, input, settings, overrides, scope),
+        ),
     );
     // Observe the SDK's own settlement promise before exposing the stream. Do
     // not wrap/replace SDK history, errors, cancellation, or stream iteration.
@@ -10104,6 +10414,9 @@ export function repositoryUsesSandboxClone(
     return false;
   }
   return (
+    // Unbound repositories must wait until run credentials have been delivered.
+    // Manifest Git entries materialize before that helper is available.
+    !repositoryHasExplicitGitConnection(resource) ||
     // A best-effort repository must go through the clone hook: the SDK's
     // manifest materialization has no per-entry failure tolerance.
     resource.optional === true ||
@@ -10111,6 +10424,18 @@ export function repositoryUsesSandboxClone(
     Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
     Boolean(resource.provider)
+  );
+}
+
+/** An explicit platform selection never falls back to product Git credentials. */
+export function repositoryHasExplicitGitConnection(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): boolean {
+  return (
+    resource.connectionId !== undefined ||
+    resource.credentialBindingId !== undefined ||
+    resource.connectionType !== undefined ||
+    resource.githubInstallationId !== undefined
   );
 }
 
@@ -10455,6 +10780,11 @@ function gitCredentialHelperBindingCaseLines(
   bindings: GitCredentialBindingSeed[],
 ): string[] {
   const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  const providerStoreRemotes = new Set(
+    resources
+      .filter((resource) => !repositoryHasExplicitGitConnection(resource))
+      .map((resource) => resource.uri),
+  );
   return runtimeGitBindingDescriptors(resources)
     .filter(
       (descriptor) =>
@@ -10466,7 +10796,7 @@ function gitCredentialHelperBindingCaseLines(
       const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
-          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) ${providerStoreRemotes.has(descriptor.uri) ? '[ -z "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ] || exit 0; ' : ""}username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
       );
     });
 }
@@ -10684,6 +11014,14 @@ function gitCredentialHelperCommandLines(
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );
   });
+  const providerStoreOriginHosts = runtimeGitBindingDescriptors(
+    resources.filter((resource) => !repositoryHasExplicitGitConnection(resource)),
+  ).flatMap((item) =>
+    gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
+      (uri) =>
+        `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.host)}; return 0 ;;`,
+    ),
+  );
   const soleWrapperHashes = [...bindingProviders.entries()].flatMap(([provider, ids]) => {
     if (ids.size !== 1) return [];
     const descriptor = wrapperDescriptors.find((item) => item.provider === provider);
@@ -10870,6 +11208,12 @@ function gitCredentialHelperCommandLines(
     "    *) return 1 ;;",
     "  esac",
     "}",
+    "provider_store_host_for_origin() {",
+    '  case "$provider|$1" in',
+    ...providerStoreOriginHosts,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
     `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
     'if [ -n "$provider" ]; then',
@@ -10898,8 +11242,19 @@ function gitCredentialHelperCommandLines(
     '      *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
     "    esac",
     "  fi",
-    '  if [ -f "$token_file" ]; then',
+    "  token=",
+    '  provider_store_host="$(provider_store_host_for_origin "${origin:-}" 2>/dev/null || true)"',
+    '  if [ -z "${OPENGENI_GIT_BINDING:-}" ] && [ -n "$provider_store_host" ] && [ -r "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+    '    provider_credential="$(printf \'protocol=https\\nhost=%s\\n\\n\' "$provider_store_host" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get)"',
+    '    while IFS="=" read -r key value; do',
+    '      if [ "$key" = password ]; then token="$value"; fi',
+    "    done <<PROVIDER_CREDENTIAL_EOF",
+    "$provider_credential",
+    "PROVIDER_CREDENTIAL_EOF",
+    "    unset provider_credential",
+    '  elif [ -f "$token_file" ]; then',
     '    token="$(cat "$token_file" 2>/dev/null || true)"',
+    "  fi",
     '    if [ -n "$token" ]; then',
     '      case "$token_env" in',
     '        GH_TOKEN) export GH_TOKEN="$token" ;;',
@@ -10912,7 +11267,6 @@ function gitCredentialHelperCommandLines(
     '        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
     "      esac",
     "    fi",
-    "  fi",
     "fi",
     'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
     'old_ifs="$IFS"',
@@ -11050,6 +11404,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  ref="$3"',
   '  subpath="$4"',
   '  expected_commit="${5:-}"',
+  // Command-only helper selection: neither the credential nor its helper is
+  // persisted in .git/config. The run-credential wrapper supplies the current
+  // provider store path before this command starts; Git performs exact-host
+  // matching in that store. No matching entry means an anonymous fetch.
+  '  repository_credential_source="${6:-connection}"',
+  "  repository_git() {",
+  '    if [ "$repository_credential_source" = provider ]; then',
+  '      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= command git -c credential.helper= -c \'credential.helper=!f() { test "$1" = get && test -n "$OPENGENI_GIT_CREDENTIALS_FILE" && sed "/^path=/d" | git credential-store --file="$OPENGENI_GIT_CREDENTIALS_FILE" get; }; f\' "$@"',
+  '    elif [ -n "${OPENGENI_GIT_CREDENTIALS_FILE:-}" ]; then',
+  // Reset the provider's GIT_CONFIG_* helper for this explicit connection,
+  // leaving its platform binding, broker route and askpass behavior intact.
+  '      command git -c credential.helper= -c credential.helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper" "$@"',
+  "    else",
+  '      command git "$@"',
+  "    fi",
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
@@ -11058,8 +11428,8 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
   // the mount path before the repo exists). Subpath extracts are not git repos —
   // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
   '        echo "Repository resource already present at $target"',
   "        return 0",
   "      fi",
@@ -11073,7 +11443,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '  rm -rf "$tmp"',
   // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
   // (set -eu would exit before any cleanup).
-  '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
+  '  if ! { repository_git init "$tmp" >/dev/null && repository_git -C "$tmp" remote add origin "$uri" && repository_git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
@@ -11084,15 +11454,15 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // remote set-head` only accepts a branch that the fetch materialized under
   // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
   // must not turn a successful fetch into a failed clone.
-  '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
-  '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+  '  if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+  '    repository_git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
   "  fi",
-  '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+  '  if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
   '    rm -rf "$tmp"',
   '    echo "Repository resource fetch failed for $target" >&2',
   "    exit 1",
   "  fi",
-  '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+  '  if [ -n "$expected_commit" ] && [ "$(repository_git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
   '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
   '    rm -rf "$tmp"',
   "    exit 1",
@@ -11119,7 +11489,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // accept it; a non-empty non-repo survivor here is a mount point the manifest
   // re-filled — install into it by content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
   '        rm -rf "$tmp"',
   '        echo "Repository resource already present at $target"',
   "        return 0",
@@ -11129,7 +11499,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   "    else",
   '      mv "$tmp" "$target"',
   "    fi",
-  '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
+  '    repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
   "  fi",
   '  if [ ! -e "$target" ]; then',
   '    echo "Repository resource was not materialized at $target" >&2',
@@ -11232,7 +11602,7 @@ export function repositoryCloneCommand(
     "start_optional_repository_clone() {",
     "  (",
     "    set +e",
-    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5"',
+    '    run_optional_repository_clone "$1" "$2" "$3" "$4" "$5" "$7"',
     "    clone_status=$?",
     '    if [ "$clone_status" -eq 124 ] || [ "$clone_status" -eq 137 ]; then',
     `      echo "${SKIPPED_OPTIONAL_REPOSITORY_PREFIX}$6 (clone did not finish in time); the session continues without it" >&2`,
@@ -11267,6 +11637,7 @@ export function repositoryCloneCommand(
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
         shellQuote(resource.expectedCommitSha ?? ""),
         ...(optional ? [shellQuote(mountPath)] : []),
+        shellQuote(repositoryHasExplicitGitConnection(resource) ? "connection" : "provider"),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
@@ -11986,3 +12357,4 @@ function sortJson(value: unknown): unknown {
 }
 
 export { createFirstPartyAttemptClient } from "./first-party-client";
+export { withClaudeUsageObserver } from "./claude-subscription-usage";

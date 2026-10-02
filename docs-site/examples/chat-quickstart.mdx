@@ -1,0 +1,44 @@
+---
+title: "Chat quickstart"
+description: "A backend-only example of the chat facade, for products that keep their own chat UI."
+icon: "message"
+---
+
+The chat quickstart is a small server that serves an OpenGeni agent through `createChatHandler` from `@opengeni/sdk/chat`. It has no frontend: connect your existing chat UI, or try it with `curl`. For the full React experience, use [`SessionConversation`](/integrate/conversation-ui) instead.
+
+## Run it
+
+You need Bun, a repository checkout, a full-access organization API key, and your organization id.
+
+An organization owner or admin must first enable **Only me chats** in the web app under **Organization settings > Security & data**. If the setting is unavailable, ask the installation operator to activate private chats. The chat facade defaults to private chats; onboarding and the chat handler do not enable this organization setting. Until enabled, requests fail closed with `OPENGENI_SETUP_REQUIRED` (`OpenGeniSetupError` in the SDK), without creating a chat or changing the setting.
+
+```bash
+git clone https://github.com/Cloudgeni-ai/opengeni.git
+cd opengeni && bun install
+cd examples/chat-quickstart
+cp .env.example .env.local   # set OPENGENI_API_KEY and OPENGENI_ORGANIZATION_ID
+bun run onboard u_42
+bun run server
+```
+
+`bun run onboard u_42` creates the demo tenant's workspace and makes the user `u_42` a member. A real product does this once, when it admits a user. It prints an operation id; after an uncertain result, retry with `bun run onboard u_42 <that id>`.
+
+Send a message:
+
+```bash
+curl -N http://127.0.0.1:4200/api/chat \
+  -H 'Content-Type: application/json' \
+  -H 'x-demo-user: u_42' \
+  -H 'x-opengeni-conversation: c_1' \
+  -d '{"message":"Hello"}'
+```
+
+This runs an agent and may use credits. `GET /api/chat` with the same headers restores history and pending decisions, and `POST /api/chat/respond` answers a pending approval or question.
+
+The `x-demo-user` header is for the demo only. A real product authenticates the user on the server and checks that they may open the conversation id.
+
+## Formats
+
+The handler streams native chat chunks by default and also speaks the Vercel UI message stream (`format: "vercel"`), OpenAI Chat Completions, and OpenAI Responses shapes. See [Keep your existing chat UI](/integrate/existing-chat-ui).
+
+[View the source on GitHub](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/chat-quickstart).

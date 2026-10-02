@@ -8,7 +8,11 @@ import {
   UpdateScheduledTaskRequest,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
+import {
+  getScheduledTaskRevisionAuthoritySubject,
+  listScheduledTaskRuns,
+  listScheduledTasks,
+} from "@opengeni/db";
 import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
@@ -27,6 +31,7 @@ import {
   resolveScheduledTaskPreflightModel,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { requireAgentConfigAdmission, scheduledTaskAgentInput } from "@opengeni/core";
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
@@ -192,6 +197,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     const payload = parsedPayload.data;
+    requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -327,6 +333,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     const payload = parsedPayload.data;
+    requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -437,11 +444,22 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         agentConfig: task.agentConfig,
         requireOnline: true,
       });
+      const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+      });
       await requireLimit(
         { ...deps, settings: catalogSettings },
         {
           accountId: grant.accountId,
           workspaceId,
+          // A manual trigger does not transfer the task's frozen human to
+          // the triggering administrator. Unavailable authority is refused
+          // visibly by worker dispatch; this edge still checks the workspace.
+          initiatingHumanSubjectId:
+            taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
           action: "agent_run:create",
           quantity: 1,
           // A model-less task is checked against the model its occurrence

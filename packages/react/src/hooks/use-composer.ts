@@ -15,6 +15,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
+import { composerSubmissionCanRetry, composerSubmissionErrorMessage } from "../lib/format";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -97,6 +98,8 @@ export type ComposerOptimisticMessage = {
   triggerEventId?: string | null | undefined;
   appliedQueueVersion?: number | null | undefined;
   error?: string | undefined;
+  /** False for a definitive refusal that requires changing payment or allowance settings. */
+  retryable?: boolean | undefined;
   outcomeUnknown?: boolean | undefined;
 };
 
@@ -185,7 +188,14 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
     error:
       operation.state === "sending"
         ? "Delivery was interrupted; retry to reconcile this message."
-        : operation.error,
+        : operation.error
+          ? composerSubmissionErrorMessage(new Error(operation.error))
+          : undefined,
+    retryable:
+      operation.state === "sending" || operation.outcomeUnknown
+        ? true
+        : (operation.retryable ??
+          (operation.error ? composerSubmissionCanRetry(new Error(operation.error)) : true)),
     input: operation.input,
     canRetry: !hasMcpCredentialUpdates,
   }));
@@ -433,6 +443,8 @@ export type ComposerState = {
   /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
   optimisticMessages?: ComposerOptimisticMessage[] | undefined;
   retryOptimisticMessage?: ((clientEventId: string) => void) | undefined;
+  /** Move a definitively refused message into an empty composer without resending it. */
+  restoreOptimisticMessage?: ((clientEventId: string) => void) | undefined;
   removeOptimisticMessage?: ((clientEventId: string) => void) | undefined;
   /** Supersede current direction with the draft. */
   steer: (text?: string) => Promise<boolean>;
@@ -1379,7 +1391,8 @@ export function useComposer(
               ? {
                   ...candidate,
                   state: "failed",
-                  error: problem.message,
+                  error: outcomeUnknown ? problem.message : composerSubmissionErrorMessage(problem),
+                  retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
                 }
               : candidate,
@@ -1432,7 +1445,7 @@ export function useComposer(
           }
           if (!operation.canRetry) {
             throw new Error(
-              "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+              "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
             );
           }
         }
@@ -1842,7 +1855,7 @@ export function useComposer(
           if (!pending.canRetry) {
             setError(
               new Error(
-                "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+                "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
               ),
             );
             return false;
@@ -2138,6 +2151,7 @@ export function useComposer(
           if (operation.outcomeUnknown) {
             return { ...operation, state: "sending", error: undefined };
           }
+          if (operation.retryable === false) return operation;
           const nextClientEventId = generateClientEventId();
           const currentPersonalResourceAttachment = resolveSendExtras(
             sendExtrasRef.current,
@@ -2167,6 +2181,7 @@ export function useComposer(
             occurredAt: new Date().toISOString(),
             state: "sending",
             error: undefined,
+            retryable: undefined,
             outcomeUnknown: false,
             canRetry: true,
           };
@@ -2573,6 +2588,42 @@ export function useComposer(
     );
   }, []);
 
+  const restoreOptimisticMessage = useCallback(
+    (clientEventId: string): void => {
+      if (
+        targetKeyRef.current !== targetKey ||
+        draftLoading ||
+        pendingOperationRef.current ||
+        hasDraftContent()
+      )
+        return;
+      const operation = optimisticSendsRef.current.find(
+        (candidate) => candidate.clientEventId === clientEventId,
+      );
+      if (!operation || operation.state !== "failed" || operation.outcomeUnknown) return;
+      // Restoring is a new draft edit, not a retry. Keep the user's current model
+      // selection and never copy credentials from the old rejected request.
+      localEditRevision.current += 1;
+      valueRef.current = operation.text;
+      restoredResourcesRef.current = [...operation.resources];
+      annotationsRef.current = cloneAnnotations(operation.annotations);
+      setValue(operation.text);
+      setRestoredResources(restoredResourcesRef.current);
+      setAnnotations(annotationsRef.current);
+      setError(null);
+      setOptimisticDraftShadow({
+        text: operation.text,
+        resources: restoredResourcesRef.current,
+        annotations: annotationsRef.current,
+        policy: policyRef.current ?? undefined,
+      });
+      replaceOptimisticSends((current) =>
+        current.filter((candidate) => candidate.clientEventId !== clientEventId),
+      );
+    },
+    [draftLoading, hasDraftContent, replaceOptimisticSends, setOptimisticDraftShadow, targetKey],
+  );
+
   const resolveDraftConflict = useCallback(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
       const ownedTargetKey = targetKey;
@@ -2676,6 +2727,10 @@ export function useComposer(
     send,
     optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
+    restoreOptimisticMessage:
+      !draftLoading && !pendingOperationRef.current && !hasDraftContent()
+        ? restoreOptimisticMessage
+        : undefined,
     removeOptimisticMessage,
     steer,
     steering: visibleSteering,

@@ -12,7 +12,9 @@ completion is still obtained from the backend, never from that handle.
 injected `ConnectNavigation` adapter and either `popup` or `redirect` mode.
 Call popup mode directly from a user gesture: opening is synchronous, a blocked
 popup throws explicitly, and only backend polling determines the result. The
-popup is closed when polling settles. Cancellation stops polling, not the
+popup is closed when polling settles if the browser still permits it. The human
+closes provider windows that remain on a foreign origin or have become detached.
+Cancellation stops polling, not the
 durable server attempt; cancel that explicitly through the controller if desired.
 
 For redirect mode, retain the opaque attempt ID in host-owned state before

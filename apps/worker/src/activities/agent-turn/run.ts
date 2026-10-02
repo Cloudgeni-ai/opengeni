@@ -1,5 +1,13 @@
-import { getSessionAuthorityProjection, readActiveSandbox } from "@opengeni/db";
+import {
+  getSessionAuthorityProjection,
+  readActiveSandbox,
+  getWorkspaceCredentialProvider,
+  loadClaudeSubscriptionUsageCredential,
+  resolveClaudeSubscriptionCredential,
+  ClaudeSubscriptionReconnectRequired,
+} from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   assertModelConnectionAllowsTurn,
@@ -16,10 +24,12 @@ import {
   sandboxOperationMetricObserver,
   turnExecutionTelemetryKey,
   withTraceContext,
+  withMcpTelemetry,
 } from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  awaitModelCallAdmission,
   materializeSandboxFileDownloads,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
@@ -30,11 +40,14 @@ import { buildCodexTokenResolver } from "../codex-auth";
 import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
-  CODEX_FALLBACK_MODEL_SLUGS,
   codexRequestStorage,
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
+import { codexUpstreamModelSlugs } from "@opengeni/config";
+import { parseModelProvidersJson } from "@opengeni/config";
+import { withClaudeUsageObserver } from "@opengeni/runtime";
+import { createClaudeUsageObserver } from "./claude-usage-observer";
 import {
   xaiSubscriptionRequestStorage,
   type XaiSubscriptionRequestContext,
@@ -369,12 +382,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
-    const checkpointBeforeProviderDispatch = () =>
-      checkpointHistoryBeforeProviderDispatch(historySink, {
+    const checkpointBeforeProviderDispatch = async () => {
+      await awaitModelCallAdmission();
+      await checkpointHistoryBeforeProviderDispatch(historySink, {
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
       });
+    };
 
     try {
       const claimed = await claimTurnAttempt({
@@ -545,6 +560,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             agentHumanInputEnabled,
             codeSearchEnabled,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -610,10 +626,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sessionId: input.sessionId,
                     getToken: () => resolveTrackedToken(resolver.getToken),
                     refresh: () => resolveTrackedToken(resolver.refresh),
-                    resolveModel: buildModelResolver(
-                      CODEX_FALLBACK_MODEL_SLUGS,
-                      CODEX_FALLBACK_MODEL_SLUGS[0],
-                    ),
+                    resolveModel: buildModelResolver(codexUpstreamModelSlugs(runSettings)),
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
@@ -780,8 +793,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               credentialId: providerTurn.effectiveXaiCredentialId,
               authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
-                webSearch: runSettings.webSearchEnabled,
-                xSearch: runSettings.webSearchEnabled,
+                webSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
+                xSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
               nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
@@ -915,12 +932,49 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             providerTurn.xaiRequestContext = authorization.context;
           }
+          const claudeUsageObserver = await createClaudeUsageObserver(
+            parseModelProvidersJson(runSettings.modelProvidersJson),
+            providerTurn.latestClaudeUsage,
+            (scope) =>
+              loadClaudeSubscriptionUsageCredential(db, settings, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                scope,
+              }),
+          );
+          const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
+            withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
+              const binding = claudeUsageObserver.binding(providerId);
+              if (!binding) return headers;
+              const credential = await resolveClaudeSubscriptionCredential(
+                db,
+                settings,
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  scope: binding.scope,
+                },
+                {
+                  expectedConnectionId: binding.expectedConnectionId,
+                  expectedCredentialVersion: binding.expectedCredentialVersion,
+                },
+              );
+              if (!credential) return headers; // A replaced connection never lends its new token to this turn.
+              if ("reconnectRequired" in credential)
+                throw new ClaudeSubscriptionReconnectRequired();
+              claudeUsageObserver.renew(providerId, credential);
+              headers.set("authorization", `Bearer ${credential.token}`);
+              headers.delete("x-api-key");
+              return headers;
+            });
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            providerTurn.xaiRequestContext
-              ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
-              : withCodex(fn);
+            withClaudeUsage(() =>
+              providerTurn.xaiRequestContext
+                ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
+                : withCodex(fn),
+            );
           let codexSessionTitleRequestSequence = 0;
           let xaiSessionTitleRequestSequence = 0;
           const codexSessionTitleContext = codexContext
@@ -936,25 +990,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            xaiSessionTitleContext
-              ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-              : codexSessionTitleContext
-                ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                : fn();
+            withClaudeUsage(() =>
+              xaiSessionTitleContext
+                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                : codexSessionTitleContext
+                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                  : fn(),
+            );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
-            withCodex(() =>
-              withCodexRequestOverrides(
-                {
-                  betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
-                  turnMetadata: {
-                    request_kind: "compaction",
-                    compaction: {
-                      implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
-                      strategy: "memento",
+            withClaudeUsage(() =>
+              withCodex(() =>
+                withCodexRequestOverrides(
+                  {
+                    betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+                    turnMetadata: {
+                      request_kind: "compaction",
+                      compaction: {
+                        implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                        strategy: "memento",
+                      },
                     },
                   },
-                },
-                fn,
+                  fn,
+                ),
               ),
             );
           const compactionPrep = await prepareCompaction({
@@ -980,6 +1038,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1094,6 +1153,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // set. A Connected Machine receives no platform Git credential, so its
           // resources stay exactly as stored. Resolution never fails the turn;
           // an unusable bound repository stays bare and is reported visibly.
+          const hasCredentialProvider =
+            activeSandboxBackend !== "selfhosted" &&
+            (
+              await waitForTurnOperation(
+                getWorkspaceCredentialProvider(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                }),
+                cancellationSignal,
+                undefined,
+              )
+            )?.enabled === true;
           const boundResources = await waitForTurnOperation(
             applyTurnGitHubRepositoryBindings({
               db,
@@ -1101,6 +1172,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               activeSandboxBackend,
+              hasCredentialProvider,
               claimedTurnResources,
               claimedRuntimeResources,
               publish: async (events) => {
@@ -1138,6 +1210,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
 
           const runCredentials = await prepareRunCredentials({
+            turnTools,
+            localMcpServerIds: installedApiIntegrations.map((integration) => integration.serverId),
             input,
             settings,
             db,
@@ -1152,6 +1226,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxRuntime,
             turn,
             session,
+            turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
             workspaceVariableSet,
@@ -1168,6 +1243,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const {
             runCredentialResolver,
+            runMcpCredentials,
             establishPolicy,
             initialRunCredentialMaterial,
             runCredentialsNote,
@@ -1291,6 +1367,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
             runCredentialRenewals: runCredentialResolver ? renewals : undefined,
+            runMcpCredentials,
             input,
             catalogSourceSettings,
             db,
@@ -1370,6 +1447,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             supportsImageInput,
             agentHumanInputEnabled,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1499,6 +1577,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1813,14 +1892,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       { parent: null },
     );
     try {
-      return await withTraceContext(span, () => {
-        try {
-          resolvedServices.observability.info("worker execution started", { correlationId });
-        } catch {
-          // Correlation diagnostics never affect execution or admission.
-        }
-        return runAgentTurn(input, resolvedServices, span);
-      });
+      return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
+        withTraceContext(span, () => {
+          try {
+            resolvedServices.observability.info("worker execution started", { correlationId });
+          } catch {
+            // Correlation diagnostics never affect execution or admission.
+          }
+          return runAgentTurn(input, resolvedServices, span);
+        }),
+      );
     } catch (error) {
       span.end({ error });
       throw error;

@@ -4514,6 +4514,7 @@ describe("runtime event normalization", () => {
     "Otherwise leave changes in the working tree and do not create or mention branches, commits, or pull requests unless the user asks; if the repository has a remote, say the changes are not pushed, and if the user asks for something you cannot make, say what blocks it.",
     "Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
+    "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
     'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
     "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
@@ -5374,6 +5375,7 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
@@ -5411,17 +5413,30 @@ describe("runtime event normalization", () => {
     ]);
   });
 
-  test("preserves a custom Git HTTPS port in the manifest remote", () => {
-    const manifest = buildManifest(testSettings(), [
+  test("preserves a custom Git HTTPS port through deferred clone and explicit manifest materialization", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://git.example.com:8443/acme/app.git",
+      ref: "main",
+    };
+    const mountPath = "repos/git.example.com%3A8443/acme/app.git";
+    // Bare repositories wait for provider delivery. A directory entry reserves
+    // the same port-aware mount; the clone hook retains the exact remote URI.
+    const manifest = buildManifest(testSettings(), [resource]);
+    expect(manifest.entries[mountPath]).toMatchObject({ type: "dir" });
+    expect(repositoryCloneCommand([resource])).toContain(
+      `start_repository_clone '/workspace/${mountPath}' '${resource.uri}' 'main'`,
+    );
+    // Explicit platform selections retain the SDK materialization path.
+    const explicit = buildManifest(testSettings(), [
       {
-        kind: "repository",
-        uri: "https://git.example.com:8443/acme/app.git",
-        ref: "main",
+        ...resource,
+        connectionId: "explicit-platform-connection",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
+    expect(explicit.entries[mountPath]).toMatchObject({
       type: "git_repo",
-      repo: "https://git.example.com:8443/acme/app.git",
+      repo: resource.uri,
     });
   });
 
@@ -5537,10 +5552,12 @@ describe("runtime event normalization", () => {
     // origin/HEAD is best-effort (branch refs only); a PR ref, tag, or SHA must not
     // fail the clone because `remote set-head` rejects it.
     expect(command).toContain(
-      'if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+      'if repository_git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
     );
     expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
-    expect(command).toContain('if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then');
+    expect(command).toContain(
+      'if ! repository_git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+    );
     expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
     expect(command).toContain("Repository resource ready at $target");
@@ -5694,7 +5711,7 @@ describe("runtime event normalization", () => {
       true,
     );
     expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(
-      false,
+      true,
     );
 
     // Home backend IS selfhosted: gated with no caller change (active backend
@@ -5765,8 +5782,8 @@ describe("runtime event normalization", () => {
       .split("\n")
       .filter((line) => /^start_(optional_)?repository_clone /u.test(line));
     expect(invocations).toEqual([
-      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' ''",
-      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent'",
+      "start_repository_clone '/workspace/repos/picked' 'https://github.com/acme/picked.git' 'main' '' '' 'provider'",
+      "start_optional_repository_clone '/workspace/repos/recent' 'https://github.com/acme/recent.git' 'main' '' '' 'repos/recent' 'provider'",
     ]);
   });
 
@@ -6269,6 +6286,7 @@ describe("runtime event normalization", () => {
         ref: "main",
         mountPath: "repos/acme/private/README.md",
         subpath: "README.md",
+        connectionId: "explicit-platform-connection",
       },
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({

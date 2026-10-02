@@ -9,7 +9,8 @@ import {
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
-  getWorkspaceCredentialProvider,
+  resolveWorkspaceCredentialProvider,
+  resolveInitiatingHuman,
   type Database,
 } from "@opengeni/db";
 import { pinnedFetch, type OutboundNetworkSettings } from "@opengeni/network";
@@ -33,7 +34,7 @@ type ProviderOk = Extract<CredentialProviderResponse, { status: "ok" }>;
 
 function gitCredentialLine(entry: NonNullable<ProviderOk["git"]>[number]): string {
   const username = encodeURIComponent(entry.username ?? "x-access-token");
-  return `https://${username}:${encodeURIComponent(entry.password)}@${entry.host}`;
+  return `https://${username}:${encodeURIComponent(entry.password)}@${entry.host.toLowerCase()}`;
 }
 
 /**
@@ -48,7 +49,7 @@ export function withGitCredentialHelper(response: ProviderOk): ProviderOk {
   const index = Number.isFinite(existingCount) && existingCount > 0 ? existingCount : 0;
   environment[`GIT_CONFIG_KEY_${index}`] = "credential.helper";
   environment[`GIT_CONFIG_VALUE_${index}`] =
-    `!f() { test "$1" = get && exec git credential-store --file="$${GIT_CREDENTIALS_FILE_ENV}" get; }; f`;
+    `!f() { test "$1" = get && sed '/^path=/d' | git credential-store --file="$${GIT_CREDENTIALS_FILE_ENV}" get; }; f`;
   environment.GIT_CONFIG_COUNT = String(index + 1);
   return {
     ...response,
@@ -71,9 +72,18 @@ export function withGitCredentialHelper(response: ProviderOk): ProviderOk {
 export function credentialProviderRequestBody(
   input: RunCredentialsRequest,
   initiatingHumanSubjectId: string | null,
+  initiatingHuman: CredentialProviderRequest["initiatingHuman"] = null,
+  selection: Pick<CredentialProviderRequest, "lane" | "mcpServers"> = {
+    lane: "workspace",
+    mcpServers: [],
+  },
 ): CredentialProviderRequest {
+  const via = input.initiatorContext.via;
+  const latestHop = Array.isArray(via) ? via.at(-1) : null;
   return {
     type: "credentials.request",
+    lane: selection.lane,
+    mcpServers: selection.mcpServers.map(({ id, url }) => ({ id, url })),
     purpose: input.purpose,
     forceRefresh: input.forceRefresh,
     accountId: input.accountId,
@@ -84,7 +94,18 @@ export function credentialProviderRequestBody(
     turnId: input.turnId,
     attemptId: input.attemptId,
     initiator: { kind: input.initiator.kind, subjectId: input.initiator.subjectId },
+    initiatorContext: {
+      kind:
+        latestHop?.kind === "agent"
+          ? "agent"
+          : input.initiator.kind === "subject"
+            ? "human"
+            : "service",
+      initiator: input.initiator,
+      context: input.initiatorContext,
+    },
     initiatingHumanSubjectId,
+    initiatingHuman,
     sandboxBackend: input.effectiveSandboxBackend,
     sandboxOs: input.sandboxOs,
   };
@@ -131,6 +152,10 @@ async function readBoundedText(response: Response): Promise<string> {
 
 export type WorkspaceCredentialProviderDeps = {
   fetch?: typeof pinnedFetch;
+  resolveProvider?: typeof resolveWorkspaceCredentialProvider;
+  resolveHuman?: typeof resolveInitiatingHuman;
+  /** Trusted selected session-attached remote targets, frozen by the worker. */
+  mcpServers?: readonly { id: string; url: string }[];
 };
 
 /**
@@ -146,29 +171,60 @@ export async function workspaceCredentialProviderResolver(
   initiatingHumanSubjectId: string | null,
   deps: WorkspaceCredentialProviderDeps = {},
 ): Promise<WorkspaceRunCredentialResolver | null> {
-  const row = await getWorkspaceCredentialProvider(db, scope);
-  if (!row?.enabled) return null;
+  const row = await (deps.resolveProvider ?? resolveWorkspaceCredentialProvider)(db, scope);
+  if (!row) return null;
+  if (!row.enabled) {
+    // A disabled workspace override is an explicit pause, not an absent
+    // provider. Return a resolver so the deployment port cannot be borrowed.
+    return async (input) => ({
+      status: "not_applicable",
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+    });
+  }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
     throw new CredentialProviderError(
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required to use a workspace credential provider",
     );
   }
-  const secret = decryptEnvironmentValue(key, row.secretEncrypted);
   const fetchImpl = deps.fetch ?? pinnedFetch;
   const network: OutboundNetworkSettings = settings;
+  const selection = {
+    lane:
+      "workspaceId" in row && row.workspaceId !== null
+        ? ("workspace" as const)
+        : ("organization" as const),
+    mcpServers: (deps.mcpServers ?? []).map(({ id, url }) => ({ id, url })),
+  };
   return async (input) => {
     const echo = {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
     };
-    const body = JSON.stringify(credentialProviderRequestBody(input, initiatingHumanSubjectId));
+    // Rotation and disabling take effect on the next outbound request. Never
+    // switch registration mid-attempt if deletion exposes an inherited row.
+    const current = await (deps.resolveProvider ?? resolveWorkspaceCredentialProvider)(db, scope);
+    if (!current?.enabled || current.id !== row.id) {
+      return { status: "not_applicable", ...echo };
+    }
+    const secret = decryptEnvironmentValue(key, current.secretEncrypted);
+    const initiatingHuman = await (deps.resolveHuman ?? resolveInitiatingHuman)(
+      db,
+      scope,
+      initiatingHumanSubjectId,
+      input.turnId,
+    );
+    const body = JSON.stringify(
+      credentialProviderRequestBody(input, initiatingHumanSubjectId, initiatingHuman, selection),
+    );
     let status: number;
     let text: string;
     try {
       const response = await fetchImpl(
-        row.url,
+        current.url,
         {
           method: "POST",
           headers: {
@@ -177,7 +233,7 @@ export async function workspaceCredentialProviderResolver(
             [OPENGENI_SIGNATURE_HEADER]: await signOpenGeniPayload(secret, body),
           },
           body,
-          signal: AbortSignal.timeout(row.timeoutMs),
+          signal: AbortSignal.timeout(current.timeoutMs),
         },
         network,
         { label: "Workspace credential provider", requireHttpsOutsideLocalTest: true },

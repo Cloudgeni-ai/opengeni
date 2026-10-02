@@ -37,11 +37,13 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-The four user-owned choices (who shares what, when things run and in which time
-zone, where outputs land, whether the agent may write) are never defaulted
-silently: if the request or repository does not settle one, send the single
-bundled question before building the parts that depend on it, and continue only
-independent discovery while waiting. Skip this only when the user explicitly
+The user-owned choices (who shares what, whether the agent may change data,
+and, only for background or scheduled work, when it runs and where its results
+should appear) are never defaulted silently: if the request or repository does
+not settle a relevant one, send a single short question in plain product terms
+before building the parts that depend on it, and continue only independent
+discovery while waiting. A chat assistant's replies appear in the chat; that is
+not a question to ask. Skip this only when the user explicitly
 said not to ask; then state the defaults you chose in the handoff. For other
 choices, first use facts already available from the product, repository, live
 service, or prior direction, and use a reversible recommendation instead of a
@@ -64,26 +66,31 @@ user accept it or adjust individual choices. Do not build a new questionnaire or
 ask every integration the same questions. A suggested answer is not consent to
 send data, share private content, or perform an external action.
 
-Use product language for the relevant unresolved choices:
+Write every question the way the end user talks about their own product. Never
+use internal terms such as "on-demand", "learning across chats", "shape",
+"capabilities" or "visibility". Only ask about what applies:
 
-- **Learning across chats:** no new lasting learning, remember for each person,
-  or shared team knowledge. Explain briefly that chat history/retention is separate
-  and disabling learning does not delete history or existing authorized Knowledge.
-- **Who can open chats:** only their owner, the team, or a choice on each chat.
-  Keep human visibility separate from agent access and Knowledge scope. Choose the
-  workspace mapping from the actual sharing boundary; private chats alone do not
-  require a workspace per person.
-- **How the agent gets data:** current-page snapshots, read-only tools to fetch
-  more reports, or controlled queries for deeper analysis. State the meaningful
-  limitation of the recommendation. Confirm broader access or writes separately
-  only when they are part of the requested product.
-- **When things run:** on demand, or on a schedule (time and time zone).
-- **Where results land:** the chat, a product record or screen, or a channel;
-  delivery goes through product tools, or signed workspace webhooks where the
-  deployment offers them.
+- **Who can see a chat:** only the person who started it (`chats: "private"`),
+  their whole team (`"shared"`), or each user gets a fully separate space
+  (`"isolated"`). Choose the workspace mapping from the actual sharing boundary;
+  private chats alone do not require a workspace per person.
+- **What the agent may do:** only look things up (read-only), or also make
+  changes. Name the actual things ("read your analytics", "can't change
+  websites or users"). Confirm writes separately, only when they are part of
+  the requested product.
+- **What data it uses:** only what's on the current page, or it can look up
+  more on its own. State the meaningful limitation of the recommendation.
+- **Only when the requested feature is itself scheduled or runs in the
+  background** (for example "email me a weekly report"): the missing details
+  (when it runs, "every Monday at 9:00, Oslo time", and where results should
+  appear) with one sentence on why. Never ask about this up front, and never
+  for a chat assistant: long sessions work without any user decision.
+- **Memory:** don't ask by default. Use no lasting memory between chats unless
+  the product clearly needs the assistant to remember things ("remember my
+  preferences"). If it does, ask in those words. Chat history is kept either way.
 
-For example, if all three choices are unresolved for a simple dashboard, propose
-“Private chats, no learning between chats, and current-page data only” with a short
+For example, for a simple dashboard assistant, propose
+“Only you can see your chats; it uses what's on the current page and can't change anything” with a short
 explanation that the agent cannot fetch another report on its own. Do not reuse
 that default for a team assistant whose requirements already imply shared work.
 Continue independent discovery while awaiting an answer; ask again only when new

@@ -80,7 +80,7 @@ for (const unsupported of [true, false]) {
       await Promise.race([
         banner.waitFor({ timeout: 45_000 }),
         page
-          .getByRole("heading", { name: /^(Something went wrong|OpenGeni has been updated)$/ })
+          .getByRole("heading", { name: /^(Something went wrong|Opengeni has been updated)$/ })
           .waitFor({ timeout: 45_000 })
           .then(() => {
             throw new Error("Route failed");
@@ -234,41 +234,51 @@ for (const uncertainFirst of [false, true]) {
   }, 60_000);
 }
 
-test("real session shows automatic checkpoint Retry and loss notice at desktop and mobile widths", async () => {
-  for (const [size, viewport] of [
-    ["desktop", { width: 1440, height: 960 }],
-    ["mobile", { width: 390, height: 844 }],
-  ] as const) {
-    const page = await browser.newPage({ viewport });
-    const retries: unknown[] = [];
-    try {
-      await installApi(page, false, retries, true, true, true);
-      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
-      const banner = page.getByTestId("failed-session-banner");
-      await banner.waitFor();
-      await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
-      expect(await banner.textContent()).toContain("Newer sandbox files may be unavailable");
-      expect(await banner.getByRole("button").count()).toBe(1);
-      expect(await banner.getByRole("button", { name: "Review checkpoint recovery" }).count()).toBe(
-        0,
-      );
-      expect(await page.getByText("Could not load pending Skill reviews.").count()).toBe(0);
-      expect(
-        await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
-      ).toBeLessThanOrEqual(1);
-      if (evidenceDir)
-        await page.screenshot({
-          path: `${evidenceDir}/automatic-checkpoint-retry-${size}.png`,
-          fullPage: true,
-        });
-      await banner.getByRole("button", { name: "Retry", exact: true }).click();
-      await banner.getByRole("button", { name: "Check retry", exact: true }).waitFor();
-      expect(retries).toHaveLength(1);
-    } finally {
-      await page.close();
+for (const lane of ["checkpoint", "fresh_workspace"] as const) {
+  test(`real session shows automatic ${lane} Retry and loss notice at desktop and mobile widths`, async () => {
+    for (const [size, viewport] of [
+      ["desktop", { width: 1440, height: 960 }],
+      ["mobile", { width: 390, height: 844 }],
+    ] as const) {
+      const page = await browser.newPage({ viewport });
+      const retries: unknown[] = [];
+      try {
+        await installApi(page, false, retries, true, true, lane);
+        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        const banner = page.getByTestId("failed-session-banner");
+        await banner.waitFor();
+        await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
+        const text = await banner.textContent();
+        if (lane === "checkpoint") {
+          expect(text).toContain("Retry will use the latest verified checkpoint from");
+          expect(text).toContain("Newer files are unavailable.");
+        } else {
+          expect(text).toContain(
+            "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+          );
+        }
+        expect(await banner.getByRole("button").count()).toBe(1);
+        expect(
+          await banner.getByRole("button", { name: "Review checkpoint recovery" }).count(),
+        ).toBe(0);
+        expect(await page.getByText("Could not load pending Skill reviews.").count()).toBe(0);
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+        ).toBeLessThanOrEqual(1);
+        if (evidenceDir)
+          await page.screenshot({
+            path: `${evidenceDir}/automatic-${lane}-retry-${size}.png`,
+            fullPage: true,
+          });
+        await banner.getByRole("button", { name: "Retry", exact: true }).click();
+        await banner.getByRole("button", { name: "Check retry", exact: true }).waitFor();
+        expect(retries).toHaveLength(1);
+      } finally {
+        await page.close();
+      }
     }
-  }
-}, 120_000);
+  }, 120_000);
+}
 
 test("a failure without a retained logical turn never offers Retry", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
@@ -314,7 +324,7 @@ async function installApi(
   retries: unknown[],
   retainedTurn = true,
   canControl = true,
-  automaticFallback = false,
+  automaticLane: "checkpoint" | "fresh_workspace" | null = null,
 ) {
   const workspace = {
     id: workspaceId,
@@ -356,7 +366,7 @@ async function installApi(
     model: "gpt-5.6-sol",
     reasoningEffort: "low",
     latencyMode: "standard",
-    sandboxBackend: automaticFallback ? "modal" : "none",
+    sandboxBackend: automaticLane ? "modal" : "none",
     sandboxOs: "linux",
     sandboxGroupId: sessionId,
     activeSandboxId: null,
@@ -398,10 +408,10 @@ async function installApi(
       payload: {
         error: unsupported
           ? "The model `example` is not supported with this account."
-          : automaticFallback
+          : automaticLane
             ? "Sandbox recovery is degraded."
             : "Connection interrupted.",
-        ...(automaticFallback
+        ...(automaticLane
           ? { failureCategory: "archive_recovery", failureCode: "restore_degraded" }
           : {}),
       },
@@ -485,16 +495,28 @@ async function installApi(
       request.method() === "GET" &&
       path === `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`
     ) {
-      // Preview-only API wiring: the automatic case represents an already
-      // verified, provider-lost singleton checkpoint; no restore is performed.
+      // Preview-only API wiring: the automatic cases represent a provider-lost
+      // group's verified checkpoint or its empty-workspace continuation; no
+      // restore is performed.
       if (!canControl) return json({ error: "Permission denied" }, 403);
-      if (automaticFallback)
+      if (automaticLane === "fresh_workspace")
         return json({
           version: 1,
           status: "eligible",
           reason: null,
           operationId: null,
           automaticAvailable: true,
+          automaticLane,
+          checkpoint: null,
+        } satisfies SandboxRecoveryProjection);
+      if (automaticLane)
+        return json({
+          version: 1,
+          status: "eligible",
+          reason: null,
+          operationId: null,
+          automaticAvailable: true,
+          automaticLane,
           checkpoint: {
             version: 1,
             sessionId,

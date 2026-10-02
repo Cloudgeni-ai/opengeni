@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
+import { userErrorText } from "@/lib/api-error";
 
 import {
   configuredGoogleDriveSources,
@@ -178,7 +179,7 @@ export function useGoogleDriveIntegration({
         });
       } else {
         toast.success("Google Drive connected", {
-          description: "Choose the folders OpenGeni may read and turn on sync when ready.",
+          description: "Choose the folders Opengeni may read and turn on sync when ready.",
         });
       }
       void refresh();
@@ -223,7 +224,7 @@ export function useGoogleDriveIntegration({
     } catch (error) {
       toast.error(
         action === "pause" ? "Google Drive could not be paused" : "Google Drive could not resume",
-        { description: error instanceof Error ? error.message : String(error) },
+        { description: userErrorText(error) },
       );
       await refresh();
     } finally {
@@ -248,7 +249,7 @@ export function useGoogleDriveIntegration({
       return true;
     } catch (error) {
       toast.error("Google Drive could not be disconnected", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       return false;
     } finally {
@@ -290,7 +291,7 @@ export function useGoogleDriveIntegration({
       toast.success(enabled ? "Google Drive sync turned on" : "Google Drive sync turned off");
     } catch (error) {
       toast.error("Google Drive sync could not be saved", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       await refresh();
     } finally {
@@ -546,7 +547,7 @@ export function useGoogleDriveIntegration({
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}
         title="Disconnect Google Drive?"
-        description="OpenGeni will stop using this connection. Google may still list the grant because disconnecting here does not revoke every grant for the Google OAuth project."
+        description="Opengeni will stop using this connection. Google may still list the grant because disconnecting here does not revoke every grant for the Google OAuth project."
         confirmLabel="Disconnect Google Drive"
         cancelAutoFocus
         onConfirm={disconnect}
@@ -618,7 +619,7 @@ function googleDriveStateNotice(
       tone: "waiting",
       title: "Google Drive is paused",
       description:
-        "OpenGeni will not browse or use the selected folders until you resume this connection.",
+        "Opengeni will not browse or use the selected folders until you resume this connection.",
     };
   }
   if (state === "token_revoked") {

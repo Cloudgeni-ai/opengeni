@@ -11,7 +11,13 @@ kernel) see [`deployment.md` § Local Development Stack](deployment.md#local-dev
 - Bun at the exact version in `.bun-version`, plus Git, Bash and curl.
 - Docker, for local Postgres, NATS, Temporal, and Garage when the daemon is up. The agent sandbox defaults to `local` (this machine). Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead.
 - rustup and a C compiler only when a matching verified artifact-runtime prebuilt is unavailable or when the optional relay needs a source build. The artifact kernel uses its checked-in exact Rust toolchain.
-- Model credentials for real agent runs. They are not required to start the app; use Settings → Models afterward. The `OPENGENI_OPENAI_API_KEY` example is commented out and empty.
+- Model credentials for real agent runs. They are not required to start the app; use Organization settings → Models afterward. The `OPENGENI_OPENAI_API_KEY` example is commented out and empty.
+
+The `local` agent sandbox needs Node and either `setsid` or Python 3 for
+isolated shell process groups (macOS uses Python 3). If Node is installed through
+NVM or another custom executable directory, add `PATH` to
+`OPENGENI_SANDBOX_ENV_ALLOWLIST` in `.env` and restart the stack so the sandbox
+can find it.
 
 Run `bun run dev:check` to collect missing prerequisites without starting services.
 The native infrastructure path additionally needs PostgreSQL server/client tools

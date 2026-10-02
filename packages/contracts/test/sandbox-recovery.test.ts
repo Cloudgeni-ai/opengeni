@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
+  SandboxFreshWorkspaceRecovery,
   SandboxRecoveryProjection,
   SandboxRecoveryRequest,
   automaticSandboxRecoveryDiscontinuity,
+  freshWorkspaceSandboxRecoveryDiscontinuity,
   sandboxRecoveryDiscontinuity,
 } from "../src/sandbox-recovery";
 const selection = {
@@ -61,4 +63,60 @@ test("recovery projection distinguishes automatic Retry from explicit human cons
       automaticAvailable: true,
     }).automaticAvailable,
   ).toBe(true);
+});
+
+test("automatic lanes are a closed public set; an empty workspace carries no checkpoint", () => {
+  expect(
+    SandboxRecoveryProjection.parse({
+      version: 1,
+      status: "eligible",
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+      automaticAvailable: true,
+      automaticLane: "fresh_workspace",
+    }).automaticLane,
+  ).toBe("fresh_workspace");
+  expect(
+    SandboxRecoveryProjection.safeParse({
+      version: 1,
+      status: "eligible",
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+      automaticAvailable: true,
+      automaticLane: "reset",
+    }).success,
+  ).toBe(false);
+});
+
+test("shared checkpoint and empty-workspace warnings never claim success, counts or replay safety", () => {
+  const shared = automaticSandboxRecoveryDiscontinuity(selection, "shared");
+  expect(shared).toContain("shares with other sessions");
+  expect(shared).toContain(selection.capturedAt);
+  expect(shared).toContain("unknown outcomes");
+  const recovery = SandboxFreshWorkspaceRecovery.parse({
+    version: 1,
+    sessionId: selection.sessionId,
+    sandboxGroupId: selection.sandboxGroupId,
+    leaseId: selection.leaseId,
+    leaseEpoch: 3,
+    workspaceGeneration: 44,
+    archiveGeneration: null,
+    lostAt: "2026-09-17T06:24:31.000Z",
+    reason: "archive_unavailable",
+  });
+  const fresh = freshWorkspaceSandboxRecoveryDiscontinuity(recovery);
+  expect(fresh).toContain("lost at 2026-09-17T06:24:31.000Z");
+  expect(fresh).toContain("no checkpoint OpenGeni can restore automatically");
+  expect(fresh).toContain("new empty workspace");
+  expect(fresh).toContain("do not assume they exist");
+  expect(fresh).toContain("External effects are not undone");
+  expect(fresh).toContain("Never automatically replay prior commands");
+  expect(
+    SandboxFreshWorkspaceRecovery.safeParse({ ...recovery, providerBinding: {} }).success,
+  ).toBe(false);
+  expect(SandboxFreshWorkspaceRecovery.safeParse({ ...recovery, reason: "other" }).success).toBe(
+    false,
+  );
 });

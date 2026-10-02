@@ -38,6 +38,8 @@ import {
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   readLease,
+  authorizeAutomaticSandboxCheckpointRecovery,
+  getSandboxRecoveryDiscontinuity,
   SandboxImageConflictError,
   SandboxLeaseRecoveryBlockedError,
   upsertSandboxSessionEnvelope,
@@ -58,6 +60,7 @@ import {
 } from "@opengeni/runtime";
 import { WorkspaceArchiveIntegrityError } from "@opengeni/runtime/sandbox";
 import type { ObjectStorage } from "@opengeni/storage";
+import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
 import {
   createFreshSandboxReadinessReplacementBudget,
   resumeBoxForTurn,
@@ -938,6 +941,83 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     }
   }, 60_000);
 
+  test("(2ab) owning attempt cancellation aborts native Modal readiness before returning a warm session", async () => {
+    if (!available) return;
+    const settings = testSettings({ ...settingsFor(true), sandboxBackend: "modal" });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const instanceId = "sb-readiness-cancellation";
+    const leaseEpoch = 7;
+    const holderId = sandboxLeaseHolderIdForAttempt("cancelled-modal-readiness");
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: instanceId } },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warm', 0,
+        0, 0, ${instanceId}, 'modal', ${leaseEpoch},
+        'modal', ${JSON.stringify(resumeState)}::jsonb, now() + interval '60 seconds'
+      )`;
+    const cancellation = new AbortController();
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let probeAborted = false;
+    const pending = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        cancellationSignal: cancellation.signal,
+        establishAttachedSandbox: async () => ({
+          client: {},
+          instanceId,
+          backendId: "modal",
+          sessionState: resumeState.sessionState,
+          session: {
+            verifyExecReadiness: (signal: AbortSignal) =>
+              new Promise<number>((_resolve, reject) => {
+                const abort = () => {
+                  probeAborted = true;
+                  reject(signal.reason);
+                };
+                signal.addEventListener("abort", abort, { once: true });
+                if (signal.aborted) abort();
+                enter();
+              }),
+            execCommand: async () => {
+              throw new Error("SDK readiness must not execute");
+            },
+          },
+        }),
+      },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "modal" },
+      "turn",
+      holderId,
+    );
+    const result = pending.catch((caught) => caught);
+    try {
+      await entered;
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      cancellation.abort(new Error("TURN_ATTEMPT_FINALIZED_DURING_READINESS"));
+      expect((await result).message).toContain("TURN_ATTEMPT_FINALIZED_DURING_READINESS");
+      expect(probeAborted).toBe(true);
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(0);
+      expect(await readRow(workspaceId, groupId)).toMatchObject({
+        liveness: "draining",
+        lease_epoch: leaseEpoch,
+        instance_id: instanceId,
+      });
+    } finally {
+      cancellation.abort();
+      await result;
+    }
+  }, 60_000);
+
   test("(2b) concurrent observers of one missing warm instance elect exactly one replacement owner", async () => {
     if (!available) return;
     const settings = settingsFor(true);
@@ -1442,6 +1522,182 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
   }, 60_000);
 
   // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("(F3-d) a lost group with no usable checkpoint rematerializes an EMPTY box for the next turn, never a legacy fallback", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId } = await freshWorkspace();
+    const createManaged = (sandboxGroupId?: string) =>
+      createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: "continue after the sandbox was lost",
+        resources: [],
+        metadata: {},
+        model: "gpt-test",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        ...(sandboxGroupId ? { sandboxGroupId } : {}),
+      });
+    const parent = await createManaged();
+    const children = [
+      await createManaged(parent.sandboxGroupId),
+      await createManaged(parent.sandboxGroupId),
+    ];
+
+    // A verified per-session legacy archive exists. The empty-workspace
+    // decision must not silently restore it under a warning that says empty.
+    const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: parent.id,
+      recovery: "create-or-restore",
+      backendOverride: "local",
+    });
+    let legacy: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>;
+    try {
+      const write = await (
+        seed.session as {
+          exec: (args: { cmd: string }) => Promise<{ exitCode: number }>;
+        }
+      ).exec({ cmd: "printf 'pre-loss-legacy-file' > /workspace/pre-loss.txt" });
+      expect(write.exitCode).toBe(0);
+      legacy = await captureVerifiedWorkspaceArchive(seed.session);
+    } finally {
+      await dropSession(seed);
+    }
+    await upsertSandboxSessionEnvelope(db, {
+      accountId,
+      workspaceId,
+      sessionId: parent.id,
+      envelope: {
+        backendId: "unix_local",
+        sessionState: {
+          providerState: { sandboxId: "lost-provider-must-not-resume" },
+          workspaceArchive: legacy.base64,
+          workspaceArchiveMeta: legacy.descriptor,
+        },
+      },
+    });
+    // Exactly what confirmDrainCold commits after a box vanished before any
+    // capture: provider missing, no archive, unrecoverable.
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch, workspace_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${parent.sandboxGroupId}, 'cold', 0, 0, 0,
+        'modal', 11, 12, 'modal',
+        ${JSON.stringify({
+          backendId: "modal",
+          opengeniRecovery: {
+            provider: {
+              status: "missing",
+              instanceId: "lost-provider-must-not-resume",
+              observedAt: "2026-09-25T09:10:11.000Z",
+              diagnostic: "provider_not_found_before_workspace_capture",
+            },
+            archive: { status: "none", current: null, previous: null },
+            restore: {
+              status: "unrecoverable",
+              rematerializationId: null,
+              selectedRevision: null,
+              startedAt: null,
+              completedAt: "2026-09-25T09:10:11.000Z",
+              failureCode: "archive_unavailable",
+              retryable: false,
+            },
+            workspace: { status: "unrecoverable", verifiedRevision: null, verifiedAt: null },
+          },
+        })}::text::jsonb,
+        now() + interval '60s'
+      )`;
+
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: parent.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `fresh-workspace-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+      filesystemDiscontinuityProtocol: 3,
+    });
+    expect(claim).toMatchObject({ action: "claimed" });
+    const decision = await authorizeAutomaticSandboxCheckpointRecovery(db, {
+      accountId,
+      workspaceId,
+      sessionId: parent.id,
+      attemptId,
+    });
+    expect(decision).toMatchObject({
+      status: "authorized",
+      lane: "fresh_workspace",
+      reason: "archive_unavailable",
+      lostAt: "2026-09-25T09:10:11.000Z",
+      groupSessionCount: 3,
+    });
+
+    const resumed = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: parent.sandboxGroupId,
+        sessionId: parent.id,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt(attemptId),
+    );
+    try {
+      expect(resumed.established.origin).toBe("created");
+      expect(resumed.established.restoredArchive ?? null).toBeNull();
+      const exec = (cmd: string) =>
+        (
+          resumed.established.session as {
+            exec: (args: { cmd: string }) => Promise<{ stdout: string; exitCode: number }>;
+          }
+        ).exec({ cmd });
+      expect((await exec("test -e /workspace/pre-loss.txt")).exitCode).not.toBe(0);
+      expect(await exec("printf 'after-loss' > /workspace/new.txt && cat /workspace/new.txt"))
+        .toMatchObject({ exitCode: 0, stdout: "after-loss" });
+
+      const lease = await readLease(db, workspaceId, parent.sandboxGroupId);
+      expect(lease).toMatchObject({
+        liveness: "warm",
+        leaseEpoch: resumed.leaseEpoch,
+        instanceId: resumed.established.instanceId,
+        recovery: {
+          provider: { status: "exists" },
+          archive: { status: "none" },
+          restore: { status: "not_required" },
+          workspace: { status: "ready" },
+        },
+      });
+      expect(lease?.resumeState?.opengeniFreshWorkspaceRecovery).toMatchObject({
+        status: "verified",
+      });
+      expect(JSON.stringify(lease?.resumeState)).not.toContain("lost-provider-must-not-resume");
+      for (const sessionId of [parent.id, ...children.map((child) => child.id)]) {
+        expect(await getSandboxRecoveryDiscontinuity(db, workspaceId, sessionId)).toContain(
+          "new empty workspace",
+        );
+      }
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  // oxfmt-ignore
   test.skipIf(process.platform !== "linux")("(F3-c) a verified session fallback outranks an archive-less lease without importing its stale provider", async () => {
     if (!available) return;
     const settings = settingsFor(true);
@@ -1929,6 +2185,114 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     } finally {
       await resumed.release();
       await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  test("between-turn deployment repin resumes the warm Modal group on its recorded image", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const pin = (byte: string) => `registry.example.com/desktop@sha256:${byte.repeat(64)}`;
+    const routeForPin = async (image: string) => {
+      const settings = testSettings({
+        ...settingsFor(true),
+        sandboxBackend: "modal",
+        modalImageRef: image,
+      });
+      const route = await resolveSandboxRoute({
+        input: { accountId, workspaceId, sessionId: groupId } as never,
+        settings,
+        db,
+        eventing: { modelRunSettings: settings } as never,
+        sandboxState: {} as never,
+        media: {} as never,
+        fileAuthoritySubjectId: null,
+        runSettings: settings,
+        logicalSandboxSettings: settings,
+      });
+      return { settings, route };
+    };
+    const before = await routeForPin(pin("a"));
+    const instanceId = "sb-before-repin";
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: instanceId } },
+    };
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "between-turn-keeper",
+      backend: "modal",
+      image: before.route.groupBoxImage,
+      imagePolicy: before.route.groupBoxImagePolicy,
+      leaseTtlMs: 60_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState,
+      leaseTtlMs: 60_000,
+    });
+    expect(committed.committed).toBe(true);
+    const resumedInstances: string[] = [];
+    const resumeTurn = async (selected: typeof before, attemptId: string) =>
+      await resumeBoxForTurn(
+        {
+          db,
+          settings: selected.settings,
+          establishAttachedSandbox: async (_settings, envelope, options) => {
+            expect(options?.recovery).toBe("resume-only");
+            expect(envelope).toMatchObject(resumeState);
+            resumedInstances.push(instanceId);
+            return {
+              client: {},
+              session: {},
+              sessionState: resumeState.sessionState,
+              instanceId,
+              backendId: "modal",
+              origin: "resumed",
+            };
+          },
+          verifyAttachedSandboxReadiness: async () => undefined,
+        },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: selected.route.groupBoxBackend,
+          image: selected.route.groupBoxImage!,
+          imagePolicy: selected.route.groupBoxImagePolicy,
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt(attemptId),
+      );
+    const firstTurn = await resumeTurn(before, "turn-before-repin");
+    await firstTurn.release();
+    const after = await routeForPin(pin("b"));
+    expect(after.route.groupBoxImage).toBe(pin("b"));
+    const secondTurn = await resumeTurn(after, "turn-after-repin");
+    try {
+      expect(secondTurn.established.origin).toBe("resumed");
+      expect(secondTurn.established.instanceId).toBe(firstTurn.established.instanceId);
+      expect(secondTurn.leaseEpoch).toBe(firstTurn.leaseEpoch);
+      expect(resumedInstances).toEqual([instanceId, instanceId]);
+      expect(await readLease(db, workspaceId, groupId)).toMatchObject({
+        liveness: "warm",
+        image: pin("a"),
+        instanceId,
+        leaseEpoch: firstTurn.leaseEpoch,
+        rotationRequestedAt: null,
+        turnHolders: 1,
+        viewerHolders: 1,
+      });
+    } finally {
+      await secondTurn.release();
     }
   }, 60_000);
 

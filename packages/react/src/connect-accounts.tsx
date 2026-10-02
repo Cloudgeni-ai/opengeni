@@ -184,7 +184,7 @@ function ScopedAccounts({
                   {selected === `${account.providerId}:${account.id}` ? (
                     <div role="group" aria-label={`Disconnect ${account.label}`}>
                       <p>
-                        This removes local OpenGeni access. It does not revoke consent at the
+                        This removes local Opengeni access. It does not revoke consent at the
                         provider.
                       </p>
                       <button

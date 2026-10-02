@@ -112,7 +112,7 @@ function Harness() {
     <ReviewTab
       workspaceId={workspaceId}
       queue={queue}
-      learningLine="These wait for you because Learning is set to Review first."
+      emptyDescription="When agents propose knowledge, instruction or skill changes, they wait here for your OK."
       onOpenLearning={() => undefined}
       onOpenEntry={() => undefined}
       onChanged={() => undefined}
@@ -137,12 +137,21 @@ async function settle() {
   }
 }
 
-function button(label: string | RegExp): HTMLButtonElement | undefined {
-  return [...document.body.querySelectorAll("button")].find((each) =>
+function button(label: string | RegExp, within: ParentNode = document.body) {
+  return [...within.querySelectorAll("button")].find((each) =>
     typeof label === "string"
       ? each.textContent?.trim() === label
       : label.test(each.textContent ?? ""),
   );
+}
+
+/** Opens the first change on the list: its own page, with the back link to Review. */
+async function openFirstRow(container: HTMLElement) {
+  const row = container.querySelector<HTMLElement>("[data-slot=list-row] [data-row-action]");
+  expect(row).not.toBeNull();
+  await act(async () => row!.click());
+  await settle();
+  expect(button("Review", container)).toBeDefined();
 }
 
 test("instruction approval waits until the current text is loaded, then shows one diff", async () => {
@@ -152,21 +161,29 @@ test("instruction approval waits until the current text is loaded, then shows on
   try {
     await act(async () => root.render(<Harness />));
     await settle();
+    // One row per change: what it is and when.
     expect(container.textContent).toContain("Workspace instructions");
+    expect(container.querySelectorAll("[data-slot=list-row]")).toHaveLength(1);
+    await openFirstRow(container);
     // Nothing to approve until the baseline is visible: no unseen replacement.
     expect(button("Approve")).toBeUndefined();
+    expect(button("Reject")).toBeUndefined();
     await act(async () => resolveBaseline({ content: "Keep every existing customer commitment." }));
     await settle();
     expect(container.textContent).toContain("Keep every existing customer commitment.");
     expect(container.textContent).toContain("Added: Use the new rule.");
     const approve = button("Approve");
     expect(approve).toBeDefined();
+    // The agent's reason is on the page, under what changes.
+    expect(container.textContent).toContain("Agent proposed a policy change");
     await act(async () => approve!.click());
     await settle();
     expect(reviewAgentInstruction).toHaveBeenCalledWith(
       workspaceId,
       expect.objectContaining({ revisionId, decision: "approve" }),
     );
+    // The last change is done: back on the list, which says so.
+    expect(container.textContent).toContain("You're all caught up");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -182,12 +199,15 @@ test("a skill removal confirms with its consequences and submits the exact opera
   try {
     await act(async () => root.render(<Harness />));
     await settle();
+    await openFirstRow(container);
     expect(container.textContent).toContain("An agent asked to delete this skill");
-    await act(async () => button("Delete skill…")!.click());
+    await act(async () => button("Delete skill")!.click());
     await settle();
     expect(document.body.textContent).toContain("Every saved version of it is deleted.");
     expect(approveSkill).not.toHaveBeenCalled();
-    await act(async () => button("Delete skill")!.click());
+    await act(async () =>
+      button("Delete skill", document.querySelector("[role=dialog]")!)!.click(),
+    );
     await settle();
     expect(approveSkill).toHaveBeenCalledWith(
       workspaceId,

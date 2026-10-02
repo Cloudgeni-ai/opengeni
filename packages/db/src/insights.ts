@@ -1,4 +1,4 @@
-import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
@@ -1075,7 +1075,7 @@ export async function listFloorSessions(
       .where(eq(schema.sessions.workspaceId, workspaceId))
       .orderBy(desc(schema.sessions.updatedAt))
       .limit(limit);
-    return await withLatestStartedSessionPolicy(scopedDb, workspaceId, rows);
+    return await withEffectiveSessionPolicy(scopedDb, workspaceId, rows);
   });
 }
 

@@ -122,6 +122,14 @@ config:
   # Keep false for the image rollout, then flip true only after API, worker, and
   # web replicas all understand the host authority discriminator.
   OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
+  # Agent configuration (sessions.agent_config, migration 0559). Readers first:
+  # roll every worker onto the 0559-aware image with both switches off, then
+  # set ADMISSION to "true" so the API accepts `agent` inputs (and PUT
+  # .../agent, workspace defaults, scheduled/automation `agent`). DEFAULT makes
+  # new top-level sessions that omit `agent` resolve { capabilities: "all" }.
+  # See docs/deployment.md.
+  OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED: "false"
+  OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS: "false"
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
@@ -1092,6 +1100,14 @@ ingress:
   setupAccountIngress:
     # Required when setup email token transport is "query". Disabling this
     # while query mode is selected aborts rendering with an operator error.
+    enabled: true
+    annotations: {}
+  # Exact API routes for the workspace MCP OAuth protocol paths that live at
+  # the issuer origin root (/.well-known/oauth-*, /oauth/*). Rendered for every
+  # ingress host that already routes to the API, only while
+  # config.OPENGENI_MCP_OAUTH_ENABLED is true. Gated deployments that protect
+  # the primary Ingress with auth annotations must repeat them here.
+  mcpOAuthIngress:
     enabled: true
     annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the

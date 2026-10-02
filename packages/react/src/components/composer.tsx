@@ -175,7 +175,9 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   messagePlaceholder: "Message the agent…",
   pausedPlaceholder: "Message the agent — it will wait in the queue…",
   inputLabel: "Message the agent",
-  keyboardHint: "Enter to queue · Cmd/Ctrl+Enter to steer · Shift+Enter for a new line",
+  // Shortcuts live in the send button's title; the footer stays quiet unless
+  // the host supplies its own hint.
+  keyboardHint: "",
   slashCommandBlocked:
     "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
   controlChangedError:
@@ -1342,10 +1344,10 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
           }
           className={cn(
             "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
-            "bg-og-accent text-og-accent-fg shadow-og-sm",
+            "border border-og-primary-border bg-og-primary text-og-primary-fg",
             "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
-            "hover:bg-og-accent-strong active:scale-95",
-            "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
+            "hover:bg-og-primary-hover active:scale-95",
+            "disabled:cursor-not-allowed disabled:opacity-50",
             className,
           )}
         >
@@ -1502,7 +1504,7 @@ function WorkstreamPausedStrip({
         <button
           type="button"
           aria-label={messages.resumeThisWorkstream}
-          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-md border border-og-status-waiting/35 bg-og-surface-1 px-2.5 text-og-xs font-medium text-og-fg hover:bg-og-surface-2 pointer-coarse:min-h-11"
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-md border border-og-primary-border bg-og-primary px-2.5 text-og-xs font-medium text-og-primary-fg hover:bg-og-primary-hover disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
           disabled={busy}
           onClick={onResume}
         >

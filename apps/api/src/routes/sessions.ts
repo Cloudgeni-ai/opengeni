@@ -1,4 +1,5 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
@@ -6,6 +7,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
+import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
@@ -82,6 +84,8 @@ import {
   UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentConfigError,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
@@ -184,6 +188,7 @@ import {
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
   SessionVariableSetSelectionUnavailableError,
+  SessionCreateConnectionSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
@@ -305,9 +310,11 @@ import {
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
+  updateSessionAgent,
   updateSessionTitle,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
+  workspaceSessionEffectiveToolsContext,
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
   relayConfigFromSettings,
@@ -821,7 +828,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
+      ...page.pinned,
+      ...page.sessions,
+    ]);
     const commandActivity = await backgroundCommandActivityForSessions(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -846,6 +856,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         },
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
+        policy.effectiveToolsContext,
       );
     };
     if (pageView) {
@@ -1209,15 +1220,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
-      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
-        beginSessionRealtimeInTransaction(scopedDb, {
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+        const accounts = await freezeSessionRealtimeConnectionAccounts({
+          db: scopedDb as unknown as Database,
+          settings,
+          grant,
+          workspaceId,
+          sessionId,
+        });
+        return beginSessionRealtimeInTransaction(scopedDb, {
           accountId: grant.accountId,
           workspaceId,
           sessionId,
           ownerSubjectId: grant.subjectId,
           ...parsed.data,
-        }),
-      );
+          ...accounts,
+        });
+      });
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
       return c.json({ mode: result.mode, replay: result.replay }, result.replay ? 200 : 201);
@@ -1989,9 +2008,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.param("sessionId"),
       ...lineage.ancestors.map((session) => session.id),
     ];
+    const lineageSessions = [...lineage.ancestors];
     const collect = (nodes: LineageNode[]) => {
       for (const node of nodes) {
         sessionIds.push(node.session.id);
+        lineageSessions.push(node.session as Session);
         collect(node.children);
       }
     };
@@ -2007,7 +2028,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         session: { ...node.session, hasSchedules: targets.has(node.session.id) },
         children: decorateNodes(node.children),
       }));
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
+    const policy = await loadEffectivePolicyContext(
+      deps,
+      workspaceId,
+      grant.subjectId,
+      lineageSessions,
+    );
     return c.json({
       ...lineage,
       sessionHasSchedules: targets.has(c.req.param("sessionId")),
@@ -2016,6 +2042,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           { ...session, hasSchedules: targets.has(session.id) },
           policy.workspaceServerIds,
           policy.workspaceDefaultServerIds,
+          policy.effectiveToolsContext,
         ),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
@@ -2348,6 +2375,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
     try {
       const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  // Replace the session's agent configuration (capabilities, identity,
+  // instructions alias, renderer). Shares the tool-policy version CAS and
+  // applies from the next attempt.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/agent", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = parseRequestBody(
+      UpdateSessionAgentRequest,
+      await c.req.json().catch(() => null),
+    );
+    try {
+      const session = await updateSessionAgent(deps, grant, sessionId, payload);
       return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
     } catch (error) {
       if (error instanceof SessionToolPolicyVersionConflictError) {
@@ -4317,6 +4373,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(out);
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read-workspace", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read", "fs.read");
+    const req = await parseChannelABody(c, FsReadRequest);
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.fsRead({ ...req, workspaceOnly: true }),
+    );
+    return c.json(out);
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/publish", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -4867,6 +4932,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/mcp-credentials/rotate" && verb === "POST")
     return "session.mcp.credentials.rotate";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
@@ -4961,10 +5027,16 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix.startsWith("/viewers/") && ["POST", "DELETE"].includes(verb)) {
     return "session.viewer.control";
   }
-  if (suffix === "/fs/list" || suffix === "/fs/list-batch" || suffix === "/fs/read") {
+  if (
+    suffix === "/fs/list" ||
+    suffix === "/fs/list-batch" ||
+    suffix === "/fs/read" ||
+    suffix === "/fs/read-workspace"
+  ) {
     return verb === "POST" ? "session.files.read" : null;
   }
   if (suffix === "/artifacts/publish" && verb === "POST") return "session.files.write";
+  if (suffix.startsWith("/artifact-associations/") && verb === "GET") return "session.read";
   if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
     return verb === "POST" ? "session.files.write" : null;
   }
@@ -5644,6 +5716,24 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof UnsupportedLatencyModeError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.code,
+          modelId: error.modelId,
+          latencyMode: error.latencyMode,
+          allowedLatencyModes: [...error.allowedLatencyModes],
+        },
+      },
+      422,
+    );
+  }
+  if (error instanceof SessionCreateConnectionSelectionUnavailableError) {
+    return c.json({ code: error.code, message: error.message, retryable: false }, 409);
+  }
   if (error instanceof SessionTenancyManagedHumanRequiredError) {
     return c.json(
       {
@@ -5704,6 +5794,24 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
         currentRevision: error.cause.currentRevision,
       },
       409,
+    );
+  }
+  if (
+    error instanceof HTTPException &&
+    error.status === 422 &&
+    error.cause instanceof AgentConfigError
+  ) {
+    // Typed agent-configuration failure: the specific code is details.code.
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.cause.code,
+          ...(error.cause.capability ? { capability: error.cause.capability } : {}),
+        },
+      },
+      422,
     );
   }
   if (error instanceof HTTPException && error.status === 422) {
@@ -5773,18 +5881,21 @@ function commandConflictResponse(c: Context, error: unknown): Response {
 type EffectivePolicyContext = {
   workspaceServerIds: string[];
   workspaceDefaultServerIds: string[];
+  effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
 };
 
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,
+  sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
     workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
     workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
   ]);
-  return { workspaceServerIds, workspaceDefaultServerIds };
+  return { workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext };
 }
 
 async function withEffectivePolicy(
@@ -5793,11 +5904,12 @@ async function withEffectivePolicy(
   subjectId: string,
   session: Session,
 ): Promise<Session> {
-  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId);
+  const policy = await loadEffectivePolicyContext(deps, workspaceId, subjectId, [session]);
   return sessionWithEffectiveToolPolicy(
     session,
     policy.workspaceServerIds,
     policy.workspaceDefaultServerIds,
+    policy.effectiveToolsContext,
   );
 }
 
@@ -5808,6 +5920,7 @@ function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): 
       node.session as Session,
       policy.workspaceServerIds,
       policy.workspaceDefaultServerIds,
+      policy.effectiveToolsContext,
     ),
     children: mapLineageNodes(node.children, policy),
   }));

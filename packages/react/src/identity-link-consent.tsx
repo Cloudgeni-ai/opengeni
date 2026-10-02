@@ -106,7 +106,7 @@ export function IdentityLinkConsent({
       aria-label="Link your account"
       aria-busy={busy}
     >
-      <h2>Link your OpenGeni account</h2>
+      <h2>Link your Opengeni account</h2>
       <p>
         Only continue if you started this request in a product you trust. Linking lets that product
         act as your account with the permissions you select. It does not merge accounts or move
@@ -120,7 +120,7 @@ export function IdentityLinkConsent({
           <dd>
             {preview.externalIdentity.externalId} ({preview.externalIdentity.source})
           </dd>
-          <dt>Your OpenGeni identity</dt>
+          <dt>Your Opengeni identity</dt>
           <dd>{preview.nativeSubjectId}</dd>
         </dl>
       )}
@@ -182,7 +182,7 @@ export function IdentityLinkConsent({
         </>
       )}
       {link?.status === "revoked" && (
-        <p role="status">Link revoked. Your OpenGeni account and existing work are unchanged.</p>
+        <p role="status">Link revoked. Your Opengeni account and existing work are unchanged.</p>
       )}
       {link?.status === "expired" && (
         <p role="status">This request has expired. Start a new request from your product.</p>

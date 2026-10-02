@@ -98,6 +98,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   rig_promote: { allOf: ["rigs:manage"] },
   sessions_list: { allOf: ["sessions:read"] },
   session_get: { allOf: ["sessions:read"] },
+  session_set_model: { allOf: ["sessions:control"] },
   session_events: { allOf: ["sessions:read"] },
   // Blocking wait inside a running turn: the live attempt's own session is the
   // self target, so the tool exists only for session-scoped grants.
@@ -122,6 +123,11 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_downloads: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_download_save: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "files:upload"],
+  },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
   interaction_request_human: {
     sessionRequired: true,

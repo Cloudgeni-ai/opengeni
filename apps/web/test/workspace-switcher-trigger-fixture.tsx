@@ -109,7 +109,7 @@ function WorkspaceSwitcherFixture() {
             <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-brand text-xs font-bold text-white">
               OG
             </span>
-            {collapsed ? null : <span className="min-w-0 truncate">OpenGeni</span>}
+            {collapsed ? null : <span className="min-w-0 truncate">Opengeni</span>}
           </div>
           <section aria-label="Workspace switcher preview">
             {collapsed ? (
@@ -118,11 +118,9 @@ function WorkspaceSwitcherFixture() {
                 orgs={organizations}
                 workspaces={workspaces}
                 activeWorkspaceId={activeWorkspaceId}
+                activeAccountId={activeWorkspace.accountId}
                 canCreate
                 onSelect={setActiveWorkspaceId}
-                onCreate={() => setLastAction("New workspace")}
-                onCreateOrganization={() => setLastAction("New organization")}
-                workspaceId={activeWorkspaceId}
                 managedSelfContext={selfContext}
                 align="start"
               >
@@ -140,15 +138,13 @@ function WorkspaceSwitcherFixture() {
                   orgs={organizations}
                   workspaces={workspaces}
                   activeWorkspaceId={activeWorkspaceId}
+                  activeAccountId={activeWorkspace.accountId}
                   canCreate
                   onSelect={(workspaceId) => {
                     const selected = workspaces.find((candidate) => candidate.id === workspaceId)!;
                     setActiveWorkspaceId(workspaceId);
                     setLastAction(`Opened ${selected.name}`);
                   }}
-                  onCreate={() => setLastAction("New workspace")}
-                  onCreateOrganization={() => setLastAction("New organization")}
-                  workspaceId={activeWorkspaceId}
                   managedSelfContext={selfContext}
                   align="start"
                 >

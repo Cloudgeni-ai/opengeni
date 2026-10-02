@@ -60,7 +60,7 @@ test("history lists every activated version, newest first, in plain words", () =
   const history = instructionRevisions(response, "user:me");
   expect(history.map((each) => [each.summary, each.author, each.revisionId])).toEqual([
     ["Restored an earlier version", "A workspace admin", "r1"],
-    ["Approved an agent's change", "OpenGeni", "r2"],
+    ["Approved an agent's change", "Opengeni", "r2"],
     ["Created the instructions", "You", "r1"],
   ]);
   expect(history[1]?.content).toContain("Link the Linear issue.");

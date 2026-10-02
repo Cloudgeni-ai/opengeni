@@ -299,7 +299,7 @@ export function wrapChannelABoxWithRouting(
         op: string;
         backend: ResolvedActiveBackend;
         admission: unknown;
-        outcome: "resolved" | "rejected";
+        outcome: "resolved" | "rejected" | "outcome_unknown";
         result?: unknown;
         retainedProcess?: RoutingRetainedProcess;
       }): Promise<void> => {
@@ -323,7 +323,7 @@ export function wrapChannelABoxWithRouting(
         ) {
           throw new Error("API-direct workspace mutation settlement lacked its bound admission");
         }
-        if (outcome === "resolved" && retainedProcess) {
+        if ((outcome === "resolved" || outcome === "outcome_unknown") && retainedProcess) {
           await retainWorkspaceProviderCommand(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -355,6 +355,10 @@ export function wrapChannelABoxWithRouting(
           });
           return;
         }
+        if (outcome === "outcome_unknown")
+          throw new Error(
+            "Outcome-unknown command settlement requires its exact retained invocation",
+          );
         await verifyDirectWorkspaceMutationSettlement(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,

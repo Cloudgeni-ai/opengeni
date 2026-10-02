@@ -4,6 +4,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { ApiKey } from "@/types";
+import { presetById, workspaceKeyPermissions } from "@/lib/api-key-presets";
+import { defaultApiKeyPermissions } from "@/lib/permissions";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const accountId = "44444444-4444-4444-8444-444444444444";
@@ -99,6 +101,11 @@ async function render(keyParam: string | undefined) {
   });
   return {
     container,
+    rerender: async (nextKeyParam = keyParam) => {
+      await act(async () => {
+        root.render(<WorkspaceApiKeysPage workspaceId={workspaceId} keyParam={nextKeyParam} />);
+      });
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -112,6 +119,31 @@ function button(container: HTMLElement, text: string): HTMLButtonElement {
   );
   if (!found) throw new Error(`No button "${text}"`);
   return found;
+}
+
+async function selectAccess(container: HTMLElement, label: string) {
+  const trigger = container.querySelector<HTMLButtonElement>("button[role=combobox]")!;
+  await act(async () => trigger.click());
+  const option = Array.from(document.querySelectorAll<HTMLElement>("[role=option]")).find((each) =>
+    each.textContent?.startsWith(label),
+  );
+  expect(option).toBeDefined();
+  await act(async () => option!.click());
+}
+
+async function submitKey(container: HTMLElement) {
+  const input = container.querySelector<HTMLInputElement>("input[placeholder='e.g. CI pipeline']")!;
+  await act(async () => {
+    const propsKey = Object.keys(input).find((each) => each.startsWith("__reactProps$"))!;
+    const props = (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[
+      propsKey
+    ]!;
+    input.value = "Fixture key";
+    props.onChange({ target: input, currentTarget: input });
+  });
+  await act(async () => button(container, "Create API key").click());
+  expect(createApiKey).toHaveBeenCalledTimes(1);
+  return createApiKey.mock.calls[0]![1].permissions as string[];
 }
 
 describe("workspace API keys", () => {
@@ -144,6 +176,24 @@ describe("workspace API keys", () => {
     await view.unmount();
   });
 
+  test("a Personal workspace says keys aren't available there, not who manages them", async () => {
+    permissions = ["workspace:read"];
+    const workspace = context.workspaces[0]! as { kind?: string };
+    workspace.kind = "personal";
+    try {
+      const view = await render(undefined);
+      expect(listApiKeys).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain(
+        "API keys aren't available in Personal workspaces",
+      );
+      expect(view.container.textContent).not.toContain("workspace admins can");
+      expect(view.container.textContent).not.toContain("managed by workspace admins");
+      await view.unmount();
+    } finally {
+      delete workspace.kind;
+    }
+  });
+
   test("creates a key with a 90-day expiry and shows the token once on the same page", async () => {
     const view = await render("new");
     const input = view.container.querySelector<HTMLInputElement>(
@@ -173,7 +223,7 @@ describe("workspace API keys", () => {
       expiresAt?: string;
     };
     expect(request.name).toBe("Nightly export");
-    expect(request.permissions).toContain("sessions:create");
+    expect([...request.permissions].sort()).toEqual([...defaultApiKeyPermissions].sort());
     expect(request.permissions.some((each) => each.startsWith("account:"))).toBe(false);
     const days = (new Date(request.expiresAt!).getTime() - Date.now()) / 86_400_000;
     expect(Math.round(days)).toBe(90);
@@ -182,4 +232,127 @@ describe("workspace API keys", () => {
     expect(text).toContain("ogk_dddddddd_shown-once");
     await view.unmount();
   });
+
+  test("All permissions submits every current workspace scope, including high-trust scopes", async () => {
+    permissions = ["workspace:admin", "members:manage", "secrets:read"];
+    const view = await render("new");
+    await selectAccess(view.container, "All permissions");
+    expect((await submitKey(view.container)).sort()).toEqual(workspaceKeyPermissions().sort());
+    await view.unmount();
+  });
+
+  test.each(["all_permissions", "full_automation", "read_only", "run_sessions"] as const)(
+    "%s to Custom preserves the selected set and supports narrowing",
+    async (preset) => {
+      permissions = ["workspace:admin", "members:manage", "secrets:read"];
+      const view = await render("new");
+      await selectAccess(view.container, presetById(preset).label);
+      await selectAccess(view.container, "Custom");
+      const checkboxes = Array.from(
+        view.container.querySelectorAll<HTMLInputElement>("input[type=checkbox]"),
+      );
+      expect(checkboxes.filter((each) => each.checked)).toHaveLength(
+        presetById(preset).permissions.length,
+      );
+      const readSessions = checkboxes.find(
+        (each) => each.labels?.[0]?.textContent === "Read sessions",
+      )!;
+      await act(async () => readSessions.click());
+      expect((await submitKey(view.container)).sort()).toEqual(
+        presetById(preset)
+          .permissions.filter((each) => each !== "sessions:read")
+          .sort(),
+      );
+      await view.unmount();
+    },
+  );
+
+  test.each([
+    { grants: ["workspace:admin", "workspace:read"] },
+    { grants: ["api_keys:manage", "workspace:read", "sessions:read"] },
+  ])(
+    "restricted grants cannot select All permissions or escalate via Custom: %j",
+    async ({ grants }) => {
+      permissions = [...grants];
+      const view = await render("new");
+      await act(async () =>
+        view.container.querySelector<HTMLButtonElement>("button[role=combobox]")!.click(),
+      );
+      const all = Array.from(document.querySelectorAll<HTMLElement>("[role=option]")).find((each) =>
+        each.textContent?.startsWith("All permissions"),
+      )!;
+      expect(all.getAttribute("aria-disabled")).toBe("true");
+      await act(async () => all.click());
+      expect(view.container.querySelector("button[role=combobox]")?.textContent).not.toContain(
+        "All permissions",
+      );
+      // Close the open menu before choosing Custom.
+      await act(async () =>
+        view.container.querySelector<HTMLButtonElement>("button[role=combobox]")!.click(),
+      );
+      await selectAccess(view.container, "Custom");
+      const submitted = await submitKey(view.container);
+      expect(submitted).not.toContain("members:manage");
+      expect(submitted).not.toContain("secrets:read");
+      if (!permissions.includes("workspace:admin")) {
+        expect(submitted.every((each) => permissions.includes(each))).toBe(true);
+      }
+      await view.unmount();
+    },
+  );
+
+  test.each([false, true])(
+    "live authority loss filters the actual payload (Custom: %s)",
+    async (custom) => {
+      permissions = ["workspace:admin", "members:manage", "secrets:read"];
+      const view = await render("new");
+      await selectAccess(view.container, "All permissions");
+      if (custom) await selectAccess(view.container, "Custom");
+      permissions = ["api_keys:manage", "workspace:read"];
+      await view.rerender();
+      expect(view.container.querySelector("button[role=combobox]")?.textContent).toContain(
+        "Custom",
+      );
+      expect((await submitKey(view.container)).sort()).toEqual([...permissions].sort());
+      await view.unmount();
+    },
+  );
+
+  test("losing key-management access while open prevents submission", async () => {
+    const view = await render("new");
+    permissions = ["workspace:read"];
+    await view.rerender();
+    expect(view.container.textContent).toContain("Only workspace admins can create API keys");
+    expect(view.container.querySelector("form")).toBeNull();
+    expect(createApiKey).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test.each([false, true])(
+    "replacement preserves all scopes or narrows to live grants (restricted: %s)",
+    async (restricted) => {
+      permissions = restricted
+        ? ["api_keys:manage", "workspace:read", "sessions:read"]
+        : ["workspace:admin", "members:manage", "secrets:read"];
+      listApiKeys.mockResolvedValueOnce([
+        { ...expiredKey, permissions: workspaceKeyPermissions() as ApiKey["permissions"] },
+      ]);
+      const view = await render(expiredKey.id);
+      await act(async () => button(view.container, "Create a replacement").click());
+      expect(navigate).toHaveBeenCalled();
+      await view.rerender("new");
+      expect(
+        view.container.querySelector<HTMLInputElement>("input[placeholder='e.g. CI pipeline']")
+          ?.value,
+      ).toBe(expiredKey.name);
+      expect(view.container.querySelector("button[role=combobox]")?.textContent).toContain(
+        restricted ? "Custom" : "All permissions",
+      );
+      expect((await submitKey(view.container)).sort()).toEqual(
+        (restricted ? permissions : workspaceKeyPermissions()).sort(),
+      );
+      expect(deleteApiKey).not.toHaveBeenCalled();
+      await view.unmount();
+    },
+  );
 });

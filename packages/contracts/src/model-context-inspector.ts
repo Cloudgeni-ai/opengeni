@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AGENT_PROMPT_MODULE_IDS, AgentPromptModuleId } from "./agent-config";
 
 export const MODEL_CONTEXT_SNAPSHOT_VERSION = 1 as const;
 export const MODEL_CONTEXT_INSTRUCTIONS_MAX_UTF8_BYTES = 8 * 1024 * 1024;
@@ -23,8 +24,18 @@ export const ModelContextInstructionLayerId = z.enum([
   "sandbox_preamble",
   "sandbox_filesystem",
   "sent_system_instructions",
+  "identity",
 ]);
 export type ModelContextInstructionLayerId = z.infer<typeof ModelContextInstructionLayerId>;
+
+/** One prompt module inside a layer (modular operational contract only). */
+export const ModelContextInstructionModule = z
+  .object({
+    id: AgentPromptModuleId,
+    chars: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ModelContextInstructionModule = z.infer<typeof ModelContextInstructionModule>;
 
 export const ModelContextInstructionLayer = z
   .object({
@@ -33,6 +44,8 @@ export const ModelContextInstructionLayer = z
     content: z.string(),
     utf8Bytes: z.number().int().nonnegative(),
     estimatedTokens: z.number().int().nonnegative(),
+    // Composition-order prompt modules of a modular operational contract.
+    modules: z.array(ModelContextInstructionModule).max(AGENT_PROMPT_MODULE_IDS.length).optional(),
   })
   .strict();
 export type ModelContextInstructionLayer = z.infer<typeof ModelContextInstructionLayer>;

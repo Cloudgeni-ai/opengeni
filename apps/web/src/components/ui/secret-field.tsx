@@ -260,7 +260,7 @@ export function variableNameIssue(
     return {
       kind: "reserved",
       message: REPOSITORY_TOKEN_NAMES.has(name)
-        ? `OpenGeni sets ${name} for repository access. Use another name, like ${name.replace(/_TOKEN$/, "")}_BOT_TOKEN.`
+        ? `Opengeni sets ${name} for repository access. Use another name, like ${name.replace(/_TOKEN$/, "")}_BOT_TOKEN.`
         : `${name} is set by the sandbox. Use another name.`,
     };
   }

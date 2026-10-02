@@ -1,26 +1,55 @@
+import { ClaudeMark, AnthropicMark, OpenRouterMark, GrokMark } from "@opengeni/react";
+import type { ModelConnectionAccessResponse } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
-import { RouteIcon, SparklesIcon } from "lucide-react";
-import { useCallback, useEffect, useState, type ComponentProps, type SVGProps } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ComponentProps,
+  type SVGProps,
+} from "react";
 
 import { ChatGptMark } from "@/components/chatgpt-mark";
 import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
 import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
+import { userErrorText } from "@/lib/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { returnToSearch, type ReturnTo } from "@/lib/return-to";
 
-export type ModelsScope =
-  | { kind: "workspace"; workspaceId: string }
-  | { kind: "organization"; workspaceId: string };
+/**
+ * Where a Models page lives: Organization settings > Models, opened through
+ * `anchorWorkspaceId` (the settings URL's workspace), and the workspace whose
+ * model page it is or was opened from, if any (`?workspace=`).
+ */
+export type ModelsScope = { anchorWorkspaceId: string; workspaceId?: string | undefined };
 
 /* ----------------------------------------------------------------------------
-   Shared pieces of Settings > Models (workspace and organization): provider
-   marks, small menus, the flush form page and the URL state that says which
-   list, account page or form is showing.
+   Shared pieces of Organization settings > Models: provider marks, small
+   menus, the flush form page and the URL state that says which list, account
+   page or form is showing.
    -------------------------------------------------------------------------- */
 
-export type ModelProviderId = "codex" | "supergrok" | "vercel" | "openrouter";
+/**
+ * The name of the list a sub-page's back link returns to: "Models", or the
+ * workspace's name for pages opened from a workspace's model page.
+ */
+const ModelsListLabelContext = createContext("Models");
+export const ModelsListLabelProvider = ModelsListLabelContext.Provider;
+export function useModelsListLabel(): string {
+  return useContext(ModelsListLabelContext);
+}
+
+export type ModelProviderId =
+  | "codex"
+  | "supergrok"
+  | "vercel"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
 
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -39,8 +68,10 @@ export function ProviderMark({
 }) {
   if (provider === "codex") return <ChatGptMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
-  if (provider === "supergrok") return <SparklesIcon aria-hidden="true" className={className} />;
-  return <RouteIcon aria-hidden="true" className={className} />;
+  if (provider === "claude_subscription") return <ClaudeMark className={className} />;
+  if (provider === "anthropic") return <AnthropicMark className={className} />;
+  if (provider === "supergrok") return <GrokMark className={className} />;
+  return <OpenRouterMark className={className} />;
 }
 
 /** The provider's logo on the shared tile. Size follows the list or page it sits in. */
@@ -54,12 +85,69 @@ export function ProviderTile({
   return <LogoTile size={size} icon={<ProviderMark provider={provider} className="text-fg" />} />;
 }
 
+/**
+ * Who an account is for, as the one tag on its row and page: the
+ * organization's workspaces (all, or the ones it was limited to), this
+ * workspace, or only the person who connected it.
+ */
+export interface ModelsScopeLabels {
+  /** "Shared by Acme": an organization account whose "Available in" this viewer can't read. */
+  organization: string;
+  /** "Everyone in Acme": an organization account every workspace can use. */
+  everyone: string;
+  /** "Selected workspaces": an organization account limited to some workspaces. */
+  selected: string;
+  /** "Design preview only", "This workspace only", or "Personal workspace only". */
+  workspace: string;
+  /** "Only you". */
+  user: string;
+}
+
+export function modelsScopeLabels(
+  organizationName: string,
+  personal: boolean,
+  /** Names the workspace in its own accounts' tag ("Design preview only"). */
+  workspaceName?: string,
+): ModelsScopeLabels {
+  return {
+    organization: `Shared by ${organizationName}`,
+    everyone: `Everyone in ${organizationName}`,
+    selected: "Selected workspaces",
+    workspace: personal
+      ? "Personal workspace only"
+      : workspaceName
+        ? `${workspaceName} only`
+        : "This workspace only",
+    user: "Only you",
+  };
+}
+
+/**
+ * The tag of an organization account, from its "Available in": everyone, or
+ * selected workspaces. "Shared by Acme" until the policy is known.
+ */
+export function organizationReachLabel(
+  labels: ModelsScopeLabels,
+  access: ModelConnectionAccessResponse | null | undefined,
+): string {
+  if (!access) return labels.organization;
+  const { policy, personalWorkspacesSupported } = access;
+  return policy.allowedWorkspaces === null &&
+    (!personalWorkspacesSupported || policy.allowPersonalWorkspaces)
+    ? labels.everyone
+    : labels.selected;
+}
+
+/** "Not in use", in the usage column of an account new work here doesn't use. */
+export const NOT_IN_USE = <span className="text-xs font-medium text-fg-subtle">Not in use</span>;
+
 /** A full-page form with a back link and a sticky Cancel + primary footer. */
 export function ModelsFormPage({
-  backLabel = "Models",
+  backLabel,
   ...props
 }: Omit<ComponentProps<typeof FlushFormPage>, "backLabel"> & { backLabel?: string }) {
-  return <FlushFormPage backLabel={backLabel} {...props} />;
+  const listLabel = useModelsListLabel();
+  return <FlushFormPage backLabel={backLabel ?? listLabel} {...props} />;
 }
 
 /**
@@ -70,10 +158,12 @@ export function payerShortLabel(row: { billingClass: string; providerLabel: stri
   switch (row.billingClass) {
     case "codex_subscription":
       return "Codex";
+    case "claude_subscription":
+      return "Claude";
     case "supergrok_subscription":
       return "SuperGrok";
     case "opengeni_credits":
-      return "Credits";
+      return "Opengeni credits";
     case "byok":
     case "organization_byok":
       return row.providerLabel;
@@ -87,10 +177,12 @@ export function payerLabel(billingClass: string, fallback?: string): string {
   switch (billingClass) {
     case "codex_subscription":
       return "Codex plan";
+    case "claude_subscription":
+      return "Claude plan";
     case "supergrok_subscription":
       return "SuperGrok plan";
     case "opengeni_credits":
-      return "OpenGeni credits";
+      return "Opengeni credits";
     case "byok":
       return "Workspace API key";
     case "organization_byok":
@@ -106,11 +198,12 @@ export function resetsLabel(count: number | null | undefined): string | null {
   return count === 1 ? "1 usage limit reset" : `${count} usage limit resets`;
 }
 
+/** One line for a failed action: advice for an API error, never its raw message. */
 export function errorText(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return userErrorText(error, fallback);
 }
 
-/* Which page of Settings > Models is showing lives in the URL (lib/models-route). */
+/* Which page of Organization settings > Models is showing lives in the URL (lib/models-route). */
 
 export interface ModelsNavigation {
   account: string | undefined;
@@ -124,6 +217,8 @@ export interface ModelsNavigation {
   openAccount: (account: string | undefined, from?: ReturnTo) => void;
   /** Opens a form page, optionally for an account. */
   openView: (view: ModelsView | undefined, account?: string) => void;
+  /** Opens a workspace's model page, or the organization's list with `undefined`. */
+  openWorkspace: (workspaceId: string | undefined, account?: string, view?: ModelsView) => void;
   /** Returns to where a cross-scope link came from. */
   goBack: (returnTo: ReturnTo) => void;
 }
@@ -143,29 +238,25 @@ export function useModelsNavigation(
       account?: string | undefined;
       view?: ModelsView | undefined;
       from?: ReturnTo | undefined;
+      /** Null leaves the workspace page for the organization's list. */
+      workspace?: string | null | undefined;
     }) => {
       const from = search.from ?? (search.account ? currentReturnTo : undefined);
+      const workspace = search.workspace === undefined ? scope.workspaceId : search.workspace;
       const next = {
         section: "models" as const,
+        ...(workspace ? { workspace } : {}),
         ...(search.account ? { account: search.account } : {}),
         ...(search.view ? { view: search.view } : {}),
         ...returnToSearch(from),
       };
-      if (scope.kind === "organization") {
-        void navigate({
-          to: "/workspaces/$workspaceId/organization",
-          params: { workspaceId: scope.workspaceId },
-          search: next,
-        });
-      } else {
-        void navigate({
-          to: "/workspaces/$workspaceId/settings",
-          params: { workspaceId: scope.workspaceId },
-          search: next,
-        });
-      }
+      void navigate({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId: scope.anchorWorkspaceId },
+        search: next,
+      });
     },
-    [navigate, scope, currentReturnTo],
+    [navigate, scope.anchorWorkspaceId, scope.workspaceId, currentReturnTo],
   );
   return {
     account: current.account,
@@ -173,6 +264,10 @@ export function useModelsNavigation(
     returnTo: currentReturnTo,
     openAccount: useCallback((account, from) => go({ account, from }), [go]),
     openView: useCallback((view, account) => go({ account, view }), [go]),
+    openWorkspace: useCallback(
+      (workspace, account, view) => go({ workspace: workspace ?? null, account, view }),
+      [go],
+    ),
     goBack: useCallback((returnTo) => void navigate({ href: returnTo.path }), [navigate]),
   };
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
+import { userErrorText } from "@/lib/api-error";
 import {
   Dialog,
   DialogContent,
@@ -70,7 +71,7 @@ export function QuickConnectDialog({
       }
       onOpenChange(false);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : String(submitError));
+      setError(userErrorText(submitError));
       setBusy(false);
     }
   }

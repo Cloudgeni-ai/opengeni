@@ -1,5 +1,5 @@
 import { ChevronDownIcon, PlugIcon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { Suspense } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 
 import { Button } from "@/components/ui/button";
@@ -52,24 +52,30 @@ export function visibleSessionToolSelection(
 }
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
-import { COMPOSER_MENU_PANEL_CLASS, ComposerMenuHeader } from "@/components/ui/composer-menu";
+import {
+  COMPOSER_MENU_PANEL_CLASS,
+  ComposerMenuHeader,
+  ComposerMenuRowsSkeleton,
+  lazyComposerPanel,
+} from "@/components/ui/composer-menu";
+import { isComposerConnector } from "@/lib/session-tools";
 
-const LazySessionConnectorsMenuBody = lazy(() =>
-  import("@/components/session-connectors-menu-body").then((module) => ({
-    default: module.SessionConnectorsMenuBody,
-  })),
+const loadSessionConnectorsMenu = () => import("@/components/session-connectors-menu-body");
+
+const LazySessionConnectorsMenuBody = lazyComposerPanel(() =>
+  loadSessionConnectorsMenu().then((module) => module.SessionConnectorsMenuBody),
 );
 
 /** Secondary connector/account controls load only when their menu is opened. */
 export function SessionToolsMenuBody(props: SessionConnectorsMenuProps) {
+  // Same header and one row per known connector, so the menu keeps its size.
+  const rows = Math.min(6, Math.max(1, props.servers.filter(isComposerConnector).length));
   return (
     <Suspense
       fallback={
         <>
           <ComposerMenuHeader title="Connectors" leading={props.leading} />
-          <p role="status" className="px-4 py-4 text-xs text-fg-muted">
-            Loading connectors…
-          </p>
+          <ComposerMenuRowsSkeleton rows={rows} size="tile" label="Loading connectors" />
         </>
       }
     >

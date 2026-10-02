@@ -1,0 +1,128 @@
+/* Match the opengeni.ai landing page. Colors, background and DM Sans are set in docs.json;
+   this file adds the details docs.json cannot express. Mintlify loads every .css file in
+   docs-site globally. Selectors use Mintlify's stable ids and documented class names. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+:root {
+  --og-ink: #111311;
+  --og-paper: #fbfbf8;
+  --og-line: #e3e5df;
+  --og-aqua: #9fe3d3;
+  --og-peach: #ffb787;
+  --og-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* The landing page's aqua and peach glows, fixed behind the page. */
+#background-color {
+  background-image:
+    radial-gradient(60rem 44rem at 6% -8%, rgb(159 227 211 / 0.6), transparent 70%),
+    radial-gradient(54rem 46rem at 102% 26%, rgb(255 183 135 / 0.5), transparent 70%),
+    radial-gradient(48rem 36rem at 40% 108%, rgb(159 227 211 / 0.28), transparent 70%);
+}
+.dark #background-color {
+  background-image:
+    radial-gradient(60rem 44rem at 6% -8%, rgb(159 227 211 / 0.22), transparent 70%),
+    radial-gradient(54rem 46rem at 102% 26%, rgb(255 183 135 / 0.16), transparent 70%),
+    radial-gradient(48rem 36rem at 40% 108%, rgb(159 227 211 / 0.1), transparent 70%);
+}
+/* Let the glow show through the header and the top of the sidebar, as on the landing page:
+   Mintlify paints both with the flat page color, which would cut the glow off in hard lines. */
+#navbar > div:first-child {
+  background-color: rgb(251 251 248 / 0.72);
+  -webkit-backdrop-filter: saturate(1.4) blur(14px);
+  backdrop-filter: saturate(1.4) blur(14px);
+}
+.dark #navbar > div:first-child {
+  background-color: rgb(15 17 21 / 0.72);
+}
+#sidebar-content .sticky.top-0.pointer-events-none {
+  background-image: none;
+}
+
+/* Tight display tracking, as on the landing headings. */
+#page-title {
+  letter-spacing: -0.045em;
+}
+#content h2,
+#content h3 {
+  letter-spacing: -0.03em;
+}
+
+/* Section eyebrow as a landing kicker: mono caps after a gradient dot. */
+#header .eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--og-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--og-ink);
+}
+#header .eyebrow::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--og-aqua), var(--og-peach));
+}
+.dark #header .eyebrow {
+  color: var(--og-paper);
+}
+
+/* Header call to action: the landing's ink pill (paper pill in dark mode). */
+#topbar-cta-button a > span:first-child {
+  background: var(--og-ink);
+  border-radius: 999px;
+}
+#topbar-cta-button a {
+  padding-left: 16px;
+  padding-right: 12px;
+}
+.dark #topbar-cta-button a > span:first-child {
+  background: var(--og-paper);
+}
+.dark #topbar-cta-button a .text-white,
+.dark #topbar-cta-button a svg {
+  color: var(--og-ink);
+}
+
+/* Cards: warm hairline and the landing's soft drop shadow. */
+#content .card {
+  border-color: var(--og-line);
+  box-shadow: 0 24px 48px -32px rgb(17 19 17 / 0.22);
+}
+.dark #content .card {
+  border-color: rgb(255 255 255 / 0.1);
+  box-shadow: none;
+}
+
+/* Code in JetBrains Mono, like the landing snippets. */
+#content code,
+#content pre,
+#content pre code {
+  font-family: var(--og-mono);
+}
+
+/* Note and Info callouts in the landing's teal instead of Mintlify blue. Tip, Warning and
+   the rest keep their own colors because the color carries meaning. */
+#content :is([data-callout-type="note"], [data-callout-type="info"]) {
+  border-color: rgb(31 138 116 / 0.25);
+  background-color: rgb(159 227 211 / 0.18);
+}
+#content :is([data-callout-type="note"], [data-callout-type="info"])
+  :is([data-component-part="callout-icon"] svg, [data-component-part="callout-content"]) {
+  color: #155e4f;
+}
+.dark #content :is([data-callout-type="note"], [data-callout-type="info"]) {
+  border-color: rgb(159 227 211 / 0.25);
+  background-color: rgb(159 227 211 / 0.08);
+}
+.dark
+  #content
+  :is([data-callout-type="note"], [data-callout-type="info"])
+  :is([data-component-part="callout-icon"] svg, [data-component-part="callout-content"]) {
+  color: var(--og-aqua);
+}

@@ -48,6 +48,7 @@ export type TurnSettleFn = (input: {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   suppressGoalContinuation?: boolean;
+  allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
 }) => Promise<boolean>;
@@ -113,6 +114,8 @@ export type SandboxRuntimeState = {
 };
 
 export type RenewalState = {
+  /** Secret-only local state; closed on every attempt finalization path. */
+  runMcpCredentials?: { close(): void };
   gitCredentialRenewals: GitCredentialRenewalController[];
   gitCredentialRenewalClosed: boolean;
   runCredentialRenewal: RunCredentialRenewalController | null;
@@ -188,6 +191,10 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
+  latestClaudeUsage: Map<
+    "workspace" | "organization",
+    import("./claude-usage-observer").CapturedClaudeUsage
+  >;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -302,6 +309,7 @@ export function createTurnContext(input: {
       xaiCredentialQuarantined: false,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
+      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
     },
   };

@@ -570,8 +570,10 @@ export function createTurnSandboxProvisioner<T>(
  *   - legacy/built-in OpenAI or Azure Responses fallback (resolvedModel null);
  *   - resolved built-in OpenAI/Azure providers;
  *   - ChatGPT/Codex subscription backend (its strict allowlist permits the field).
+ *   - native Anthropic Messages (maps the internal key to Claude session identity;
+ *     the OpenAI field is never sent on that wire).
  *
- * Registry API-key providers are intentionally excluded. Fireworks' prompt-cache
+ * Other registry API-key providers are intentionally excluded. Fireworks' prompt-cache
  * docs prescribe `user` or `x-session-affinity`, not `prompt_cache_key`; Z.AI/GLM
  * documents automatic context caching plus `user_id`. Sending OpenAI-only fields
  * to unknown OpenAI-compatible providers risks unsupported-parameter 400s.

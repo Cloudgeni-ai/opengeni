@@ -1,8 +1,10 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/sdk";
+import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { registerDom, renderComponent, flush, actRun } from "./render-hook";
+import { OpenGeniLinkProvider } from "../src/components/open-geni-links";
+import { formatAllowanceDate } from "../src/usage/allowance-copy";
 import type {
   AuthNeededItem,
   MemoryItem,
@@ -64,6 +66,19 @@ test("account-qualified native and Codemode calls render persisted labels after 
 
 let timelineSequence = 0;
 
+test("repeated empty final renders its notice without a failure label", async () => {
+  const rendered = await renderComponent(
+    <MessageTimeline
+      events={[timelineEvent("turn.completed", { output: "", emptyFinalReply: true })]}
+      status="idle"
+    />,
+  );
+  await flush();
+  expect(rendered.container.textContent).toContain(EMPTY_FINAL_REPLY_NOTICE);
+  expect(rendered.container.textContent).not.toContain("Turn failed");
+  await rendered.unmount();
+});
+
 function timelineEvent(
   type: string,
   payload: unknown,
@@ -94,6 +109,88 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
 
   throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
 }
+
+describe("allowance refusal rendering", () => {
+  test.each(["workspace", "member"] as const)(
+    "renders one %s remedy from paired usage and completed events",
+    async (scope) => {
+      const refusal = {
+        code: "allowance_exhausted",
+        scope,
+        ...(scope === "member" ? { subjectId: "user:member" } : {}),
+        resetsAt: "2026-10-01T02:30:00+02:00",
+        message: "Private wrapper says buy credits",
+      };
+      const r = await renderComponent(
+        <MessageTimeline
+          events={[
+            timelineEvent("usage.exhausted", refusal),
+            timelineEvent("turn.completed", { ...refusal, segmentLimit: "budget_exhausted" }),
+          ]}
+        />,
+      );
+      await flush();
+      const text = r.container.textContent ?? "";
+      expect(text).toContain(
+        scope === "workspace"
+          ? "An organization admin can raise the workspace budget."
+          : "A workspace admin can raise this limit.",
+      );
+      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
+      expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
+        "status",
+      );
+      expect(text).not.toMatch(/buy credits|subscription|private wrapper|API key/i);
+      await r.unmount();
+    },
+  );
+
+  test("hosts reword or replace the row and keep the typed refusal", async () => {
+    const refusal = {
+      code: "allowance_exhausted",
+      scope: "member",
+      subjectId: "user:member",
+      resetsAt: null,
+      message: "ignored",
+    };
+    const reworded = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("usage.exhausted", refusal)]}
+        allowanceExhaustedLabels={{
+          memberLimitReachedTitle: "You're out of usage for this plan",
+          memberRemedy: "Ask your team admin for more.",
+          noReset: "Buy a top-up to keep going.",
+        }}
+      />,
+    );
+    await flush();
+    const text = reworded.container.textContent ?? "";
+    expect(text).toContain("You're out of usage for this plan");
+    expect(text).toContain("Ask your team admin for more. Buy a top-up to keep going.");
+    await reworded.unmount();
+
+    const seen: unknown[] = [];
+    const replaced = await renderComponent(
+      <MessageTimeline
+        events={[timelineEvent("usage.exhausted", { ...refusal, scope: "workspace" })]}
+        renderAllowanceExhausted={(typed, { defaultRow }) => {
+          seen.push(typed);
+          return typed.scope === "workspace" ? (
+            <p data-testid="custom">Your team has used this month's plan. Upgrade?</p>
+          ) : (
+            defaultRow
+          );
+        }}
+      />,
+    );
+    await flush();
+    expect(replaced.container.textContent).toContain("Upgrade?");
+    expect(replaced.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(0);
+    expect(seen[0]).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+    await replaced.unmount();
+  });
+});
 
 describe("context compaction rendering", () => {
   test("labels before and after values as estimated history tokens", async () => {
@@ -362,6 +459,31 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("does not render background command delivery notices in chat", async () => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "command-result",
+                kind: "background_command_result",
+                classification: "success",
+                sourceId: "command-1",
+                summary: "execCommand: completed successfully.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("details[data-og-machine-input-batch]")).toBeNull();
+    expect(r.container.textContent).not.toContain("Command result received");
+    await r.unmount();
+  });
+
   test("opens the typed child source without treating receipt delivery as work completion", async () => {
     resetTimelineEvents();
     const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -547,6 +669,56 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
 }
 
 describe("SiteArtifactRenderer", () => {
+  test("Site actions expose pending and retry state instead of swallowing failures", async () => {
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    const pending = new Promise<void>((_resolve, rejectPending) => {
+      reject = rejectPending;
+    });
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      status: "complete",
+      output: {
+        artifact: {
+          id: "22222222-2222-4222-8222-222222222222",
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          title: "Board",
+        },
+        version: { revision: 1 },
+      },
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const view = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={() => ({
+          open: () => {
+            calls++;
+            return pending;
+          },
+        })}
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    try {
+      await flush();
+      const button = view.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Open Board"]',
+      )!;
+      await actRun(() => button.click());
+      await flush();
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      button.click();
+      expect(calls).toBe(1);
+      await actRun(() => reject(new Error("failed")));
+      await flush();
+      expect(button.disabled).toBe(false);
+      expect(button.textContent).toBe("Retry open");
+    } finally {
+      await view.unmount();
+    }
+  });
   test("renders a direct durable Site link from the structured mutation result", async () => {
     const item = toolItem({
       name: "opengeni__artifacts_create",
@@ -569,10 +741,25 @@ describe("SiteArtifactRenderer", () => {
       status: "complete",
     });
     const Renderer = defaultToolRegistry.resolve(item);
-    const r = await renderComponent(<Renderer item={item} />);
+    // Without a host resolver the console route would 404 inside an embedder.
+    const bare = await renderComponent(<Renderer item={item} />);
     await flush();
+    expect(bare.container.textContent).toContain("Published Incident board");
+    expect(bare.container.querySelector('[aria-label="Open Incident board"]')).toBeNull();
+    await bare.unmount();
 
-    expect(r.container.textContent).toContain("Published Incident board");
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) =>
+          target.kind === "site"
+            ? { href: `/workspaces/${target.workspaceId}/artifacts/${target.artifactId}` }
+            : null
+        }
+      >
+        <Renderer item={item} />
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
     const link = r.container.querySelector('a[aria-label="Open Incident board"]');
     expect(link?.getAttribute("href")).toBe(
       "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",
@@ -1179,7 +1366,10 @@ describe("timeline renderer isolation", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Message not sent");
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "Gateway unavailable",
+    );
+    expect(r.container.querySelector('[role="status"] [title]')).toBeNull();
     expect(r.container.querySelector('[role="status"]')?.className).toContain(
       "text-og-status-failed",
     );
@@ -1193,6 +1383,43 @@ describe("timeline renderer isolation", () => {
       remove?.click();
     });
     expect({ retries, removals }).toEqual({ retries: 1, removals: 1 });
+    await r.unmount();
+  });
+
+  test("renders a credit refusal inline with Edit message instead of Retry", async () => {
+    let edits = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          {
+            kind: "user-message",
+            id: "credit-refused-message",
+            text: "Keep the original message",
+            resources: [],
+            tools: [],
+            occurredAt: new Date(0).toISOString(),
+            delivery: {
+              state: "failed",
+              error:
+                "Your organization has no OpenGeni credits left. Add credits before sending again.",
+              onEdit: () => {
+                edits += 1;
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "no OpenGeni credits left",
+    );
+    const buttons = [...r.container.querySelectorAll("button")];
+    expect(buttons.find((button) => button.textContent === "Retry")).toBeUndefined();
+    const edit = buttons.find((button) => button.textContent === "Edit message");
+    expect(edit).toBeDefined();
+    await act(async () => edit?.click());
+    expect(edits).toBe(1);
     await r.unmount();
   });
 
@@ -2070,6 +2297,30 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
     expect(r.container.textContent).toContain("terraform apply");
     expect(r.container.textContent).toContain("Approval needed");
+
+    await r.unmount();
+  });
+
+  test("readable turns carry a live approval wait in the header, not a second banner", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy it" }),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "terraform apply" },
+      }),
+      timelineEvent("session.requiresAction", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} status="requires_action" turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+
+    // The host's approval surface is the one place to decide.
+    expect(r.container.textContent).toContain("Waiting for you");
+    expect(r.container.textContent).not.toContain("Approval needed");
 
     await r.unmount();
   });

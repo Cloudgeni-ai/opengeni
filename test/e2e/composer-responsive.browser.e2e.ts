@@ -204,6 +204,12 @@ describe("container-responsive public composer demo", () => {
     await search.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
+    expect(await page.locator(".og-model-policy-menu").isVisible()).toBe(true);
+    expect(await search.inputValue()).toBe("codex");
+    expect(
+      await page.getByRole("radio", { name: "High", exact: true }).getAttribute("aria-checked"),
+    ).toBe("true");
+    await page.keyboard.press("Escape");
     await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
     await page.waitForFunction(
       () => document.activeElement?.getAttribute("aria-label") === "Model and effort",
@@ -265,6 +271,50 @@ describe("container-responsive public composer demo", () => {
     expect(axe.violations).toEqual([]);
     await context.close();
   }, 90_000);
+
+  test.each([1440, 390])(
+    "model and effort changes keep the picker open at %spx until dismissed",
+    async (width) => {
+      const context = await browser.newContext({
+        viewport: { width, height: 1000 },
+        reducedMotion: "reduce",
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(
+          `${baseUrl}/composer-responsive.html?width=${width === 1440 ? 768 : 320}&branding=host`,
+        );
+        await openModelMenu(page);
+        const menu = page.getByTestId("model-picker-content");
+        const choice = page.getByTestId("model-picker-choice-host/example");
+        await choice.click();
+        expect(await menu.isVisible()).toBe(true);
+        expect(await choice.getByLabel("Selected").count()).toBe(1);
+        const high = page.getByRole("radio", { name: "High", exact: true });
+        await high.click();
+        expect(await menu.isVisible()).toBe(true);
+        expect(await high.getAttribute("aria-checked")).toBe("true");
+        await choice.focus();
+        await page.keyboard.press("Enter");
+        expect(await menu.isVisible()).toBe(true);
+        expect(await high.getAttribute("aria-checked")).toBe("true");
+
+        // Outside interactions, Escape, and the trigger still dismiss normally.
+        await page.getByRole("textbox", { name: "Message the agent" }).click();
+        await menu.waitFor({ state: "detached" });
+        await openModelMenu(page);
+        expect(await high.getAttribute("aria-checked")).toBe("true");
+        await page.keyboard.press("Escape");
+        await menu.waitFor({ state: "detached" });
+        await openModelMenu(page);
+        await page.getByRole("button", { name: "Model and effort" }).click();
+        await menu.waitFor({ state: "detached" });
+      } finally {
+        await context.close();
+      }
+    },
+    30_000,
+  );
 
   test("density/theme stay orthogonal and coarse pointers retain 44px targets", async () => {
     const context = await browser.newContext({

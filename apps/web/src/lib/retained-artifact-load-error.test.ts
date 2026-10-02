@@ -60,7 +60,7 @@ describe("retained artifact load error presentation", () => {
   test("keeps retry for network and server failures", () => {
     expect(retainedArtifactLoadErrorPresentation(new TypeError("Failed to fetch"))).toEqual({
       title: "Couldn't load this file",
-      description: "The app could not reach OpenGeni. Check your connection and try again.",
+      description: "The app could not reach Opengeni. Check your connection and try again.",
       retryable: true,
       supportReference: null,
     });

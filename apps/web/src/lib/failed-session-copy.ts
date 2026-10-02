@@ -10,44 +10,67 @@ import type { SessionFailureSummary } from "./events";
  * failures keep Retry because the condition can clear (a top-up, a verified
  * organization, a daily reset).
  */
-type KnownFailure = { message: string; retryUnhelpful: boolean; suggestModel: boolean };
+type KnownFailure = {
+  /** Closed analytics class (turn-failure-analytics.ts); never shown to people. */
+  kind: KnownFailureKind;
+  message: string;
+  retryUnhelpful: boolean;
+  suggestModel: boolean;
+};
+export type KnownFailureKind =
+  | "provider_credentials"
+  | "provider_billing"
+  | "provider_access"
+  | "daily_limit"
+  | "monthly_limit"
+  | "provider_quota"
+  | "rate_limited"
+  | "provider_error";
 
 const CREDENTIALS: KnownFailure = {
+  kind: "provider_credentials",
   message: "The model provider rejected the credentials for this model.",
   retryUnhelpful: true,
   suggestModel: true,
 };
 const PROVIDER_BILLING: KnownFailure = {
+  kind: "provider_billing",
   message: "The model provider account for this model is out of credits.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const PROVIDER_ACCESS: KnownFailure = {
+  kind: "provider_access",
   message: "The model provider denied access to this model.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const DAILY_LIMIT: KnownFailure = {
+  kind: "daily_limit",
   message: "This model's daily limit has been reached.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const MONTHLY_LIMIT: KnownFailure = {
+  kind: "monthly_limit",
   message: "This model's monthly limit has been reached.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const QUOTA: KnownFailure = {
+  kind: "provider_quota",
   message: "The model provider's usage quota for this model is used up.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const RATE_LIMITED: KnownFailure = {
+  kind: "rate_limited",
   message: "The model provider is rate limiting requests. Try again in a minute.",
   retryUnhelpful: false,
   suggestModel: false,
 };
 const PROVIDER_ERROR: KnownFailure = {
+  kind: "provider_error",
   message: "The model provider had a temporary error.",
   retryUnhelpful: false,
   suggestModel: false,
@@ -191,7 +214,7 @@ export function failedSessionCopy(
     };
   }
   const reason = creditExhausted
-    ? "This workspace is out of OpenGeni credits."
+    ? "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
       : unavailableModel

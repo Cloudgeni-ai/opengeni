@@ -429,6 +429,9 @@ export class InMemoryEditableArtifactStore
     artifactId: EditableArtifactId,
     request: ReadEditableArtifactTransactionBasisRequest,
   ): Promise<EditableArtifactTransactionBasis> {
+    if (request.authorizeCommit) {
+      throw new TypeError("Transactional artifact authority requires a PostgreSQL store");
+    }
     const normalizedScope = editableArtifactScope(scope);
     const normalizedArtifactId = editableArtifactId(artifactId);
     const key = aggregateKey(normalizedScope, normalizedArtifactId);
@@ -496,6 +499,9 @@ export class InMemoryEditableArtifactStore
   async tryCommitAppliedTransaction(
     request: TryCommitAppliedEditableArtifactTransactionRequest,
   ): Promise<TryCommitAppliedEditableArtifactTransactionResult> {
+    if (request.authorizeCommit) {
+      throw new TypeError("Transactional artifact authority requires a PostgreSQL store");
+    }
     const scope = editableArtifactScope(request.scope);
     const artifactId = editableArtifactId(request.artifactId);
     const key = aggregateKey(scope, artifactId);

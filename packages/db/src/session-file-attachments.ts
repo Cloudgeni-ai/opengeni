@@ -23,6 +23,30 @@ export async function acceptSessionFileAttachments(
   });
 }
 
+/** Called only after canonical archive events commit within the same transaction.
+ * The existing SQL lifecycle proves the immutable importer and completed upload;
+ * passing NULL never creates or authorizes an execution turn. */
+export async function acceptArchivedSessionFileAttachments(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    fileIds: readonly string[];
+  },
+): Promise<void> {
+  const ids = [...new Set(input.fileIds)];
+  if (!ids.length) return;
+  await withRlsContext(db, input, async (tx) => {
+    for (let offset = 0; offset < ids.length; offset += 1000) {
+      await tx.execute(sql`select opengeni_private.accept_session_file_attachments(
+        ${input.accountId}::uuid,${input.workspaceId}::uuid,${input.sessionId}::uuid,NULL::uuid,
+        ${input.subjectId},ARRAY(select jsonb_array_elements_text(${JSON.stringify(ids.slice(offset, offset + 1000))}::jsonb))::uuid[])`);
+    }
+  });
+}
+
 export type SessionAttachmentReadAccess = {
   sessionId: string;
   authorityEpoch: number;

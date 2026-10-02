@@ -23,9 +23,16 @@ import {
   type IncludedOnboardingModel,
 } from "@/components/model-access-onboarding";
 import { Button } from "@/components/ui/button";
+import { TechnicalDetails } from "@/components/ui/error-message";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  apiErrorTechnicalFacts,
+  userErrorText,
+  userErrorTextWithoutReference,
+} from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -78,7 +85,7 @@ export function OrganizationOnboardingPanel({
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
   );
-  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<{ error: unknown } | null>(null);
   const [statusRequest, setStatusRequest] = useState(0);
   const [organizationName, setOrganizationName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -117,6 +124,16 @@ export function OrganizationOnboardingPanel({
     includedModel: IncludedOnboardingModel | null;
     startingCredits: StartingCreditsOnboarding | null;
   } | null>(null);
+  // Consent-gated onboarding journey; the model step reports itself.
+  useOnboardingStep(
+    state === null || state === "unavailable" || createdSetup
+      ? null
+      : state === "invitation_pending" || invitation
+        ? "invitation"
+        : "organization_name",
+    undefined,
+    !previewState,
+  );
   const confirmingOrganizationId = createdSetup?.organizationId ?? null;
   const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
 
@@ -136,7 +153,7 @@ export function OrganizationOnboardingPanel({
       })
       .catch((error) => {
         if (!active) return;
-        setStatusError(error instanceof Error ? error.message : String(error));
+        setStatusError({ error });
       });
     return () => {
       active = false;
@@ -204,7 +221,7 @@ export function OrganizationOnboardingPanel({
       })
       .catch((error) => {
         if (!active) return;
-        setInvitationError(error instanceof Error ? error.message : String(error));
+        setInvitationError(userErrorText(error));
       })
       .finally(() => {
         if (active) setInvitationLoading(false);
@@ -228,9 +245,10 @@ export function OrganizationOnboardingPanel({
       });
       invitationOperationIds.current.delete(selectedInvitation.id);
       clearOrganizationInvitationContinuation();
+      onboardingJourney().completed("invitation", "joined");
       onComplete();
     } catch (error) {
-      setInvitationError(error instanceof Error ? error.message : String(error));
+      setInvitationError(userErrorText(error));
     } finally {
       setAcceptingInvitationId(null);
     }
@@ -249,6 +267,7 @@ export function OrganizationOnboardingPanel({
           organizationName: normalizedName,
           operationId: operationId.current,
         });
+        onboardingJourney().completed("organization_name", "created");
         setCreatedSetup({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,
@@ -260,8 +279,8 @@ export function OrganizationOnboardingPanel({
         personalWorkspaceId: "preview-workspace",
       });
     } catch (error) {
-      toast.error("Organization setup failed", {
-        description: error instanceof Error ? error.message : String(error),
+      toast.error("Couldn't set up the organization", {
+        description: userErrorText(error),
       });
     } finally {
       setBusy(false);
@@ -281,10 +300,10 @@ export function OrganizationOnboardingPanel({
 
   if (state === null && statusError) {
     return frame(
-      <section className="flex flex-1 items-center justify-center px-4">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
         <div
           role="alert"
-          className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+          className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         >
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-status-failed/15 text-status-failed">
             <CircleAlertIcon className="size-4" />
@@ -292,8 +311,13 @@ export function OrganizationOnboardingPanel({
           <h1 className="text-base font-semibold">We couldn't load your account setup</h1>
           <p className="mt-2 text-sm leading-5 text-fg-subtle">
             Your account is signed in, but checking its organization setup failed. This is usually
-            temporary. {statusError}
+            temporary. {userErrorTextWithoutReference(statusError.error)}
           </p>
+          {apiErrorTechnicalFacts(statusError.error).length > 0 ? (
+            <div className="mt-2">
+              <TechnicalDetails facts={apiErrorTechnicalFacts(statusError.error)} />
+            </div>
+          ) : null}
           <Button
             type="button"
             className="mt-4 w-full"
@@ -321,8 +345,8 @@ export function OrganizationOnboardingPanel({
     const unavailable = invitationResolution === "unavailable";
     const focusedInvitation = invitationResolution === "matched" ? invitations[0] : null;
     return frame(
-      <section className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-lg rounded-lg border border-border bg-surface p-5 shadow-sm">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-lg rounded-xl border border-border bg-surface p-6">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <MailIcon className="size-4" />
           </span>
@@ -438,6 +462,7 @@ export function OrganizationOnboardingPanel({
       <ModelAccessOnboardingPanel
         client={client}
         organizationId={createdSetup.organizationId}
+        organizationName={organizationName.trim() || undefined}
         workspaceId={createdSetup.personalWorkspaceId}
         billingMode={billingMode}
         codexEnabled={codexEnabled}
@@ -451,8 +476,8 @@ export function OrganizationOnboardingPanel({
 
   if (state === "unavailable") {
     return frame(
-      <section className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
+      <section className="og-page-glow flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
           <span className="mb-4 flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <LockKeyholeIcon className="size-4" />
           </span>
@@ -467,9 +492,9 @@ export function OrganizationOnboardingPanel({
   }
 
   return frame(
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section className="og-page-glow flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        className="w-full max-w-sm rounded-xl border border-border bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
@@ -544,8 +569,8 @@ export function OnboardingAccountHeader({
             void Promise.resolve()
               .then(onSignOut)
               .catch((error) =>
-                toast.error("Sign out failed", {
-                  description: error instanceof Error ? error.message : String(error),
+                toast.error("Couldn't sign out", {
+                  description: userErrorText(error),
                 }),
               )
               .finally(() => setSigningOut(false));

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { MessageTimeline, SessionConversation } from "@opengeni/react/session-ui";
 import { latestQuestionClient } from "../test/fixtures/latest-question-client";
 import { SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
@@ -29,7 +30,9 @@ type Draft = { type: string; payload: unknown; turnId: string | null; at: number
 type ExchangeFoldHarness = {
   total: number;
   /** Show the first `count` events of the scripted exchange. */
-  show(count: number): void;
+  show(count: number, synchronous?: boolean): void;
+  /** Mirror SessionConversation's keyed session boundary. */
+  switchSession(): void;
   /**
    * Show events `[start, count)` with older history available before them;
    * loading older history prepends everything before `start`.
@@ -41,6 +44,8 @@ type ExchangeFoldHarness = {
   olderRequested(): boolean;
   /** Deliver the older history the timeline asked for. */
   completeOlder(): void;
+  /** The deprecated global navigation callback must never be used by the UI. */
+  questionResolverCalls(): number;
 };
 
 declare global {
@@ -142,6 +147,116 @@ function notesScenario(): Draft[] {
   return drafts;
 }
 
+/** Explicit phases exercise live tail movement separately from final settlement. */
+function tailScenario(): Draft[] {
+  const { drafts, add, tool } = script();
+  add(
+    "user.message",
+    { text: "Reconcile yesterday's signups and show the verified breakdown." },
+    null,
+  );
+  add("turn.started", {}, "turn-tail");
+  for (let batch = 1; batch <= 3; batch++) {
+    const progress = {
+      messageId: `progress-${batch}`,
+      phase: "commentary",
+      text: `### Check ${batch}: reconcile sources\n\n${LONG_NOTE}\n\n- Keep **verified** and unverified totals separate.\n- Compare the [source ledger](#source-ledger) before accepting the result.`,
+    };
+    add("agent.message.delta", progress, "turn-tail");
+    add("agent.message.completed", progress, "turn-tail");
+    for (let step = 1; step <= 8; step++) {
+      tool(
+        `check-${batch}-${step}`,
+        "exec_command",
+        { cmd: `psql -f source-${batch}-${step}.sql` },
+        "Counts match the source ledger.",
+        "turn-tail",
+      );
+    }
+  }
+  add("session.status.changed", { status: "requires_action" }, "turn-tail");
+  tool(
+    "approved-check",
+    "exec_command",
+    { cmd: "psql -f approved-totals.sql" },
+    "171 verified rows checked.",
+    "turn-tail",
+  );
+  add(
+    "agent.message.delta",
+    {
+      messageId: "final",
+      phase: "final_answer",
+      text: "**171 signups**, reconciled against the source ledger.\n\n",
+    },
+    "turn-tail",
+  );
+  add(
+    "agent.message.delta",
+    {
+      messageId: "final",
+      phase: "final_answer",
+      text: "| Source | Signups | Verified |\n| --- | --- | --- |\n| Docs | 99 | 88 |\n| Pricing | 41 | 37 |\n| Referral | 31 | 24 |\n\nNo duplicates or bot bursts found.",
+    },
+    "turn-tail",
+  );
+  tool(
+    "after-final",
+    "exec_command",
+    { cmd: "record-analysis-metadata" },
+    "Analysis metadata saved.",
+    "turn-tail",
+  );
+  add("turn.completed", {}, "turn-tail");
+  return drafts;
+}
+
+function startupTailScenario(): Draft[] {
+  const { drafts, add } = script();
+  add("user.message", { text: "Check the signup totals." }, null);
+  add("turn.started", {}, "startup", 0.1);
+  add("turn.startup.phase.started", { phase: "model_preparation" }, "startup", 0.1);
+  add("sandbox.operation.started", { name: "sandbox.provision" }, "startup", 0.1);
+  add("sandbox.operation.completed", { name: "sandbox.provision", durationMs: 2000 }, "startup", 2);
+  add(
+    "turn.startup.phase.completed",
+    { phase: "model_preparation", durationMs: 2200 },
+    "startup",
+    0.1,
+  );
+  add("agent.model.request", { phase: "started" }, "startup", 0.1);
+  add("agent.model.request", { phase: "first_byte", durationMs: 2000 }, "startup", 2);
+  add(
+    "agent.message.completed",
+    {
+      messageId: "startup-progress",
+      phase: "commentary",
+      text: "I’m checking the **source totals** against the [ledger](#source-ledger).",
+    },
+    "startup",
+    0.1,
+  );
+  add(
+    "agent.toolCall.created",
+    { id: "read", name: "exec_command", arguments: { cmd: "psql -f totals.sql" } },
+    "startup",
+    0.2,
+  );
+  add("agent.toolCall.output", { id: "read", output: "171 signups" }, "startup", 0.3);
+  add(
+    "agent.message.delta",
+    {
+      messageId: "startup-final",
+      phase: "final_answer",
+      text: "**171 signups**, verified against the ledger.",
+    },
+    "startup",
+    0.2,
+  );
+  add("turn.completed", {}, "startup", 0.2);
+  return drafts;
+}
+
 /** Long real work details plus following prose exercise section-scoped sticky headers. */
 function stickyScenario(): Draft[] {
   const { drafts, add, tool, stream, settle } = script();
@@ -194,13 +309,24 @@ function stickyScenario(): Draft[] {
 }
 
 /** Several exchanges, so a window that starts inside one can load older history. */
-function historyScenario(): Draft[] {
+function historyScenario(tallPrompt = false): Draft[] {
   const { drafts, add, tool, stream, settle } = script();
   for (let exchange = 1; exchange <= 4; exchange += 1) {
     const turnId = `turn-${exchange}`;
     add(
       "user.message",
-      { text: `Question ${exchange}: how did signups move this week?` },
+      {
+        text: `Question ${exchange}: how did signups move this week?${
+          tallPrompt && exchange === 2
+            ? "\n\n" +
+              Array.from(
+                { length: 14 },
+                (_, index) =>
+                  `Requirement ${index + 1}: compare the full signup history with the previous week and explain the retained evidence.`,
+              ).join("\n\n")
+            : ""
+        }`,
+      },
       null,
       30,
     );
@@ -333,10 +459,37 @@ function machineFollowUpScenario(): Draft[] {
 }
 
 const SCENARIOS: Record<string, () => Draft[]> = {
+  overlap: () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Earlier work is still pending." }, null);
+    add("turn.started", {}, "earlier");
+    add(
+      "agent.toolCall.created",
+      { id: "pending", name: "exec_command", arguments: {} },
+      "earlier",
+    );
+    return [...drafts, ...tailScenario().map((draft) => ({ ...draft, at: draft.at + 10 }))];
+  },
+  "startup-recovery": () => {
+    const { drafts, add } = script();
+    add("user.message", { text: "Check the signup totals." }, null);
+    add("turn.started", {}, "failed-startup");
+    add("turn.startup.phase.started", { phase: "tools" }, "failed-startup");
+    add(
+      "turn.startup.phase.failed",
+      { phase: "tools", durationMs: 275, error: "Fixture tool setup failed" },
+      "failed-startup",
+    );
+    add("turn.failed", { error: "Fixture tool setup failed" }, "failed-startup");
+    return [...drafts, ...startupTailScenario().map((draft) => ({ ...draft, at: draft.at + 10 }))];
+  },
+  startup: startupTailScenario,
+  tail: tailScenario,
   delegated: delegatedScenario,
   "follow-up": followUpScenario,
   notes: notesScenario,
   history: historyScenario,
+  "history-tall": () => historyScenario(true),
   sticky: stickyScenario,
   "review-maintenance": () => {
     const { drafts, add } = script();
@@ -442,12 +595,14 @@ function App() {
   );
   const drafts = useMemo(() => (SCENARIOS[scenarioName] ?? delegatedScenario)(), [scenarioName]);
   const [count, setCount] = useState(0);
+  const [session, setSession] = useState(0);
   const [windowStart, setWindowStart] = useState(0);
   const [historyMode, setHistoryMode] = useState(false);
   // The regression suite delivers older history on demand, so it can measure
   // the reader's position right before the prepend lands.
   const deferOlder = useRef(false);
   const olderRequested = useRef(false);
+  const questionResolverCalls = useRef(0);
   const [dark, setDark] = useState(true);
   const [compact, setCompact] = useState(true);
   const [playing, setPlaying] = useState(false);
@@ -458,11 +613,23 @@ function App() {
   useEffect(() => {
     window.exchangeFoldHarness = {
       total: drafts.length,
-      show: (value) => {
-        setHistoryMode(false);
-        setPlaying(false);
-        setWindowStart(0);
-        setCount(value);
+      switchSession: () =>
+        flushSync(() => {
+          setSession((value) => value + 1);
+          setCount(0);
+          setWindowStart(0);
+          setHistoryMode(false);
+          setPlaying(false);
+        }),
+      show: (value, synchronous) => {
+        const update = () => {
+          setHistoryMode(false);
+          setPlaying(false);
+          setWindowStart(0);
+          setCount(value);
+        };
+        if (synchronous) flushSync(update);
+        else update();
       },
       showWindow: (start, value) => {
         setHistoryMode(true);
@@ -473,6 +640,7 @@ function App() {
         setCount(value);
       },
       olderRequested: () => olderRequested.current,
+      questionResolverCalls: () => questionResolverCalls.current,
       completeOlder: () => setWindowStart(0),
       indexOf: (type, match = {}) =>
         drafts.flatMap((draft, index) =>
@@ -571,14 +739,20 @@ function App() {
           />
         ) : (
           <MessageTimeline
-            key={compact ? "compact" : "classic"}
+            key={`${session}:${compact ? "compact" : "classic"}`}
             className="h-full"
             events={events}
             turnSummary={{ rolling: compact }}
             hasOlder={windowStart > 0}
             hasNewer={historyMode && count < drafts.length}
             onJumpToStart={() => setWindowStart(0)}
+            onJumpToLatest={() => {
+              setHistoryMode(false);
+              setWindowStart(0);
+              setCount(drafts.length);
+            }}
             onJumpToLatestQuestion={async () => {
+              questionResolverCalls.current++;
               const end = historyMode ? drafts.length : count;
               const target =
                 drafts

@@ -8,8 +8,10 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { cn } from "../lib/cn";
+import { codeEditorPeers, type CodeEditorLanguage } from "../lib/workbench-peers";
 
 // --- Lazy CodeMirror surface ----------------------------------------------
 //
@@ -42,19 +44,8 @@ type EditorBundle = {
   languageExtension: unknown | null;
 };
 
-/** Language grammar loaders, keyed by the extension class we infer from the path. */
-const LANGUAGE_LOADERS: Record<string, () => Promise<unknown>> = {
-  javascript: async () =>
-    (await import("@codemirror/lang-javascript")).javascript({ jsx: true, typescript: true }),
-  json: async () => (await import("@codemirror/lang-json")).json(),
-  python: async () => (await import("@codemirror/lang-python")).python(),
-  markdown: async () => (await import("@codemirror/lang-markdown")).markdown(),
-  css: async () => (await import("@codemirror/lang-css")).css(),
-  html: async () => (await import("@codemirror/lang-html")).html(),
-};
-
 /** Map a filename to a grammar key (or null for plain text — still fully editable). */
-export function languageForPath(path: string): keyof typeof LANGUAGE_LOADERS | null {
+export function languageForPath(path: string): string | null {
   const name = path.split("/").pop() ?? path;
   const ext = name.includes(".") ? (name.split(".").pop() ?? "").toLowerCase() : "";
   switch (ext) {
@@ -182,6 +173,11 @@ export function CodeEditor({
 }: CodeEditorProps) {
   const [failed, setFailed] = useState(false);
   const [bundle, setBundle] = useState<EditorBundle | null>(null);
+  const peerRevision = useSyncExternalStore(
+    codeEditorPeers.subscribe,
+    codeEditorPeers.revision,
+    codeEditorPeers.revision,
+  );
 
   // The live buffer and its compare-and-swap baseline are one state value so a
   // remote refresh cannot update one without the other.
@@ -233,12 +229,13 @@ export function CodeEditor({
 
   // Resolve the lazy bundle (editor + keymap/Prec helpers + language grammar)
   // once, re-resolving the grammar when the file's language class changes.
-  const langKey = useMemo(() => languageForPath(path), [path]);
+  const langKey = useMemo(() => languageForPath(path) as CodeEditorLanguage | null, [path]);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const cmMod = (await import("@uiw/react-codemirror")) as unknown as {
+        const peers = await codeEditorPeers.load();
+        const cmMod = peers.module as {
           default: ReactCodeMirrorComponent;
           keymap: { of: (binds: unknown[]) => unknown };
           Prec: { highest: (ext: unknown) => unknown };
@@ -248,7 +245,7 @@ export function CodeEditor({
         let languageExtension: unknown | null = null;
         if (langKey) {
           try {
-            languageExtension = (await LANGUAGE_LOADERS[langKey]?.()) ?? null;
+            languageExtension = (await peers.languages?.[langKey]?.()) ?? null;
           } catch {
             languageExtension = null;
           }
@@ -283,7 +280,7 @@ export function CodeEditor({
     return () => {
       cancelled = true;
     };
-  }, [langKey]);
+  }, [langKey, peerRevision]);
 
   // Keep the freshest save closure reachable from the (stable) keymap binding.
   const saveRef = useRef<() => void>(() => {});

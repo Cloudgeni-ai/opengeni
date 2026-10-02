@@ -408,6 +408,29 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
   expect(Number(firstBatch?.rate)).toBe(1_000_000);
   expect(firstBatch?.vectors).toBe(32);
   expect(firstBatch?.debits).toBe(1);
+  const [attribution] = await shared.admin`
+    SELECT j.billing_attribution,
+      (SELECT metadata FROM credit_ledger_entries WHERE source_id=${saved.revisionId}
+        AND type='document_embedding_debit' LIMIT 1) AS debit_metadata
+    FROM knowledge_index_jobs j WHERE j.revision_id=${saved.revisionId}`;
+  expect(attribution?.billing_attribution).toEqual({
+    kind: "human",
+    initiatingHumanSubjectId: "user:rollback-index-owner",
+  });
+  expect(attribution?.debit_metadata).toMatchObject({
+    initiatingHumanSubjectId: "user:rollback-index-owner",
+  });
+  const [memberUsage] = await shared.admin`
+    SELECT coalesce(sum(used),0)::bigint AS used FROM opengeni_private.workspace_allowance_counters
+    WHERE workspace_id=${workspaceId} AND subject_id='user:rollback-index-owner'`;
+  expect(Number(memberUsage?.used)).toBe(
+    1_000_000 - (await getBillingBalance(client.db, accountId)).balanceMicros,
+  );
+  await expect(
+    shared.admin`UPDATE knowledge_index_jobs SET
+      billing_attribution='{"kind":"service"}'::jsonb
+      WHERE revision_id=${saved.revisionId}`.then((rows) => rows),
+  ).rejects.toMatchObject({ code: "23514" });
   const balanceAfterFirstBatch = (await getBillingBalance(client.db, accountId)).balanceMicros;
 
   settings.documentEmbeddingBillingMode = "usage_only";
@@ -475,6 +498,13 @@ test("a frozen paid generation pauses across a billing-mode rollback and resumes
   expect(settled?.next_index).toBe(chunks.length);
   expect(Number(settled?.rate)).toBe(1_000_000);
   expect(settled?.debits).toBe(2);
+  const secondAttribution = await shared.admin`
+    SELECT metadata->>'initiatingHumanSubjectId' AS human FROM credit_ledger_entries
+    WHERE source_id=${saved.revisionId} AND type='document_embedding_debit'`;
+  expect(secondAttribution.map((row) => row.human)).toEqual([
+    "user:rollback-index-owner",
+    "user:rollback-index-owner",
+  ]);
   expect(Number(settled?.charged)).toBe(Number(settled?.bytes));
   expect((await worker.indexKnowledge()).completed).toBe(0);
   expect(calls).toBe(2);

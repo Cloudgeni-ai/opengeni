@@ -229,6 +229,8 @@ export type ApplyTurnGitHubRepositoryBindingsInput = {
   workspaceId: string;
   sessionId: string;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
+  /** Product-owned credentials take precedence over inferred platform bindings. */
+  hasCredentialProvider?: boolean;
   claimedTurnResources: readonly ResourceRef[];
   claimedRuntimeResources: readonly ResourceRef[];
   /** Publishes one attempt-fenced session event batch. */
@@ -258,7 +260,7 @@ export async function applyTurnGitHubRepositoryBindings(
     turnResources: [...input.claimedTurnResources],
     runtimeResources: [...input.claimedRuntimeResources],
   };
-  if (input.activeSandboxBackend === "selfhosted") {
+  if (input.activeSandboxBackend === "selfhosted" || input.hasCredentialProvider) {
     return passthrough;
   }
   let resolved: TurnGitHubRepositoryBindings;

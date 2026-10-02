@@ -1,5 +1,5 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
@@ -22,8 +22,10 @@ export type CopyButtonProps = {
 /**
  * Ghost icon copy control — no chrome box, no "Copy code" label.
  * Copy → check flash. Hover-reveal via `group/copy` on a parent.
+ * Keep unchanged controls out of parent message rerenders: mounting history
+ * already has to commit each new tooltip, without redoing the retained suffix.
  */
-export function CopyButton({
+export const CopyButton = memo(function CopyButton({
   text,
   label = "Copy",
   className,
@@ -113,7 +115,7 @@ export function CopyButton({
       <TooltipContent side="top">{tip}</TooltipContent>
     </Tooltip>
   );
-}
+});
 
 /** Hover-reveal chrome around a message / turn so {@link CopyButton} can fade in. */
 export function CopyHoverFrame({

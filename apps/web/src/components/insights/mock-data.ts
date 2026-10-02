@@ -65,7 +65,7 @@ export function providerLabel(provider: string | null | undefined): string {
 export function billingLabel(billing: InsightsBillingPath): string {
   switch (billing) {
     case "opengeni_credits":
-      return "OpenGeni credits";
+      return "Opengeni credits";
     case "external":
       return "external payer";
     default: {

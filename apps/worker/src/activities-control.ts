@@ -2,6 +2,7 @@ import { createKnowledgeIndexingActivities } from "./activities/knowledge-indexi
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
+import { createBrowserDeadlineCheckpointActivities } from "./activities/browser-deadline-checkpoint";
 import { createAutomationActivities } from "./activities/automations";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
@@ -40,6 +41,7 @@ export function createControlActivitiesFromServices(
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createBrowserStateArtifactMaintenanceActivities(services),
+    ...createBrowserDeadlineCheckpointActivities(services),
     ...createFileUploadReaperActivities(services),
     ...createModelCallFactReconcilerActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),

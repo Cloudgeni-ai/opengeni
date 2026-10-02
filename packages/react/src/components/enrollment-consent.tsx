@@ -139,7 +139,7 @@ export function EnrollmentConsent({
             Give the agent your whole machine?
           </h1>
           <p className="mt-1 text-og-base text-og-fg-muted">
-            Approving lets the OpenGeni agent run on{" "}
+            Approving lets the Opengeni agent run on{" "}
             <span className="font-medium text-og-fg">{machine.machineName}</span> with full access.
             This is your real computer — not a sandbox.
           </p>

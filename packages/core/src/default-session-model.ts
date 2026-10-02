@@ -1,5 +1,7 @@
 import {
   canonicalizeConfiguredModelId,
+  CLAUDE_CONNECTION_KINDS,
+  type ClaudeConnectionCatalog,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -17,6 +19,8 @@ import {
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
+  getWorkspaceProviderApiKeyConnectionMetadata,
+  listWorkspaceProviderCustomModels,
   listOrganizationModelProviderCustomModelsForWorkspace,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
@@ -32,10 +36,13 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  isWorkspaceModelAdmissible,
   resolveWorkspaceModelSelection,
   type WorkspaceModelSelection,
   type WorkspaceModelSelectionInput,
 } from "./model-catalog";
+
+import { loadWorkspaceCodexModelAvailability } from "./codex-model-availability";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -151,7 +158,10 @@ function creditsCandidate(
  *    credits-billed model when that one is not selectable. Skipped when the
  *    deployment default is already a selectable credits-billed model, so an
  *    operator's paid default is never replaced.
- * 4. `deployment`: the deployment default with the deployment reasoning effort.
+ * 4. `deployment`: the deployment default with the deployment reasoning effort
+ *    when stably admissible; otherwise the first stably admissible catalog
+ *    model with its own default effort. With no admitted models, retain the
+ *    deployment hint and let fresh creation refuse it.
  *
  * An explicit model on the request, the scheduled task, or the person's
  * new-chat draft is never passed through this function.
@@ -191,13 +201,21 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
     const credits = creditsCandidate(input);
     if (credits) return credits;
   }
-  return {
-    model:
-      deployment?.model.id ??
-      canonicalizeConfiguredModelId(input.settings, input.settings.openaiModel),
-    reasoningEffort: fallbackEffort,
-    source: "deployment",
-  };
+  if (deployment && isWorkspaceModelAdmissible(deployment)) {
+    return { model: deployment.model.id, reasoningEffort: fallbackEffort, source: "deployment" };
+  }
+  const fallback = input.selections.find(isWorkspaceModelAdmissible);
+  return fallback
+    ? {
+        model: fallback.model.id,
+        reasoningEffort: defaultReasoningEffortForConfiguredModel(fallback.model, fallbackEffort),
+        source: "deployment",
+      }
+    : {
+        model: canonicalizeConfiguredModelId(input.settings, input.settings.openaiModel),
+        reasoningEffort: fallbackEffort,
+        source: "deployment",
+      };
 }
 
 /**
@@ -319,12 +337,14 @@ export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
+  options: { observeAvailability?: boolean } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
   const [
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
     policy,
     codexSubscriptionActive,
+    observations,
     workspaceGatewayConnectionActive,
     workspaceGatewayCustomModels,
     openRouterConnectionActive,
@@ -337,6 +357,9 @@ export async function loadWorkspaceModelSelectionInput(
     connectionRestrictionsAndXaiReadiness(db, settings, context),
     getWorkspaceModelPolicy(db, workspaceId),
     workspaceCodexSubscriptionActive(db, settings, workspaceId),
+    options.observeAvailability === false
+      ? Promise.resolve({})
+      : loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
     workspaceVercelAiGatewayConnectionActive(db, workspaceId),
     listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
     workspaceOpenRouterConnectionActive(db, workspaceId),
@@ -362,11 +385,37 @@ export async function loadWorkspaceModelSelectionInput(
       providerKind: "openrouter",
     }),
   ]);
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+  await Promise.all(
+    CLAUDE_CONNECTION_KINDS.map(async (kind) => {
+      if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return;
+      const [active, models, metadata, workspaceModels] = await Promise.all([
+        organizationModelProviderConnectionActiveForWorkspace(db, {
+          accountId,
+          workspaceId,
+          providerKind: kind,
+        }),
+        listOrganizationModelProviderCustomModelsForWorkspace(db, {
+          accountId,
+          workspaceId,
+          providerKind: kind,
+        }),
+        getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind),
+        listWorkspaceProviderCustomModels(db, { accountId, workspaceId, providerKind: kind }),
+      ]);
+      claudeConnections[kind] = { active, models };
+      workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
+    }),
+  );
   return {
+    claudeConnections,
+    workspaceClaudeConnections,
     connectionModelRestrictions,
     settings,
     policy,
     codexSubscriptionActive,
+    observations,
     xaiSubscriptionActive,
     workspaceGatewayConnectionActive,
     workspaceGatewayCustomModels,
@@ -377,6 +426,42 @@ export async function loadWorkspaceModelSelectionInput(
     organizationGatewayCustomModels,
     organizationOpenRouterCustomModels,
   };
+}
+
+/**
+ * Caller-scoped stable fresh admission; never re-admit already accepted work.
+ * Live discovery is opt-in: its token refresh can mutate connection readiness,
+ * so a health hint must not change the billing rail of an explicit create.
+ */
+export async function resolveCallerWorkspaceModelSelections(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext,
+  options: { observeAvailability?: boolean } = {},
+): Promise<WorkspaceModelSelection[]> {
+  return resolveWorkspaceModelSelection(
+    await loadWorkspaceModelSelectionInput(db, settings, context, {
+      observeAvailability: options.observeAvailability === true,
+    }),
+  );
+}
+
+/** Transient selectability for existing consumers; not fresh-create admission. */
+export function selectableWorkspaceModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): WorkspaceModelSelection | undefined {
+  const selection = findSelection(selections, modelId);
+  return selection?.availability.selectable ? selection : undefined;
+}
+
+/** Same stable decision used by client config and direct fresh session creation. */
+export function admissibleWorkspaceModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): WorkspaceModelSelection | undefined {
+  const selection = findSelection(selections, modelId);
+  return selection && isWorkspaceModelAdmissible(selection) ? selection : undefined;
 }
 
 /**

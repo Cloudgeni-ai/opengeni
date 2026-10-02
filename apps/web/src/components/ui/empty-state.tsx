@@ -145,7 +145,7 @@ export function EmptyStateTemplates({
   const labelId = useId();
   return (
     <div className={cn("@container/templates min-w-0", className)}>
-      <p id={labelId} className="mb-3 text-center text-xs leading-4.5 font-medium text-fg-subtle">
+      <p id={labelId} className="mb-3 text-center text-xs leading-4.5 font-medium text-fg-muted">
         {label}
       </p>
       <ul

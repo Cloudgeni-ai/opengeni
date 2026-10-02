@@ -85,6 +85,17 @@ const GENERATED_FENCES = [
   /^packages\/agent-proto\/scripts\/codegen\.sh$/,
   /^packages\/agent-proto\/src\/gen\//,
 ];
+/**
+ * Workspaces whose change can alter the public API surface: the API routes,
+ * the contracts schemas behind them, and the SDK/React packages. Everything the
+ * API depends on reaches this set through `transitiveDependents`.
+ */
+const PUBLIC_API_WORKSPACES = new Set([
+  "@opengeni/api-router",
+  "@opengeni/contracts",
+  "@opengeni/react",
+  "@opengeni/sdk",
+]);
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
 const DOC_PATTERN = /^(?:docs\/|[^/]+\.md$)/;
 
@@ -182,6 +193,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/embedded-artifact-viewer.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/chat-media-entry.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -199,6 +215,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/ai-gateway-connection.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/claude-subscription.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/sdk",
     "@opengeni/testing",
@@ -224,8 +245,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/crypto-random-uuid.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/developer-settings.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/organization-workspace-administration.browser.e2e.ts": [
     "opengeni-web",
+    "@opengeni/testing",
+  ],
+  "test/e2e/usage-allowances.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
     "@opengeni/testing",
   ],
   "test/e2e/custom-api-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -252,6 +280,16 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/composer-pane.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
+  "test/e2e/composer-focus-handoff.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
+  "test/e2e/composer-keyboard.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/composer-menus.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -645,6 +683,10 @@ function fullPlan(
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
+      // The public API surface snapshot and the published-SDK compatibility
+      // run (docs/design/api-compatibility-policy.md).
+      "public-api",
+      "sdk-compat",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -851,6 +893,9 @@ export function createImpactPlan(
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
     guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
+  }
+  if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
+    guards.push("public-api", "sdk-compat");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");

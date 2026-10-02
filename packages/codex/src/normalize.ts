@@ -157,24 +157,23 @@ export function normalizedCodexRequestBody(
 }
 
 /**
- * Build a longest-prefix model resolver. Catalog slugs come from GET /models
- * (api-client.ts). One leading `namespace/` segment is stripped first; an
- * unknown slug returns the fallback (caller should log — spec §1.4 step 4).
+ * Build the Codex model resolver. One leading `namespace/` segment is stripped
+ * first; an exact live slug wins, then the longest live-slug prefix (for suffixed
+ * variants). An unknown slug passes through unchanged so the provider rejects it
+ * visibly — never silently substitute a different model.
  */
-export function buildModelResolver(
-  liveSlugs: readonly string[],
-  fallbackSlug: string,
-): (slug: string) => string {
+export function buildModelResolver(liveSlugs: readonly string[]): (slug: string) => string {
   return (requested: string): string => {
     const stripped = requested.includes("/")
       ? requested.slice(requested.indexOf("/") + 1)
       : requested;
+    if (liveSlugs.includes(stripped)) return stripped;
     let best = "";
     for (const slug of liveSlugs) {
       if (stripped.startsWith(slug) && slug.length > best.length) {
         best = slug;
       }
     }
-    return best || fallbackSlug;
+    return best || stripped;
   };
 }

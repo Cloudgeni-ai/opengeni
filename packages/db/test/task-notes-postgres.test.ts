@@ -783,6 +783,87 @@ describe("task-tree notes PostgreSQL authority", () => {
     expect(durable).toEqual({ receipt_count: 1, active_successor_count: 1 });
   });
 
+  test("root-lock migration is an exact, idempotent change preserving authority posture", async () => {
+    if (!shared) return;
+    const migration = await Bun.file(
+      new URL("../drizzle/0542_task_note_root_lock_mode.sql", import.meta.url),
+    ).text();
+    const signature = "resolve_task_note_attempt_authority(uuid,uuid,uuid,uuid,uuid,integer)";
+    const fixedLock =
+      "  -- Session keys are unchanged: permit concurrent root-session FK checks.\n  FOR NO KEY UPDATE;";
+    await shared.admin.begin(async (tx) => {
+      const snapshot = async () =>
+        (
+          await tx`select pg_get_functiondef(oid) as definition,
+        proowner, proacl, prosecdef, proconfig from pg_proc where oid=${signature}::regprocedure`
+        )[0]!;
+      const fixed = await snapshot();
+      expect(fixed.definition.split(fixedLock)).toHaveLength(2);
+      await tx.unsafe(fixed.definition.replace(fixedLock, "  FOR UPDATE;"));
+      const old = await snapshot();
+      expect(old.definition).not.toBe(fixed.definition);
+      await tx.unsafe(migration);
+      expect(await snapshot()).toEqual(fixed);
+      await tx.unsafe(migration);
+      expect(await snapshot()).toEqual(fixed);
+
+      // An unrecognized future body must not be silently or broadly rewritten.
+      await tx.unsafe(old.definition.replace("  FOR UPDATE;", "  FOR UPDATE NOWAIT;"));
+      await expectSqlState(() => tx.savepoint((savepoint) => savepoint.unsafe(migration)), "55000");
+      await tx.unsafe(fixed.definition);
+    });
+  });
+
+  test("root authority permits FK checks while still excluding concurrent mutations", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ child: true });
+    const attempt = await seedAttempt({
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      sessionId: f.child!.id,
+      initiatorSubjectId: f.ownerSubjectId,
+      initiatingHumanSubjectId: f.ownerSubjectId,
+    });
+    const pool = postgres(shared.appUrl, { max: 1 });
+    const authority = await pool.reserve();
+    try {
+      await authority`begin`;
+      await authority`select
+        set_config('opengeni.account_id', ${f.grant.accountId}, true),
+        set_config('opengeni.workspace_id', ${f.grant.workspaceId}, true),
+        set_config('opengeni.subject_id', ${f.ownerSubjectId}, true)`;
+      const rows = await authority`select * from create_task_note_for_attempt(
+        ${f.grant.accountId}, ${f.grant.workspaceId}, ${f.child!.id},
+        ${attempt.turnId}, ${attempt.attemptId}, ${attempt.executionGeneration},
+        ${crypto.randomUUID()}, 'finding', 'Lock compatibility fixture.', 1)`;
+      expect(rows[0]?.root_session_id).toBe(f.root.id);
+
+      // The FK check performed by activity finalization must not wait on the
+      // root while holding the workspace activity counter. Before the lock
+      // correction, even this key-only check fails with 55P03.
+      const keys = await shared.admin`select id from sessions
+        where workspace_id = ${f.grant.workspaceId} and id = ${f.root.id}
+        for key share nowait`;
+      expect(keys).toHaveLength(1);
+      await expectSqlState(
+        () => shared!.admin`select id from sessions
+          where workspace_id = ${f.grant.workspaceId} and id = ${f.root.id}
+          for no key update nowait`,
+        "55P03",
+      );
+      await expectSqlState(
+        () => shared!.admin`select id from sessions
+          where workspace_id = ${f.grant.workspaceId} and id = ${f.root.id}
+          for update nowait`,
+        "55P03",
+      );
+    } finally {
+      await authority`rollback`;
+      authority.release();
+      await pool.end();
+    }
+  });
+
   test("serializes sibling creates at the 500-active-note boundary", async () => {
     if (!shared || !client) return;
     const f = await fixture({ child: true });

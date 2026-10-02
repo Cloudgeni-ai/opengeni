@@ -12,6 +12,7 @@ import { BrowserInteractionController } from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
   AgentBrowserJsonRunner,
+  BrowserSupervisor,
   imageDimensions,
   resolvePinnedAgentBrowserBinary,
 } from "../src";
@@ -19,6 +20,86 @@ import { CdpConnection } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
+const chromiumE2e =
+  process.env.OPENGENI_BROWSERD_E2E === "1" || process.env.OPENGENI_BROWSERD_HEADED_E2E === "1"
+    ? test
+    : test.skip;
+
+e2e(
+  "replaces existing editable text and honors select-all on the browser platform",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-replace-text-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `replace_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      let observation = await driver.start(
+        dataUrl(`<!doctype html>
+        <input aria-label="Input" value="first">
+        <textarea aria-label="Textarea">first</textarea>
+        <div contenteditable role="textbox" aria-label="Rich text">first</div>
+        <output></output>
+        <script>
+          document.addEventListener('input', event => {
+            document.querySelector('output').textContent = 'Received: ' +
+              (event.target.value ?? event.target.textContent);
+          });
+        </script>`),
+      );
+      for (const name of ["Input", "Textarea", "Rich text"]) {
+        const locator = { kind: "role", role: "textbox", name } as const;
+        for (const value of ["replacement", "", "Norwegian æøå 🦊"]) {
+          observation = await driver.dispatch(
+            command(observation, {
+              type: "fill",
+              locator,
+              value,
+            }),
+          );
+          expect(names(observation)).toContain(`Received: ${value}`.trimEnd());
+        }
+        observation = await driver.dispatch(
+          command(observation, {
+            type: "press",
+            locator,
+            key: "Mod+A",
+          }),
+        );
+        observation = await driver.dispatch(
+          command(observation, {
+            type: "type",
+            locator,
+            text: "selected replacement",
+          }),
+        );
+        expect(names(observation)).toContain("Received: selected replacement");
+      }
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
 
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
@@ -55,7 +136,7 @@ headedE2e(
       browserSessionId: randomUUID(),
       controllerGeneration: `controller-${randomUUID()}`,
       runner,
-      foregroundManagedTabs: true,
+      focusEmulation: true,
     });
     try {
       await driver.start(fixture("First"));
@@ -97,7 +178,7 @@ headedE2e(
       browserSessionId: randomUUID(),
       controllerGeneration: `controller-${randomUUID()}`,
       runner,
-      foregroundManagedTabs: true,
+      focusEmulation: true,
     });
     let cdp: CdpConnection | null = null;
     let frames: import("../src").BrowserFrameSubscription | null = null;
@@ -107,8 +188,17 @@ headedE2e(
           '<!doctype html><meta name="viewport" content="width=device-width"><title>Hidden form</title><input aria-label="Name">',
         ),
       );
-      const typed = await driver.dispatch(
+      const mobile = await driver.dispatch(
         command(initial, {
+          type: "viewport",
+          width: 390,
+          height: 844,
+          deviceScaleFactor: 1,
+          mobile: true,
+        }),
+      );
+      const typed = await driver.dispatch(
+        command(mobile, {
           type: "type",
           locator: { kind: "role", role: "textbox", name: "Name" },
           text: "Preserved input",
@@ -120,20 +210,26 @@ headedE2e(
         targetId: typed.target.id,
         flatten: true,
       });
-      await cdp.send(
-        "Emulation.setDeviceMetricsOverride",
-        {
-          width: 390,
-          height: 844,
-          deviceScaleFactor: 1,
-          mobile: true,
-        },
-        { sessionId: attached.sessionId },
-      );
+      const foreground = await cdp.send<{ targetId: string }>("Target.createTarget", {
+        url: fixture("Foreground sentinel"),
+        background: false,
+      });
+      const foregroundAttached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: foreground.targetId,
+        flatten: true,
+      });
+      const foregroundVisibility = async () => {
+        const state = await cdp!.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          { expression: "document.visibilityState", returnByValue: true },
+          { sessionId: foregroundAttached.sessionId },
+        );
+        return state.result.value;
+      };
+      expect(await foregroundVisibility()).toBe("visible");
       frames = await driver.subscribeFrames(typed.target.id, { format: "jpeg" });
       const iterator = frames[Symbol.asyncIterator]();
       let latest = await frameWithin(iterator, 3_000);
-      const foreground = await driver.openTarget(fixture("Foreground"));
       const deadline = Date.now() + 60_000;
       let received = 0;
       while (Date.now() < deadline) {
@@ -146,6 +242,9 @@ headedE2e(
           height: 844,
         });
         received += 1;
+        if (received % 20 === 0) {
+          expect(await foregroundVisibility()).toBe("visible");
+        }
       }
       expect(received).toBeGreaterThan(50);
       const state = await cdp.send<{ result: { value: { visibility: string; value: string } } }>(
@@ -157,8 +256,11 @@ headedE2e(
         },
         { sessionId: attached.sessionId, timeoutMs: 2_000 },
       );
-      expect(state.result.value).toEqual({ visibility: "hidden", value: "Preserved input" });
-      expect(await driver.listTargets()).toContainEqual(foreground.target);
+      expect(state.result.value).toEqual({ visibility: "visible", value: "Preserved input" });
+      expect(await foregroundVisibility()).toBe("visible");
+      expect(await driver.listTargets()).toContainEqual(
+        expect.objectContaining({ id: foreground.targetId }),
+      );
     } finally {
       await frames?.close();
       cdp?.close();
@@ -169,8 +271,200 @@ headedE2e(
   90_000,
 );
 
+headedE2e.each([false, true])(
+  "streams a mobile headed tab continuously while managed input stays in the background (headed=%j)",
+  async (headed) => {
+    const directory = await mkdtemp("/tmp/ogb-background-input-");
+    const socketDirectory = await mkdtemp("/tmp/ogb-bg-sockets-");
+    const reference = {
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+    };
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: socketDirectory,
+    });
+    let cdp: CdpConnection | null = null;
+    let frames: import("../src").BrowserFrameSubscription | null = null;
+    let detachedDriver: AgentBrowserDriver | null = null;
+    try {
+      const foreground = await supervisor.createSession({
+        ...reference,
+        headed,
+        initialUrl: fixture("Foreground"),
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+      });
+      const [port, browserPath] = (
+        await Bun.file(
+          join(
+            directory,
+            "state",
+            "sessions",
+            reference.browserSessionId,
+            "profile",
+            "DevToolsActivePort",
+          ),
+        ).text()
+      )
+        .trim()
+        .split("\n");
+      if (!port || !/^[0-9]{1,5}$/u.test(port) || !browserPath?.startsWith("/devtools/browser/")) {
+        throw new Error("owned Chromium did not publish its debugger endpoint");
+      }
+      cdp = await CdpConnection.connect(`ws://127.0.0.1:${port}${browserPath}`);
+      // This independent page has no active-state emulation. Its visibility
+      // therefore proves that managed actions did not switch the real tab.
+      const front = await cdp.send<{ targetId: string }>("Target.createTarget", {
+        url: fixture("Foreground sentinel"),
+        background: false,
+      });
+      const frontAttached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: front.targetId,
+        flatten: true,
+      });
+      const background = await supervisor.openTarget(
+        reference,
+        dataUrl(`<!doctype html>
+        <meta name="viewport" content="width=device-width"><title>Background form</title>
+        <input aria-label="Name"><button onclick="requestAnimationFrame(() => {
+          const output = document.querySelector('output');
+          output.textContent = 'Clicked in background ' + (Number(output.dataset.count || 0) + 1);
+          output.dataset.count = String(Number(output.dataset.count || 0) + 1);
+        })">Update</button><output></output>`),
+      );
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: background.target.id,
+        flatten: true,
+      });
+      const frontVisibility = async () => {
+        const state = await cdp!.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          {
+            expression: "document.visibilityState",
+            returnByValue: true,
+          },
+          { sessionId: frontAttached.sessionId },
+        );
+        return state.result.value;
+      };
+      expect(await frontVisibility()).toBe("visible");
+      let observed = background;
+      const act = async (action: BrowserActionCommand["action"]) => {
+        const result = await supervisor.action(command(observed, action));
+        expect(result.state).toBe("completed");
+        expect(result.observation).not.toBeNull();
+        observed = result.observation!;
+        expect(await frontVisibility()).toBe("visible");
+      };
+      await act({ type: "viewport", width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      const locator = { kind: "role", role: "textbox", name: "Name" } as const;
+      const inputValue = async () => {
+        const result = await cdp!.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          { expression: "document.querySelector('input').value", returnByValue: true },
+          { sessionId: attached.sessionId },
+        );
+        return result.result.value;
+      };
+      await act({ type: "fill", locator, value: "first" });
+      expect(await inputValue()).toBe("first");
+      await act({ type: "fill", locator, value: "replacement" });
+      expect(await inputValue()).toBe("replacement");
+      await act({ type: "press", locator, key: "Mod+A" });
+      await act({ type: "type", locator, text: "Background æøå 🦊" });
+      await act({ type: "click", locator: { kind: "role", role: "button", name: "Update" } });
+      const deadline = Date.now() + 3_000;
+      while (!names(observed).includes("Clicked in background 1") && Date.now() < deadline) {
+        await Bun.sleep(25);
+        observed = await supervisor.observe(reference, background.target.id);
+      }
+      // No screenshot or preview stream has run before this animation callback.
+      expect(names(observed)).toContain("Clicked in background 1");
+      const state = await cdp.send<{ result: { value: { visibility: string; value: string } } }>(
+        "Runtime.evaluate",
+        {
+          expression:
+            "({visibility:document.visibilityState,value:document.querySelector('input').value})",
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      expect(state.result.value).toEqual({ visibility: "visible", value: "Background æøå 🦊" });
+      expect(await frontVisibility()).toBe("visible");
+      // Disconnecting one controller restores its override without closing
+      // the shared owned browser or touching another controller's tab.
+      detachedDriver = new AgentBrowserDriver({
+        browserSessionId: randomUUID(),
+        controllerGeneration: `detached-${randomUUID()}`,
+        targetLifecycle: "cdp",
+        focusEmulation: true,
+        runner: {
+          async run<T>(args: readonly string[]): Promise<T> {
+            if (args[0] === "get" && args[1] === "cdp-url") {
+              return { cdpUrl: `ws://127.0.0.1:${port}${browserPath}` } as T;
+            }
+            throw new Error("unexpected detached-controller runner command");
+          },
+        },
+      });
+      const cleanup = await detachedDriver.start(fixture("Detached background"));
+      const cleanupAttached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: cleanup.target.id,
+        flatten: true,
+      });
+      const cleanupVisibility = async () => {
+        const current = await cdp!.send<{ result: { value: string } }>(
+          "Runtime.evaluate",
+          { expression: "document.visibilityState", returnByValue: true },
+          { sessionId: cleanupAttached.sessionId },
+        );
+        return current.result.value;
+      };
+      expect(await cleanupVisibility()).toBe("visible");
+      await detachedDriver.close();
+      const cleanupDeadline = Date.now() + 3_000;
+      while ((await cleanupVisibility()) !== "hidden" && Date.now() < cleanupDeadline) {
+        await Bun.sleep(25);
+      }
+      expect(await cleanupVisibility()).toBe("hidden");
+      expect(await frontVisibility()).toBe("visible");
+      await cdp.send("Target.closeTarget", { targetId: cleanup.target.id });
+      frames = await supervisor.subscribeFrames(reference, background.target.id, {
+        format: "jpeg",
+      });
+      const iterator = frames[Symbol.asyncIterator]();
+      const first = await frameWithin(iterator, 3_000);
+      const screenshot = await supervisor.screenshot(reference, background.target.id);
+      expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      const next = await frameAfter(iterator, first.sequence, 3_000);
+      expect([next.width, next.height]).toEqual([390, 844]);
+      expect(await frontVisibility()).toBe("visible");
+      // Explicit activation remains available for a human choosing direct control.
+      const activated = await supervisor.action(command(observed, { type: "activate" }));
+      expect(activated.state).toBe("completed");
+      expect(await frontVisibility()).toBe("hidden");
+      expect(await supervisor.listTargets(reference)).toContainEqual(
+        expect.objectContaining({
+          id: foreground.observation.target.id,
+          targetGeneration: foreground.observation.target.targetGeneration,
+        }),
+      );
+    } finally {
+      await detachedDriver?.close();
+      await frames?.close();
+      cdp?.close();
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+      await rm(socketDirectory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
 headedE2e(
-  "foregrounds a headed managed tab before frame-scheduled interaction",
+  "keeps a headed managed tab active for frame-scheduled interaction",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-headed-tab-");
     const runner = await AgentBrowserJsonRunner.create({
@@ -186,7 +480,7 @@ headedE2e(
       browserSessionId: randomUUID(),
       controllerGeneration: `controller-${randomUUID()}`,
       runner,
-      foregroundManagedTabs: true,
+      focusEmulation: true,
     });
     let cdp: CdpConnection | null = null;
     try {
@@ -233,7 +527,7 @@ headedE2e(
         },
         { sessionId: attached.sessionId },
       );
-      expect(selected.result.value).toBe("hidden");
+      expect(selected.result.value).toBe("visible");
     } finally {
       cdp?.close();
       await driver.close();
@@ -893,6 +1187,87 @@ e2e(
   60_000,
 );
 
+e2e(
+  "a popup closing during a click stays uncertain without losing its parent or replaying input",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-popup-close-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        return new Response(
+          new URL(request.url).pathname === "/popup"
+            ? '<title>Popup</title><button onclick="window.close()">Close popup</button>'
+            : '<title>Parent</title><input aria-label="Draft" value="unsaved draft"><button onclick="window.open(&quot;/popup&quot;)">Open popup</button>',
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `close_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const browserSessionId = randomUUID(),
+      controllerGeneration = randomUUID();
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      const parent = await driver.start(String(server.url));
+      await controller.run(
+        command(parent, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Open popup", exact: true },
+        }),
+      );
+      let popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+      for (let n = 0; !popup && n < 40; n++) {
+        await Bun.sleep(25);
+        popup = (await driver.listTargets()).find((target) => target.id !== parent.target.id);
+      }
+      expect(popup).toBeDefined();
+      const observed = await driver.observe(popup!.id);
+      const close = command(observed, {
+        type: "click",
+        locator: { kind: "role", role: "button", name: "Close popup", exact: true },
+      });
+      const receipt = await controller.run(close);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      expect(await controller.run(close)).toEqual(receipt);
+      expect((await driver.listTargets()).map((target) => target.id)).toEqual([parent.target.id]);
+      const retained = await driver.observe(parent.target.id);
+      expect(retained.target.targetGeneration).toBe(parent.target.targetGeneration);
+      expect(retained.target.documentGeneration).toBe(parent.target.documentGeneration);
+      expect(
+        await driver.readDom(parent.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "input" },
+          expectedTargetGeneration: parent.target.targetGeneration,
+          expectedDocumentGeneration: parent.target.documentGeneration!,
+          expectedFrameId: parent.frameId!,
+        }),
+      ).toMatchObject({ kind: "element", value: "unsaved draft" });
+    } finally {
+      server.stop(true);
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  40_000,
+);
+
 function command(
   observation: BrowserObservation,
   action: BrowserActionCommand["action"],
@@ -1077,7 +1452,7 @@ headedE2e(
       browserSessionId: randomUUID(),
       controllerGeneration: randomUUID(),
       runner,
-      foregroundManagedTabs: true,
+      focusEmulation: true,
       connect: async (endpoint) => {
         const connection = await CdpConnection.connect(endpoint);
         return {
@@ -1134,6 +1509,18 @@ headedE2e(
           { value: "blocked", label: "Blocked", selected: false, disabled: true },
         ],
       });
+      // Keyboard users can open the same popup and explicitly read its focused
+      // options even on controllers whose input observation mode is click-only.
+      await driver.dispatch({
+        ...command(view, { type: "press", key: "Escape" }),
+        observationMode: "none",
+      });
+      await driver.dispatch({
+        ...command(view, { type: "press", key: "Alt+ArrowDown" }),
+        observationMode: "none",
+      });
+      view = await driver.observe(view.target.id);
+      expect(focused(view)?.native?.data).toMatchObject({ kind: "native-select", multiple: false });
       const ref = view.focusedRef!;
       await expect(
         driver.dispatch(
@@ -1211,3 +1598,122 @@ headedE2e(
   },
   60000,
 );
+
+for (const mode of [
+  "scroll",
+  "small semantic target",
+  "small coordinate target",
+  "removed target",
+] as const) {
+  chromiumE2e(
+    `completes native drag lifecycle with ${mode}`,
+    async () => {
+      const directory = await mkdtemp("/tmp/ogb-drag-");
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: `drag_${randomUUID().slice(0, 8)}`,
+        sessionName: "s",
+        socketDirectory: join(directory, "s"),
+        profileDirectory: join(directory, "profile"),
+        downloadDirectory: join(directory, "downloads"),
+        screenshotDirectory: join(directory, "screenshots"),
+        headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+        ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+          ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+          : {}),
+        binary: await resolvePinnedAgentBrowserBinary(
+          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+            : {},
+        ),
+      });
+      const driver = new AgentBrowserDriver({
+        browserSessionId: randomUUID(),
+        controllerGeneration: randomUUID(),
+        runner,
+        focusEmulation: true,
+      });
+      let cdp: CdpConnection | null = null;
+      try {
+        const initial = await driver.start(
+          dataUrl(`<!doctype html>
+          <style>
+            body{margin:0} button{position:absolute;left:100px;width:100px;padding:0;border:0}
+            #source{top:100px;height:40px} #destination{top:${mode === "scroll" ? 1400 : 600}px;height:10px}
+          </style>
+          <button id="source" draggable="true">Source</button>
+          <button id="destination">Destination</button>
+          <script>
+            globalThis.events=[];globalThis.moved=false;
+            source.addEventListener('dragstart',e=>{
+              events.push('start');e.dataTransfer.setData('text/plain','source');
+              ${mode === "removed target" ? "destination.remove();" : ""}
+            });
+            source.addEventListener('dragend',()=>events.push('end'));
+            destination.addEventListener('dragover',e=>e.preventDefault());
+            destination.addEventListener('drop',e=>{
+              e.preventDefault();events.push('drop');globalThis.moved=true;
+            });
+          </script>`),
+        );
+        const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+        cdp = await CdpConnection.connect(endpoint.cdpUrl);
+        const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: initial.target.id,
+          flatten: true,
+        });
+        const options = { sessionId: attached.sessionId };
+        await cdp.send(
+          "Emulation.setDeviceMetricsOverride",
+          {
+            width: 800,
+            height: 720,
+            deviceScaleFactor: 1,
+            mobile: false,
+          },
+          options,
+        );
+        const page = await driver.observe(initial.target.id);
+        const action = command(
+          page,
+          mode === "small coordinate target"
+            ? {
+                type: "pointer",
+                action: "drag",
+                x: 150,
+                y: 120,
+                endX: 150,
+                endY: 605,
+              }
+            : {
+                type: "drag",
+                from: { kind: "role", role: "button", name: "Source", exact: true },
+                to: { kind: "role", role: "button", name: "Destination", exact: true },
+              },
+        );
+        if (mode === "removed target") {
+          await expect(driver.dispatch(action)).rejects.toThrow();
+        } else {
+          await driver.dispatch(action);
+        }
+        const result = await cdp.send<{ result: { value: unknown } }>(
+          "Runtime.evaluate",
+          {
+            expression: "({events,moved,scrolled:scrollY>0})",
+            returnByValue: true,
+          },
+          options,
+        );
+        expect(result.result.value).toEqual({
+          events: mode === "removed target" ? ["start", "end"] : ["start", "drop", "end"],
+          moved: mode !== "removed target",
+          scrolled: mode === "scroll",
+        });
+      } finally {
+        cdp?.close();
+        await driver.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+}

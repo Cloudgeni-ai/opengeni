@@ -220,6 +220,7 @@ describeWithRipgrep("runCodeSearch end to end with a fake Jev", () => {
     }
     expect(r.stats.packChars).toBeLessThanOrEqual(4000 * 3.2);
     expect(r.text.startsWith("code_search: evidence rating 0.85 (s1 0.85, s2 0.85) |")).toBe(true);
+    expect(r.text.endsWith("\n\n(engine scout-0.4.0)\n")).toBe(true);
     expect(r.text.split("\n")[0]).toMatch(
       /^code_search: evidence rating .* \| \d+ passages from \d+ files, ~[\d.k]+ tokens \| [\d.]+s$/,
     );
@@ -242,6 +243,8 @@ describeWithRipgrep("runCodeSearch end to end with a fake Jev", () => {
       "pack",
       "recall",
       "status",
+      "symbols",
+      "vocab",
       "wave1",
       "wave2",
       "wave3",

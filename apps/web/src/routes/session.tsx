@@ -1,4 +1,7 @@
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import { enableSandboxTerminal } from "@opengeni/react/terminal";
+import { enableCodeEditor } from "@opengeni/react/editor";
+import { enableDesktopViewer } from "@opengeni/react/desktop";
 import { retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
@@ -15,6 +18,9 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { useStreamHealthTelemetry } from "@/lib/stream-health";
+import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
+import { noteTurnFailureAction } from "@/lib/turn-failure-actions";
 import { observeSessionTurnEvents } from "@/lib/analytics-observer";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
@@ -62,6 +68,7 @@ import {
 } from "@opengeni/react/session";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BotIcon,
   BugIcon,
   CheckIcon,
   Loader2Icon,
@@ -85,12 +92,14 @@ import {
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
+import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
+import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
 import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
+import { SessionRunsOnMenuBody, useSessionRunsOn } from "@/components/session/sandbox-switcher";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useSessionOpening } from "@/lib/session-opening";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
-import { useQueuedQuestionFocus } from "@/lib/queued-question-focus";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
@@ -170,6 +179,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "@/lib/session-dock-preferences";
+import { consoleLinkResolver } from "@/lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -192,6 +202,17 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 // Highlighted diffs and file views load @pierre/diffs only here, in the lazy
 // session route, so the peer and its highlighter stay out of the initial graph.
 enablePierreDiffs();
+enableSandboxTerminal({ webgl: () => import("@xterm/addon-webgl") });
+enableDesktopViewer();
+enableCodeEditor({
+  javascript: async () =>
+    (await import("@codemirror/lang-javascript")).javascript({ jsx: true, typescript: true }),
+  json: async () => (await import("@codemirror/lang-json")).json(),
+  python: async () => (await import("@codemirror/lang-python")).python(),
+  markdown: async () => (await import("@codemirror/lang-markdown")).markdown(),
+  css: async () => (await import("@codemirror/lang-css")).css(),
+  html: async () => (await import("@codemirror/lang-html")).html(),
+});
 
 const InlineChatArtifact = lazy(() =>
   import("@/components/artifacts/retained-file-preview").then((module) => ({
@@ -250,6 +271,11 @@ const LazyFailedSessionBanner = lazy(() =>
   })),
 );
 
+const LazyAgentConfigurationPanel = lazy(() =>
+  import("@/components/session/agent-configuration-panel").then(({ AgentConfigurationPanel }) => ({
+    default: AgentConfigurationPanel,
+  })),
+);
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
@@ -331,7 +357,6 @@ export function SessionRoute({
     loadOldest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
-    jumpToLatestQuestion,
     jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
@@ -721,6 +746,8 @@ export function SessionRoute({
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
+  // Content-free operational signal; see lib/stream-health.ts.
+  useStreamHealthTelemetry("session", connectionState);
   useEffect(() => {
     sessionEventFeedStore.set({ sessionId, events });
   }, [events, sessionId, sessionEventFeedStore]);
@@ -819,7 +846,7 @@ export function SessionRoute({
       });
     })().catch((error) => {
       toast.error("Connection succeeded, but setup needs attention", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
     });
   }, [
@@ -855,7 +882,7 @@ export function SessionRoute({
         });
       })().catch((error) =>
         toast.error("Connection authorized, but setup needs attention", {
-          description: error instanceof Error ? error.message : String(error),
+          description: userErrorText(error),
         }),
       );
     } else {
@@ -938,6 +965,7 @@ export function SessionRoute({
                 : "GitHub is not configured on this deployment.",
             );
           }
+          await markIntegrationConnectRedirect("github", "app_install");
           window.location.assign(status.linkUrl);
           return;
         }
@@ -967,6 +995,7 @@ export function SessionRoute({
           if (!response.authorizationUrl) {
             throw new Error("The provider did not return an authorization link.");
           }
+          await markIntegrationConnectRedirect({ domain: mcpUrl }, "oauth");
           window.location.assign(response.authorizationUrl);
           return;
         }
@@ -1005,6 +1034,7 @@ export function SessionRoute({
       if (!response.authorizationUrl) {
         throw new Error("The provider did not return an authorization link.");
       }
+      await markIntegrationConnectRedirect({ domain: item.providerDomain }, "oauth");
       window.location.assign(response.authorizationUrl);
     },
     [
@@ -1096,7 +1126,7 @@ export function SessionRoute({
                 title="Conversation couldn't be loaded"
                 description="Your saved messages are unchanged. Try loading them again."
                 action={
-                  <Button variant="secondary" onClick={() => void jumpToLatest()}>
+                  <Button variant="outline" onClick={() => void jumpToLatest()}>
                     Retry conversation
                   </Button>
                 }
@@ -1149,7 +1179,6 @@ export function SessionRoute({
       loadingOldest={loadingOldest}
       onJumpToStart={loadOldest}
       onJumpToLatest={jumpToLatest}
-      onJumpToLatestQuestion={jumpToLatestQuestion}
       onClearView={clearView}
       onOpenSession={(nextSessionId) =>
         void navigate({
@@ -1230,11 +1259,22 @@ export function SessionRoute({
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
-        description: error instanceof Error ? error.message : String(error),
+        description: userErrorText(error),
       });
       throw error instanceof Error ? error : new Error(String(error));
     }
   }
+}
+
+/** The latest agent-settings change, and whether a turn has started since. */
+function lastAgentChange(events: readonly SessionEvent[]): { at: string; pending: boolean } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "session.agent.updated") continue;
+    const pending = !events.slice(index + 1).some((later) => later.type === "turn.started");
+    return { at: event.occurredAt, pending };
+  }
+  return null;
 }
 
 /**
@@ -1364,6 +1404,23 @@ function SessionDock(props: {
       ),
     },
   ];
+  if (props.session && context.clientConfig.agentConfig?.enabled) {
+    trailingTabs.push({
+      id: "agent",
+      label: "Agent",
+      icon: <BotIcon />,
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening agent settings" />}>
+          <LazyAgentConfigurationPanel
+            key={props.session.id}
+            session={props.session}
+            lastChange={lastAgentChange(props.events)}
+            onReloadSession={props.onReloadSession}
+          />
+        </Suspense>
+      ),
+    });
+  }
   if (props.session) {
     trailingTabs.push({
       id: "debug",
@@ -1567,7 +1624,6 @@ function SessionChatPane(props: {
   loadingOldest: boolean;
   onJumpToStart: () => Promise<boolean>;
   onJumpToLatest: () => Promise<void>;
-  onJumpToLatestQuestion: ReturnType<typeof useSessionEvents>["jumpToLatestQuestion"];
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -1584,18 +1640,6 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
-  const { onQueuedQuestion, queueFocusTarget } = useQueuedQuestionFocus({
-    client: context.client,
-    subjectId: context.accessContext.subjectId,
-    workspaceId: props.session.workspaceId,
-    sessionId: props.session.id,
-    queue: props.queue,
-  });
-  const jumpToQuestion = props.onJumpToLatestQuestion;
-  const jumpToLatestQuestion = useCallback(
-    () => jumpToQuestion({ onQueuedQuestion }),
-    [jumpToQuestion, onQueuedQuestion],
-  );
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
@@ -1844,6 +1888,8 @@ function SessionChatPane(props: {
   const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
     null,
   );
+  // "+" > Runs on: the compute this chat runs on and the machines it can move to.
+  const runsOn = useSessionRunsOn(props.session.id, props.session.sandboxBackend);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -1978,9 +2024,9 @@ function SessionChatPane(props: {
         setDurableToolsSnapshot(updated);
         setConnectorCustomizingOverride((current) => (current === true ? true : null));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = userErrorText(error);
         setDurableToolsError(message);
-        toast.error("Failed to save session tools", { description: message });
+        toast.error("Couldn't save session tools", { description: message });
         try {
           const refreshed = await context.client.getSession(
             props.session.workspaceId,
@@ -2135,6 +2181,7 @@ function SessionChatPane(props: {
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
     onSubmitted: (_text, input) => {
+      noteTurnFailureAction("send_message");
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
@@ -2305,7 +2352,12 @@ function SessionChatPane(props: {
       ),
     [props.events],
   );
-  const { optimisticMessages, retryOptimisticMessage, removeOptimisticMessage } = composer;
+  const {
+    optimisticMessages,
+    retryOptimisticMessage,
+    restoreOptimisticMessage,
+    removeOptimisticMessage,
+  } = composer;
   const failedOptimisticMessageCount = (optimisticMessages ?? []).filter(
     (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
   ).length;
@@ -2327,6 +2379,7 @@ function SessionChatPane(props: {
       {
         optimisticMessages,
         retryOptimisticMessage,
+        restoreOptimisticMessage,
         removeOptimisticMessage,
       },
     );
@@ -2338,6 +2391,7 @@ function SessionChatPane(props: {
     props.queue.snapshot,
     props.timeline,
     retryOptimisticMessage,
+    restoreOptimisticMessage,
   ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const admissionControl = admissionRecheckControl(
@@ -2528,6 +2582,10 @@ function SessionChatPane(props: {
           <LazyFailedSessionBanner
             key={props.session.id}
             failure={props.failure}
+            analyticsKey={
+              props.failure.failureEventId ??
+              `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
+            }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
@@ -2669,6 +2727,8 @@ function SessionChatPane(props: {
               }
             >
               <MessageTimeline
+                resolveLink={consoleLinkResolver}
+                allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                 trailingState={
                   <>
                     {/* Recovery follows the failed request, only in the latest history window.
@@ -2733,7 +2793,6 @@ function SessionChatPane(props: {
                   await props.onJumpToStart();
                 }}
                 onJumpToLatest={props.onJumpToLatest}
-                onJumpToLatestQuestion={jumpToLatestQuestion}
                 emptyState={
                   // Clear view hides history, not the retained failure or retry operation.
                   failureRecovery ??
@@ -2763,7 +2822,7 @@ function SessionChatPane(props: {
                       title="Conversation couldn't be loaded"
                       description="Your saved messages are unchanged. Try loading them again."
                       action={
-                        <Button variant="secondary" onClick={() => void props.onJumpToLatest()}>
+                        <Button variant="outline" onClick={() => void props.onJumpToLatest()}>
                           Retry conversation
                         </Button>
                       }
@@ -2885,7 +2944,6 @@ function SessionChatPane(props: {
             }
           />
           <SessionChrome
-            queueFocusTarget={queueFocusTarget}
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
             queue={props.queue}
@@ -2923,6 +2981,7 @@ function SessionChatPane(props: {
           />
           <ConsoleComposer
             workspaceId={props.session.workspaceId}
+            usageRefreshKey={props.session.status}
             composer={composer}
             attachments={attachments}
             effectiveControl={composer.effectiveControl}
@@ -3019,6 +3078,22 @@ function SessionChatPane(props: {
                     disabled: terminal || composer.sending,
                     panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
                   }}
+                  {...(runsOn.hasChoices ||
+                  props.session.rigId ||
+                  (runsOn.activeMachine && !runsOn.activeMachine.isSessionGroup)
+                    ? {
+                        runsOn: {
+                          summary: runsOn.activeName,
+                          panel: (
+                            <SessionRunsOnMenuBody
+                              runsOn={runsOn}
+                              workspaceId={props.session.workspaceId}
+                              rigId={props.session.rigId ?? null}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
                 />
               </>
             }
@@ -3050,7 +3125,7 @@ function SessionChatPane(props: {
                     (props.session.status === "failed" || props.session.status === "idle")
                   ? // "Send a message to revive" is a dead end without credits —
                     // the reply turn dies the same budget death.
-                    "Out of OpenGeni credits — add credits to continue."
+                    "Out of Opengeni credits — add credits to continue."
                   : "Send a follow-up…"
             }
             controls={

@@ -152,7 +152,7 @@ export function useModelAccessPolicy(workspaceId: string) {
 
   /**
    * Saves, then re-reads. Resolves false when the page moved to another
-   * workspace meanwhile (the result is ignored). Throws a user-facing error.
+   * workspace meanwhile (the result is ignored). Throws the failure for the form page to show.
    */
   const save = useCallback(
     async (draft: ModelAccessPolicyDraft): Promise<boolean> => {
@@ -169,10 +169,10 @@ export function useModelAccessPolicy(workspaceId: string) {
         await client.updateWorkspaceModelAccessPolicy(workspaceId, modelAccessPolicyRequest(draft));
       } catch (caught) {
         if (!isCurrentScope()) return false;
-        throw new Error(
-          `Couldn't save Allowed models. ${caught instanceof Error ? caught.message : String(caught)}`,
-          { cause: caught },
-        );
+        // The form page says what to do and keeps an API error's facts in Technical details.
+        throw caught instanceof Error && caught.message
+          ? caught
+          : new Error("Couldn't save Allowed models. Try again.", { cause: caught });
       }
       if (!isCurrentScope()) return false;
       await load();
@@ -189,7 +189,9 @@ export function useModelAccessPolicy(workspaceId: string) {
 export type ModelAccessPolicyState = ReturnType<typeof useModelAccessPolicy>;
 
 /** The current value, short, for the Allowed models row: "All models", "3 models". */
-export function allowedModelsSummary(state: ModelAccessPolicyState): string {
+export function allowedModelsSummary(
+  state: Pick<ModelAccessPolicyState, "saved" | "models">,
+): string {
   const draft = state.saved;
   if (!draft) return "";
   if (draft.mode === "unrestricted") return "All models";
@@ -659,7 +661,7 @@ function ChecklistGroup({ label, children }: { label: string; children: ReactNod
   const id = useId();
   return (
     <section aria-labelledby={id} className="min-w-0">
-      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg-subtle">
+      <h3 id={id} className="pb-1 text-xs leading-4.5 font-medium text-fg">
         {label}
       </h3>
       <ul className="m-0 flex min-w-0 list-none flex-col divide-y divide-border p-0">{children}</ul>

@@ -267,11 +267,12 @@ export function registerEditableArtifactAgentTools(
     "editable_artifact_export",
     {
       title: "Export editable artifact",
-      description:
-        "Pin the current artifact head and start an immutable Office/PDF/image export. This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.",
+      description: `Pin the current artifact head and start an immutable file export. ${input.deps.editableArtifactAgent?.describeExportFormats?.() ?? "No exporter capability description is available; query this deployment before promising a format."} This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.`,
       inputSchema: {
         artifactId: ArtifactId,
-        format: Format,
+        format: Format.describe(
+          "Target file format. Only the formats listed in this tool's description are served; any other combination is refused with unsupported_format.",
+        ),
         options: JsonRecord.optional(),
       },
       outputSchema: {

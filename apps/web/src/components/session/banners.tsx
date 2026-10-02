@@ -31,7 +31,7 @@ export function TerminalSessionBanner(props: { session: Session; onNewSession: (
       <Button
         type="button"
         size="sm"
-        variant="secondary"
+        variant="outline"
         onClick={props.onNewSession}
         className="shrink-0"
       >

@@ -30,20 +30,39 @@ export const POST = createChatHandler(og, {
     return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
   },
   format: "vercel", // or "openai-chat" / "openai-responses"; default: native chunks
+  toolParts: true, // optional Vercel activity indicators; off by default
 });
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
 ```
 
+For the Vercel format, `toolParts: true` emits OpenGeni's tool activity as
+`dynamic`, `providerExecuted` parts, not tools for your app to execute. The
+successful output is only `{ status }`, not the actual result: this opt-in does
+not restore tool results, artifacts or attachments. Leave it off for text-only
+activity. Approval requests are emitted independently of this option (AI SDK
+6+ is needed to answer them). When composing your own AI SDK stream, pass the
+same option to `uiMessageStreamParts(chunks, { framing: false, toolParts: true })`;
+`framing: false` leaves message framing to the outer stream.
+
 Each tenant maps to one workspace and each conversation to one deterministic
 session. Conversation IDs are independent of the acting user; authorization
 decides who may use a shared conversation. Without a `user`, `resolve` must
 return the `conversation`. `chatBySessionId` reopens sessions derived with the
-old user-namespaced helper. The facade defaults to `agentAccess: "session"` and
-`memory: false`. The adapters send only the latest user message and import
-earlier messages once as first-message context; afterwards OpenGeni owns the
-history. They run in the customer's backend: they do not add `/responses` or
+old user-namespaced helper. `chats` defaults to `"private"` when a `user` is
+given (private visibility, session-only agent reach, the user's personal
+Knowledge; pass `memory: false` to keep Knowledge authoring off). Without a
+user, omitted `chats` keeps workspace visibility, session-only reach and
+Knowledge off; use `chats: "shared"` for service-owned chats. `agent` takes the
+same object as sessions, and the facade's renderer defaults to `"markdown"`
+(only that implicit default is dropped on a server without agent settings).
+`resolve` may return `chats` and `agent` too. See
+[Configure the agent](configure-the-agent.md). The adapters send only the
+latest user message. Earlier messages from your app are imported only when the
+session is first created, as context on its first message; after that OpenGeni
+owns the history, and messages your app shows but never sent are not added.
+They run in the customer's backend: they do not add `/responses` or
 `/chat/completions` to the OpenGeni service. See
 [Compatibility and troubleshooting](compatibility-and-troubleshooting.md) and
 `examples/chat-quickstart`.

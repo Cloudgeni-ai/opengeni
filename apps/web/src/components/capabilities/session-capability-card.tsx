@@ -12,6 +12,7 @@ import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
 import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
+import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -180,9 +181,7 @@ function ScopedSessionCapabilityCard({
     } catch (failure) {
       navigating = false;
       if (active.current && requestSequence === githubRequestSequence.current) {
-        setGithubError(
-          failure instanceof Error ? failure.message : "Couldn't start GitHub setup. Try again.",
-        );
+        setGithubError(`Couldn't start GitHub setup. ${userErrorText(failure, "Try again.")}`);
         setExpanded(true);
       }
     } finally {
@@ -452,9 +451,7 @@ function SessionCapabilitySetup({
       if (current()) onComplete();
     } catch (failure) {
       if (current())
-        setError(
-          failure instanceof Error ? failure.message : "Couldn't add this connection. Try again.",
-        );
+        setError(`Couldn't add this connection. ${userErrorText(failure, "Try again.")}`);
     } finally {
       inFlight.current = false;
       if (current()) setBusy(false);
@@ -603,7 +600,7 @@ function SessionCodexAppsSetup({
     } catch (failure) {
       if (active.current)
         setError(
-          failure instanceof Error ? failure.message : "Couldn't enable Apps in this conversation.",
+          `Couldn't enable Apps in this conversation. ${userErrorText(failure, "Try again.")}`,
         );
     } finally {
       inFlight.current = false;

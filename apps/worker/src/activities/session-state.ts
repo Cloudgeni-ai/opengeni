@@ -19,6 +19,7 @@ import {
   markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
+  SANDBOX_SETUP_RECOVERY_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { CancelledFailure } from "@temporalio/activity";
@@ -239,6 +240,9 @@ export function createSessionStateActivities(
       turn.triggerEventId === postClaimRecovery.triggerEventId &&
       turn.executionGeneration === postClaimRecovery.executionGeneration,
     );
+    if (postClaimRecovery?.sandboxSetupRecoveryExhausted && !postClaimIdentityMatches) {
+      return { action: "stale" };
+    }
     const providerRecoveryCount = postClaimIdentityMatches
       ? postClaimRecovery?.providerRecoveryCount
       : undefined;
@@ -247,6 +251,19 @@ export function createSessionStateActivities(
       : undefined;
     const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
     const hasProviderFailureCode = providerFailureCode !== undefined;
+    const setupOutcomeUnknown =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupOutcomeUnknown === true;
+    const setupRecoveryExhausted =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupRecoveryExhausted === true;
+    if (
+      (setupOutcomeUnknown && setupRecoveryExhausted) ||
+      ((setupOutcomeUnknown || setupRecoveryExhausted) &&
+        (hasProviderRecoveryCount || hasProviderFailureCode)) ||
+      (setupRecoveryExhausted &&
+        turn.metadata?.providerRecoveryCount !== SANDBOX_SETUP_RECOVERY_LIMIT)
+    ) {
+      return { action: "stale" };
+    }
     if (hasProviderRecoveryCount !== hasProviderFailureCode) {
       return { action: "stale" };
     }
@@ -275,11 +292,30 @@ export function createSessionStateActivities(
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: input.attemptId,
-        reason: providerFailureCode ?? "claimed_attempt_database_failure",
+        reason: setupOutcomeUnknown
+          ? "sandbox_command_start_outcome_unknown"
+          : setupRecoveryExhausted
+            ? "sandbox_command_start_recovery_exhausted"
+            : (providerFailureCode ?? "claimed_attempt_database_failure"),
+        ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+        ...(setupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
         ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
         detail: {
-          code: providerFailureCode ?? recoveredClaimCode,
-          retryable: true,
+          code: setupOutcomeUnknown
+            ? "sandbox_command_start_outcome_unknown"
+            : setupRecoveryExhausted
+              ? "sandbox_command_start_recovery_exhausted"
+              : (providerFailureCode ?? recoveredClaimCode),
+          retryable: !setupOutcomeUnknown && !setupRecoveryExhausted,
+          ...(setupOutcomeUnknown ? { setupOutcome: "unknown", replay: "blocked" } : {}),
+          ...(setupRecoveryExhausted
+            ? {
+                setupOutcome: "not_started",
+                replay: "blocked",
+                recoveryExhausted: true,
+                providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+              }
+            : {}),
           ...(providerRecoveryCount !== undefined
             ? {
                 databaseFailureCode: recoveredClaimCode,

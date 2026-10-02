@@ -503,7 +503,7 @@ describe("API helpers", () => {
 
   test("allows public bearer CORS without exposing credentialed browser sessions", async () => {
     const app = createApp({
-      settings: testSettings(),
+      settings: testSettings({ productAccessMode: "managed" }),
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -1117,6 +1117,7 @@ describe("API helpers", () => {
     });
 
     expect(params.mode).toBe("payment");
+    expect(params.allow_promotion_codes).toBe(true);
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
@@ -1128,6 +1129,7 @@ describe("API helpers", () => {
           opengeni_credit_amount_usd: "25.50",
           opengeni_credit_micros: "25500000",
           opengeni_credit_idempotency_key: "checkout:test",
+          opengeni_credit_coupon_v1: "1",
         },
       },
     });
@@ -1135,9 +1137,11 @@ describe("API helpers", () => {
     expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
     expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
     expect(params.metadata?.opengeni_credit_idempotency_key).toBe("checkout:test");
+    expect(params.metadata?.opengeni_credit_coupon_v1).toBe("1");
     expect(params.payment_intent_data?.metadata?.opengeni_account_id).toBe(
       "00000000-0000-4000-8000-000000000001",
     );
+    expect(params.payment_intent_data?.metadata?.opengeni_credit_coupon_v1).toBe("1");
   });
 
   test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
@@ -1169,6 +1173,36 @@ describe("API helpers", () => {
     ).toThrow("successUrl must use the OpenGeni public origin");
   });
 
+  test("returns local Stripe Checkout to the configured web origin", () => {
+    const base = {
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      amountCents: 1000,
+      amountMicros: 10_000_000,
+      publicBaseUrl: "http://127.0.0.1:8000",
+      webBaseUrl: "http://127.0.0.1:3000",
+      idempotencyKey: "checkout:test-local-return",
+    };
+    const params = stripeCheckoutSessionCreateParams({
+      ...base,
+      successUrl:
+        "http://127.0.0.1:3000/workspaces/test/organization?section=billing&checkout=success",
+      cancelUrl:
+        "http://127.0.0.1:3000/workspaces/test/organization?section=billing&checkout=cancelled",
+    });
+    expect(params.success_url).toContain("http://127.0.0.1:3000/workspaces/test/organization");
+    expect(params.cancel_url).toContain("checkout=cancelled");
+    expect(stripeCheckoutSessionCreateParams(base).success_url).toBe(
+      "http://127.0.0.1:3000/billing?checkout=success",
+    );
+    expect(() =>
+      stripeCheckoutSessionCreateParams({
+        ...base,
+        successUrl: "https://evil.example/checkout",
+      }),
+    ).toThrow("successUrl must use the OpenGeni public or web origin");
+  });
+
   test("namespaces Stripe customer mirrors by live and test mode", () => {
     expect(stripeCustomerProvider({ livemode: true } as never)).toBe("stripe:live");
     expect(stripeCustomerProvider({ livemode: false } as never)).toBe("stripe:test");
@@ -1198,6 +1232,14 @@ describe("API helpers", () => {
         returnUrl: "https://evil.example/billing",
       }),
     ).toThrow("returnUrl must use the OpenGeni public origin");
+    expect(
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "http://127.0.0.1:8000",
+        webBaseUrl: "http://127.0.0.1:3000",
+        returnUrl: "http://127.0.0.1:3000/workspaces/test/organization?section=billing",
+      }).return_url,
+    ).toBe("http://127.0.0.1:3000/workspaces/test/organization?section=billing");
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {
@@ -1819,7 +1861,7 @@ describe("GET /v1/config/client", () => {
   // null so createApp does not try to stand up Better Auth.
   function appFor(settings: Settings) {
     const deps = {
-      settings,
+      settings: { ...settings, productAccessMode: "managed" as const },
       db: {} as never,
       bus: {} as never,
       workflowClient: {} as never,
@@ -2025,7 +2067,7 @@ describe("GET /v1/config/client", () => {
     ).toBeNull();
   });
 
-  test("supports a Codex subscription model as the client default", async () => {
+  test("does not advertise a disconnected Codex subscription, even as deployment default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
       openaiModel: "codex/gpt-6-sol",
@@ -2034,16 +2076,65 @@ describe("GET /v1/config/client", () => {
     const config = await fetchClientConfig(settings);
 
     expect(config.defaultModel).toBe("codex/gpt-6-sol");
-    expect(config.allowedModels).toContain("codex/gpt-6-sol");
-    const defaultModel = config.models.find((model) => model.id === config.defaultModel);
-    expect(defaultModel).toMatchObject({
-      provider: "codex",
-      providerLabel: "Codex",
-      source: "codex",
-      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+    expect(config.allowedModels).toEqual(["codex/gpt-6-sol"]);
+    expect(config.models).toEqual([]);
+    expect(config.legacyModelFallback).toMatchObject({
+      id: "codex/gpt-6-sol",
+      availability: { status: "unavailable", selectable: false, reason: "needs_reauth" },
     });
-    expect(defaultModel).not.toHaveProperty("deployment");
-    expect(defaultModel).not.toHaveProperty("credentialSource");
+  });
+
+  test("public bootstrap hides enabled subscriptions and missing deployment credentials", async () => {
+    const config = await fetchClientConfig(
+      testSettings({
+        codexSubscriptionEnabled: true,
+        supergrokSubscriptionEnabled: true,
+        openaiApiKey: undefined,
+      }),
+    );
+    expect(config.allowedModels).toHaveLength(1);
+    expect(config.models).toEqual([]);
+    expect(config.legacyModelFallback?.availability).toMatchObject({
+      status: "unavailable",
+      selectable: false,
+      reason: "missing_credential",
+    });
+  });
+
+  test("stale browser cookies preserve public bootstrap but explicit workspace requests require auth", async () => {
+    const app = appFor(testSettings());
+    expect(
+      (await app.request("/v1/config/client", { headers: { cookie: "unrelated=expired" } })).status,
+    ).toBe(200);
+    expect((await app.request("/v1/config/client?workspaceId=workspace")).status).toBe(401);
+    expect((await app.request("/v1/config/client?workspaceId=")).status).toBe(422);
+  });
+
+  test("unscoped browser bootstrap does not require selected-actor reconciliation", async () => {
+    let authReads = 0;
+    const app = createApp({
+      settings: testSettings({ productAccessMode: "managed" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: {
+        handler: async () => Response.json({}),
+        api: {
+          getSession: async () => {
+            authReads += 1;
+            throw new HTTPException(409, { message: "managed_auth_actor_changed" });
+          },
+        },
+      } as never,
+    });
+    const headers = { cookie: "opengeni.session_set=browser-authority-not-reconciled" };
+    const bootstrap = await app.request("/v1/config/client", { headers });
+    expect(bootstrap.status).toBe(200);
+    expect(ClientConfig.parse(await bootstrap.json()).auth.mode).toBe("managedSession");
+    expect(authReads).toBe(0);
+    const scoped = await app.request("/v1/config/client?workspaceId=workspace", { headers });
+    expect(scoped.status).toBe(409);
+    expect(authReads).toBe(1);
   });
 
   test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {
@@ -2084,7 +2175,12 @@ describe("GET /v1/config/client", () => {
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
     expect(glm?.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
-    expect(glm).not.toHaveProperty("availability");
+    expect(glm?.availability).toEqual({
+      status: "unknown",
+      selectable: true,
+      reason: null,
+      checkedAt: null,
+    });
     expect(glm).not.toHaveProperty("deployment");
     expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");

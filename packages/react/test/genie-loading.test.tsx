@@ -109,6 +109,33 @@ test("long waits replace playful text with an honest status", async () => {
   expect(r.container.textContent).toContain("Behind the magic");
   await r.unmount();
 });
+test("a dispatched model request waits for its response instead of preparing the task", async () => {
+  const start = new Date(Date.now() - 31_000).toISOString();
+  const setup = phase({ startedAt: start, status: "complete" });
+  for (const status of ["running", "complete"] as const) {
+    const r = await renderComponent(
+      <ActivityRail
+        startupActive
+        items={[
+          setup,
+          phase({ id: "request", phase: "provider_first_byte", status, startedAt: start }),
+        ]}
+      />,
+    );
+    try {
+      expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
+        "Waiting for a response. Taking longer than usual.",
+      );
+      expect(r.container.querySelector(".og-genie-phrase")?.textContent).toBe(
+        "Still waiting for a response…",
+      );
+      expect(r.container.textContent).not.toContain("Preparing your task");
+      expect(r.container.querySelector("button")?.textContent).toContain("Show details");
+    } finally {
+      await r.unmount();
+    }
+  }
+});
 test("failures and cancellation stop the wisp and stay visible", async () => {
   for (const status of ["failed", "cancelled"] as const) {
     const r = await renderComponent(
@@ -148,6 +175,73 @@ test("startup-only timeline groups have no verbose step-count shell", async () =
   expect(r.container.textContent).not.toContain("steps");
   expect(r.container.querySelector(".og-genie-loading")).not.toBeNull();
   await r.unmount();
+});
+
+test("readable startup stays primary through phase gaps and first byte, then hands its clock to Working", async () => {
+  const start = new Date(Date.now() - 12_000).toISOString();
+  const first = phase({ startedAt: start, occurredAt: start });
+  const r = await renderComponent(
+    <MessageTimeline items={[first]} turnSummary={{ rolling: true }} />,
+  );
+  try {
+    const orb = r.container.querySelector("canvas");
+    expect(orb).not.toBeNull();
+    expect(r.container.querySelector("[data-og-work-header]")).toBeNull();
+    const ready = [
+      { ...first, status: "complete" as const },
+      phase({ id: "byte", phase: "provider_first_byte", status: "complete" }),
+    ];
+    await r.rerender(<MessageTimeline items={ready} turnSummary={{ rolling: true }} />);
+    expect(r.container.querySelector("canvas")).toBe(orb);
+    const progress = {
+      kind: "agent-message" as const,
+      id: "progress",
+      turnId: "turn",
+      text: "Checking the **ledger**",
+      streaming: false,
+      occurredAt: new Date().toISOString(),
+    };
+    await r.rerender(
+      <MessageTimeline items={[...ready, progress]} turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+    expect(r.container.querySelector("[data-og-exchange-status]")?.textContent).toMatch(
+      /^Working · 1[2-4]s$/,
+    );
+    expect(r.container.querySelector("[data-og-work-header]")?.textContent).not.toContain(
+      "Preparation",
+    );
+    const trigger = r.container.querySelector<HTMLButtonElement>("[data-og-work-header]")!;
+    await act(async () => trigger.click());
+    expect(r.container.querySelector("[data-og-fold-content] .og-genie-loading")).toBeNull();
+    await r.rerender(
+      <MessageTimeline
+        items={[...ready, progress, phase({ id: "late" })]}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+  } finally {
+    await r.unmount();
+  }
+});
+
+test("readable startup failure and cancellation never hide behind a closed Working row", async () => {
+  for (const status of ["failed", "cancelled"] as const) {
+    const r = await renderComponent(
+      <MessageTimeline items={[phase({ status })]} turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+    expect(r.container.querySelector(".og-genie-loading")).toBeNull();
+    expect(r.container.querySelector("[data-og-work-header]")?.getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+    expect(r.container.textContent).toContain(
+      status === "failed" ? "Sandbox didn’t start" : "Sandbox startup interrupted",
+    );
+    await r.unmount();
+  }
 });
 
 test("the same orb survives gaps between startup phases", async () => {
@@ -254,16 +348,19 @@ test("work mixed with startup receipts uses the normal Steps disclosure", async 
 });
 
 test("hosts can replace loading with an arbitrary component", async () => {
-  const r = await renderComponent(
-    <MessageTimeline
-      items={[phase()]}
-      genieLoading={{
-        render: ({ startedAt }) => <div data-start={startedAt}>Custom preparation</div>,
-      }}
-    />,
+  const render = ({ startedAt, phase: loadingPhase }: { startedAt: string; phase: string }) => (
+    <div data-start={startedAt} data-phase={loadingPhase}>
+      Custom preparation
+    </div>
   );
+  const r = await renderComponent(<MessageTimeline items={[phase()]} genieLoading={{ render }} />);
   expect(r.container.textContent).toContain("Custom preparation");
   expect(r.container.querySelector("canvas")).toBeNull();
+  expect(r.container.querySelector("[data-phase]")?.getAttribute("data-phase")).toBe("preparing");
+  await r.rerender(
+    <MessageTimeline items={[phase({ phase: "provider_first_byte" })]} genieLoading={{ render }} />,
+  );
+  expect(r.container.querySelector("[data-phase]")?.getAttribute("data-phase")).toBe("waiting");
   await r.unmount();
 });
 

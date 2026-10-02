@@ -22,8 +22,8 @@ export function promptCopy(
     return {
       label: "Describe your organization",
       placeholder:
-        "For example: OpenGeni builds infrastructure for teams running dependable autonomous agents. We exist to make capable agents safe and practical to operate.",
-      button: "Create with OpenGeni",
+        "For example: Opengeni builds infrastructure for teams running dependable autonomous agents. We exist to make capable agents safe and practical to operate.",
+      button: "Create with Opengeni",
       openingMessage: (request) =>
         `Help me create or update our organization identity.\n\nWho we are and why we exist:\n${request}`,
       instructions:
@@ -32,14 +32,14 @@ export function promptCopy(
   }
   if (kind === "workspace_instructions") {
     return {
-      label: "Tell OpenGeni how agents should work",
+      label: "Tell Opengeni how agents should work",
       placeholder:
         "For example: Keep updates concise, explain important decisions, and surface blockers early.",
-      button: "Create with OpenGeni",
+      button: "Create with Opengeni",
       openingMessage: (request) =>
         `Help me create or update the instructions for agents working in this workspace.\n\nWhat I want:\n${request}`,
       instructions:
-        "Help the user turn a natural-language request into the shortest useful global workspace instruction: one imperative rule, normally 1–3 sentences and no more than 600 characters. Include only behavior that should apply to nearly every agent task. Remove rationale, examples, repeated defaults, and procedural detail; split unrelated rules and route conditional procedures or reusable how-to guidance to focused Skills. Route facts, decisions, incidents, bug fixes, and outcomes to retrievable Knowledge. Ask only essential follow-up questions. Before every change, read the current instruction and activation version with instruction_policy_get. Preserve every unrelated existing command exactly: use instruction_policy_save with editMode=append for a new rule, or edit with one localized exact oldText match for an update or removal. Agents cannot replace the complete instruction; direct a whole-policy rewrite to the manual editor. Use the exact baseline returned by the read. Agent learning settings govern publication: Automatic activates it, Review first saves a pending revision without interrupting the chat, and Off prevents agent changes. Report the actual receipt and direct pending changes to Knowledge > Review. Do not ask a second approval question. Do not duplicate the content in Knowledge or Skills. If the instruction tools are unavailable, say so briefly and leave the final proposed text ready for the manual editor.",
+        "Help the user turn a natural-language request into the shortest useful global workspace instruction: one imperative rule, normally 1–3 sentences. Use the same size limit as the manual editor. Include only behavior that should apply to nearly every agent task. Remove rationale, examples, repeated defaults, and procedural detail; split unrelated rules and route conditional procedures or reusable how-to guidance to focused Skills. Route facts, decisions, incidents, bug fixes, and outcomes to retrievable Knowledge. Ask only essential follow-up questions. Before every change, read the current instruction and activation version with instruction_policy_get. Preserve every unrelated existing command exactly: use instruction_policy_save with editMode=append for a new rule, or edit with one localized exact oldText match for an update or removal. Agents cannot replace the complete instruction; direct a whole-policy rewrite to the manual editor. Use the exact baseline returned by the read. Agent learning settings govern publication: Automatic activates it, Review first saves a pending revision without interrupting the chat, and Off prevents agent changes. Report the actual receipt and direct pending changes to Knowledge > Review. Do not ask a second approval question. Do not duplicate the content in Knowledge or Skills. If the instruction tools are unavailable, say so briefly and leave the final proposed text ready for the manual editor.",
     };
   }
   if (personalWorkspace) {
@@ -47,9 +47,9 @@ export function promptCopy(
       label: "Describe a personal skill",
       placeholder:
         "For example: When preparing a release update, lead with the outcome, then list decisions, blockers, and the next action.",
-      button: "Create with OpenGeni",
+      button: "Create with Opengeni",
       openingMessage: (request) =>
-        `Help me create or update a personal Skill for OpenGeni agents.\n\nWhat I want:\n${request}`,
+        `Help me create or update a personal Skill for Opengeni agents.\n\nWhat I want:\n${request}`,
       instructions:
         "Help the user draft one personal Skill: a conditional procedure or how-to that should follow this user across workspaces in the organization. Do not turn a fact, decision, incident, bug fix, or outcome into a Skill; those belong in retrievable Knowledge. Do not turn a universal always-on rule into a Skill; that belongs in a concise workspace instruction. Propose a clear name, a stable key, a one-sentence always-visible summary, and focused full instructions. Use skill_read and skill_save in this personal workspace to save the Skill for the initiating user. Its name and description belong in SKILL.md frontmatter. Follow the effective Skills setting: Automatic publishes, Review first retains a pending revision in Knowledge > Review while the chat continues, and Off prevents agent authoring. Report the actual saved or pending receipt without asking another approval question.",
     };
@@ -58,9 +58,9 @@ export function promptCopy(
     label: "Describe a reusable skill",
     placeholder:
       "For example: When preparing a release update, lead with the outcome, then list decisions, blockers, and the next action.",
-    button: "Create with OpenGeni",
+    button: "Create with Opengeni",
     openingMessage: (request) =>
-      `Help me turn this into a reusable Skill for OpenGeni agents.\n\nWhat I want:\n${request}`,
+      `Help me turn this into a reusable Skill for Opengeni agents.\n\nWhat I want:\n${request}`,
     instructions:
       "Help the user create one focused reusable Skill for this workspace: a conditional procedure or how-to agents fetch when relevant. A Skill is a folder containing SKILL.md and optional supporting text files. Give it a clear name, stable key, one-sentence always-visible summary, and concise full instructions with one trigger and outcome. Include only necessary prerequisites, executable steps, verification, and important failure handling; omit background, repetition, generic advice, and decorative examples, and split unrelated workflows into separate Skills. Facts, decisions, incidents, bug fixes, and outcomes belong in retrievable Knowledge; universal always-on rules belong in the shortest possible workspace instruction. Use skill_read for existing content and discover the lazy skill_save tool to create or update files without a sandbox. Read opengeni-skills when it is listed for the detailed workflow. Agent learning settings govern the write: Automatic publishes a valid authorized change, Review first leaves it pending in Knowledge > Review while the chat continues, and Off prevents agent authoring. Report the actual receipt; do not call remember, remember_confirm, or a confirmation-question tool for Skill writes, and do not treat a user request as a settings override. A private chat or personal workspace saves personal Skills for its initiating user; a shared chat saves workspace Skills. Organization Skill administration remains in its authorized manual editor. Do not duplicate the content in Knowledge or workspace instructions.",
   };
@@ -234,7 +234,7 @@ export function AgentKnowledgePrompt({
         <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-fg-subtle">
           <span>
             Could not resolve an allowed workspace model: {modelCatalog.error}. Retry before
-            creating with OpenGeni.
+            creating with Opengeni.
           </span>
           <button
             type="button"
@@ -248,7 +248,7 @@ export function AgentKnowledgePrompt({
       <div>
         <button
           type="submit"
-          className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
+          className="rounded-md border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
           disabled={!canSubmit}
         >
           {starting ? "Starting…" : copy.button}

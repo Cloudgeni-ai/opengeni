@@ -3,7 +3,7 @@
 A live agent attempt may read, message, and control other sessions in the same
 workspace when the caller's outbound `agentAccess` scope allows it. Parent/child
 lineage is never an access deny. First-party session tools (`sessions_list`,
-`session_get`, `session_events`, `session_wait`, `session_steer`,
+`session_get`, `session_events`, `session_wait`, `session_steer`, `session_set_model`,
 pause/resume/cancel) are the capability surface; the access scope below is the
 lock, and unprompted hijack inside an allowed scope is an instruction problem. `session_wait` authorizes
 every watched target exactly as `session_events` does (`session.events.read`)
@@ -16,6 +16,13 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+Browser and desktop inventories apply `session.read` authorization to the chat
+that created each resource, for humans, services, API keys and agent attempts.
+This matches direct resource reads. A later observing/using association does not
+grant visibility through a different chat; missing or ambiguous creation
+associations are omitted. Authorization outages fail the list request rather
+than returning an apparently complete partial inventory.
+
 `session_get({})` resolves only the session in the authenticated exact agent
 attempt claims, then performs the same live-attempt and target authorization as
 an explicit ID. A child reads itself, never its parent or root. Sessionless,
@@ -26,6 +33,13 @@ bounded; self reads inspect state, not conversation history. REST/SDK session
 reads still require explicit IDs. Attempt catalogs and their generated Codemode
 declarations derive the optional field from the first-party MCP schema; an
 already-frozen catalog does not change in place.
+
+`session_set_model` requires `sessions:control` and `session.model.write` target
+authorization, then rechecks the exact calling attempt under the write lock.
+It changes only future model/reasoning defaults, with a durable idempotent receipt.
+It never resumes or wakes the target, changes accepted work, or widens the
+Codemode SDK proxy. Full `session_get` includes canonical reasoning and latency
+alongside the effective model; metadata is not their authority.
 
 ## Agent access scope
 
@@ -161,7 +175,9 @@ rather than hijacking an unrelated existing session. The prompt does not widen
 authority; the relationship policy above remains the enforcement boundary. A
 leaf turn without those tools continues the work itself.
 
-Canonical implementation: `packages/runtime/src/operational-instructions.ts`,
+Canonical implementation: `packages/runtime/src/operational-instructions.ts`
+(legacy sessions), `packages/runtime/src/agent-instructions/modules/subagents.ts`
+(sessions with an agent configuration and the subagents capability),
 `packages/core/src/session-authorization.ts`,
 `packages/db/src/session-control.ts`, `packages/db/src/index.ts`,
 `apps/api/src/routes/sessions.ts`, and `apps/api/src/mcp/server.ts`.

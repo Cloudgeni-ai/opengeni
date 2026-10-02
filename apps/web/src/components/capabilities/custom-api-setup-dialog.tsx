@@ -280,7 +280,7 @@ function AuthenticationStep({
 
       <div className="grid gap-4 rounded-xl border border-border p-4">
         <fieldset className="grid gap-2">
-          <legend className="text-xs font-medium text-fg-muted">Connection ownership</legend>
+          <legend className="text-xs font-medium text-fg">Connection ownership</legend>
           <div className="grid gap-2 sm:grid-cols-2">
             <Choice
               selected={state.draft.ownership === "personal"}
@@ -298,7 +298,7 @@ function AuthenticationStep({
         </fieldset>
 
         <fieldset className="grid gap-2">
-          <legend className="text-xs font-medium text-fg-muted">Credential source</legend>
+          <legend className="text-xs font-medium text-fg">Credential source</legend>
           <Choice
             selected={state.draft.connectionMode === "new"}
             title="Create a new Connection"

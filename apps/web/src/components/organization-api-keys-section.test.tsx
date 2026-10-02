@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -42,6 +42,10 @@ mock.module("@/components/ui/destructive-confirm", () => ({
     ) : null,
 }));
 
+// Radix detects DOM availability at import time, before the first render.
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 const { OrganizationApiKeysSection } = await import("./organization-api-keys-section");
 
 const timestamp = "2026-08-20T10:00:00.000Z";
@@ -78,13 +82,6 @@ function button(root: ParentNode, label: string): HTMLButtonElement {
   return match;
 }
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
-
 beforeEach(() => {
   toastSuccess.mockClear();
   toastError.mockClear();
@@ -96,6 +93,50 @@ afterAll(() => {
 });
 
 describe("organization API keys section", () => {
+  test.each([
+    ["Developer setup", { access: "developer_setup" }, "expires after 24 hours"],
+    ["Read only", { access: "read" }, "Can't create or change anything"],
+  ] as const)(
+    "submits the exact %s choice on the existing create page",
+    async (label, choice, hint) => {
+      const createApiKey = mock(async () => ({ apiKey: key(), token: "og_setup_shown_once" }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(
+          <OrganizationApiKeysSection
+            organizationId="22222222-2222-4222-8222-222222222222"
+            canManage
+            view="new-key"
+            onViewChange={() => undefined}
+            listApiKeys={async () => []}
+            createApiKey={createApiKey}
+            deleteApiKey={async () => key()}
+          />,
+        );
+      });
+      const trigger = container.querySelector<HTMLButtonElement>('button[role="combobox"]');
+      if (!trigger) throw new Error("Missing access picker");
+      await act(async () => trigger.click());
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (candidate) => candidate.textContent?.startsWith(label),
+      );
+      if (!option) throw new Error(`Missing access choice: ${label}`);
+      expect(document.body.textContent).not.toContain("All permissions");
+      await act(async () => option.click());
+      expect(container.textContent).toContain(hint);
+      if (label === "Developer setup") {
+        expect(container.textContent).toContain("broad workspace administration");
+      }
+      await act(async () => container.querySelector("form")!.requestSubmit());
+      await flush();
+      expect(createApiKey).toHaveBeenCalledWith({ name: "Organization automation", ...choice });
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  );
+
   test("explains the boundary and shows the one-time secret on the create page", async () => {
     const created = key({
       id: "33333333-3333-4333-8333-333333333333",

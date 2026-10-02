@@ -2,7 +2,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { JevCircuitBreaker, JevUnavailableError, type CodeSearchWorkspace } from "@opengeni/jev";
+import { CODE_SEARCH_CREDENTIAL_DIRS as CHANNEL_CREDENTIAL_DIRS } from "@opengeni/contracts/code-search";
+import {
+  CODE_SEARCH_CREDENTIAL_DIRS,
+  JevCircuitBreaker,
+  JevUnavailableError,
+  type CodeSearchWorkspace,
+} from "@opengeni/jev";
 import { createObservability } from "@opengeni/observability";
 import {
   ChannelAUnavailableError,
@@ -564,5 +570,12 @@ describe("a half-open trial ends on every path", () => {
     late.open();
     expect((await trial).isError).toBe(false);
     expect(breaker.status()).toMatchObject({ state: "half_open", trialInFlight: false });
+  });
+});
+
+describe("credential directories", () => {
+  test("the engine and the sandbox channel exclude the same directories", () => {
+    // @opengeni/jev is published standalone, so it keeps its own copy of the list
+    expect(CODE_SEARCH_CREDENTIAL_DIRS).toEqual(CHANNEL_CREDENTIAL_DIRS);
   });
 });

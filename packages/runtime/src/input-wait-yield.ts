@@ -127,6 +127,13 @@ export class InputWaitYield {
     await this.drain(this.scope, signal);
   }
 
+  /** A settled stream may need one final-reply handoff before attempt closure.
+   * Drain already-admitted receipts without reopening that stream's admission.
+   */
+  async drainForHandoff(signal = this.scope.signal): Promise<void> {
+    await this.drain(this.scope, signal);
+  }
+
   private endStream(scope: StreamScope): void {
     scope.phase = "settled";
     scope.ended = true;

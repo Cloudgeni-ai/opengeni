@@ -2,6 +2,22 @@
 // subpath keeps them out of browser bundles; only server code decides.
 
 /**
+ * Directories holding platform credential material that `code_search` never
+ * searches or reads, as path segments matched at any depth: OpenGeni's
+ * sandbox state (`.opengeni/`: Codemode bearer tokens, Git credential files
+ * and bindings), the Azure CLI login cache (`.azure/`, from the sandbox's
+ * service-principal login with HOME=/workspace) and a Connected Machine
+ * agent's enrollment credentials (`.config/opengeni/`). The sandbox channel
+ * enforces this list; `@opengeni/jev` keeps the same list for its engine, and
+ * a worker test pins that the two agree.
+ */
+export const CODE_SEARCH_CREDENTIAL_DIRS: readonly (readonly string[])[] = [
+  [".opengeni"],
+  [".azure"],
+  [".config", "opengeni"],
+];
+
+/**
  * The deployment half of the `code_search` decision. `split` gives the tool to
  * a fixed half of sessions (see `codeSearchSessionInExperiment`) so staging can
  * compare sessions with and without it.

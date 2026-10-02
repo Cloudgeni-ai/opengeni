@@ -10,7 +10,7 @@ import type {
 } from "@/types";
 
 export const ANONYMOUS_REPOSITORY_WARNING =
-  "OpenGeni will clone this repository anonymously. Make sure it is publicly readable.";
+  "Opengeni will clone this repository anonymously. Make sure it is publicly readable.";
 
 const CANONICAL_GITHUB_URL_ERROR =
   "Use a canonical GitHub URL such as https://github.com/owner/repository.";

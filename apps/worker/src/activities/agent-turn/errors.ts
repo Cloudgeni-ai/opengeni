@@ -3,6 +3,8 @@ import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   nestedPostgresSqlState,
+  databaseFailureCode,
+  isRetryablePersistenceSqlState,
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
@@ -18,8 +20,11 @@ import {
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
+  ResponsesStreamingTerminalError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
@@ -84,6 +89,12 @@ import {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+/**
+ * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
+ * answer a per-minute token limit with a `retry-after` of about a second, which
+ * alone would spend every automatic recovery before the window resets.
+ */
+export const PROVIDER_RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const;
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 
 export class PostCompactionContinuationEmptyError extends Error {
@@ -127,7 +138,15 @@ export function providerRecoveryResult(input: {
       : null;
   const continueDelayMs =
     input.failureCode === "provider_rate_limited"
-      ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
+      ? Math.max(
+          providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+          PROVIDER_RATE_LIMIT_BACKOFF_MS[
+            Math.min(
+              Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+              PROVIDER_RATE_LIMIT_BACKOFF_MS.length - 1,
+            )
+          ]!,
+        )
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "sandbox_command_start_unavailable" ||
@@ -336,6 +355,13 @@ function retryableDatabaseFailureCode(
   error: unknown,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  if (!persistenceFailure) {
+    const driver = findPostgresDriverError(error);
+    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
+    if (isRetryablePersistenceSqlState(driverSqlState)) {
+      return databaseFailureCode(driverSqlState);
+    }
+  }
   const sqlState = persistenceFailure?.details.sqlState ?? null;
   if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
     return "db_failure";
@@ -370,6 +396,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  sandboxSetupOutcomeUnknown?: true;
+  sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
@@ -377,6 +405,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (
+    (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
+    ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
+      input.providerRecovery)
+  ) {
+    return null;
+  }
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
@@ -391,6 +426,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+    ...(input.sandboxSetupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
@@ -715,6 +752,7 @@ export function shouldRecoverCompactionProviderFailure(error: unknown): boolean 
 export function classifyContextWindowOverflowError(
   error: unknown,
 ): { message: string; code?: string; detail?: string } | null {
+  if (isProviderSafetyRefusal(error)) return null;
   const fields = collectErrorStrings(error);
   const matched = fields.find(
     (value) =>
@@ -781,6 +819,9 @@ export function collectErrorStrings(value: unknown, seen = new WeakSet<object>()
   }
   seen.add(value);
   const out: string[] = [];
+  // This diagnostic is already provider-owned and byte-bounded. Do not widen
+  // generic detail traversal to arbitrary application payloads.
+  if (value instanceof ResponsesStreamingTerminalError) out.push(value.detail);
   const record = value as Record<string, unknown>;
   for (const key of ["message", "code", "type", "name", "param"]) {
     const field = record[key];
@@ -843,6 +884,9 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
 }
 
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
+  if (error instanceof ResponsesStreamingTerminalError) {
+    return error.category === "safety" ? error.detail : undefined;
+  }
   return collectErrorStrings(error).find(
     (value) =>
       /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
@@ -856,6 +900,9 @@ function isProviderSafetyRefusal(error: unknown): boolean {
 }
 
 export function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof ResponsesStreamingTerminalError) {
+    return error.category === "unavailable";
+  }
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
   const status =
@@ -984,6 +1031,16 @@ function findPostgresDriverError(error: unknown): Record<string, unknown> | null
   return null;
 }
 
+function isRawDatabaseQueryError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "query" in error &&
+    typeof error.query === "string" &&
+    "params" in error &&
+    Array.isArray(error.params)
+  );
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -1034,7 +1091,11 @@ function baseAgentRunFailurePayload(
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
-    const underlying = isSessionEventPersistenceError(error.cause)
+    const databaseFailure =
+      isSessionEventPersistenceError(error.cause) ||
+      findPostgresDriverError(error.cause) !== null ||
+      isRawDatabaseQueryError(error.cause);
+    const underlying = databaseFailure
       ? agentRunFailurePayload(error.cause, options)
       : {
           error: error.cause instanceof Error ? error.cause.message : String(error.cause),
@@ -1042,6 +1103,21 @@ function baseAgentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  // Raw ORM wrappers can contain the full SQL and its parameters. Classify a
+  // real driver before provider message heuristics; the original cause stays
+  // available to internal diagnostics. This payload grants no replay authority.
+  const postgresDriverError = findPostgresDriverError(error);
+  const rawOrmFailure = isRawDatabaseQueryError(error);
+  if ((postgresDriverError || rawOrmFailure) && !isSessionEventPersistenceError(error)) {
+    const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
+    const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
+    return {
+      error: "OpenGeni encountered a database error.",
+      code: databaseFailureCode(sqlState),
+      sqlState,
+      ...(Object.keys(database).length > 0 ? { database } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
@@ -1052,6 +1128,41 @@ function baseAgentRunFailurePayload(
       code: "provider_safety_refusal",
       retryable: false,
       detail: safetyRefusalDiagnostic,
+    };
+  }
+  if (error instanceof ResponsesStreamingTerminalError) {
+    const quota =
+      error.category === "unknown" || error.category === "rate_limit"
+        ? classifyProviderQuotaExhaustionError({
+            code: error.code,
+            error: { code: error.code, type: error.type, message: error.detail },
+            retryAfterSeconds: error.retryAfterSeconds,
+          })
+        : null;
+    if (quota) {
+      return {
+        error: providerQuotaExhaustedMessage(quota.scope),
+        code: PROVIDER_QUOTA_EXHAUSTED_CODE,
+        retryable: false,
+        quotaScope: quota.scope,
+        detail: error.detail,
+      };
+    }
+    return {
+      error:
+        error.category === "rate_limit"
+          ? "Model provider rate limit hit. Try again in a minute or lower the reasoning effort."
+          : error.category === "unavailable"
+            ? "The model provider is temporarily unavailable. The same turn will retry after a short delay."
+            : "The model provider rejected the response. Automatic retries stopped.",
+      code:
+        error.category === "rate_limit"
+          ? "provider_rate_limited"
+          : error.category === "unavailable"
+            ? "provider_unavailable"
+            : "provider_request_rejected",
+      retryable: error.category === "rate_limit" || error.category === "unavailable",
+      detail: error.detail,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -1090,6 +1201,22 @@ function baseAgentRunFailurePayload(
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
       retryable: true,
+    };
+  }
+  if (isProviderCommandObservationUnavailableError(error)) {
+    return {
+      error:
+        "A managed sandbox command cannot be observed. Its exact invocation and writer remain retained; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_observation_unavailable",
+      retryable: false,
+    };
+  }
+  if (isModalCommandStartOutcomeUnknownError(error)) {
+    return {
+      error:
+        "A managed sandbox command has an unknown outcome. Its original invocation remains fenced; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_start_outcome_unknown",
+      retryable: false,
     };
   }
   if (
@@ -1292,18 +1419,6 @@ function baseAgentRunFailurePayload(
       };
     }
     return { error: message, code: "provider_unavailable", retryable: true };
-  }
-  const postgresDriverError = findPostgresDriverError(error);
-  if (postgresDriverError) {
-    const database = safeDatabaseErrorFacts(postgresDriverError);
-    const sqlState = nestedPostgresSqlState(postgresDriverError);
-    if (sqlState !== null || Object.keys(database).length > 0) {
-      return {
-        error: message,
-        sqlState,
-        ...(Object.keys(database).length > 0 ? { database } : {}),
-      };
-    }
   }
   return { error: message };
 }

@@ -34,6 +34,40 @@ operation id cannot be approved again after execution may have started.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
+For lossless scheduled-task model edits, use
+`scheduled_tasks_update({ id, agentConfigPatch: { model, reasoningEffort } })`.
+The read tool's bounded projection is not full replacement input. Existing
+sessions keep their own model; see [scheduled-task update semantics](scheduled-task-access.md).
+
+For an **existing session**, use
+`session_set_model({ sessionId, model, reasoningEffort, idempotencyKey })`.
+Both model and reasoning are explicit; latency and all unrelated settings stay
+unchanged. The tool uses `sessions:control`, the caller's exact tool selection,
+live-attempt fencing, private-session ownership and the host's
+`session.model.write` decision. It adds no permission or approval layer.
+The response identifies the durable receipt and effective defaults; reuse the
+same key and input after an uncertain response. `session_get({ sessionId,
+detail: "full" })` returns canonical `model`, `reasoningEffort` and `latencyMode`.
+An agent retry remains bound to the same calling session and target across
+attempt replacement, while the current attempt must independently remain
+authorized. Replaying an old receipt does not overwrite a newer setting.
+
+This is a future-default change, not a prompt or a resume. Already accepted work
+keeps its frozen policy. Older queued turns cannot undo the choice when they
+start, and scheduled per-occurrence model overrides do not replace these explicit
+session defaults. A subsequent human/API turn accepted after the setting can
+establish a new inherited choice when it starts. Ordering uses its original
+`turn.queued` admission, not a mutable approval/recovery trigger; an older turn
+never becomes a fresh model selection. New schedules targeting the
+session capture the effective defaults at occurrence admission; editing the
+session does not edit the task's own configuration. No Codemode SDK proxy path
+is widened, and already-running attempts do not gain a newly released tool.
+
+Release the API, core/database/contracts and workers as one matched source cohort
+before using this operation. There is no schema migration, but an older worker
+does not honor the new defaults boundary. A source merge or SDK update alone
+does not establish deployment or behavioral verification.
+
 ### Human integration setup in chat
 
 The shared operational guidance tells the agent to use available integration

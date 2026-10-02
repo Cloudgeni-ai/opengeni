@@ -357,7 +357,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     ).rejects.toThrow("durable adoption failed");
   });
 
-  test.skipIf(Bun.which("setsid") === null)(
+  test.skipIf(Bun.which("setsid") === null && Bun.which("python3") === null)(
     "promotes a provider shell into an isolated process group before user code",
     async () => {
       const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
@@ -378,6 +378,48 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       expect(exitCode, stderr).toBe(0);
       expect(stdout).toBe("isolated");
       expect(existsSync(markerPath)).toBe(false);
+    },
+  );
+
+  test.skipIf(Bun.which("python3") === null)(
+    "uses Python session isolation without setsid and refuses execution without either helper",
+    async () => {
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-shell-session-"));
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableShellCommand(
+        'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
+        markerPath,
+      );
+      try {
+        for (const executable of ["mkdir", "rm", "ps", "tr", "python3"]) {
+          symlinkSync(Bun.which(executable)!, join(binDir, executable));
+        }
+        const run = async () => {
+          const child = Bun.spawn(["/bin/sh", "-c", command], {
+            env: { ...process.env, PATH: binDir },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+            child.exited,
+          ]);
+          return { stdout, stderr, exitCode };
+        };
+        const isolated = await run();
+        expect(isolated.exitCode, isolated.stderr).toBe(0);
+        expect(isolated.stdout).toBe("isolated");
+        expect(existsSync(markerPath)).toBe(false);
+        rmSync(join(binDir, "python3"));
+        const refused = await run();
+        expect(refused.exitCode).toBe(125);
+        expect(refused.stdout).toBe("");
+        expect(existsSync(markerPath)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
     },
   );
 
@@ -728,9 +770,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       [exec, functionTool("write_stdin", async () => running(34))],
       session,
     ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
-    await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: command, yield_time_ms: 0 })),
-    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    const result = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: command, yield_time_ms: 0 }),
+    );
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("session_id 34");
     await wrappedWrite!.invoke(
       runContext,
       JSON.stringify({ session_id: 34, chars: "", yield_time_ms: 0 }),
@@ -781,9 +826,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
-    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(
+      await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
+    ).toContain("outcome unknown");
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
 
@@ -852,14 +897,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    const error = await wrappedExec!
+    const result = await wrappedExec!
       .invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }))
       .catch((caught) => caught);
-    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
-    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
-      id: expect.any(String),
-      providerSessionId: 34,
-    });
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("session_id 34");
 
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
@@ -1982,6 +2024,7 @@ describe("retained-process stdin faults stay model-visible", () => {
     );
     expect(typeof result).toBe("string");
     expect(result).toContain("RoutingMutationOutcomeUnknownError");
-    expect(result).toContain("outcome is unknown");
+    expect(result).toContain("outcome unknown");
+    expect(result).not.toContain("Please try again");
   });
 });

@@ -117,6 +117,9 @@ export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
 export const prepareSandboxLeaseSweep = defaultControlActivities.prepareSandboxLeaseSweep;
+export const listDueBrowserCheckpoints = defaultControlActivities.listDueBrowserCheckpoints;
+export const checkpointBrowserBeforeDeadline =
+  defaultControlActivities.checkpointBrowserBeforeDeadline;
 export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;

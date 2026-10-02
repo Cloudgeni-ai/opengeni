@@ -2,6 +2,7 @@ import {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  DEVELOPER_SETUP_API_KEY_PRESET,
   Permission,
   type AccessContext,
   type ApiKey,
@@ -23,12 +24,15 @@ import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  organizationApiKeyAccess,
   requireAccessContext,
-  requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireApiKeyManagementContext,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
+
+export { organizationApiKeyAccess } from "@opengeni/core";
 
 /** Permissions minted onto a `full` organization API key. */
 export const organizationApiKeyPermissions: Permission[] = [
@@ -55,18 +59,23 @@ export const organizationReadApiKeyPermissions: Permission[] = [
 export function organizationApiKeyPermissionsForAccess(
   access: OrganizationApiKeyAccess,
 ): Permission[] {
-  return access === "read"
-    ? [...organizationReadApiKeyPermissions]
-    : [...organizationApiKeyPermissions];
+  return access === "developer_setup"
+    ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+    : access === "read"
+      ? [...organizationReadApiKeyPermissions]
+      : [...organizationApiKeyPermissions];
 }
 
-/**
- * The access tier is derived from stored permissions rather than a column: a
- * key that carries the `workspace:admin` wildcard administers the
- * organization, any other organization key is read-only.
- */
-export function organizationApiKeyAccess(permissions: Permission[]): OrganizationApiKeyAccess {
-  return permissions.includes("workspace:admin") ? "full" : "read";
+/** Existing callers retain their expiry; setup keys default to one day. */
+export function organizationApiKeyExpiryDate(
+  request: Pick<CreateOrganizationApiKeyRequest, "preset" | "expiresAt"> &
+    Partial<Pick<CreateOrganizationApiKeyRequest, "access">>,
+  now: Date = new Date(),
+): Date | null {
+  if (request.expiresAt !== undefined) return new Date(request.expiresAt);
+  return request.preset === "developer_setup" || request.access === "developer_setup"
+    ? new Date(now.getTime() + DEVELOPER_SETUP_API_KEY_PRESET.defaultExpiryHours * 60 * 60 * 1000)
+    : null;
 }
 
 function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {
@@ -76,7 +85,7 @@ function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {
 export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/api-keys", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json({ apiKeys: await listApiKeys(deps.db, workspaceId) });
   });
 
@@ -85,12 +94,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     zValidator("json", CreateApiKeyRequest.omit({ workspaceId: true })),
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "api_keys:manage",
-      );
+      const authorization = await requireWorkspaceApiKeyControl(c, deps, workspaceId);
       const grant = authorization.grant;
       const body = c.req.valid("json");
       const permissions: Permission[] =
@@ -120,7 +124,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/api-keys/:apiKeyId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
 
@@ -151,8 +155,11 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
           description: body.description ?? null,
           prefix: token.slice(0, 14),
           keyHash: await sha256Hex(token),
-          permissions: organizationApiKeyPermissionsForAccess(body.access),
-          expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+          permissions:
+            body.preset === "developer_setup"
+              ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+              : organizationApiKeyPermissionsForAccess(body.access),
+          expiresAt: organizationApiKeyExpiryDate(body),
           maxActiveKeys: organizationApiKeyLimit(deps),
           rotationSourceApiKeyId: authenticatedApiKeyId(context),
         });
@@ -228,10 +235,11 @@ function ensureDelegablePermissions(
   }
 }
 
-function requireOrganizationApiKeyControlPermission(
+export function requireOrganizationApiKeyControlPermission(
   context: AccessContext,
   organizationId: string,
 ): void {
+  requireApiKeyManagementContext(context);
   requireAccountPermission(context, organizationId, "api_keys:manage");
   if (!context.subjectId.startsWith("api_key:")) return;
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
@@ -242,6 +250,15 @@ function requireOrganizationApiKeyControlPermission(
   ) {
     throw new HTTPException(403, { message: "organization API key authority required" });
   }
+}
+
+async function requireWorkspaceApiKeyControl(
+  c: Parameters<typeof requireAccessContext>[0],
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
+  requireApiKeyManagementContext(await requireAccessContext(c, deps));
+  return await requireAccessGrantAuthorization(c, deps, workspaceId, "api_keys:manage");
 }
 
 function authenticatedApiKeyId(context: AccessContext): string | null {

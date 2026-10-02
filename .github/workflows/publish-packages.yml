@@ -94,12 +94,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Verify publishable closure
+        env:
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
         run: |
           bun run typecheck
           bun run build:packages
           bun scripts/publish-closure-guard.ts
           bun run test:publish-consumer
           bun run test:runtime-embedding-consumer
+          bun run test:effective-dependency-exports
 
       - name: Plan exact package publication
         id: package-plan
@@ -133,6 +136,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
 
       - name: Reconcile exact registry package identity
         env:
@@ -141,6 +145,14 @@ jobs:
           OPENGENI_RELEASE_PACKAGE_PHASE: verify
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
         run: bun scripts/verify-release-packages.ts
+
+      # The release-train proof above deliberately supplies sibling tarballs.
+      # Only after publication can registry-only consumers test actual declared
+      # dependency ranges without blocking a legitimate unpublished train.
+      - name: Verify registry dependency exports from packed and published packages
+        run: |
+          bun run test:registry-dependency-exports --candidate
+          bun run test:registry-dependency-exports --published-source
 
       - name: Retain verified package identity
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

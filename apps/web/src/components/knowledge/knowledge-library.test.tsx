@@ -208,11 +208,14 @@ test("By collection shows only top-level collections, sub-collections first as r
     );
     expect(titles).toEqual(["Payments", "Rolling back a bad deploy"]);
     const rowsInRunbooks = [...runbooks.querySelectorAll("[data-slot=list-row]")];
-    // Only the collection has a tile; the decision says its kind in words.
+    // Every row has a tile for its kind of object (a collection, an entry);
+    // the decision says its type in words and ends with its date.
+    const tile = (row: Element) => row.querySelector("[data-slot=logo-tile]")?.innerHTML;
     expect(rowsInRunbooks[0]!.querySelector("[data-slot=logo-tile]")).not.toBeNull();
-    expect(rowsInRunbooks[1]!.querySelector("[data-slot=logo-tile]")).toBeNull();
+    expect(rowsInRunbooks[1]!.querySelector("[data-slot=logo-tile]")).not.toBeNull();
+    expect(tile(rowsInRunbooks[1]!)).not.toBe(tile(rowsInRunbooks[0]!));
     expect(rowsInRunbooks[1]!.textContent).toContain("Decision");
-    expect(rowsInRunbooks[1]!.textContent).toContain("updated");
+    expect(rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")).not.toBeNull();
     expect(
       listKnowledgeEntries.mock.calls.some(
         ([, request]) => request.kind === "group" && request.rootOnly === true,
