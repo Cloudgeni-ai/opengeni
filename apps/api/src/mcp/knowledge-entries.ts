@@ -1,5 +1,6 @@
 import {
   AgentInstructionSaveRequest,
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
   KnowledgeEntryListRequest,
   KnowledgeSavePreparationRequest,
@@ -92,7 +93,7 @@ export function registerKnowledgeEntryTools(
               : state === "42501"
                 ? "The instruction change is unavailable in this task's scope or Agent learning policy. Off disables authoring, not the task. Do not ask for approval to continue."
                 : state === "22023" || state === "23514"
-                  ? "Invalid instruction change. Read the current instruction, use append for a new rule, or edit with one localized exact oldText match to update or remove text. Agents cannot replace the complete instruction. The resulting instruction must stay within 600 characters."
+                  ? `Invalid instruction change. Read the current instruction, use append for a new rule, or edit with one localized exact oldText match to update or remove text. Agents cannot replace the complete instruction. Each supplied text and the resulting instruction must stay within ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor.`
                   : "Workspace instructions are temporarily unavailable. Retry the same operation ID only if the prior change may have succeeded."
           : state === "40001"
             ? "This entry changed. Read its current revision and retry your correction with the current version."
@@ -304,8 +305,7 @@ export function registerKnowledgeEntryTools(
   server.registerTool(
     "instruction_policy_save",
     {
-      description:
-        "Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to 600 characters. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. Preserve personal scope rather than creating a workspace-wide rule. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.",
+      description: `Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. Preserve personal scope rather than creating a workspace-wide rule. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.`,
       inputSchema: AgentInstructionSaveRequest.shape,
     },
     (input) => run((context) => saveAgentInstruction(deps.db, context, input), "instruction"),

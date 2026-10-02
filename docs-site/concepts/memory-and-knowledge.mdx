@@ -22,6 +22,11 @@ relevant. Personal preferences must keep their intended scope rather than
 silently becoming rules for everyone in a shared workspace. If the appropriate
 destination is unavailable, the agent should explain that limitation.
 
+Agents and the manual editor use the same instruction size limit of 262,144
+characters. Agents append new rules or make exact localized edits, preserving
+unrelated instructions rather than rewriting the whole policy. Keep new rules
+concise: active instructions are included in applicable prompts.
+
 Each destination still follows its Agent learning setting. The agent should tell
 you whether the instruction or Skill is active, awaiting review, or not saved.
 Saving Knowledge does not guarantee that a behavior will apply in future chats.
