@@ -609,6 +609,8 @@ Computer frames fit the dock while preserving their proportions. Resizing or
 reopening the dock refits the visible image without changing capture resolution
 or the coordinates sent to the computer.
 
+Desktop IME candidates and their selection keys stay local; only committed text is sent.
+
 A managed browser's attachment authority error keeps a same-browser **Reconnect**
 action available. It obtains a fresh server-authorized attachment without creating
 a replacement browser or replaying input. The fresh Connected Chrome instruction
@@ -653,6 +655,12 @@ browser. A headed managed browser can receive `createLinkedComputer`; the
 returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
+
+`ComputerViewer` disables input when its control service is unavailable, even if
+frames keep arriving. Reconnect refreshes the selected desktop's controls and
+frames. App accessibility inspection failures leave independent live input
+available; `useComputerSession().controlError` reports service loss separately
+from the hook's general `error`.
 
 If the chat's latest browser was lost or failed, the viewer names it and explains
 why it is unavailable instead of showing the ordinary empty state. It offers the

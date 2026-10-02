@@ -46,7 +46,14 @@ import {
   type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ChevronDownIcon, FolderIcon, LockIcon, PlusIcon, ServerCogIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CreditCardIcon,
+  FolderIcon,
+  LockIcon,
+  PlusIcon,
+  ServerCogIcon,
+} from "lucide-react";
 import {
   createElement,
   lazy,
@@ -200,6 +207,11 @@ const EmptyCreditsNotice = lazy(() =>
     default: module.EmptyCreditsNotice,
   })),
 );
+const CreditTopupPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
+  })),
+);
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -289,6 +301,7 @@ function SessionsIndexRouteContent({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
@@ -1589,6 +1602,32 @@ function SessionsIndexRouteContent({
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
           </h1>
+          {context.clientConfig.billingMode === "stripe" &&
+          workspace?.accountId &&
+          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => setCreditTopupOpen(true)}
+              >
+                <CreditCardIcon className="size-4" />
+                Add credits
+              </Button>
+              <Suspense fallback={null}>
+                <CreditTopupPrompt
+                  purpose="topup"
+                  open={creditTopupOpen}
+                  workspaceId={workspaceId}
+                  accountId={workspace.accountId}
+                  canBuyCredits
+                  onOpenChange={setCreditTopupOpen}
+                />
+              </Suspense>
+            </>
+          ) : null}
         </section>
 
         {launchSkillCapabilityId ? (
@@ -2153,7 +2192,7 @@ function SessionFolderPicker({
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           size="sm"
           disabled={disabled}
           aria-label={`Project: ${label}`}

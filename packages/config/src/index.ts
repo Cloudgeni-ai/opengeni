@@ -1,5 +1,6 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
 import {
+  directModelConnectionSpec,
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
@@ -2113,6 +2114,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
   "vercel-gateway-organization",
+  "direct-openai-workspace",
+  "direct-azure-workspace",
   "openrouter-workspace",
   "openrouter-organization",
   "anthropic-organization",
@@ -2465,7 +2468,11 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
         message: "Codex product id must match its upstream model slug",
       });
     }
-  });
+  })
+  .transform((model) => ({
+    ...model,
+    capabilities: reviewedCodexCatalogCapabilities(model.upstreamModelId, model.capabilities),
+  }));
 
 export const ModelCatalogDocument = z
   .object({
@@ -2526,7 +2533,11 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+      if (
+        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
+        provider.id.startsWith("workspace-openai-") ||
+        provider.id.startsWith("workspace-azure-openai-")
+      ) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -4469,6 +4480,53 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   return injected;
 }
 
+/** Customer-owned OpenAI/Azure routes, bound to immutable connection identity. */
+export function withDirectModelProviders(
+  settings: Settings,
+  connections: readonly {
+    id: string;
+    version: number;
+    subjectId: string | null;
+    kind: string;
+    status: string;
+    providerDomain: string;
+    metadata: Record<string, unknown>;
+    apiKey?: string;
+  }[],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) =>
+      !provider.id.startsWith("workspace-openai-") &&
+      !provider.id.startsWith("workspace-azure-openai-"),
+  );
+  for (const connection of connections) {
+    const spec = directModelConnectionSpec(connection);
+    if (!spec) continue;
+    providers.push({
+      kind: spec.provider === "openai" ? "direct-openai-workspace" : "direct-azure-workspace",
+      id: spec.providerId,
+      label: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+      api: "responses",
+      wireProfile: spec.provider === "openai" ? "openai" : "azure-openai",
+      baseUrl: spec.baseUrl,
+      ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+      models: [
+        {
+          id: spec.modelId,
+          upstreamModelId: spec.model,
+          label: spec.model,
+          capabilities: legacyModelCapabilities(settings, {
+            reasoningEffort: false,
+            hostedWebSearch: false,
+          }),
+          toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        },
+      ],
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** Static catalog overlay; it contains no concrete workspace credential. */
 export function withWorkspaceGatewayCatalogProvider(
   settings: Settings,
@@ -4721,9 +4779,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
-    modelId.startsWith("gpt-6-") ||
+    /^gpt-6(?:\.\d+)?-/u.test(modelId) ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId.startsWith("codex/gpt-6-")
+    /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4736,6 +4794,31 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+function isReviewedGptVisionModel(slug: string): boolean {
+  return slug.startsWith("gpt-5.6-") || /^gpt-6(?:\.\d+)?-/u.test(slug);
+}
+
+/** Repair missing reviewed capabilities in live/stored Codex definitions.
+ * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ */
+function reviewedCodexCatalogCapabilities(
+  slug: string,
+  capabilities: ModelCapabilitiesV1,
+): ModelCapabilitiesV1 {
+  if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
+  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
+    (mode) => mode.id === "fast",
+  );
+  return normalizeCapabilities({
+    ...capabilities,
+    inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    latencyModes:
+      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
+        ? [...capabilities.latencyModes, fast]
+        : capabilities.latencyModes,
+  });
 }
 
 function builtinPromptCachingForModel(
@@ -4831,9 +4914,22 @@ function assertLatencyModeRunnable(
 ): void {
   const runnable = runnableLatencyModesForModel(settings, modelId);
   if (!runnable.includes(latencyMode)) {
-    throw new Error(
-      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    throw new UnsupportedLatencyModeError(modelId, latencyMode, runnable);
+  }
+}
+
+export class UnsupportedLatencyModeError extends Error {
+  readonly code = "UNSUPPORTED_LATENCY_MODE";
+
+  constructor(
+    readonly modelId: string,
+    readonly latencyMode: LatencyMode,
+    readonly allowedLatencyModes: readonly LatencyMode[],
+  ) {
+    super(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${allowedLatencyModes.join(", ")})`,
     );
+    this.name = "UnsupportedLatencyModeError";
   }
 }
 
@@ -4846,6 +4942,8 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "xai-subscription":
       return { kind: "connected_subscription", provider: "xai" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
     case "claude-subscription-workspace":
@@ -4875,6 +4973,8 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "xai-subscription":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
     case "claude-subscription-workspace":
@@ -5169,7 +5269,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
-            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
+            vision: isReviewedGptVisionModel(slug),
           }),
           ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
             ? {
@@ -5436,7 +5536,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
+          vision: isReviewedGptVisionModel(id),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
@@ -7710,6 +7810,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
       provider.kind === "vercel-gateway-organization" ||
+      provider.kind === "direct-openai-workspace" ||
+      provider.kind === "direct-azure-workspace" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "anthropic-organization" ||

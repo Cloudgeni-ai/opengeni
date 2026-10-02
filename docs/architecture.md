@@ -8,6 +8,8 @@ Read §2–4 and §6. Subsystems: §13; updates: §14.
 
 ---
 
+Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+
 ## 1. Startup
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
@@ -1353,6 +1355,11 @@ full observations; Code Mode receives local image handles. Human computer contro
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
+
+Managed download tools use the existing explicit workspace-save API; bytes stay controller-private until saved.
+
+Linux managed-browser cleanup and recovery share exact profile/executable and
+process-birth checks in [`linux-process-identity.ts`](../packages/browserd/src/linux-process-identity.ts).
 
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 

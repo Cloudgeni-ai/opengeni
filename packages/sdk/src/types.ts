@@ -847,6 +847,8 @@ type CreateConnectionRequestBase = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   operationId?: string | undefined;
+  /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
+  verifyModelAccess?: boolean | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &
@@ -3344,6 +3346,8 @@ export type FirstPartyMcpToolName =
   | "browser_screenshot"
   | "browser_clipboard"
   | "browser_debug"
+  | "browser_downloads"
+  | "browser_download_save"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"

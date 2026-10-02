@@ -298,16 +298,14 @@ An active policy revision is composed verbatim into the prompt of every session
 it applies to, for as long as it stays active. A global charter or global policy
 applies to every session in the workspace; a role policy applies to every session
 bound to that role. At most three entries compose at once (charter, global
-policy, matching role policy), so the standing ceiling the agent budget implies
-is three times the per-entry cap. Either way the length is a permanent per-turn
-cost rather than a one-time one, and agents are bad at judging that on their own:
-asked for "always track work in Linear", a model will happily author a five-step
-numbered procedure. The budget is therefore explicit and enforced, separately
-from the human editor limit:
+policy, matching role policy). Agent and human instruction writes share the
+same storage limit. This lets localized edits preserve existing long policies
+without forcing a rewrite. Concise new rules remain the authoring guidance;
+the separate 131,072-byte prompt-composition bound is unchanged.
 
 | Author | Surface | Limit |
 | --- | --- | --- |
-| Agent | `instruction_policy_save` supplied text and resulting instruction; legacy `remember`/proposal/promotion paths | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
+| Agent | `instruction_policy_save` supplied text and resulting instruction; legacy `remember`/proposal/promotion paths | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144; agent compatibility export aliases it) |
 | Agent | `remember` lane `preference`, `preference_propose`, `task_note_promote_preference` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
 | Human | Workspace State editor, HTTP/SDK policy routes | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144) |
 
@@ -315,8 +313,11 @@ The constants and the actionable rejection messages live in
 [`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts).
 The direct proposal surfaces are bounded by the request contracts. Native
 instruction edits bound each supplied text and the complete result, so an append
-cannot grow the standing prompt past the same limit and no path truncates stored
-content. Task-note
+cannot grow the stored instruction past the common limit and no path truncates
+content. Rolling migration `0584_agent_instruction_size_parity.sql` updates the
+database check without changing exact edits, authorization, review, CAS,
+operation identity or the activation-preservation fence. Old applications may
+still enforce 600 characters until their binaries are upgraded. Task-note
 promotion is bounded in
 [`packages/db/src/company-brain-governed-writes.ts`](../packages/db/src/company-brain-governed-writes.ts)
 instead, because there the content is the note rather than a request field: a

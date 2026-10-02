@@ -116,6 +116,7 @@ mock.module("@tanstack/react-router", () => ({
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
 const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
+const { DirectModelProviderForm } = await import("@/components/direct-model-provider-connection");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
 const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
@@ -534,6 +535,144 @@ describe("organization onboarding UI", () => {
       expect(onComplete).not.toHaveBeenCalled();
       expect(container.textContent).toContain("Your service is connected");
       expect(container.textContent).toContain("Try again");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Azure onboarding saves a scoped customer key and deployment, clears the key, and waits for model selection", async () => {
+    const onComplete = mock(() => undefined);
+    const createConnection = mock(async (_workspace: string, request: Record<string, unknown>) => ({
+      ...request,
+      id: "00000000-0000-4000-8000-000000000001",
+      version: 1,
+      status: "active",
+    }));
+    const client = {
+      createConnection,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="org"
+            workspaceId="personal-workspace"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      expect(container.querySelector('button[aria-label="Connect OpenAI"]')).not.toBeNull();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Azure OpenAI"]')!
+          .click(),
+      );
+      await enter(
+        container.querySelector('input[placeholder="https://your-resource.openai.azure.com"]')!,
+        "https://customer.openai.azure.com",
+      );
+      await enter(
+        container.querySelector('input[placeholder="Your model deployment name"]')!,
+        "my-deployment",
+      );
+      await enter(container.querySelector('input[type="password"]')!, "azure-customer-secret");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent === "Connect Azure OpenAI")!
+          .click(),
+      );
+      await flush();
+      expect(createConnection).toHaveBeenCalledWith(
+        "personal-workspace",
+        expect.objectContaining({
+          providerDomain: "customer.openai.azure.com",
+          subjectId: null,
+          credential: { apiKey: "azure-customer-secret" },
+          metadata: {
+            credentialRole: "direct_azure_openai",
+            credentialLabel: "Azure OpenAI",
+            directModelProvider: {
+              provider: "azure_openai",
+              model: "my-deployment",
+              endpoint: "https://customer.openai.azure.com/openai/v1",
+            },
+          },
+          operationId: expect.any(String),
+          verifyModelAccess: true,
+        }),
+      );
+      expect(container.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe("");
+      expect(container.textContent).toMatch(
+        /Usage is billed directly to your\s+Azure OpenAI\s+account/,
+      );
+      expect(container.textContent).toContain("Your service is connected");
+      expect(onComplete).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("OpenAI needs only a key, preserves it on failure, and selects the verified connection", async () => {
+    let reject = true;
+    const onConnected = mock(() => undefined);
+    const createConnection = mock(async (_workspace: string, request: Record<string, unknown>) => {
+      if (reject) throw new Error("Your provider didn’t accept this API key.");
+      return {
+        ...request,
+        id: "00000000-0000-4000-8000-000000000001",
+        version: 1,
+        status: "active",
+      };
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <DirectModelProviderForm
+            client={{ createConnection } as never}
+            workspaceId="workspace"
+            provider="openai"
+            onConnected={onConnected}
+          />,
+        ),
+      );
+      expect(container.querySelectorAll("input")).toHaveLength(1);
+      const key = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+      await enter(key, "customer-key");
+      const connect = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Connect OpenAI",
+      )!;
+      await act(async () => connect.click());
+      await flush();
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("didn’t accept");
+      expect(key.value).toBe("customer-key");
+      expect(onConnected).not.toHaveBeenCalled();
+      reject = false;
+      await act(async () => connect.click());
+      await flush();
+      expect(createConnection).toHaveBeenLastCalledWith(
+        "workspace",
+        expect.objectContaining({
+          verifyModelAccess: true,
+          metadata: expect.objectContaining({
+            directModelProvider: { provider: "openai", model: "gpt-6-sol" },
+          }),
+        }),
+      );
+      expect(onConnected).toHaveBeenCalledWith(
+        "workspace-openai-00000000-0000-4000-8000-000000000001/1/gpt-6-sol",
+      );
+      expect(key.value).toBe("");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

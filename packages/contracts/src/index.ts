@@ -1,3 +1,4 @@
+export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
@@ -924,6 +925,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "browser_act",
   "browser_clipboard",
   "browser_debug",
+  "browser_downloads",
+  "browser_download_save",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -1036,6 +1039,8 @@ export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
   "browser_act",
   "browser_clipboard",
   "browser_debug",
+  "browser_downloads",
+  "browser_download_save",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -11625,6 +11630,8 @@ export const CreateConnectionRequest = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
   operationId: z.string().uuid().optional(),
+  /** For direct OpenAI/Azure keys: run a short provider check before saving. */
+  verifyModelAccess: z.boolean().optional(),
   /** Retired: connection execution is authorized by the initiating user. */
   initialUseContexts: z.never().optional(),
 });
