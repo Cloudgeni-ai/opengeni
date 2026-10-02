@@ -2375,6 +2375,9 @@ may still arrive once; delivered history and earlier running tool receipts remai
 unchanged. Observation happens while serving the read, without a separate
 worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
+Subsequent retained reads reuse the persisted completion-observation receipt
+without reacquiring session/event write locks. They still perform the same scoped
+command and output reads; the first observation retains settlement/claim locking.
 A failed or cancelled session remains terminal and
 keeps event-only command audit rather than reopening pending model input. A
 failed transaction leaves the command unsettled so the same already-checkpointed
