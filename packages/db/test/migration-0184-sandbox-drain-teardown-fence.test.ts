@@ -108,6 +108,8 @@ const withheldMigrationNames = [
   "0582_scheduled_setup_policy_identity.sql",
   // Replaces the private instruction helper from withheld 0466; replay after it.
   "0584_agent_instruction_size_parity.sql",
+  // Extends the containment reason installed by withheld 0547; replay after it.
+  "0585_quiescence_command_containment.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
