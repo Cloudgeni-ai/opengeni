@@ -164,6 +164,7 @@
         "streamdown": "^2.5.0",
         "tailwind-merge": "^3.5.0",
         "tailwindcss": "^4.2.4",
+        "web-vitals": "^5.3.0",
       },
       "devDependencies": {
         "@happy-dom/global-registrator": "20.10.2",

@@ -1,6 +1,7 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { trackModelConnection } from "@/lib/analytics-observer";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 
 import type {
   SuperGrokAccount,
@@ -109,7 +110,9 @@ export function useSuperGrokSubscriptions({
       scope: Exclude<SuperGrokAccountScope, "organization">,
       options?: { onConnected?: (accountId: string | null) => void },
     ) => {
-      const recordOutcome = workspaceId ? trackModelConnection("supergrok", workspaceId) : () => {};
+      const recordOutcome = workspaceId
+        ? trackModelConnection("supergrok", workspaceId)
+        : beginModelConnectJourney("supergrok", "device_code");
       setBusy(true);
       try {
         const start = organizationId

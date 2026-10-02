@@ -18,6 +18,9 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { useStreamHealthTelemetry } from "@/lib/stream-health";
+import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
+import { noteTurnFailureAction } from "@/lib/turn-failure-actions";
 import { observeSessionTurnEvents } from "@/lib/analytics-observer";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
@@ -743,6 +746,8 @@ export function SessionRoute({
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
+  // Content-free operational signal; see lib/stream-health.ts.
+  useStreamHealthTelemetry("session", connectionState);
   useEffect(() => {
     sessionEventFeedStore.set({ sessionId, events });
   }, [events, sessionId, sessionEventFeedStore]);
@@ -960,6 +965,7 @@ export function SessionRoute({
                 : "GitHub is not configured on this deployment.",
             );
           }
+          await markIntegrationConnectRedirect("github", "app_install");
           window.location.assign(status.linkUrl);
           return;
         }
@@ -989,6 +995,7 @@ export function SessionRoute({
           if (!response.authorizationUrl) {
             throw new Error("The provider did not return an authorization link.");
           }
+          await markIntegrationConnectRedirect({ domain: mcpUrl }, "oauth");
           window.location.assign(response.authorizationUrl);
           return;
         }
@@ -1027,6 +1034,7 @@ export function SessionRoute({
       if (!response.authorizationUrl) {
         throw new Error("The provider did not return an authorization link.");
       }
+      await markIntegrationConnectRedirect({ domain: item.providerDomain }, "oauth");
       window.location.assign(response.authorizationUrl);
     },
     [
@@ -2173,6 +2181,7 @@ function SessionChatPane(props: {
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
     onSubmitted: (_text, input) => {
+      noteTurnFailureAction("send_message");
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
@@ -2573,6 +2582,10 @@ function SessionChatPane(props: {
           <LazyFailedSessionBanner
             key={props.session.id}
             failure={props.failure}
+            analyticsKey={
+              props.failure.failureEventId ??
+              `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
+            }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}

@@ -1,7 +1,7 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
-import { OpenGeniProvider } from "@opengeni/react";
+import { OpenGeniProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -29,6 +29,7 @@ import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { userErrorText } from "@/lib/api-error";
 import { isAbortError } from "@/lib/session-tools";
 import { orgLabel } from "@/lib/org";
+import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
@@ -553,6 +554,7 @@ function AuthorizedWorkspaceShell({
         }
       }}
     >
+      <WorkspaceStreamHealth />
       {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
@@ -572,6 +574,13 @@ function AuthorizedWorkspaceShell({
       )}
     </OpenGeniProvider>
   );
+}
+
+/** Content-free workspace live-stream health; see lib/stream-health.ts. */
+function WorkspaceStreamHealth(): null {
+  const { workspaceControlConnectionState } = useOpenGeni();
+  useStreamHealthTelemetry("workspace", workspaceControlConnectionState);
+  return null;
 }
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
