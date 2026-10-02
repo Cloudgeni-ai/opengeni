@@ -93,7 +93,7 @@ The matching React package applies neutral defaults to native error surfaces. Br
 </OpenGeniProvider>
 ```
 
-`ErrorMessageFormatter` receives `(error: unknown, defaultMessage: string)` and returns `string | undefined`; an empty string or `undefined` keeps the neutral default. The callback receives the original error, so avoid logging private diagnostics in the browser. Keep the default's support reference and sign-in, permission, setup/allowance, HTTPS-upload and unknown-outcome guidance. An uncertain mutation still requires checking/reconciling status before retrying: formatting changes presentation, not authorization or retry policy.
+`ErrorMessageFormatter` receives `(error: unknown, defaultMessage: string)` and returns `string | undefined`; an empty string or `undefined` keeps the neutral default. A throwing callback or invalid runtime return also keeps the neutral default; presentation must not interrupt delivery-state settlement. The callback receives the original error, so avoid logging private diagnostics in the browser. Keep the default's support reference and sign-in, permission, setup/allowance, HTTPS-upload and unknown-outcome guidance. An uncertain mutation still requires checking/reconciling status before retrying: formatting changes presentation, not authorization or retry policy.
 
 Explicit host-owned error props and custom command messages remain authored copy. This API does not rewrite user, assistant, tool, worker or Skill text; do not regex-scrub transcripts or source quotations. Source guidance alone does not prove an older installed/published package has the API or that a build passed visual qualification.
 

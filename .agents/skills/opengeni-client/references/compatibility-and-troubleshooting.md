@@ -74,7 +74,9 @@ exported type `ErrorMessageFormatter`:
 `(error: unknown, defaultMessage: string) => string | undefined`. It receives
 the original error and neutral default before presentation. Return a host
 message; `undefined` or an empty string keeps the default. A minimal branding
-callback preserves its state guidance and support reference:
+callback preserves its state guidance and support reference. A throwing callback
+or invalid runtime return also keeps the neutral default; presentation must not
+interrupt delivery-state settlement:
 
 ```js
 function formatAssistantError(_error, defaultMessage) {

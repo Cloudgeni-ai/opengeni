@@ -362,6 +362,8 @@ test("exact host formatter example preserves neutral action guidance and referen
     expect(prose).toContain("defaultMessage: string");
     expect(prose).toContain("string | undefined");
     expect(prose).toContain("empty string");
+    expect(prose).toContain("throwing callback");
+    expect(prose).toContain("interrupt delivery-state settlement");
     expect(prose).toContain("original error");
     expect(prose).toContain("retry policy");
     expect(prose).toContain("older installed/published package");
