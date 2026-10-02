@@ -1571,9 +1571,6 @@
 :where(.og-root).top-10,:where(.og-root) .top-10 {
     top: calc(var(--spacing) * 10);
   }
-:where(.og-root).top-11,:where(.og-root) .top-11 {
-    top: calc(var(--spacing) * 11);
-  }
 :where(.og-root).top-\[var\(--og-work-header-top\,0px\)\],:where(.og-root) .top-\[var\(--og-work-header-top\,0px\)\] {
     top: var(--og-work-header-top,0px);
   }
@@ -1601,9 +1598,6 @@
 :where(.og-root).right-3,:where(.og-root) .right-3 {
     right: calc(var(--spacing) * 3);
   }
-:where(.og-root).right-4,:where(.og-root) .right-4 {
-    right: calc(var(--spacing) * 4);
-  }
 :where(.og-root).bottom-0,:where(.og-root) .bottom-0 {
     bottom: calc(var(--spacing) * 0);
   }
@@ -1616,9 +1610,6 @@
 :where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
     bottom: calc(var(--spacing) * 4);
   }
-:where(.og-root).bottom-14,:where(.og-root) .bottom-14 {
-    bottom: calc(var(--spacing) * 14);
-  }
 :where(.og-root).bottom-full,:where(.og-root) .bottom-full {
     bottom: 100%;
   }
@@ -1630,9 +1621,6 @@
   }
 :where(.og-root).left-2,:where(.og-root) .left-2 {
     left: calc(var(--spacing) * 2);
-  }
-:where(.og-root).left-4,:where(.og-root) .left-4 {
-    left: calc(var(--spacing) * 4);
   }
 :where(.og-root).z-0,:where(.og-root) .z-0 {
     z-index: 0;
@@ -2299,9 +2287,6 @@
   }
 :where(.og-root).max-w-\[240px\],:where(.og-root) .max-w-\[240px\] {
     max-width: 240px;
-  }
-:where(.og-root).max-w-\[calc\(50\%-0\.5rem\)\],:where(.og-root) .max-w-\[calc\(50\%-0\.5rem\)\] {
-    max-width: calc(50% - 0.5rem);
   }
 :where(.og-root).max-w-\[calc\(100\%-1\.5rem\)\],:where(.og-root) .max-w-\[calc\(100\%-1\.5rem\)\] {
     max-width: calc(100% - 1.5rem);
@@ -5836,16 +5821,6 @@
       display: inline;
     }
   }
-:where(.og-root).sm\:right-6,:where(.og-root) .sm\:right-6 {
-    @media (width >= 40rem) {
-      right: calc(var(--spacing) * 6);
-    }
-  }
-:where(.og-root).sm\:left-6,:where(.og-root) .sm\:left-6 {
-    @media (width >= 40rem) {
-      left: calc(var(--spacing) * 6);
-    }
-  }
 :where(.og-root).sm\:col-span-1,:where(.og-root) .sm\:col-span-1 {
     @media (width >= 40rem) {
       grid-column: span 1 / span 1;
@@ -6175,11 +6150,6 @@
           }
         }
       }
-    }
-  }
-:where(.og-root).pointer-coarse\:top-14,:where(.og-root) .pointer-coarse\:top-14 {
-    @media (pointer: coarse) {
-      top: calc(var(--spacing) * 14);
     }
   }
 :where(.og-root).pointer-coarse\:-mx-\[19px\],:where(.og-root) .pointer-coarse\:-mx-\[19px\] {

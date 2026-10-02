@@ -158,142 +158,83 @@ describe("embedded artifact viewer", () => {
     }
   }, 60_000);
 
-  // Rects of everything a floating pill must not cover: compact controls (links,
-  // buttons, their icons and labels) and the text of full-width row controls
-  // such as the active turn's "Working" header. Plain prose is allowed.
-  async function coveredControls(page: Page, pillSelector: string) {
-    return await page.evaluate((selector) => {
-      const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-      const view = scroller.getBoundingClientRect();
-      const pill = document.querySelector<HTMLElement>(selector)!.getBoundingClientRect();
-      const hits = (rect: DOMRect) =>
-        rect.width > 0 &&
-        rect.height > 0 &&
-        rect.right > pill.left &&
-        rect.left < pill.right &&
-        rect.bottom > pill.top &&
-        rect.top < pill.bottom &&
-        rect.bottom > view.top &&
-        rect.top < view.bottom;
-      const covered: string[] = [];
-      for (const control of scroller.querySelectorAll<HTMLElement>(
-        'a[href], button, [role="button"], input, select, textarea',
-      )) {
-        const wide = control.getBoundingClientRect().width >= view.width * 0.8;
-        // A full-width row draws only its icons and label glyphs.
-        const parts: DOMRect[] = [];
-        if (!wide) parts.push(control.getBoundingClientRect());
-        else {
-          for (const icon of control.querySelectorAll("svg, img"))
-            parts.push(icon.getBoundingClientRect());
-          const walker = document.createTreeWalker(control, NodeFilter.SHOW_TEXT);
-          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-            if (!node.textContent?.trim()) continue;
-            const range = document.createRange();
-            range.selectNodeContents(node);
-            parts.push(...range.getClientRects());
-          }
-        }
-        for (const part of parts) {
-          if (hits(part)) {
-            covered.push((control.textContent ?? control.tagName).trim().slice(0, 40));
-            break;
-          }
-        }
-      }
-      return covered;
-    }, pillSelector);
-  }
-
-  /** The last reading once it is empty, or after five seconds. */
-  async function settled(read: () => Promise<string[]>): Promise<string[]> {
-    const deadline = Date.now() + 5_000;
-    let value = await read();
-    while (value.length > 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      value = await read();
-    }
-    return value;
-  }
-
-  async function scrollerGeometry(page: Page) {
+  /** Where the floating navigation pills sit, relative to the conversation frame. */
+  async function navigationGeometry(page: Page) {
     return await page.evaluate(() => {
       const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-      return { clientHeight: scroller.clientHeight, scrollTop: Math.round(scroller.scrollTop) };
+      const frame = scroller.parentElement!.getBoundingClientRect();
+      const read = (selector: string) => {
+        const node = document.querySelector<HTMLElement>(selector);
+        if (!node) return null;
+        const box = node.getBoundingClientRect();
+        return {
+          centerOffset: Math.round(box.left + box.width / 2 - (frame.left + frame.width / 2)),
+          bottomGap: Math.round(frame.bottom - box.bottom),
+          top: Math.round(box.top),
+          bottom: Math.round(box.bottom),
+          left: Math.round(box.left - frame.left),
+          right: Math.round(frame.right - box.right),
+        };
+      };
+      return {
+        latest: read("[data-og-jump-to-latest]"),
+        question: read("[data-og-jump-to-question]"),
+      };
     });
   }
 
-  for (const width of [1440, 390]) {
-    test(`Jump to latest slides clear of the Working row at ${width}px`, async () => {
-      const page = await open(width, "light", "&long");
-      try {
-        await page.locator("[data-og-work-header]").first().waitFor();
-        await page.waitForTimeout(600);
-        // Opening an artifact from the reply hands the reader the scroll; back
-        // in the conversation, Jump to latest shows while the active turn's
-        // Working row still sits at the tip, under the pill's resting spot.
-        await page.getByText("Open the dashboard").click();
-        await page
-          .getByRole("button", { name: width < 768 ? "Back" : "Close", exact: true })
-          .click();
-        const pill = page.locator("[data-og-jump-to-latest]");
-        await pill.waitFor();
-        const before = await scrollerGeometry(page);
-        expect(await settled(() => coveredControls(page, "[data-og-jump-to-latest]"))).toEqual([]);
-        await page.waitForTimeout(300);
-        await capture(page, `jump-pill-${width}-light`);
-        // Only the pill moved: the scroller kept its size and the reader's place.
-        expect(await scrollerGeometry(page)).toEqual(before);
-        await pill.click();
-        await pill.waitFor({ state: "detached" });
-      } finally {
-        await page.close();
-      }
-    }, 60_000);
-
-    test(`Back to your message slides clear of an inline Site card's controls at ${width}px`, async () => {
-      // Short enough that the card's toolbar can scroll up to the pill.
+  for (const width of [1440, 390, 320]) {
+    test(`timeline navigation stays anchored bottom-center at ${width}px`, async () => {
       const page = await open(width, "light", "&long", 560, width < 768);
       try {
         await page.locator("[data-og-work-header]").first().waitFor();
         await page.waitForTimeout(600);
-        const pillTop = width < 768 ? 56 : 44;
-        // Scroll the Site card's toolbar under the pill's resting spot; the
-        // question above it leaves the viewport, so the pill appears.
-        await page.evaluate((top) => {
-          const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-          const reload = [...scroller.querySelectorAll<HTMLElement>("button")].find(
-            (button) => button.getAttribute("aria-label") === "Reload Site",
-          )!;
-          const target = reload.getBoundingClientRect();
-          const view = scroller.getBoundingClientRect();
-          scroller.scrollTop += target.top + target.height / 2 - (view.top + top + 16);
-          scroller.dispatchEvent(new Event("scroll"));
-        }, pillTop);
-        const pill = page.locator("[data-og-jump-to-question]");
-        await pill.waitFor();
-        const before = await scrollerGeometry(page);
-        expect(await settled(() => coveredControls(page, "[data-og-question-nav] > div"))).toEqual(
-          [],
-        );
+        // Read just past the start of the longest exchange: the reader's message
+        // is above and the latest activity below, so both navigation pills show.
+        const scroller = page.locator("[data-og-timeline-scroller]");
+        await scroller.evaluate((node) => {
+          const origin = node.getBoundingClientRect().top - node.scrollTop;
+          const prompts = [...node.querySelectorAll<HTMLElement>("[data-og-prompt]")];
+          const spans = prompts.map((prompt, index) => ({
+            bottom: prompt.getBoundingClientRect().bottom - origin,
+            next: (prompts[index + 1]?.getBoundingClientRect().top ?? Infinity) - origin,
+          }));
+          const longest = spans.reduce((a, b) => (b.next - b.bottom > a.next - a.bottom ? b : a));
+          node.scrollTop = Math.round(longest.bottom + 60);
+        });
+        await page.locator("[data-og-jump-to-latest]").waitFor();
+        await page.locator("[data-og-jump-to-question]").waitFor();
         await page.waitForTimeout(300);
-        await capture(page, `question-pill-${width}-light`);
-        expect(await scrollerGeometry(page)).toEqual(before);
-        // No sideways slot fits the longer label: only the overlay moves below
-        // the toolbar, preserving the reserved sticky-header strip and scroll.
-        expect(
-          await page
-            .locator("[data-og-question-nav]")
-            .evaluate((node) => parseFloat(getComputedStyle(node).marginTop)),
-        ).toBeGreaterThan(0);
-        if (width < 768) expect((await pill.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-        await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
-          node.scrollTop += 120;
-        });
-        await page.waitForFunction(() => {
-          const node = document.querySelector("[data-og-question-nav]");
-          return node && parseFloat(getComputedStyle(node).marginTop) === 0;
-        });
+        const rest = await navigationGeometry(page);
+        await capture(page, `timeline-navigation-${width}-light`);
+        const latest = rest.latest!;
+        const question = rest.question!;
+        // Both pills are centered in the conversation and fully inside it.
+        expect(Math.abs(latest.centerOffset)).toBeLessThanOrEqual(1);
+        expect(Math.abs(question.centerOffset)).toBeLessThanOrEqual(1);
+        for (const pill of [latest, question]) {
+          expect(pill.left).toBeGreaterThanOrEqual(0);
+          expect(pill.right).toBeGreaterThanOrEqual(0);
+        }
+        // Jump to latest sits just above the composer edge; the message action
+        // stacks directly above it.
+        expect(latest.bottomGap).toBe(16);
+        expect(question.bottom).toBeLessThanOrEqual(latest.top - 8);
+        expect(latest.top - question.bottom).toBeLessThanOrEqual(10);
+
+        // Reading on (different rows under the pills, time passing) never moves them.
+        for (const delta of [-90, -90, 60]) {
+          await scroller.evaluate((node, by) => {
+            node.scrollTop += by;
+          }, delta);
+          await page.waitForTimeout(700);
+          const next = await navigationGeometry(page);
+          if (next.latest) expect(next.latest).toEqual(latest);
+          if (next.question) expect(next.question.centerOffset).toBe(question.centerOffset);
+        }
+
+        await page.locator("[data-og-jump-to-latest]").click();
+        await page.locator("[data-og-jump-to-latest]").waitFor({ state: "detached" });
       } finally {
         await page.close();
       }
