@@ -19,6 +19,7 @@ export type BundledSkillId =
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
+  | "builtin:opengeni-schedules"
   | "builtin:opengeni-documents"
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
@@ -847,6 +848,8 @@ type CreateConnectionRequestBase = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   operationId?: string | undefined;
+  /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
+  verifyModelAccess?: boolean | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &
@@ -1435,8 +1438,21 @@ export type SessionBackgroundCommandActivity = {
   count: number;
 };
 
+/** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
+export type SessionBackgroundCommandReconciliation = {
+  lastOutcome: string | null;
+  attempts: number;
+  dueAt: string;
+  claimedAt: string | null;
+  terminalProof:
+    | { outcome: "exited"; exitCode: number; observedAt: string }
+    | { outcome: "lost"; exitCode: null; observedAt: string }
+    | null;
+};
+
 export type SessionBackgroundCommand = {
   observationStatus?: "unavailable" | undefined;
+  reconciliation?: SessionBackgroundCommandReconciliation | undefined;
   id: string;
   workspaceId: string;
   sessionId: string;
@@ -1643,6 +1659,50 @@ export type CreateSessionResponse = Session & {
 };
 
 export type SessionSummary = Session;
+
+/** Compact list-only record, excluding prompts and execution configuration. */
+export type SessionListEntry = Pick<
+  Session,
+  | "id"
+  | "workspaceId"
+  | "accountId"
+  | "status"
+  | "backgroundCommandActivity"
+  | "hasSchedules"
+  | "title"
+  | "titleSource"
+  | "createdBy"
+  | "channelId"
+  | "parentSessionId"
+  | "rootSessionId"
+  | "effectiveControl"
+  | "inputWait"
+  | "lastSequence"
+  | "pinned"
+  | "pinnedAt"
+  | "pinVersion"
+  | "unread"
+  | "activelyWorking"
+  | "attentionVersion"
+  | "archived"
+  | "archivedAt"
+  | "importedArchive"
+  | "archiveVersion"
+  | "treeStats"
+  | "requiresActionSince"
+  | "createdAt"
+  | "updatedAt"
+> & {
+  displayTitle: string;
+  renameSeed: string;
+  scheduledTaskId: string | null;
+  siteOrigin: { siteId: string; title: string } | null;
+};
+export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
+  projection: "summary";
+  pinned: SessionListEntry[];
+  sessions: SessionListEntry[];
+};
 
 /** Canonical session-list page; pinned rows are excluded from ordinary pages. */
 export type SessionListResponse = {
@@ -3227,6 +3287,7 @@ export const KNOWN_PERMISSIONS = [
   "github:manage",
   "github:use",
   "api_keys:manage",
+  "usage_allowances:manage",
   "connections:read",
   "connections:write",
   "capabilities:manage",
@@ -3343,6 +3404,8 @@ export type FirstPartyMcpToolName =
   | "browser_screenshot"
   | "browser_clipboard"
   | "browser_debug"
+  | "browser_downloads"
+  | "browser_download_save"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"
@@ -3659,6 +3722,17 @@ export type ClaudeUsageWindow = {
   resetsAt: string | null;
   status: "allowed" | "allowed_warning" | "rejected" | null;
   observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
+};
+export type ClaudeUsageRequestStatus = {
+  status: ClaudeUsageWindow["status"];
+  resetsAt: string | null;
+  representativeClaim: ClaudeUsageWindow["id"] | null;
+  overageStatus: ClaudeUsageWindow["status"];
+  overageResetsAt: string | null;
+  upstreamModelId: string | null;
+  observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
 };
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -3668,6 +3742,8 @@ export type ClaudeSubscriptionUsage = {
   source: "response_headers" | "provider" | null;
   refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
   refreshCheckedAt: string | null;
+  requestStatus?: ClaudeUsageRequestStatus | null | undefined;
+  requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
 };
 
 export type OrganizationModelProviderConnection = {
@@ -4194,6 +4270,15 @@ export type ClientConfig = {
       ga4?: { measurementId: string } | undefined;
     };
   };
+  /** Operator-owned legal documents the signed-out console links to, when configured. */
+  legal?:
+    | {
+        privacyPolicyUrl?: string | undefined;
+        termsOfServiceUrl?: string | undefined;
+      }
+    | undefined;
+  /** Operator support address the console offers as a mailto link, when configured. */
+  supportEmail?: string | undefined;
   // Server-wide hint: does this deployment support Channel-A structured services
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt
@@ -5000,10 +5085,12 @@ export type UpdateWorkspaceRequest = {
  * permissions: `full` can provision shared workspaces, external members, and
  * `asUser` sessions (user requests additionally need live membership);
  * `read` only inventories shared workspaces and reads their sessions, events,
- * and files. Organization-key scope excludes Personal workspaces and bypasses neither
+ * and files. `developer_setup` configures shared workspaces and budgets without
+ * API-key management or credential delegation; its default expiry is 24 hours.
+ * Organization-key scope excludes Personal workspaces and bypasses neither
  * session visibility nor the explicit `secrets:read` permission requirement.
  */
-export type OrganizationApiKeyAccess = "full" | "read";
+export type OrganizationApiKeyAccess = "full" | "read" | "developer_setup";
 
 export type ApiKey = {
   id: string;
@@ -5041,6 +5128,8 @@ export type CreateOrganizationApiKeyRequest = {
   expiresAt?: string | undefined;
   /** Omitted means `full`. */
   access?: OrganizationApiKeyAccess | undefined;
+  /** Optional creation alias for the developer_setup access tier. */
+  preset?: "developer_setup" | undefined;
 };
 
 export type ListApiKeysResponse = {

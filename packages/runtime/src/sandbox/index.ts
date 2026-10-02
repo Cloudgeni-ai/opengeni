@@ -2,6 +2,11 @@ export type {
   ProviderCommandPersistence,
   ProviderCommandSession,
 } from "./provider-command-session";
+export {
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
+  isProviderCommandObservationUnavailableError,
+} from "./provider-command-session";
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
@@ -196,6 +201,11 @@ export {
   type ModalSandboxAttribution,
   type RevalidateModalOrphanTermination,
 } from "./providers/modal";
+export {
+  getModalCommandStartInvocation,
+  withModalCommandStartSignal,
+  type ModalCommandStartInvocation,
+} from "./providers/modal-command-start-errors";
 export {
   OpenSandboxClient,
   OpenSandboxSession,

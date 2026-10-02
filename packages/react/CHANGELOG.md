@@ -1,5 +1,111 @@
 # @opengeni/react
 
+## 7.6.1
+
+### Patch Changes
+
+- d03b4a8: Clarify that window app controls work in the background and label explicit foreground activation as “Bring to front”.
+- cf1570d: Keep desktop images usable in narrow panels by placing app controls below the image. Wider viewers retain their side panel. Keep the foreground activation button readable within the image bounds.
+- 09a991f: Hide Jump to latest when readers scroll back to the live bottom after returning to their question, preserving scroll intent across renders and releasing stale question focus.
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+
+## 7.6.0
+
+### Patch Changes
+
+- 9b3c40e: Show factual response-waiting copy once a model request is dispatched, while preserving the loading indicator and host customization.
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- Updated dependencies [e5b0123]
+  - @opengeni/sdk@7.6.0
+
+## 7.5.0
+
+### Minor Changes
+
+- b45621d: Artifacts and Sites now work inside an embedding product with the same components the OpenGeni console uses. `@opengeni/react/artifacts` gains the console's inline Site/HTML preview (`ChatInteractiveBlock`, `ArtifactSandbox`, `DeferredChatMedia`), `SiteView`, `EditableArtifactView`, and a host-mountable `SessionArtifactViewer`; `SessionConversation` renders `opengeni-site` fences inline and opens agent artifact links through `onOpenArtifact` (`viewerLinkResolver` for a custom timeline). `createSessionProxyHandler({ artifacts: true })` serves only the artifacts OpenGeni lists for the requesting session (read, editor live ticket, Site detail and sandboxed HTML), and client config advertises the live socket URL and browser cache partition. The SDK client adds `withHeaders`, `apiUrl`, and `fetchApi` for host-authenticated transports. Every built-in artifact string is translatable through a `labels` prop (partial `ArtifactLabels`) on `SessionArtifactViewer` and `ChatInteractiveBlock`, or `ArtifactLabelsProvider`. Document and presentation editors compose one projection at a time, so opening an artifact with a long history no longer floods the artifact Worker's request queue.
+- 709eef2: Usage allowance UI. `@opengeni/react/usage` adds `useUsage`, `UsageMeter`,
+  `UsageLimitNotice` (the calm near/at-limit composer line) and
+  `UsageMemberList` (an admin roster with a share-of-budget slider that shows
+  oversubscription as allowed). The conversation renders an allowance refusal as
+  a structured "usage limit reached" row that hosts reword with
+  `allowanceExhaustedLabels` or replace with `renderAllowanceExhausted`, and a
+  queued prompt refused before it starts stays above that row.
+  `@opengeni/sdk/usage-allowances` exposes allowance reads and administration as
+  free functions over `requestJson` for browser code without the root client.
+
+### Patch Changes
+
+- c85f432: Show failed-send reasons inline rather than hiding them in a tooltip. Credit and usage-allowance refusals no longer offer an unchanged Retry; Edit message restores a definitively refused prompt and its attachments into an empty composer while preserving the current model selection. Transient and uncertain deliveries keep their existing retry and reconciliation behavior.
+- 2253be0: Clarify that browser diagnostic counts include earlier pages in the same tab. Show unavailable counts until an observation exists, preserving observed zero counts.
+- c9c59b5: Explain when a chat's browser was lost or failed instead of silently showing an empty viewer.
+- 726f09d: Respect the desktop backend's mouse and keyboard availability. Encoded-frame views allow supported input independently; RFB views require both capabilities for direct control. Keep screenshots visible and show a view-only notice when direct input is unavailable.
+- 28c2b3f: Show Latest question only after the chat's initial history is ready, so startup cannot silently cancel that navigation.
+- 5ba250d: Offer Add note for text selected while the timeline's annotation controls are still loading.
+- 45d1301: Expose repeated empty final replies as a typed, informational completed-turn notice without failing goals or deferring later updates.
+- b45621d: Fix embedded artifact viewing for external users by resolving fresh effective workspace grants, checking exact session associations on every request, and binding live editor tickets to their source session. Keep editor authority and reconnect reads current when clients or sessions change, and allow retrying temporary viewer configuration failures.
+
+  Source-bound editor sockets renew a 15-second lease through the host proxy, rechecking product authorization; existing unbound console sockets are unchanged. Compact authenticated source tickets remain within the existing wire limit.
+
+  Add server-only `@opengeni/sdk/session-proxy` helpers. Stream embedded Site HTML with backpressure and cancellation and enforce a 25 MiB actual-byte ceiling; oversized streams fail with `site_html_too_large`. Preserve the console's existing shared artifact components and list behavior.
+
+  Allow PostgreSQL test fixtures to use an explicitly configured native server while preserving restricted-role and FORCE-RLS verification.
+
+- d60f96a: Preserve history reading position when Markdown tables are remeasured during host rerenders or tail streaming, without changing table overflow, copy controls or viewport resizing.
+- 0bbe2e7: Keep all React root exports available without requiring optional workbench peers at build time. Add terminal, editor, and desktop opt-in loader subpaths; hosts mounting those surfaces enable the installed peers once, with optional grammar and WebGL loaders supplied by the host.
+- 45d1301: Load client-config model defaults for the exact workspace requested by the workspace model catalog hook.
+- 0bbe2e7: `@opengeni/react/session-ui` exports `OpenGeniProvider` and the tool-renderer
+  registry (`createDefaultToolRegistry`, `createToolRegistry`,
+  `defaultToolRegistry`), so a host can render `OpenGeniChat` or
+  `SessionConversation` from that entry alone without the root's optional
+  workbench peers.
+- 5f7aa12: The conversation's floating "Jump to latest" and "Latest question" pills slide sideways when their resting spot would cover a control, such as the active turn's "Working" row or an inline Site card's toolbar. Only the pill moves; the timeline's scroll geometry is unchanged.
+- 5b48f00: Add recoverable allowance lifecycle state and idempotent clear receipts.
+  Preserve typed allowance scope and reset details in web, MCP, and Slack
+  refusals with administrator-specific remedies.
+  Expose browser-safe refusal helpers through `@opengeni/sdk/allowance-refusal`
+  without widening React's runtime dependency boundary.
+
+  Recheck allowance after paid compaction and align continuation admission with
+  its frozen causal lineage. Keep allowance storage compatible with rolling
+  deployment, preserve settled usage across period edits, harden definer search
+  paths, and order organization locks before tenancy fences.
+
+- 5b48f00: Default missing webhook lanes only after signature verification, preserve the
+  public organization webhook event vocabulary while rejecting usage subscriptions,
+  and keep allowance refusal presentation schema-runtime-free for browsers and
+  React Native. Emit the focused integration and refusal entries in published builds.
+
+  Fence the next model dispatch on settled usage and frozen-human admission, refuse
+  fresh delegated work before interruption, and repair workspace-less Knowledge
+  indexing and historical migration fixture dependencies.
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [d9ec660]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/connect@0.3.1
+
 ## 7.4.0
 
 ### Minor Changes

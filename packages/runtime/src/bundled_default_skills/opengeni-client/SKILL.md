@@ -18,6 +18,12 @@ Use this skill when a customer's product and OpenGeni remain separate systems.
 That is the normal integration shape: the product owns its users and business
 UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 
+For first-time organization and workspace provisioning, start with
+[OpenGeni developer setup](https://docs.opengeni.ai/guides/developer-plugin), then return here to write
+the embedding code. That skills-only workflow uses the coding agent's own
+browser and public REST/SDK, with a scoped Developer setup key; no OpenGeni MCP
+server is required.
+
 Do not confuse two meanings of "skill": this file teaches a customer's coding
 agent how to integrate OpenGeni; session `skills` are runtime capabilities or
 instructions attached to an OpenGeni agent. The former designs the integration.
@@ -57,13 +63,15 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Four choices belong to the user: who shares what (`chats`: private, shared
-  or isolated), when things run (schedule and time zone), where outputs land
-  (which screen, record, or channel), and whether the agent may write. If the
-  request or repository does not settle any of them, ask ONE bundled question
-  (the structured question UI when available) with a recommended answer for
-  each, before building. This is the expected step, not an option: asking once
-  is cheap, rebuilding is not. Never ask what the repository answers. See
+- Two choices belong to the user: who can see a chat (`chats`: private, shared
+  or isolated) and whether the agent may change data. If the request or
+  repository does not settle one, ask ONE short, plain-language question with a
+  recommended answer, before building. Never ask what the repository answers.
+- Do not ask about background work, schedules, session length or credential
+  lifetime up front. Long agent sessions just work. Only when the requested
+  feature itself is scheduled or runs in the background (for example "email me
+  a weekly report"), ask for the missing details (day, time, time zone, where
+  results appear) and say in one sentence why you need them. See
   [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.
@@ -196,7 +204,10 @@ Choose one only for its stated reason; read
   materially different interaction model but still wants canonical event,
   queue, composer, approval, and human-input behavior.
 - **SDK only**: a non-React frontend (Svelte, Vue, native mobile), a CLI, or
-  backend automation. Keep the SDK on a product backend route.
+  backend automation. Keep the SDK on a product backend route. For a runnable
+  native Vue host, start with the
+  [Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md).
+  Run its consumer commands from `examples/vue-conversation/app`.
 - **A non-JavaScript backend** (Django, Rails, Go, PHP, Java): keep the React
   conversation and implement the proxy's small HTTP contract in that backend
   instead of adding a Node sidecar. See

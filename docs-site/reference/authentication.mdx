@@ -57,10 +57,11 @@ access. Manage those connections separately.
 
 Choose an access tier when creating an organization key:
 
-| `access`           | Use                                                                                                                     |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `"full"` (default) | Provision shared workspaces and external members, create and control sessions (including `asUser`), and administer keys |
-| `"read"`           | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                           |
+| `access`            | Use                                                                                                                                                                         |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"full"` (default)  | Provision shared workspaces and external members, create and control sessions (including `asUser`), and administer keys                                                     |
+| `"read"`            | Inventory shared workspaces and read their sessions, events, and files for reporting or audit                                                                               |
+| `"developer_setup"` | What the `opengeni-setup` skill creates while you build: workspaces, members, sessions, and usage allowances, but no key management and only limited permissions for agents |
 
 Create a read-only key with `createOrganizationApiKey(organizationId, { name, access: "read" })` from an authorized administrative backend. It cannot create sessions, send or control turns, change configuration, or mint other keys. Use a full-access key for product integrations, which create tenant workspaces and send messages.
 
@@ -75,7 +76,7 @@ be empty even when it can access shared workspaces. Use `listWorkspaces()` for
 the inventory.
 
 The credential contains `kind` (`organization_api_key` or `workspace_api_key`),
-organization-only `access` (`full` or `read`), `accountId`, `workspaceId`,
+organization-only `access` (`full`, `read`, or `developer_setup`), `accountId`, `workspaceId`,
 `effectiveWorkspacePermissions`, and a plain-language `note`. An organization
 key's null `workspaceId` means all shared workspaces in the same organization,
 never Personal workspaces; a workspace key names its one workspace.

@@ -14,6 +14,7 @@ import {
   recordSandboxRotationBacklogGauges,
   runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
+import { recordWorkspaceCaptureCompleted } from "../src/activities/workspace-capture";
 
 function workerObservability() {
   return createObservability(testSettings(), { component: "worker" });
@@ -37,6 +38,34 @@ describe("sandbox checkpoint and deadline metrics", () => {
     expect(metrics).not.toContain("private-provider");
     expect(metrics).not.toContain("NaN");
     await observability.flush();
+  });
+  test("physical and logical capture timings coexist in one worker registry", async () => {
+    // The runtime hook (physical warm capture) and the turn-end logical capture
+    // share the worker's Observability. Each histogram keeps its own label set,
+    // so recording both in either order must not fail the registry.
+    for (const physicalFirst of [true, false]) {
+      const observability = workerObservability();
+      const hooks = runtimeMetricsHooksForObservability(observability);
+      const physical = () =>
+        hooks.onWorkspaceCapture?.({ backend: "modal", outcome: "completed", durationSeconds: 3 });
+      const logical = () => recordWorkspaceCaptureCompleted(observability, 1_500);
+      if (physicalFirst) {
+        physical();
+        logical();
+      } else {
+        logical();
+        physical();
+      }
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_workspace_capture_duration_seconds_count\{[^}]*backend="modal"[^}]*\} 1/,
+      );
+      expect(metrics).toMatch(
+        /opengeni_workspace_capture_revision_duration_seconds_count\{[^}]*\} 1/,
+      );
+      expect(metrics).toContain("opengeni_workspace_capture_total{");
+      await observability.flush();
+    }
   });
   test("publishes every bounded lifecycle/backlog series, including zeroes", async () => {
     const observability = workerObservability();

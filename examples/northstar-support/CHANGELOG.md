@@ -1,5 +1,66 @@
 # @opengeni/example-northstar-support
 
+## 0.0.163
+
+### Patch Changes
+
+- Updated dependencies [d03b4a8]
+- Updated dependencies [cf1570d]
+- Updated dependencies [3f7ff5b]
+- Updated dependencies [09a991f]
+  - @opengeni/react@7.6.1
+  - @opengeni/sdk@7.6.1
+
+## 0.0.162
+
+### Patch Changes
+
+- Updated dependencies [9b3c40e]
+- Updated dependencies [a1a23d2]
+- Updated dependencies [e5b0123]
+  - @opengeni/react@7.6.0
+  - @opengeni/sdk@7.6.0
+
+## 0.0.161
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [c85f432]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [2253be0]
+- Updated dependencies [c9c59b5]
+- Updated dependencies [45d1301]
+- Updated dependencies [726f09d]
+- Updated dependencies [28c2b3f]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [5ba250d]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [d60f96a]
+- Updated dependencies [3545ca3]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [5f7aa12]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/react@7.5.0
+
 ## 0.0.160
 
 ### Patch Changes

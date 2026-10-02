@@ -1104,10 +1104,17 @@ impl AtspiComputerAdapter {
     ) -> NativeAdapterResult<()> {
         require_interface(record, Interface::Action, "invoke")?;
         let proxy = self.action_proxy(&record.object).await?;
+        Self::perform_named_action_with_proxy(&proxy, names).await
+    }
+
+    async fn perform_named_action_with_proxy(
+        proxy: &ActionProxy<'_>,
+        names: Option<&[&str]>,
+    ) -> NativeAdapterResult<()> {
         let actions = timed(proxy.get_actions())
             .await
-            .map_err(|error| ambiguous("read AT-SPI actions", error))?;
-        let index = names.map_or(Some(0), |names| {
+            .map_err(|error| driver_error("read AT-SPI actions", error))?;
+        let index = names.map_or(actions.first().map(|_| 0), |names| {
             actions.iter().position(|candidate| {
                 names
                     .iter()
@@ -2748,6 +2755,126 @@ fn ambiguous(context: &str, error: impl std::fmt::Display) -> NativeAdapterError
     NativeAdapterError::outcome_unknown(format!(
         "{context} outcome could not be confirmed: {error}"
     ))
+}
+
+#[cfg(test)]
+mod action_tests {
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
+
+    use atspi::Action;
+    use zbus::{connection::Builder, fdo, proxy::CacheProperties, Guid};
+
+    use super::{ActionProxy, AtspiComputerAdapter};
+    use crate::{NativeAdapterErrorCode, NativeAdapterResult};
+
+    #[derive(Clone, Copy)]
+    enum FixtureReply {
+        Empty,
+        ReadFailure,
+        Success,
+        MutationFailure,
+    }
+
+    struct FixtureAction {
+        reply: FixtureReply,
+        mutations: Arc<Mutex<Vec<i32>>>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl FixtureAction {
+        fn get_actions(&self) -> fdo::Result<Vec<Action>> {
+            match self.reply {
+                FixtureReply::Empty => Ok(Vec::new()),
+                FixtureReply::ReadFailure => Err(fdo::Error::Failed(
+                    "synthetic action-list failure".to_string(),
+                )),
+                FixtureReply::Success | FixtureReply::MutationFailure => Ok(vec![Action {
+                    name: "activate".to_string(),
+                    description: "Activate fixture".to_string(),
+                    keybinding: String::new(),
+                }]),
+            }
+        }
+
+        fn do_action(&self, index: i32) -> fdo::Result<bool> {
+            self.mutations
+                .lock()
+                .expect("fixture mutation lock")
+                .push(index);
+            if matches!(self.reply, FixtureReply::MutationFailure) {
+                Err(fdo::Error::Failed("synthetic mutation failure".to_string()))
+            } else {
+                Ok(true)
+            }
+        }
+    }
+
+    async fn invoke_fixture(reply: FixtureReply) -> (NativeAdapterResult<()>, Vec<i32>) {
+        let mutations = Arc::new(Mutex::new(Vec::new()));
+        let (server_socket, client_socket) = UnixStream::pair().expect("fixture socket pair");
+        let server = Builder::unix_stream(server_socket)
+            .server(Guid::generate())
+            .expect("fixture server GUID")
+            .p2p()
+            .serve_at(
+                "/org/example/action",
+                FixtureAction {
+                    reply,
+                    mutations: Arc::clone(&mutations),
+                },
+            )
+            .expect("fixture action service")
+            .build();
+        let client = Builder::unix_stream(client_socket).p2p().build();
+        let (_server, client) = futures::try_join!(server, client).expect("fixture connections");
+        let proxy = ActionProxy::builder(&client)
+            .destination("org.example.ActionFixture")
+            .expect("fixture action destination")
+            .path("/org/example/action")
+            .expect("fixture action path")
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .expect("fixture action proxy");
+        let result = AtspiComputerAdapter::perform_named_action_with_proxy(&proxy, None).await;
+        let dispatched = mutations.lock().expect("fixture mutation lock").clone();
+        (result, dispatched)
+    }
+
+    #[tokio::test]
+    async fn empty_action_list_rejects_invoke_without_mutation() {
+        let (result, mutations) = invoke_fixture(FixtureReply::Empty).await;
+        let error = result.expect_err("empty action list cannot invoke");
+        assert_eq!(error.code, NativeAdapterErrorCode::Unsupported);
+        assert!(!error.dispatched);
+        assert_eq!(mutations, [] as [i32; 0]);
+    }
+
+    #[tokio::test]
+    async fn action_list_read_failure_rejects_invoke_without_mutation() {
+        let (result, mutations) = invoke_fixture(FixtureReply::ReadFailure).await;
+        let error = result.expect_err("action-list read must fail before mutation");
+        assert_eq!(error.code, NativeAdapterErrorCode::DriverFailed);
+        assert!(!error.dispatched);
+        assert_eq!(mutations, [] as [i32; 0]);
+    }
+
+    #[tokio::test]
+    async fn nonempty_action_list_invokes_default_action_once() {
+        let (result, mutations) = invoke_fixture(FixtureReply::Success).await;
+        result.expect("default action invokes successfully");
+        assert_eq!(mutations, [0]);
+    }
+
+    #[tokio::test]
+    async fn mutation_failure_preserves_unknown_outcome() {
+        let (result, mutations) = invoke_fixture(FixtureReply::MutationFailure).await;
+        let error = result.expect_err("mutation outcome cannot be confirmed");
+        assert_eq!(error.code, NativeAdapterErrorCode::OutcomeUnknown);
+        assert!(error.dispatched);
+        assert_eq!(mutations, [0]);
+    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
@@ -14,12 +15,21 @@ import type {
   SessionTurnSurface,
 } from "@opengeni/contracts";
 import { resolveTurnSurface } from "../turn-surface";
+import {
+  recordSessionCreated,
+  recordUserMessageAccepted,
+  type ProductUsageMetricsSink,
+} from "../product-usage-metrics";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
+import {
+  requireDeveloperSetupDelegatedPermissions,
+  withDeveloperSetupCredentialRestriction,
+} from "../developer-setup-credential-ceiling";
 
 import {
   CLAUDE_CONNECTION_KINDS,
@@ -277,6 +287,7 @@ function defaultPolicyExclusions(
 
 function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
   return (
+    (modelId != null && isDirectModelId(modelId)) ||
     modelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX) === true ||
@@ -891,6 +902,11 @@ export async function createAndStartSessionWithOutcome(input: {
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
+  /**
+   * Live product usage counters: a newly created session (never a replay)
+   * counts once, and its initial user message once unless deferred.
+   */
+  metrics?: ProductUsageMetricsSink | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
@@ -1106,9 +1122,7 @@ export async function createAndStartSessionWithOutcome(input: {
               reference,
             });
             if (!active) {
-              throw new HTTPException(422, {
-                message: `model is not available: ${input.model}`,
-              });
+              throw modelUnavailableHttpException(input.model);
             }
           }
           // Reject an already-stale browser draft before the newly inserted
@@ -1240,6 +1254,7 @@ export async function createAndStartSessionWithOutcome(input: {
       targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
       keyed,
     );
+    recordCreatedSessionUsage(input);
     return {
       session: finished.session,
       outcome: "created",
@@ -1316,12 +1331,30 @@ export async function createAndStartSessionWithOutcome(input: {
     targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
     session,
   );
+  recordCreatedSessionUsage(input);
   return {
     session: finished.session,
     outcome: "created",
     replay: false,
     changed: true,
   };
+}
+
+function recordCreatedSessionUsage(input: {
+  metrics?: ProductUsageMetricsSink | null;
+  surface?: SessionTurnSurface | null;
+  createdBy?: TurnInitiator;
+  parentSessionId?: string | null;
+  deferInitialTurn?: boolean;
+}): void {
+  recordSessionCreated(input.metrics, {
+    surface: input.surface,
+    createdByKind: input.createdBy?.kind ?? "service",
+    parentSessionId: input.parentSessionId,
+  });
+  if (!input.deferInitialTurn) {
+    recordUserMessageAccepted(input.metrics, { surface: input.surface });
+  }
 }
 
 /** Backward-compatible entity-returning create path used by existing callers. */
@@ -1511,6 +1544,17 @@ export function workflowIdForSession(sessionId: string): string {
 }
 
 /**
+ * The one 422 for a model that is not selectable in the live catalog (retired,
+ * removed, or never offered). The message keeps its historical text; the typed
+ * cause lets the API envelope add `details.code: "model_unavailable"` so
+ * clients can ask for another model instead of offering a futile retry.
+ */
+export function modelUnavailableHttpException(model: string): HTTPException {
+  const cause = new ModelUnavailableError(model);
+  return new HTTPException(422, { message: cause.message, cause });
+}
+
+/**
  * Reject an explicit model that the host does not expose. The set of usable
  * models is the union surfaced by `configuredAllowedModels` (the built-in
  * provider's allow-list plus every registry provider's ids); a `model` outside
@@ -1545,7 +1589,7 @@ export function canonicalConfiguredModel(
     ) {
       return canonicalModel;
     }
-    throw new HTTPException(422, { message: `model is not available: ${model}` });
+    throw modelUnavailableHttpException(model);
   }
   if (configuredAllowedModels(settings).includes(canonicalModel)) {
     return canonicalModel;
@@ -1569,7 +1613,7 @@ export function canonicalConfiguredModel(
   ) {
     return canonicalModel;
   }
-  throw new HTTPException(422, { message: `model is not available: ${model}` });
+  throw modelUnavailableHttpException(model);
 }
 
 export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
@@ -1943,9 +1987,7 @@ export async function postUserMessageTurn(
                         reference,
                       });
                       if (!active) {
-                        throw new HTTPException(422, {
-                          message: `model is not available: ${freshWorkspaceCustomModel}`,
-                        });
+                        throw modelUnavailableHttpException(freshWorkspaceCustomModel);
                       }
                     },
                   }
@@ -2190,15 +2232,18 @@ export async function retryFailedSession(
     throw error;
   }
   await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
-  const executionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: model,
-    requestedModelId: request.model ?? null,
-    modelSource: request.model === undefined ? "session" : "explicit",
-    reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
-    reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
-    latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
-    latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
-  });
+  const executionPolicy = withDeveloperSetupCredentialRestriction(
+    resolveTurnExecutionPolicyV1(settings, {
+      modelId: model,
+      requestedModelId: request.model ?? null,
+      modelSource: request.model === undefined ? "session" : "explicit",
+      reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
+      reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
+      latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
+      latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
+    }),
+    { grant, trustedMetadata: [session.metadata, turn?.metadata] },
+  );
   await requireLimit(
     { ...deps, settings },
     {
@@ -3008,30 +3053,33 @@ async function createSessionForRequestInFileScope(
         }
       : null;
   const inheritedFromParent = parentSession !== null;
-  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: model,
-    requestedModelId: payload.model ?? null,
-    modelSource:
-      payload.model === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-    reasoningEffort,
-    reasoningSource:
-      payload.reasoningEffort === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-    latencyMode,
-    latencyModeSource:
-      payload.latencyMode === undefined
-        ? inheritedFromParent
-          ? "continuation"
-          : "deployment"
-        : "explicit",
-  });
+  const turnExecutionPolicy = withDeveloperSetupCredentialRestriction(
+    resolveTurnExecutionPolicyV1(settings, {
+      modelId: model,
+      requestedModelId: payload.model ?? null,
+      modelSource:
+        payload.model === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+      reasoningEffort,
+      reasoningSource:
+        payload.reasoningEffort === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+      latencyMode,
+      latencyModeSource:
+        payload.latencyMode === undefined
+          ? inheritedFromParent
+            ? "continuation"
+            : "deployment"
+          : "explicit",
+    }),
+    { grant, authorization, trustedMetadata: [parentSession?.metadata] },
+  );
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
   // grant instead of silently expanding to standalone worker defaults.
@@ -3045,6 +3093,7 @@ async function createSessionForRequestInFileScope(
   const parentFirstPartyMcpPermissions = parentSession
     ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
     : null;
+  requireDeveloperSetupDelegatedPermissions(turnExecutionPolicy, payload.firstPartyMcpPermissions);
   if (
     parentFirstPartyMcpPermissions &&
     payload.firstPartyMcpPermissions?.some(
@@ -3541,6 +3590,7 @@ async function createSessionForRequestInFileScope(
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
       surface,
+      metrics: unresolvedDeps.observability ?? null,
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       resources,
@@ -3959,15 +4009,18 @@ async function acceptSessionUserMessageInFileScope(
     const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
     const sessionLatencyMode = existingSession.latencyMode;
     const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
-    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: effectiveModel,
-      requestedModelId: input.model ?? null,
-      modelSource: input.model == null ? "session" : "explicit",
-      reasoningEffort: effectiveReasoningEffort,
-      reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
-      latencyMode: effectiveLatencyMode,
-      latencyModeSource: input.latencyMode == null ? "session" : "explicit",
-    });
+    const turnExecutionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: effectiveModel,
+        requestedModelId: input.model ?? null,
+        modelSource: input.model == null ? "session" : "explicit",
+        reasoningEffort: effectiveReasoningEffort,
+        reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+        latencyMode: effectiveLatencyMode,
+        latencyModeSource: input.latencyMode == null ? "session" : "explicit",
+      }),
+      { grant, authorization: input.authorization, trustedMetadata: [existingSession.metadata] },
+    );
     if (composerDraftResources) {
       const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
       const unacceptedDraftResource = composerDraftResources.find(
@@ -4117,6 +4170,11 @@ async function acceptSessionUserMessageInFileScope(
     });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
+    const surface = resolveTurnSurface({
+      grant,
+      authorization: input.authorization,
+      requested: input.surface,
+    });
     const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
       await postUserMessageTurn({
         db,
@@ -4151,11 +4209,7 @@ async function acceptSessionUserMessageInFileScope(
           : {}),
         delivery,
         origin: source === "api" ? "operator" : "human",
-        surface: resolveTurnSurface({
-          grant,
-          authorization: input.authorization,
-          requested: input.surface,
-        }),
+        surface,
         actor: grant.subjectId,
         ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
         commandActor,
@@ -4170,6 +4224,7 @@ async function acceptSessionUserMessageInFileScope(
           ? { schedulePostCommit: deps.schedulePromptPostCommit }
           : {}),
       });
+    if (!replay) recordUserMessageAccepted(deps.observability, { surface });
     return {
       accepted,
       turn,

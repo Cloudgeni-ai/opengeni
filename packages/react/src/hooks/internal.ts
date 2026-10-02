@@ -1,6 +1,7 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { EmbeddedSessionEventClientLike } from "../client";
+import { normalizeError } from "../lib/error-message";
 
 const HIDDEN_STREAM_GRACE_MS = 2_000;
 
@@ -116,7 +117,7 @@ export function usePolledValue<T>(
           activeLoadRef.current === load &&
           !requestAbort.signal.aborted
         ) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
           setLoading(false);
         }
       } finally {
@@ -258,7 +259,7 @@ export function useMutationRunner(identity: unknown = undefined): MutationState 
           generation.current === ownedGeneration &&
           Object.is(identityRef.current, ownedIdentity)
         ) {
-          setMutationError(cause instanceof Error ? cause : new Error(String(cause)));
+          setMutationError(normalizeError(cause));
         }
         return null;
       } finally {

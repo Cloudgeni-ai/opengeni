@@ -1,6 +1,10 @@
+import { withDirectModelProviders } from "@opengeni/config";
+import { listConnectionsMetadata } from "@opengeni/db";
 import {
-  getWorkspaceProviderApiKeyConnectionMetadata,
-  listWorkspaceProviderCustomModels,
+  workspaceProviderApiKeyConnectionMetadataFromConnections,
+  listWorkspaceProviderCustomModelsByKind,
+  getOrganizationModelProviderCatalogForWorkspace,
+  type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
@@ -79,9 +83,6 @@ import {
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
-  workspaceOpenRouterConnectionActive,
-  organizationModelProviderConnectionActiveForWorkspace,
-  listOrganizationModelProviderCustomModelsForWorkspace,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -97,6 +98,8 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  requireApiKeyDelegationContext,
+  isDeveloperSetupApiKeyContext,
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
@@ -394,14 +397,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
-      await grantWorkspaceAccess(deps.db, {
-        accountId,
-        workspaceId: workspace.id,
-        subjectId: context.subjectId,
-        role: "owner",
-        permissions: allWorkspacePermissions,
-        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
-      });
+      // Setup keys already have canonical same-organization workspace access.
+      // Do not widen that ceiling with an all-permissions creator membership.
+      if (!isDeveloperSetupApiKeyContext(context)) {
+        await grantWorkspaceAccess(deps.db, {
+          accountId,
+          workspaceId: workspace.id,
+          subjectId: context.subjectId,
+          role: "owner",
+          permissions: allWorkspacePermissions,
+          ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        });
+      }
       return c.json(Workspace.parse(workspace), 201);
     } catch (error) {
       if (error instanceof WorkspaceLimitExceededError) {
@@ -521,6 +528,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const catalogSettings = deps.resolveCatalogSettings();
+    const providerKinds: WorkspaceCustomModelProviderKind[] = [
+      "vercel_gateway",
+      "openrouter",
+      ...CLAUDE_CONNECTION_KINDS.filter(
+        (kind) => kind !== "claude_subscription" || deps.settings.claudeSubscriptionEnabled,
+      ),
+    ];
     const [
       connectionModelRestrictions,
       resolvedCatalog,
@@ -528,14 +542,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       codexSubscriptionActive,
       codexModelAvailability,
       xaiSubscriptionActive,
-      workspaceGatewayConnectionActive,
-      workspaceGatewayCustomModels,
-      openRouterConnectionActive,
-      workspaceOpenRouterCustomModels,
-      organizationGatewayConnectionActive,
-      organizationOpenRouterConnectionActive,
-      organizationGatewayCustomModels,
-      organizationOpenRouterCustomModels,
+      workspaceConnections,
+      workspaceCustomModels,
+      organizationProviders,
       workspace,
     ] = await Promise.all([
       getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
@@ -546,90 +555,58 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         loadWorkspaceCodexModelAvailability(deps.db, settings, workspaceId),
       ),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
-      workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
-      listWorkspaceGatewayCustomModels(deps.db, {
+      listConnectionsMetadata(deps.db, workspaceId, null),
+      listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,
         workspaceId,
+        providerKinds,
       }),
-      workspaceOpenRouterConnectionActive(deps.db, workspaceId),
-      listWorkspaceOpenRouterCustomModels(deps.db, {
+      getOrganizationModelProviderCatalogForWorkspace(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-      }),
-      organizationModelProviderConnectionActiveForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      organizationModelProviderConnectionActiveForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKind: "openrouter",
+        providerKinds,
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
     const claudeConnections: ClaudeConnectionCatalog = {};
     const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
-    await Promise.all(
-      CLAUDE_CONNECTION_KINDS.map(async (kind) => {
-        if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled) return;
-        const [active, models] = await Promise.all([
-          organizationModelProviderConnectionActiveForWorkspace(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            providerKind: kind,
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            providerKind: kind,
-          }),
-        ]);
-        claudeConnections[kind] = { active, models };
-        const [metadata, workspaceModels] = await Promise.all([
-          getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, kind),
-          listWorkspaceProviderCustomModels(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            providerKind: kind,
-          }),
-        ]);
-        workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
-      }),
+    const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
+      workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
+    for (const kind of CLAUDE_CONNECTION_KINDS) {
+      if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled) continue;
+      claudeConnections[kind] = organizationProviders[kind];
+      workspaceClaudeConnections[kind] = {
+        active: workspaceConnectionActive(kind),
+        models: workspaceCustomModels[kind],
+      };
+    }
+    const workspaceCatalogSettings = withDirectModelProviders(
+      resolvedCatalog.settings,
+      workspaceConnections,
     );
     const selections = resolveWorkspaceModelSelection({
       claudeConnections,
       workspaceClaudeConnections,
       connectionModelRestrictions,
-      settings: resolvedCatalog.settings,
+      settings: workspaceCatalogSettings,
       policy,
       observations: codexModelAvailability,
       codexSubscriptionActive,
       xaiSubscriptionActive,
-      workspaceGatewayConnectionActive,
-      workspaceGatewayCustomModels,
-      workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-      workspaceOpenRouterCustomModels,
-      organizationGatewayConnectionActive,
-      organizationOpenRouterConnectionActive,
-      organizationGatewayCustomModels,
-      organizationOpenRouterCustomModels,
+      workspaceGatewayConnectionActive: workspaceConnectionActive("vercel_gateway"),
+      workspaceGatewayCustomModels: workspaceCustomModels.vercel_gateway,
+      workspaceOpenRouterConnectionActive: workspaceConnectionActive("openrouter"),
+      workspaceOpenRouterCustomModels: workspaceCustomModels.openrouter,
+      organizationGatewayConnectionActive: organizationProviders.vercel_gateway.active,
+      organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
+      organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
+      organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
     const workspaceSettings = workspace?.settings ?? {};
     const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
-      settings: resolvedCatalog.settings,
+      settings: workspaceCatalogSettings,
       accountId: grant.accountId,
       workspaceSettings,
       selections,
@@ -640,7 +617,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         projectWorkspaceModelCatalog(selections, {
           defaultSelection,
           creditsSelection: creditsDefaultSessionModel({
-            settings: resolvedCatalog.settings,
+            settings: workspaceCatalogSettings,
             selections,
             workspaceSettings,
           }),
@@ -1172,6 +1149,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     let candidates: WorkspaceMemberCandidate[];
     try {
       candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
@@ -1224,6 +1202,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
+    requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {

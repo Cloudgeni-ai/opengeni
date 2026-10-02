@@ -36,6 +36,7 @@ import {
   type RefObject,
 } from "react";
 import { argHint, defaultCommands } from "../commands/registry";
+import { useErrorMessage } from "../lib/error-message";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import { shouldSteerOnKey, shouldSubmitOnKey } from "../hooks/use-composer";
@@ -175,7 +176,9 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   messagePlaceholder: "Message the agent…",
   pausedPlaceholder: "Message the agent — it will wait in the queue…",
   inputLabel: "Message the agent",
-  keyboardHint: "Enter to queue · Cmd/Ctrl+Enter to steer · Shift+Enter for a new line",
+  // Shortcuts live in the send button's title; the footer stays quiet unless
+  // the host supplies its own hint.
+  keyboardHint: "",
   slashCommandBlocked:
     "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
   controlChangedError:
@@ -374,6 +377,7 @@ export function useChatComposerController({
   onPaste,
   messages: messageOverrides,
 }: UseChatComposerControllerOptions) {
+  const formatError = useErrorMessage();
   const messages = useMemo(
     () => ({ ...defaultChatComposerMessages, ...messageOverrides }),
     [messageOverrides],
@@ -663,7 +667,10 @@ export function useChatComposerController({
           tone: "error" as const,
           message: /control changed|paused while/i.test(delivery.error.message)
             ? messages.controlChangedError
-            : composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+            : formatError(
+                delivery.error,
+                composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+              ),
         }
       : null);
   useEffect(() => {

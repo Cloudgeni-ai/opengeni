@@ -445,6 +445,20 @@ describe("workspace Gateway custom model API", () => {
   }
   test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {
     if (!publicApp) throw new Error("Real database fixture required");
+    for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+      expect(
+        (
+          await request(
+            `/model-providers/${providerKind}/custom-models`,
+            {
+              method: "POST",
+              body: { operationId: crypto.randomUUID(), upstreamModelId: "catalog-flag-fixture" },
+            },
+            publicApp,
+          )
+        ).status,
+      ).toBe(201);
+    }
     settings.claudeSubscriptionEnabled = false;
     try {
       expect(
@@ -457,6 +471,17 @@ describe("workspace Gateway custom model API", () => {
       expect(
         (await request("/model-providers/anthropic/custom-models", {}, publicApp)).status,
       ).toBe(200);
+      const catalogResponse = await request("/model-catalog", {}, publicApp);
+      expect(catalogResponse.status).toBe(200);
+      const catalog = await catalogResponse.json();
+      expect(
+        catalog.models.some((model: { provider: string }) =>
+          model.provider.includes("claude-subscription"),
+        ),
+      ).toBe(false);
+      expect(
+        catalog.models.some((model: { provider: string }) => model.provider.includes("anthropic")),
+      ).toBe(true);
     } finally {
       settings.claudeSubscriptionEnabled = true;
     }

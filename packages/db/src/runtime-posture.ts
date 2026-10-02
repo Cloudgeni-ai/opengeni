@@ -79,6 +79,13 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "read_sender_connection(uuid, uuid, uuid, text)",
+  // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
+  // functions and the migration-owner backfill. Runtime roles may still hold
+  // EXECUTE until a follow-up migration revokes it once no pre-0565 binary
+  // can run; this binary no longer requires it.
+  "capture_product_lifecycle_fact()",
+  "observe_credit_grant()",
+  "backfill_product_lifecycle_facts(text, integer)",
   "validate_mcp_account_bindings(jsonb, jsonb)",
   "fence_mcp_account_bindings()",
   "guard_mcp_operation_immutable()",
@@ -701,6 +708,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
   "count_workspace_allowance_debit()",

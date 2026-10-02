@@ -125,7 +125,7 @@ async function listCalls(): Promise<SessionSidebarEvidence["listCalls"]> {
   return page.evaluate(() => window.sessionSidebarQa.listCalls);
 }
 
-test("projects start at four roots; disclosure is independent and keeps fifty-row cache pages", async () => {
+test("projects start at four roots and fetch the next displayed step independently", async () => {
   await openActive();
   expect(await group("Archived").count()).toBe(0);
   expect(await page.getByText(/^Archived /).count()).toBe(0);
@@ -133,12 +133,12 @@ test("projects start at four roots; disclosure is independent and keeps fifty-ro
   expect(initial).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        options: expect.objectContaining({ channelId: redesignId, limit: 50 }),
+        options: expect.objectContaining({ channelId: redesignId, limit: 4 }),
       }),
       expect.objectContaining({
-        options: expect.objectContaining({ channelId: bugfixesId, limit: 50 }),
+        options: expect.objectContaining({ channelId: bugfixesId, limit: 4 }),
       }),
-      expect.objectContaining({ options: expect.objectContaining({ channelId: null, limit: 50 }) }),
+      expect.objectContaining({ options: expect.objectContaining({ channelId: null, limit: 4 }) }),
     ]),
   );
   await capture("active-projects");
@@ -148,9 +148,9 @@ test("projects start at four roots; disclosure is independent and keeps fifty-ro
   expect(await showMore("Website redesign").count()).toBe(0);
   expect(await rows(group("Bugfixes")).count()).toBe(4);
   expect(await rows(group("Default")).count()).toBe(4);
-  // All eight were cached by the first fifty-row page; disclosure performs no read.
+  // Only the newly disclosed step is fetched for this project.
   expect((await listCalls()).filter((call) => call.options.channelId === redesignId).length).toBe(
-    initial.filter((call) => call.options.channelId === redesignId).length,
+    initial.filter((call) => call.options.channelId === redesignId).length + 1,
   );
 
   await showMore("Bugfixes").click();
@@ -160,7 +160,7 @@ test("projects start at four roots; disclosure is independent and keeps fifty-ro
   await capture("expanded");
 }, 30_000);
 
-test("disclosure fills across a fifty-row server cursor in one bounded step", async () => {
+test("disclosure follows four-row cursors through the final partial step", async () => {
   await openActive();
   for (let count = 8; count <= 48; count += 4) {
     await showMore("Default").click();
@@ -169,7 +169,7 @@ test("disclosure fills across a fifty-row server cursor in one bounded step", as
   expect(
     (await listCalls()).filter((call) => call.options.channelId === null && call.options.cursor)
       .length,
-  ).toBe(0);
+  ).toBe(11);
   await showMore("Default").click();
   await waitForRows("Default", 51);
   expect(await showMore("Default").count()).toBe(0);
@@ -178,8 +178,12 @@ test("disclosure fills across a fifty-row server cursor in one bounded step", as
   expect(await listCalls()).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        options: expect.objectContaining({ channelId: null, cursor: "50", limit: 50 }),
-        returnedIds: ["00000000-0000-4000-9000-000000000350"],
+        options: expect.objectContaining({ channelId: null, cursor: "48", limit: 4 }),
+        returnedIds: [
+          "00000000-0000-4000-9000-000000000348",
+          "00000000-0000-4000-9000-000000000349",
+          "00000000-0000-4000-9000-000000000350",
+        ],
         nextCursor: null,
       }),
     ]),
@@ -322,6 +326,7 @@ test("a discovered creator auto-hydrates to four before disclosure and expands i
   const discovery = calls.find(
     (call) =>
       !call.options.pinsOnly &&
+      call.options.limit === 50 &&
       call.options.channelId === undefined &&
       !call.options.createdBy &&
       call.options.archiveStatus === "active",
@@ -361,8 +366,9 @@ test("an off-page project's first-read error exposes retry and recovers only fou
   await showMore("Bugfixes").click();
   await waitForRows("Bugfixes", 8);
   const calls = (await listCalls()).filter((call) => call.options.channelId === bugfixesId);
-  expect(calls.map((call) => call.outcome)).toEqual(["error", "success"]);
-  expect(calls.every((call) => call.options.limit === 50 && !call.options.cursor)).toBe(true);
+  expect(calls.map((call) => call.outcome)).toEqual(["error", "success", "success"]);
+  expect(calls.every((call) => call.options.limit === 4)).toBe(true);
+  expect(calls.map((call) => call.options.cursor)).toEqual([undefined, undefined, "4"]);
 }, 30_000);
 
 test("mobile width preserves four-row disclosure and the actual view menu without overflow", async () => {
@@ -483,6 +489,14 @@ test("one Active disclosure traverses overlapping and sparse fifty-row pages to 
 }, 30_000);
 
 async function openKeyboardFocus(visibleCount: number) {
+  // Keep all 106 recent fixtures in Today, including when CI runs at midnight.
+  // Fix only the wall clock; loading and keyboard timers still run normally.
+  const noon = await page.evaluate(() => {
+    const date = new Date();
+    date.setHours(12, 0, 0, 0);
+    return date.getTime();
+  });
+  await page.clock.setFixedTime(noon);
   await page.goto(`${url}?scenario=keyboard-focus`);
   await waitForRows("Today", 4);
   for (let count = 8; count <= visibleCount; count += 4) {

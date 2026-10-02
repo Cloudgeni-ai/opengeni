@@ -15,9 +15,25 @@ export const ClaudeUsageWindow = z
     resetsAt: z.string().datetime().nullable(),
     status: z.enum(["allowed", "allowed_warning", "rejected"]).nullable(),
     observedAt: z.string().datetime(),
+    source: z.enum(["response_headers", "provider"]).optional(),
   })
   .strict();
 export type ClaudeUsageWindow = z.infer<typeof ClaudeUsageWindow>;
+
+/** One response's dispatch authority; never combine statuses from different responses. */
+export const ClaudeUsageRequestStatus = z
+  .object({
+    status: z.enum(["allowed", "allowed_warning", "rejected"]).nullable(),
+    resetsAt: z.string().datetime().nullable(),
+    representativeClaim: ClaudeUsageWindowId.nullable(),
+    overageStatus: z.enum(["allowed", "allowed_warning", "rejected"]).nullable(),
+    overageResetsAt: z.string().datetime().nullable(),
+    upstreamModelId: z.string().min(1).max(256).nullable(),
+    observedAt: z.string().datetime(),
+    source: z.enum(["response_headers", "provider"]).optional(),
+  })
+  .strict();
+export type ClaudeUsageRequestStatus = z.infer<typeof ClaudeUsageRequestStatus>;
 
 /** Provider observations, never an estimate based on OpenGeni token counts. */
 export const ClaudeSubscriptionUsage = z
@@ -35,6 +51,9 @@ export const ClaudeSubscriptionUsage = z
       "reconnect",
     ]),
     refreshCheckedAt: z.string().datetime().nullable(),
+    requestStatus: ClaudeUsageRequestStatus.nullable().optional(),
+    // Model-scoped dispatch evidence; allowances retain an ordering watermark.
+    requestRestrictions: z.array(ClaudeUsageRequestStatus).max(64).optional(),
   })
   .strict();
 export type ClaudeSubscriptionUsage = z.infer<typeof ClaudeSubscriptionUsage>;

@@ -2369,7 +2369,7 @@ describe("worker activities integration", () => {
       resources: [
         {
           kind: "repository",
-          uri: "https://github.com/Futhark-AS/aifilesearch.git",
+          uri: "https://git.example.com/team/fixture.git",
           ref: "main",
         },
       ],
@@ -2416,7 +2416,7 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(3);
+    expect(sandboxExecCalls.length).toBeGreaterThan(3);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
     expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
@@ -2425,13 +2425,26 @@ describe("worker activities integration", () => {
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
-    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
-      "start_repository_clone '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
+    const chunks = sandboxExecCalls.slice(2).flatMap(({ cmd }) => {
+      const match = String(cmd).match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
+      return match ? [match[1]!] : [];
+    });
+    expect(chunks.length).toBeGreaterThan(0);
+    const cloneCommand = Buffer.from(chunks.join(""), "base64").toString("utf8");
+    expect(cloneCommand).toContain(
+      "start_repository_clone '/workspace/repos/git.example.com/team/fixture.git'",
     );
-    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
+    expect(cloneCommand).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[2]?.cmd)).toContain("x-access-token");
+    expect(cloneCommand).toContain("x-access-token");
+    const cloneExecution = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes("exec /bin/sh '/tmp/opengeni/repository-setup-payloads/"),
+    );
+    expect(cloneExecution).toBeGreaterThan(2);
+    expect(String(sandboxExecCalls.at(-1)?.cmd)).toContain(
+      "rm -f '/tmp/opengeni/repository-setup-payloads/",
+    );
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);

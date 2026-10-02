@@ -144,6 +144,11 @@ export type ControlActivityServices = SharedActivityServices;
 
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
+  /** Host-owned containment: stop polling and checkpoint peer turns before exit.
+   * Bare activity embedders must provide their own worker lifecycle edge. */
+  requestWorkerDrain: () => void;
+  /** Deterministic test clock for the cleanup-only monitor. */
+  turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
@@ -302,6 +307,10 @@ export type PostClaimDatabaseRecoveryDetail = {
   providerRecoveryCount?: number;
   /** Safe classified provider cause paired with providerRecoveryCount. */
   providerFailureCode?: string;
+  /** Persist the no-replay setup marker, not a new provider/setup attempt. */
+  sandboxSetupOutcomeUnknown?: true;
+  /** Preserve the exhausted budget for a command proven not dispatched. */
+  sandboxSetupRecoveryExhausted?: true;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
@@ -436,6 +445,7 @@ export type DispatchScheduledTaskRunInput = {
       triggerType: Extract<ScheduledTaskTriggerType, "scheduled">;
       agentRunUsageIdempotencyKey?: never;
       initiator?: never;
+      credentialRestriction?: never;
     }
   | {
       triggerType: Extract<
@@ -445,6 +455,8 @@ export type DispatchScheduledTaskRunInput = {
       agentRunUsageIdempotencyKey: string;
       /** Exact identity used by the API-side charge for this same trigger. */
       initiator: TurnInitiator;
+      /** Trusted API-side caller ceiling for this occurrence, not the schedule. */
+      credentialRestriction?: "developer_setup";
     }
 );
 

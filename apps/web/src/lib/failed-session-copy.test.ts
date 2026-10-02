@@ -21,7 +21,7 @@ test("only explicit model availability evidence suggests another model", () => {
     "An unknown response was received.",
   ]) {
     expect(failedSessionCopy({ ...summary, reason })).toEqual({
-      reason: "The session stopped because of an unexpected error.",
+      reason: "The session stopped unexpectedly.",
       unavailableModel: false,
       detail: reason,
     });
@@ -38,7 +38,7 @@ test("unknown errors have a plain headline and complete recorded details", () =>
   expect(result.reason.length).toBeLessThanOrEqual(160);
   expect(result.detail).toBe(recorded);
   expect(failedSessionCopy({ ...summary, reason: null }).reason).toBe(
-    "The session stopped because of an unexpected error.",
+    "The session stopped unexpectedly.",
   );
 });
 
@@ -119,7 +119,7 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
     "413 Payload Too Large",
   ]) {
     expect(failedSessionCopy({ ...summary, reason, recordedDetail: reason })).toEqual({
-      reason: "The session stopped because of an unexpected error.",
+      reason: "The session stopped unexpectedly.",
       unavailableModel: false,
       detail: reason,
     });
@@ -262,7 +262,7 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
       recordedDetail: "Connection interrupted.",
     }),
   ).toEqual({
-    reason: "The session stopped because of an unexpected error.",
+    reason: "The session stopped unexpectedly.",
     unavailableModel: false,
     detail: "Connection interrupted.",
   });
@@ -297,7 +297,7 @@ test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", 
   expect(
     failedSessionCopy({ ...summary, reason: rejected, failureCode: "codex_request_rejected" }),
   ).toEqual({
-    reason: "Codex rejected this request without explaining why. Try again when you're ready.",
+    reason: "Codex rejected this request. Try again when you're ready.",
     unavailableModel: false,
     detail: rejected,
   });
@@ -305,11 +305,11 @@ test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", 
 
 test("Modal transport headline makes no command-outcome or retry claim", () => {
   const detail =
-    "Failed to run function tools: ClientError: /modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: Name resolution failed for target dns:task-fixture.w.modal.host:443";
+    "Failed to run function tools: ClientError: /modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: Name resolution failed for target dns:execution.example.test:443";
   const failure = { ...summary, reason: detail, recordedDetail: detail };
   const before = JSON.stringify(failure);
   expect(failedSessionCopy(failure)).toEqual({
-    reason: "OpenGeni lost contact with the execution environment.",
+    reason: "Opengeni lost contact with the execution environment.",
     unavailableModel: false,
     detail,
   });
@@ -319,8 +319,58 @@ test("Modal transport headline makes no command-outcome or retry claim", () => {
 test("unknown failure headline preserves diagnostic whitespace behind Details", () => {
   const detail = "Upstream failure\n  exact diagnostic\n";
   expect(failedSessionCopy({ ...summary, reason: detail })).toEqual({
-    reason: "The session stopped because of an unexpected error.",
+    reason: "The session stopped unexpectedly.",
     unavailableModel: false,
     detail,
   });
+});
+
+test("uncategorized preclaim diagnostics stay behind Details without changing failure truth", () => {
+  for (const detail of [
+    "Failed query: INSERT INTO fixture_records VALUES ($1)\nparams: synthetic-marker",
+    "getaddrinfo ENOTFOUND database.example.test",
+  ]) {
+    const failure = {
+      ...summary,
+      reason: detail,
+      recordedDetail: detail,
+      failureCode: "pre_claim_failure",
+    };
+    const before = JSON.stringify(failure);
+    expect(failedSessionCopy(failure)).toEqual({
+      reason: "The session stopped unexpectedly.",
+      unavailableModel: false,
+      detail,
+    });
+    expect(JSON.stringify(failure)).toBe(before);
+  }
+});
+
+test("preclaim presentation preserves existing authored database and structural remedies", () => {
+  const authored = "Earlier execution is still settling.";
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: authored,
+      failureCode: "pre_claim_failure",
+      structuralSandboxFailure: true,
+    }),
+  ).toEqual({ reason: authored, unavailableModel: false });
+  const database = "OpenGeni encountered a database error.";
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: database,
+      failureCode: "db_failure",
+      recordedDetail: "synthetic diagnostic",
+    }),
+  ).toEqual({ reason: database, unavailableModel: false });
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: "synthetic refusal",
+      failureCode: "pre_claim_failure",
+      safetyRefusal: true,
+    }).reason,
+  ).toBe("The model provider declined this request.");
 });

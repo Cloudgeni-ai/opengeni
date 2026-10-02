@@ -9,6 +9,10 @@ import {
   BrowserActionReceipt,
   BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse,
   BrowserDomReadResponse,
   BrowserDomReadLocator,
   BrowserDomReadSelector,
@@ -279,6 +283,8 @@ const TOOL_PERMISSION = {
   browser_act: "sessions:control",
   browser_clipboard: "sessions:read",
   browser_debug: "sessions:read",
+  browser_downloads: "sessions:read",
+  browser_download_save: ["sessions:control", "files:upload"],
   browser_auth: "sessions:control",
   interaction_request_human: "sessions:control",
   browser_identity: "sessions:control",
@@ -290,7 +296,7 @@ const TOOL_PERMISSION = {
   computer_clipboard: "sessions:read",
   computer_act: "sessions:control",
   computer_lifecycle: "sessions:control",
-} as const satisfies Record<InteractionAttemptToolName, Permission>;
+} as const satisfies Record<InteractionAttemptToolName, Permission | readonly Permission[]>;
 
 const DiscoveryInput = z
   .object({
@@ -617,6 +623,26 @@ const ComputerLifecycleInput = z
   .strict();
 
 const TERMINAL_LIFECYCLES = new Set(["ended", "failed"]);
+
+const BrowserDownloadsInput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    operation: z.enum(["list", "get"]).default("list"),
+    downloadId: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.operation === "get") !== (value.downloadId !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["downloadId"],
+        message: "downloadId is required only for operation=get",
+      });
+    }
+  });
+const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: true })
+  .extend({ browserSessionId: z.string().uuid(), downloadId: z.string().uuid() })
+  .strict();
 
 export type CreateInteractionAttemptToolsInput = {
   transport: InteractionTransport;
@@ -1037,6 +1063,82 @@ export function createInteractionAttemptToolDefinitions(
           ...(value.limit !== undefined ? { limit: value.limit } : {}),
         },
       ),
+  });
+
+  add({
+    name: "browser_downloads",
+    codemodePath: ["interaction", "browser", "downloads"],
+    title: "Inspect browser downloads",
+    description:
+      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. Attached browsers and Lightpanda do not expose managed downloads.",
+    input: BrowserDownloadsInput,
+    output: z.union([BrowserDownloadListResponse, BrowserDownload]),
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) => {
+      if (value.operation === "get") {
+        const download = await input.transport.getBrowserDownload(
+          input.workspaceId,
+          value.browserSessionId,
+          value.downloadId!,
+        );
+        if (
+          download.browserSessionId !== value.browserSessionId ||
+          download.id !== value.downloadId
+        ) {
+          throw new Error("Browser download belongs to another resource");
+        }
+        return download;
+      }
+      const response = await input.transport.listBrowserDownloads(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      if (
+        response.browserSessionId !== value.browserSessionId ||
+        response.downloads.some(
+          (download) =>
+            download.browserSessionId !== value.browserSessionId ||
+            download.controllerGeneration !== response.controllerGeneration,
+        )
+      ) {
+        throw new Error("Browser downloads belong to another session binding");
+      }
+      return response;
+    },
+  });
+
+  add({
+    name: "browser_download_save",
+    codemodePath: ["interaction", "browser", "downloadSave"],
+    title: "Save browser download to workspace",
+    description:
+      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+    input: BrowserDownloadSaveInput,
+    output: BrowserDownloadSaveResponse,
+    readOnly: false,
+    idempotent: true,
+    execute: async (value, context) => {
+      const response = await input.transport.saveBrowserDownload(
+        input.workspaceId,
+        value.browserSessionId,
+        value.downloadId,
+        {
+          operationId: context.operationId,
+          destinationPath: value.destinationPath,
+          overwrite: value.overwrite,
+        },
+      );
+      if (
+        response.download.browserSessionId !== value.browserSessionId ||
+        response.download.id !== value.downloadId ||
+        response.operationId !== context.operationId ||
+        response.destinationPath !== value.destinationPath
+      ) {
+        throw new Error("Browser download save returned another operation binding");
+      }
+      return response;
+    },
   });
 
   add({
@@ -1478,6 +1580,7 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
   scope: AttemptToolScope;
   subjectId?: string;
   subjectLabel?: string;
+  credentialRestriction?: "developer_setup";
   fetch?: typeof globalThis.fetch;
 };
 
@@ -1518,6 +1621,9 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
         turnId: input.scope.turnId,
         attemptId: input.scope.attemptId,
         executionGeneration: input.scope.executionGeneration,
+        ...(input.credentialRestriction
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
         exp: Math.floor(Date.now() / 1_000) + 60 * 60,
       });
       const headers = new Headers(init?.headers);
@@ -1988,8 +2094,16 @@ function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as AttemptToolJsonSchema;
 }
 
-function hasToolPermission(permissions: readonly Permission[], required: Permission): boolean {
-  return permissions.includes(required) || permissions.includes("workspace:admin");
+function hasToolPermission(
+  permissions: readonly Permission[],
+  required: Permission | readonly Permission[],
+): boolean {
+  return (
+    permissions.includes("workspace:admin") ||
+    (typeof required === "string" ? [required] : required).every((permission) =>
+      permissions.includes(permission),
+    )
+  );
 }
 
 function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {

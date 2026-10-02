@@ -10,57 +10,81 @@ import type { SessionFailureSummary } from "./events";
  * failures keep Retry because the condition can clear (a top-up, a verified
  * organization, a daily reset).
  */
-type KnownFailure = { message: string; retryUnhelpful: boolean; suggestModel: boolean };
+type KnownFailure = {
+  /** Closed analytics class (turn-failure-analytics.ts); never shown to people. */
+  kind: KnownFailureKind;
+  message: string;
+  retryUnhelpful: boolean;
+  suggestModel: boolean;
+};
+export type KnownFailureKind =
+  | "provider_credentials"
+  | "provider_billing"
+  | "provider_access"
+  | "daily_limit"
+  | "monthly_limit"
+  | "provider_quota"
+  | "rate_limited"
+  | "provider_error";
 
 const CREDENTIALS: KnownFailure = {
+  kind: "provider_credentials",
   message: "The model provider rejected the credentials for this model.",
   retryUnhelpful: true,
   suggestModel: true,
 };
 const PROVIDER_BILLING: KnownFailure = {
+  kind: "provider_billing",
   message: "The model provider account for this model is out of credits.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const PROVIDER_PAYMENT: KnownFailure = {
+  kind: "provider_billing",
   message: "The model provider couldn't bill this request. Check the account's payment details.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const PROVIDER_ACCESS: KnownFailure = {
+  kind: "provider_access",
   message: "The model provider denied access to this model.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const DAILY_LIMIT: KnownFailure = {
+  kind: "daily_limit",
   message: "This model's daily limit has been reached.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const MONTHLY_LIMIT: KnownFailure = {
+  kind: "monthly_limit",
   message: "This model's monthly limit has been reached.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const QUOTA: KnownFailure = {
+  kind: "provider_quota",
   message: "The model provider's usage quota for this model is used up.",
   retryUnhelpful: false,
   suggestModel: true,
 };
 const RATE_LIMITED: KnownFailure = {
+  kind: "rate_limited",
   message: "The model provider is rate limiting requests. Try again in a minute.",
   retryUnhelpful: false,
   suggestModel: false,
 };
 const PROVIDER_ERROR: KnownFailure = {
+  kind: "provider_error",
   message: "The model provider had a temporary error.",
   retryUnhelpful: false,
   suggestModel: false,
 };
 
-const UNKNOWN_FAILURE = "The session stopped because of an unexpected error.";
-const EXECUTION_CONNECTION_FAILURE = "OpenGeni lost contact with the execution environment.";
-const CODEX_REQUEST_REJECTED = "Codex rejected this request without explaining why.";
+const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
+const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution environment.";
+const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -94,6 +118,7 @@ export function classifyProviderFailure(
   quotaScope?: string | null,
 ): KnownFailure | null {
   if (failureCode === "provider_billing_error") return PROVIDER_PAYMENT;
+  if (failureCode === "anthropic_authentication_error") return CREDENTIALS;
   const scoped = quotaScopeFailure(quotaScope);
   if (scoped) return scoped;
   if (failureCode && !PROVIDER_TEXT_CODES.has(failureCode)) return null;
@@ -219,6 +244,7 @@ export function failedSessionCopy(
       ...(known === DAILY_LIMIT ? { dailyLimit: true as const } : {}),
     };
   }
+  // Unclassified preclaim text can also contain raw infrastructure diagnostics.
   // Presentation only: transport text grants no retry or provider-loss proof.
   // Preserve the complete diagnostic behind the existing Details disclosure.
   if (
@@ -226,7 +252,7 @@ export function failedSessionCopy(
     !failure.safetyRefusal &&
     !failure.structuralSandboxFailure &&
     !unavailableModel &&
-    !code &&
+    (!code || code === "pre_claim_failure") &&
     !/opengeni credits/i.test(recorded ?? "")
   ) {
     const detail = diagnostic;

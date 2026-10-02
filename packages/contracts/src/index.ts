@@ -1,3 +1,4 @@
+export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
@@ -12,6 +13,7 @@ import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-config";
+export * from "./model-availability";
 import {
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
   AgentConfigRequest,
@@ -63,6 +65,7 @@ export const HostMcpCreateSelections = z
   });
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
+import { OrganizationApiKeyPreset } from "./api-key-presets";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -104,6 +107,7 @@ export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
+export * from "./api-key-presets";
 export * from "./session-titles";
 export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
@@ -922,6 +926,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "browser_act",
   "browser_clipboard",
   "browser_debug",
+  "browser_downloads",
+  "browser_download_save",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -1034,6 +1040,8 @@ export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
   "browser_act",
   "browser_clipboard",
   "browser_debug",
+  "browser_downloads",
+  "browser_download_save",
   "browser_auth",
   "interaction_request_human",
   "browser_identity",
@@ -2772,6 +2780,7 @@ export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
 
 const reservedServiceTurnInitiatorContextKeys = new Set([
   "backfill",
+  "credentialRestriction",
   "label",
   "provenanceError",
   "opengeniSiteAuthConnectionId",
@@ -2848,10 +2857,11 @@ export type AccessGrant = z.infer<typeof AccessGrant>;
  * Organization API key access tier. `full` keys administer the organization
  * (create workspaces, mint keys, run sessions in every shared workspace);
  * `read` keys only inventory shared workspaces and read their sessions, events,
- * and files. The tier is derived from the key's stored permissions, never
+ * and files. Developer setup keys configure workspaces and budgets without key
+ * management or credential delegation. The tier is derived from stored permissions, never
  * stored separately: a key whose permissions omit `workspace:admin` is `read`.
  */
-export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export const OrganizationApiKeyAccess = z.enum(["full", "read", "developer_setup"]);
 export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
 
 /** Informational projection of direct API-key authority, not an authorization grant. */
@@ -2897,6 +2907,8 @@ export const DelegatedAccessTokenPayload = z
     // select a principal kind instead of inferring "human" from absent machine
     // markers.
     principalKind: DelegatedAccessPrincipalKind,
+    /** Trusted frozen setup-key ceiling, covered by the token HMAC. */
+    credentialRestriction: z.literal("developer_setup").optional(),
     // Trusted embedding hosts can sign a causal service principal separately
     // from the grant subject that authorizes the request. The claim is consumed
     // only when a command creates a new session/turn.
@@ -3014,22 +3026,25 @@ export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPay
 
 const delegatedAccessTokenPrefix = "ogd_";
 const delegatedServiceAccessTokenPrefix = "ogd2_";
+const delegatedRestrictedAccessTokenPrefix = "ogd3_";
 
 export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
 ): Promise<string> {
   const parsed = DelegatedAccessTokenPayload.parse(payload);
-  const prefix = parsed.serviceInitiator
-    ? delegatedServiceAccessTokenPrefix
-    : delegatedAccessTokenPrefix;
+  const prefix =
+    parsed.credentialRestriction === "developer_setup"
+      ? delegatedRestrictedAccessTokenPrefix
+      : parsed.serviceInitiator
+        ? delegatedServiceAccessTokenPrefix
+        : delegatedAccessTokenPrefix;
   const encodedPayload = base64UrlEncode(JSON.stringify(parsed));
-  // The service-capable envelope binds its prefix into the signature. An old
-  // verifier accepts only ogd_ and therefore fails closed during a rolling
-  // deploy; changing ogd2_ to ogd_ cannot turn provenance loss into success.
+  // Critical provenance uses a versioned, prefix-bound envelope. Older
+  // verifiers reject it; downgrading its prefix cannot discard the ceiling.
   const signature = await hmacSha256Base64Url(
     secret,
-    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+    prefix !== delegatedAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
   );
   return `${prefix}${encodedPayload}.${signature}`;
 }
@@ -3039,11 +3054,13 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
-  const prefix = token.startsWith(delegatedServiceAccessTokenPrefix)
-    ? delegatedServiceAccessTokenPrefix
-    : token.startsWith(delegatedAccessTokenPrefix)
-      ? delegatedAccessTokenPrefix
-      : null;
+  const prefix = token.startsWith(delegatedRestrictedAccessTokenPrefix)
+    ? delegatedRestrictedAccessTokenPrefix
+    : token.startsWith(delegatedServiceAccessTokenPrefix)
+      ? delegatedServiceAccessTokenPrefix
+      : token.startsWith(delegatedAccessTokenPrefix)
+        ? delegatedAccessTokenPrefix
+        : null;
   if (!prefix) {
     return null;
   }
@@ -3056,7 +3073,7 @@ export async function verifyDelegatedAccessToken(
   const signature = withoutPrefix.slice(dot + 1);
   const expected = await hmacSha256Base64Url(
     secret,
-    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+    prefix !== delegatedAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
   );
   if (!constantTimeEqual(signature, expected)) {
     return null;
@@ -3072,8 +3089,14 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   if (
-    (prefix === delegatedServiceAccessTokenPrefix) !==
-    (payload.data.serviceInitiator !== undefined)
+    (prefix === delegatedRestrictedAccessTokenPrefix) !==
+    (payload.data.credentialRestriction === "developer_setup")
+  ) {
+    return null;
+  }
+  if (
+    prefix !== delegatedRestrictedAccessTokenPrefix &&
+    (prefix === delegatedServiceAccessTokenPrefix) !== (payload.data.serviceInitiator !== undefined)
   ) {
     return null;
   }
@@ -3492,8 +3515,14 @@ export const CreateOrganizationApiKeyRequest = z
     expiresAt: z.string().datetime({ offset: true }).optional(),
     /** Access tier; omitted means `full` so existing callers keep their keys. */
     access: OrganizationApiKeyAccess.default("full"),
+    /** Optional creation alias for the developer_setup access tier. */
+    preset: OrganizationApiKeyPreset.optional(),
   })
-  .strict();
+  .strict()
+  .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
+    path: ["access"],
+    message: "Developer setup is not read-only organization API key access",
+  });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
@@ -10748,6 +10777,8 @@ export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSche
       metadata: AutomationBoundedJson.default({}),
       // Agent configuration for generated sessions. Omitted keeps legacy.
       agent: AgentConfigRequest.optional(),
+      // Server-frozen creator ceiling; never accepted as public write authority.
+      credentialRestriction: z.literal("developer_setup").optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -10767,6 +10798,14 @@ export const AutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSche
 );
 export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
 
+/** A caller can neither forge nor clear the server-owned creator ceiling. */
+export const AutomationSessionTemplateWrite = /* @__PURE__ */ defineSkillContractSchema(() =>
+  AutomationSessionTemplate.transform(
+    ({ credentialRestriction: _restriction, ...template }) => template,
+  ),
+);
+export type AutomationSessionTemplateWrite = z.infer<typeof AutomationSessionTemplateWrite>;
+
 /** Stored labels are projections, not assertions supplied by a new caller. */
 export const StoredAutomationSessionTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.preprocess(projectStoredTemplateSkillMetadata, AutomationSessionTemplate),
@@ -10781,6 +10820,8 @@ export const AutomationNormalizedEvent = z
     subject: z.string().trim().min(1).max(512).nullable().default(null),
     resource: z.string().trim().min(1).max(1024).nullable().default(null),
     payload: AutomationBoundedJson,
+    /** Server-owned manual-caller restriction, frozen in the immutable event. */
+    credentialRestriction: z.literal("developer_setup").optional(),
   })
   .strict();
 export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
@@ -10863,7 +10904,7 @@ export const CreateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContrac
       eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
       configuration: AutomationBoundedJson.default({}),
       parameters: AutomationBoundedJson.default({}),
-      sessionTemplate: AutomationSessionTemplate,
+      sessionTemplate: AutomationSessionTemplateWrite,
       status: AutomationTriggerStatus.default("active"),
     })
     .strict(),
@@ -10878,7 +10919,7 @@ export const UpdateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContrac
       eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
       configuration: AutomationBoundedJson.optional(),
       parameters: AutomationBoundedJson.optional(),
-      sessionTemplate: AutomationSessionTemplate.optional(),
+      sessionTemplate: AutomationSessionTemplateWrite.optional(),
       status: AutomationTriggerStatus.optional(),
     })
     .strict()
@@ -11590,6 +11631,8 @@ export const CreateConnectionRequest = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
   operationId: z.string().uuid().optional(),
+  /** For direct OpenAI/Azure keys: run a short provider check before saving. */
+  verifyModelAccess: z.boolean().optional(),
   /** Retired: connection execution is authorized by the initiating user. */
   initialUseContexts: z.never().optional(),
 });
@@ -12860,6 +12903,40 @@ export const SessionCommandFailure = z
   );
 export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
 
+/** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
+export const SessionBackgroundCommandReconciliation = z
+  .object({
+    lastOutcome: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,63}$/)
+      .nullable(),
+    attempts: z.number().int().nonnegative(),
+    dueAt: z.string().datetime({ offset: true }),
+    claimedAt: z.string().datetime({ offset: true }).nullable(),
+    terminalProof: z
+      .discriminatedUnion("outcome", [
+        z
+          .object({
+            outcome: z.literal("exited"),
+            exitCode: z.number().int(),
+            observedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+        z
+          .object({
+            outcome: z.literal("lost"),
+            exitCode: z.null(),
+            observedAt: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+      ])
+      .nullable(),
+  })
+  .strict();
+export type SessionBackgroundCommandReconciliation = z.infer<
+  typeof SessionBackgroundCommandReconciliation
+>;
+
 export const SessionBackgroundCommand = z
   .object({
     id: z.string().uuid(),
@@ -12868,6 +12945,7 @@ export const SessionBackgroundCommand = z
     provider: SessionBackgroundCommandProvider,
     state: SessionBackgroundCommandState,
     observationStatus: z.literal("unavailable").optional(),
+    reconciliation: SessionBackgroundCommandReconciliation.optional(),
     commandPreview: z.string().max(512),
     commandText: z.string().optional(),
     cancelRequestedAt: z.string().nullable(),
@@ -13247,6 +13325,55 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
   }),
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
+
+/** Compact list-only records; full Session and SessionSummary contracts are unchanged. */
+export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
+  Session.pick({
+    id: true,
+    workspaceId: true,
+    accountId: true,
+    status: true,
+    backgroundCommandActivity: true,
+    hasSchedules: true,
+    title: true,
+    titleSource: true,
+    createdBy: true,
+    channelId: true,
+    parentSessionId: true,
+    rootSessionId: true,
+    effectiveControl: true,
+    inputWait: true,
+    lastSequence: true,
+    pinned: true,
+    pinnedAt: true,
+    pinVersion: true,
+    unread: true,
+    activelyWorking: true,
+    attentionVersion: true,
+    archived: true,
+    archivedAt: true,
+    importedArchive: true,
+    archiveVersion: true,
+    treeStats: true,
+    requiresActionSince: true,
+    createdAt: true,
+    updatedAt: true,
+  }).extend({
+    displayTitle: z.string(),
+    renameSeed: z.string(),
+    scheduledTaskId: z.string().nullable(),
+    siteOrigin: z.object({ siteId: z.string().uuid(), title: z.string() }).nullable(),
+  }),
+);
+export type SessionListEntry = z.infer<typeof SessionListEntry>;
+export const SessionListEntryResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
+  SessionListResponse.omit({ pinned: true, sessions: true }).extend({
+    projection: z.literal("summary"),
+    pinned: z.array(SessionListEntry),
+    sessions: z.array(SessionListEntry),
+  }),
+);
+export type SessionListEntryResponse = z.infer<typeof SessionListEntryResponse>;
 
 /**
  * Organization session queries may filter a canonical scope subject and lifecycle
@@ -16490,29 +16617,31 @@ export const UpdateGitHubActionPolicyRequest = z.object({
 });
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
-export const ClientAuthConfig = z.discriminatedUnion("mode", [
-  z.object({
-    mode: z.literal("none"),
-  }),
-  z.object({
-    mode: z.literal("deploymentKey"),
-    headerName: z.literal("x-opengeni-access-key"),
-  }),
-  z.object({
-    mode: z.literal("configuredToken"),
-    headerName: z.literal("authorization"),
-    scheme: z.literal("bearer"),
-  }),
-  z.object({
-    mode: z.literal("managedSession"),
-    session: z.literal("cookie"),
-    emailVerificationRequired: z.boolean().default(true),
-    socialProviders: z
-      .array(z.enum(["google", "github"]))
-      .max(2)
-      .default([]),
-  }),
-]);
+export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.discriminatedUnion("mode", [
+    z.object({
+      mode: z.literal("none"),
+    }),
+    z.object({
+      mode: z.literal("deploymentKey"),
+      headerName: z.literal("x-opengeni-access-key"),
+    }),
+    z.object({
+      mode: z.literal("configuredToken"),
+      headerName: z.literal("authorization"),
+      scheme: z.literal("bearer"),
+    }),
+    z.object({
+      mode: z.literal("managedSession"),
+      session: z.literal("cookie"),
+      emailVerificationRequired: z.boolean().default(true),
+      socialProviders: z
+        .array(z.enum(["google", "github"]))
+        .max(2)
+        .default([]),
+    }),
+  ]),
+);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
 
 // The negotiated capability handshake document (sandbox contract C.3). ONE shape;
@@ -16535,91 +16664,93 @@ export const CapabilityUnavailableReason = z.enum([
 ]);
 export type CapabilityUnavailableReason = z.infer<typeof CapabilityUnavailableReason>;
 
-export const SessionCapabilities = z.object({
-  sessionId: z.string().uuid(),
-  backend: SandboxBackend,
-  os: SandboxOs,
-  liveness: z.enum(["cold", "warming", "warm", "draining"]),
-  // Echoed on viewer heartbeats (the split-brain fence).
-  leaseEpoch: z.number().int().nonnegative(),
-  workspaceGeneration: z.number().int().nonnegative().nullable().default(null),
-  archiveGeneration: z.number().int().nonnegative().nullable().default(null),
-  archiveComplete: z.boolean().default(false),
-  viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
-  FileSystem: z.object({
-    available: z.boolean(),
-    readOnly: z.boolean(),
-    root: z.string(),
-    pathSep: z.enum(["/", "\\"]),
-    treeMode: z.enum(["lazy", "snapshot"]),
-    reason: CapabilityUnavailableReason.nullable(),
+export const SessionCapabilities = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    sessionId: z.string().uuid(),
+    backend: SandboxBackend,
+    os: SandboxOs,
+    liveness: z.enum(["cold", "warming", "warm", "draining"]),
+    // Echoed on viewer heartbeats (the split-brain fence).
+    leaseEpoch: z.number().int().nonnegative(),
+    workspaceGeneration: z.number().int().nonnegative().nullable().default(null),
+    archiveGeneration: z.number().int().nonnegative().nullable().default(null),
+    archiveComplete: z.boolean().default(false),
+    viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
+    FileSystem: z.object({
+      available: z.boolean(),
+      readOnly: z.boolean(),
+      root: z.string(),
+      pathSep: z.enum(["/", "\\"]),
+      treeMode: z.enum(["lazy", "snapshot"]),
+      reason: CapabilityUnavailableReason.nullable(),
+    }),
+    Terminal: z.object({
+      transport: z.enum(["sse-events", "pty-ws", "relay-pty"]).nullable(),
+      ptyCapable: z.boolean(),
+      shell: z.string(),
+      // The direct-to-provider ttyd PTY-over-websocket URL (pty-ws) resolved on the
+      // SAME tunnel as the desktop; null on a cold lease / read-only sse-events
+      // firehose / degraded terminal. The scoped stream token is recorded against
+      // the holder (NEVER a URL query param), symmetric with DesktopStream.
+      url: z.string().url().nullable(),
+      token: z.string().nullable(),
+      // ISO absolute expiry of the minted stream token (symmetric with
+      // DesktopStream.expiresAt). Null when no live URL/token is minted.
+      expiresAt: z.string().nullable(),
+      reason: CapabilityUnavailableReason.nullable(),
+    }),
+    Git: z.object({
+      available: z.boolean(),
+      repos: z.array(z.string()),
+      reason: CapabilityUnavailableReason.nullable(),
+    }),
+    DesktopStream: z.object({
+      // "relay-frames" is the selfhosted framebuffer stream: PNG-per-frame protobuf
+      // datagrams spliced over the relay (NOT RFB). The viewer renders it with the
+      // "frames" client (a canvas painter), distinct from Modal's "vnc-ws"/"novnc".
+      transport: z.enum(["vnc-ws", "rdp-ws", "webrtc", "relay-frames"]).nullable(),
+      client: z.enum(["novnc", "web-rdp", "frames"]).nullable(),
+      mode: z.enum(["read-only", "interactive"]).default("read-only"),
+      url: z.string().url().nullable(),
+      token: z.string().nullable(),
+      expiresAt: z.string().nullable(),
+      resolution: z
+        .tuple([z.number().int().positive(), z.number().int().positive()])
+        .default([1024, 768]),
+      // REQUIRED, no default (the server must assert un-redacted pixels).
+      unredacted: z.boolean(),
+      requiresAcknowledgment: z.boolean(),
+      acknowledged: z.boolean(),
+      // SHARED-EXPOSURE disclosure (addendum E.1). `shared` is true when the box's
+      // group has >1 session: watching this desktop ALSO shows the sibling
+      // sessions' agents on the one :0 framebuffer (the pixels cannot be redacted).
+      // `sharedSessionIds` lists the OTHER sessions whose agents may appear — IDS
+      // ONLY, never their goal/metadata/conversation (a viewer of A must not be
+      // able to use "I can see B's id" to subscribe to B's events; stress g). When
+      // shared, the consent gate requires the shared-exposure acknowledgment (409
+      // shared_acknowledgment_required) before the desktop path is handed out.
+      shared: z.boolean().default(false),
+      sharedSessionIds: z.array(z.string().uuid()).default([]),
+      reason: CapabilityUnavailableReason.nullable(),
+    }),
+    Recording: z.object({
+      available: z.boolean(),
+      modes: z.array(z.enum(["manual", "on-turn", "on-verify"])),
+      codecs: z.array(z.enum(["h264-mp4", "vp9-webm"])),
+      reason: CapabilityUnavailableReason.nullable(),
+    }),
+    // Deprecated compatibility cell for clients that predate managed
+    // ComputerSession interaction tools. Newly negotiated documents report this
+    // unavailable/read-only with `disabled_by_policy`; the shape remains so older
+    // clients and persisted payloads still parse.
+    ComputerUse: z.object({
+      available: z.boolean(),
+      readOnly: z.boolean(),
+      reason: CapabilityUnavailableReason.nullable(),
+    }),
+    negotiatedAt: z.string(),
   }),
-  Terminal: z.object({
-    transport: z.enum(["sse-events", "pty-ws", "relay-pty"]).nullable(),
-    ptyCapable: z.boolean(),
-    shell: z.string(),
-    // The direct-to-provider ttyd PTY-over-websocket URL (pty-ws) resolved on the
-    // SAME tunnel as the desktop; null on a cold lease / read-only sse-events
-    // firehose / degraded terminal. The scoped stream token is recorded against
-    // the holder (NEVER a URL query param), symmetric with DesktopStream.
-    url: z.string().url().nullable(),
-    token: z.string().nullable(),
-    // ISO absolute expiry of the minted stream token (symmetric with
-    // DesktopStream.expiresAt). Null when no live URL/token is minted.
-    expiresAt: z.string().nullable(),
-    reason: CapabilityUnavailableReason.nullable(),
-  }),
-  Git: z.object({
-    available: z.boolean(),
-    repos: z.array(z.string()),
-    reason: CapabilityUnavailableReason.nullable(),
-  }),
-  DesktopStream: z.object({
-    // "relay-frames" is the selfhosted framebuffer stream: PNG-per-frame protobuf
-    // datagrams spliced over the relay (NOT RFB). The viewer renders it with the
-    // "frames" client (a canvas painter), distinct from Modal's "vnc-ws"/"novnc".
-    transport: z.enum(["vnc-ws", "rdp-ws", "webrtc", "relay-frames"]).nullable(),
-    client: z.enum(["novnc", "web-rdp", "frames"]).nullable(),
-    mode: z.enum(["read-only", "interactive"]).default("read-only"),
-    url: z.string().url().nullable(),
-    token: z.string().nullable(),
-    expiresAt: z.string().nullable(),
-    resolution: z
-      .tuple([z.number().int().positive(), z.number().int().positive()])
-      .default([1024, 768]),
-    // REQUIRED, no default (the server must assert un-redacted pixels).
-    unredacted: z.boolean(),
-    requiresAcknowledgment: z.boolean(),
-    acknowledged: z.boolean(),
-    // SHARED-EXPOSURE disclosure (addendum E.1). `shared` is true when the box's
-    // group has >1 session: watching this desktop ALSO shows the sibling
-    // sessions' agents on the one :0 framebuffer (the pixels cannot be redacted).
-    // `sharedSessionIds` lists the OTHER sessions whose agents may appear — IDS
-    // ONLY, never their goal/metadata/conversation (a viewer of A must not be
-    // able to use "I can see B's id" to subscribe to B's events; stress g). When
-    // shared, the consent gate requires the shared-exposure acknowledgment (409
-    // shared_acknowledgment_required) before the desktop path is handed out.
-    shared: z.boolean().default(false),
-    sharedSessionIds: z.array(z.string().uuid()).default([]),
-    reason: CapabilityUnavailableReason.nullable(),
-  }),
-  Recording: z.object({
-    available: z.boolean(),
-    modes: z.array(z.enum(["manual", "on-turn", "on-verify"])),
-    codecs: z.array(z.enum(["h264-mp4", "vp9-webm"])),
-    reason: CapabilityUnavailableReason.nullable(),
-  }),
-  // Deprecated compatibility cell for clients that predate managed
-  // ComputerSession interaction tools. Newly negotiated documents report this
-  // unavailable/read-only with `disabled_by_policy`; the shape remains so older
-  // clients and persisted payloads still parse.
-  ComputerUse: z.object({
-    available: z.boolean(),
-    readOnly: z.boolean(),
-    reason: CapabilityUnavailableReason.nullable(),
-  }),
-  negotiatedAt: z.string(),
-});
+);
 export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
 
 // ── API-direct viewer attach (P1.4) ─────────────────────────────────────────
@@ -17481,6 +17612,8 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+      /** Immutable setup-key ceiling inherited by this session/turn. */
+      credentialRestriction: z.literal("developer_setup").optional(),
     })
     .strict()
     .superRefine((policy, context) => {
@@ -17883,6 +18016,15 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 /** Public OpenGeni documentation linked from the web console's Help menu by default. */
 export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
 
+/** An absolute http(s) URL the console may render as a plain link. */
+const ClientLegalDocumentUrl = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .string()
+    .url()
+    .max(2_048)
+    .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL"),
+);
+
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     deploymentRevision: z.string(),
@@ -18019,6 +18161,17 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         }),
       })
       .default({ consentRequired: true, providers: {} }),
+    // Operator-owned legal documents the signed-out console links to. Absent or
+    // empty on self-hosted deployments unless their operator configures them.
+    legal: z
+      .object({
+        privacyPolicyUrl: ClientLegalDocumentUrl.optional(),
+        termsOfServiceUrl: ClientLegalDocumentUrl.optional(),
+      })
+      .optional(),
+    // Operator support address the console offers as a mailto link. Absent
+    // unless the operator configures one.
+    supportEmail: z.string().email().max(254).optional(),
     // Server-wide hint: does this deployment support Channel-A structured services
     // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
     // (it depends on the session's pinned backend); this is the coarse on/off the

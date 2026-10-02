@@ -30,13 +30,18 @@ describe("completed turn physical finalization", () => {
     ["writers", "tool_writers"],
     ["snapshot", "workspace_snapshot"],
   ]) {
-    test(`contains a completed turn stuck in ${stage} without releasing its activity`, async () => {
+    test(`drains before host exit when a completed turn stays stuck in ${stage}`, async () => {
       const result = await finalize(mode!);
       expect(result.stderr).toBe("");
       expect(result.code).toBe(1);
       expect(result.stdout).toContain('"phase":"finalizing"');
       expect(result.stdout).toContain('"opAcks":{"settled_op":"42"}');
       expect(result.stdout).toContain(`"reason":"${stage}"`);
+      expect(result.stdout).toContain("graceful_drain_requested");
+      expect(result.stdout).toContain("host_exit_backstop");
+      expect(result.stdout.indexOf("graceful_drain_requested")).toBeLessThan(
+        result.stdout.indexOf("host_exit_backstop"),
+      );
       expect(result.stdout).not.toContain("finalizer_returned");
     }, 30_000);
   }
@@ -46,5 +51,7 @@ describe("completed turn physical finalization", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("finalizer_returned false");
     expect(result.stdout).not.toContain('"outcome":"containment"');
+    expect(result.stdout).not.toContain("graceful_drain_requested");
+    expect(result.stdout).not.toContain("host_exit_backstop");
   }, 30_000);
 });

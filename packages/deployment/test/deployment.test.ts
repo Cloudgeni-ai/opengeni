@@ -1232,6 +1232,9 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_ENABLED: "true",
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+        OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai",
         OPENGENI_IMAGE_TAG: "release-prod",
         ...maintenanceImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
@@ -1258,6 +1261,13 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_LEGAL_PRIVACY_POLICY_URL=https://opengeni.ai/privacy",
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      'OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms"',
+    );
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
@@ -1565,6 +1575,7 @@ describe("deployment contract", () => {
     expect(SANDBOX_LIFECYCLE_PASSTHROUGH_ENV).toEqual(
       expect.arrayContaining([
         "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+        "OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS",
         "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",

@@ -1,5 +1,6 @@
 import { modelAllowedByConnections, type ConnectionModelRestrictions } from "@opengeni/db";
 import {
+  withDirectModelProviders,
   applyModelCatalogDocument,
   CLAUDE_CONNECTION_KINDS,
   claudeProviderId,
@@ -36,6 +37,7 @@ import {
   type WorkspaceModelPolicyContract,
 } from "@opengeni/contracts";
 import {
+  listConnectionsMetadata,
   getDeploymentModelCatalog,
   listWorkspaceProviderCustomModels,
   getWorkspaceProviderCustomModelForExecution,
@@ -254,6 +256,7 @@ export async function resolveWorkspaceCatalogSettings(
     organizationOpenRouterCustomModels,
     retainedOrganizationGatewayCustomModels,
     retainedOrganizationOpenRouterCustomModels,
+    directConnections,
   ] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
     listWorkspaceGatewayCustomModels(db, {
@@ -323,6 +326,9 @@ export async function resolveWorkspaceCatalogSettings(
               }),
           ),
         )
+      : Promise.resolve([]),
+    supportsOrganizationProviderReads
+      ? listConnectionsMetadata(db, input.workspaceId, null)
       : Promise.resolve([]),
   ]);
   const includeRetainedModels = <T extends { upstreamModelId: string }>(
@@ -403,22 +409,25 @@ export async function resolveWorkspaceCatalogSettings(
     }
   return {
     ...resolved,
-    settings: withClaudeConnectionCatalog(
+    settings: withDirectModelProviders(
       withClaudeConnectionCatalog(
-        withOrganizationOpenRouterCatalogProvider(
-          withOrganizationGatewayCatalogProvider(
-            withWorkspaceOpenRouterCatalogProvider(
-              withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
-              openRouterCustomModels,
+        withClaudeConnectionCatalog(
+          withOrganizationOpenRouterCatalogProvider(
+            withOrganizationGatewayCatalogProvider(
+              withWorkspaceOpenRouterCatalogProvider(
+                withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+                openRouterCustomModels,
+              ),
+              organizationGatewayModels,
             ),
-            organizationGatewayModels,
+            organizationOpenRouterModels,
           ),
-          organizationOpenRouterModels,
+          claudeConnections,
         ),
-        claudeConnections,
+        workspaceClaudeConnections,
+        "workspace",
       ),
-      workspaceClaudeConnections,
-      "workspace",
+      directConnections,
     ),
   };
 }
@@ -592,11 +601,15 @@ function credentialReadinessFor(input: {
     const claudeKind = CLAUDE_CONNECTION_KINDS.find(
       (kind) => claudeProviderId(kind, "workspace") === input.model.providerId,
     );
-    const connectionActive = claudeKind
-      ? input.workspaceClaudeConnections?.[claudeKind]?.active === true
-      : input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
-        ? input.workspaceOpenRouterConnectionActive
-        : input.workspaceGatewayConnectionActive;
+    const connectionActive =
+      input.provider?.kind === "direct-openai-workspace" ||
+      input.provider?.kind === "direct-azure-workspace"
+        ? true
+        : claudeKind
+          ? input.workspaceClaudeConnections?.[claudeKind]?.active === true
+          : input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+            ? input.workspaceOpenRouterConnectionActive
+            : input.workspaceGatewayConnectionActive;
     return connectionActive
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {

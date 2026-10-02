@@ -220,12 +220,22 @@ impl GlobalSpoolBudget {
         if bytes == 0 {
             return;
         }
-        let result = self
-            .used_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_sub(bytes)
-            });
-        debug_assert!(result.is_ok(), "spool ledger release exceeds usage");
+        let mut used = self.used_bytes.load(Ordering::Acquire);
+        loop {
+            let Some(next) = used.checked_sub(bytes) else {
+                debug_assert!(used >= bytes, "spool ledger release exceeds usage");
+                return;
+            };
+            match self.used_bytes.compare_exchange_weak(
+                used,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => used = actual,
+            }
+        }
     }
 }
 

@@ -48,12 +48,51 @@ test("compact row offers one ghost Retry without duplicate controls or guidance"
   expect(details.open).toBe(false);
   expect(details.querySelector("p")!.textContent).toBe("Connection interrupted.");
   expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
-    "The session stopped because of an unexpected error.",
+    "The session stopped unexpectedly.",
   );
   expect(container.textContent).not.toMatch(/Choose another model|composer|preserved|Try again/);
   expect(container.querySelector('[data-testid="failed-session-banner"]')!.className).not.toMatch(
     /bg-|border|rounded/,
   );
+});
+
+test("uncategorized preclaim details never grant Retry or bypass its blocker", async () => {
+  const detail = "getaddrinfo ENOTFOUND database.example.test\nsynthetic diagnostic";
+  const preclaim = {
+    ...failure,
+    reason: detail,
+    recordedDetail: detail,
+    failureCode: "pre_claim_failure",
+  };
+  let retries = 0;
+  const container = await render(<FailedSessionBanner failure={preclaim} />);
+  expect(container.querySelector("button")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe(detail);
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={preclaim}
+        actions={{
+          onRetry: async () => {
+            retries += 1;
+            return true;
+          },
+          retryBlocker: "permission",
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () => {
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+  });
+  expect(retries).toBe(0);
 });
 
 test("credential failures hide Retry until another model is chosen and keep raw detail folded", async () => {
@@ -681,9 +720,7 @@ test("unknown provider evidence never invents expiry, reset or connection classi
     />,
   );
   const row = container.querySelector('[data-testid="failed-session-banner"]')!;
-  expect(row.querySelector("span")!.textContent).toBe(
-    "The session stopped because of an unexpected error.",
-  );
+  expect(row.querySelector("span")!.textContent).toBe("The session stopped unexpectedly.");
   expect(row.querySelector("details p")!.textContent).toBe("Connection failed.");
   expect(row.querySelector("details")!.open).toBe(false);
   expect(row.querySelector("button")!.textContent).toBe("Retry");

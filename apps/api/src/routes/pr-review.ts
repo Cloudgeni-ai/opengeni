@@ -14,6 +14,7 @@ import {
   defaultPrReviewProviderBaseUrl,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
+  modelUnavailableHttpException,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
   requireAccessGrant,
@@ -576,9 +577,7 @@ function prReviewCustomModelCommitGuard(input: {
       reference,
     });
     if (!active) {
-      throw new HTTPException(422, {
-        message: `model is not available: ${input.modelId}`,
-      });
+      throw modelUnavailableHttpException(input.modelId);
     }
   };
 }

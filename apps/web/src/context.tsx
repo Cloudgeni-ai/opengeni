@@ -3,6 +3,7 @@ import {
   noteSuccessfulLogin,
   observeSocialLoginResult,
 } from "@/lib/analytics-login";
+import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { creationHandoffReconciled } from "@/lib/session-creation-handoff";
@@ -49,6 +50,8 @@ import {
   createOpenGeniClient,
   fetchAuthSession,
   fetchClientConfig,
+  checkDeploymentRevision,
+  mountApiUpdateNotice,
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
@@ -67,6 +70,7 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { readBootstrap } from "@/lib/bootstrap-read";
+import { startDeploymentRefresh } from "@/lib/deployment-refresh";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -915,6 +919,7 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
+    let stopDeploymentRefresh = () => {};
     const controller = new AbortController();
     // Let synchronous effect cleanup (including StrictMode's discarded mount)
     // cancel before starting I/O. Active requests still abort on real cleanup.
@@ -939,6 +944,7 @@ export function RootRouteComponent() {
         // the deployer's configured default — a silent billing footgun).
         setReasoningEffort(initialReasoningEffort(config));
         setLatencyMode("standard");
+        stopDeploymentRefresh = startDeploymentRefresh(checkDeploymentRevision);
       })
       .catch((error) => {
         if (cancelled) {
@@ -950,6 +956,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
       controller.abort();
+      stopDeploymentRefresh();
     };
   }, [configRequestVersion, isPublicDevHarness]);
 
@@ -1740,6 +1747,8 @@ export function RootRouteComponent() {
       });
       if (attempt.nextAction.type !== "authorize")
         throw new Error("GitHub did not return an authorization link");
+      // The exact-return Connect redirect carries no outcome parameters.
+      await markIntegrationConnectRedirect("github", "oauth", { returnsWithOutcome: false });
       window.location.assign(attempt.nextAction.url);
     } catch (error) {
       toast.error("Couldn't open GitHub sign-in", {
@@ -2393,16 +2402,19 @@ export function RootRouteComponent() {
   }
 
   async function handleManagedSignOut() {
-    invalidatePrincipalWorkspaceState();
+    // Unmount authenticated readers before sign-out can invalidate their
+    // cookie. Keep the neutral surface until an ambiguous response is
+    // reconciled against the authoritative session.
+    flushSync(() => {
+      invalidatePrincipalWorkspaceState();
+      setAuthSession(undefined);
+      setAccessContext(null);
+      setWorkspaces([]);
+      setAccessError(null);
+    });
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
-    // Keep the authenticated tree hidden until an ambiguous response has been
-    // reconciled against the authoritative cookie session.
-    setAuthSession(undefined);
-    setAccessContext(null);
-    setWorkspaces([]);
-    setAccessError(null);
     const reconciliation = await runCurrentTransitionInvocation({
       isCurrent: ownsInvocation,
       request: async () =>
@@ -2813,7 +2825,7 @@ export function RootRouteComponent() {
     <LoadingPanel />
   ) : managedAuthRequired && !authSession ? (
     <Suspense fallback={<LoadingPanel />}>
-      <SignedOutPage>
+      <SignedOutPage legalLinks={clientConfig?.legal} supportEmail={clientConfig?.supportEmail}>
         {browserAccountsEnabled ? (
           <BrowserAccountsSignedOutPanel
             presentation="embedded"
@@ -2977,6 +2989,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}
         verificationLinkError={

@@ -5,7 +5,12 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { parseClaudeUsageHeaders, parseModelProvidersJson } from "@opengeni/config";
+import {
+  claudeSubscriptionCapacity,
+  parseClaudeUsageHeaders,
+  parseClaudeUsageResponse,
+  parseModelProvidersJson,
+} from "@opengeni/config";
 import {
   createDb,
   encryptEnvironmentValue,
@@ -86,7 +91,7 @@ const observation = (time = new Date(), value = ".5") =>
 
 test("worker responses received after same-token replacement cannot repopulate the new connection", async () => {
   const { scope, row, credentialEncrypted } = await fixture();
-  const latest = new Map<"workspace" | "organization", CapturedClaudeUsage>();
+  const latest = new Map<string, CapturedClaudeUsage>();
   const observe = await createClaudeUsageObserver(
     parseModelProvidersJson(
       JSON.stringify([
@@ -125,7 +130,7 @@ test("worker responses received after same-token replacement cannot repopulate t
       headers: { "anthropic-ratelimit-unified-5h-utilization": "1" },
     }),
   );
-  const snapshot = latest.get("workspace")!;
+  const snapshot = [...latest.values()][0]!;
   expect(snapshot.expectedConnectionId).toBe(row.id);
   expect(snapshot.expectedCredentialVersion).toBe(row.version);
   expect(await recordClaudeSubscriptionUsage(client.db, settings, scope, snapshot)).toBeNull();
@@ -210,6 +215,106 @@ test("out-of-order responses cannot overwrite a newer provider reading", async (
   });
   expect((await readClaudeSubscriptionUsage(client.db, scope)).windows[1]?.usedPercent).toBe(70);
 });
+
+test("model restrictions and direct-window provenance survive persisted observations", async () => {
+  const { scope, row } = await fixture();
+  const first = new Date(Math.max(Date.now(), Date.parse(row.updatedAt)) + 10);
+  const reset = new Date(first.getTime() + 3_600_000);
+  const headers = (status: string) =>
+    new Headers({
+      "anthropic-ratelimit-unified-status": status,
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+      "anthropic-ratelimit-unified-reset": String(reset.getTime() / 1000),
+      "anthropic-ratelimit-unified-5h-utilization": "1",
+    });
+  for (const [model, status, offset] of [
+    ["claude-opus-5-5", "rejected", 0],
+    ["claude-sonnet-5-5", "allowed", 1],
+  ] as const)
+    await recordClaudeSubscriptionUsage(client.db, settings, scope, {
+      token: setupToken,
+      expectedConnectionId: row.id,
+      expectedCredentialVersion: row.version,
+      observation: parseClaudeUsageHeaders(
+        headers(status),
+        new Date(first.getTime() + offset),
+        model,
+      )!,
+    });
+  const denied = await readClaudeSubscriptionUsage(client.db, scope);
+  expect(denied.windows[0]!.source).toBe("response_headers");
+  expect(denied.requestRestrictions).toHaveLength(2);
+  expect(claudeSubscriptionCapacity(denied, "claude-opus-5-5", first).available).toBe(false);
+  await recordClaudeSubscriptionUsage(client.db, settings, scope, {
+    token: setupToken,
+    expectedConnectionId: row.id,
+    expectedCredentialVersion: row.version,
+    observation: parseClaudeUsageResponse(
+      { five_hour: { utilization: 20, resets_at: reset.toISOString() } },
+      new Date(first.getTime() + 2),
+    )!,
+  });
+  const refreshed = await readClaudeSubscriptionUsage(client.db, scope);
+  expect(refreshed.windows[0]!.source).toBe("provider");
+  expect(claudeSubscriptionCapacity(refreshed, "claude-opus-5-5", first).available).toBe(true);
+  await recordClaudeSubscriptionUsage(client.db, settings, scope, {
+    token: setupToken,
+    expectedConnectionId: row.id,
+    expectedCredentialVersion: row.version,
+    observation: parseClaudeUsageHeaders(
+      headers("allowed"),
+      new Date(first.getTime() + 3),
+      "claude-sonnet-5-5",
+    )!,
+  });
+  const later = await readClaudeSubscriptionUsage(client.db, scope);
+  expect(later.windows[0]!.source).toBe("response_headers");
+  expect(claudeSubscriptionCapacity(later, "claude-opus-5-5", first).available).toBe(true);
+});
+test("a delayed finalized denial cannot undo a direct refresh in any persistence order", async () => {
+  for (const order of [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+  ]) {
+    const { scope, row } = await fixture();
+    const first = new Date(Math.max(Date.now(), Date.parse(row.updatedAt)) + 10);
+    const reset = new Date(first.getTime() + 3_600_000).toISOString();
+    const headers = (status: string) =>
+      new Headers({
+        "anthropic-ratelimit-unified-status": status,
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-reset": String(Date.parse(reset) / 1000),
+        "anthropic-ratelimit-unified-5h-utilization": status === "rejected" ? "1" : ".2",
+      });
+    const observations = [
+      parseClaudeUsageHeaders(headers("rejected"), first, "claude-opus-5-5")!,
+      parseClaudeUsageResponse(
+        { five_hour: { utilization: 20, resets_at: reset } },
+        new Date(first.getTime() + 1),
+      )!,
+      parseClaudeUsageHeaders(
+        headers("allowed"),
+        new Date(first.getTime() + 2),
+        "claude-sonnet-5-5",
+      )!,
+    ];
+    for (const index of order)
+      await recordClaudeSubscriptionUsage(client.db, settings, scope, {
+        token: setupToken,
+        expectedConnectionId: row.id,
+        expectedCredentialVersion: row.version,
+        observation: observations[index]!,
+      });
+    const persisted = await readClaudeSubscriptionUsage(client.db, scope);
+    expect(persisted.windows[0]!.source).toBe("response_headers");
+    expect(claudeSubscriptionCapacity(persisted, "claude-opus-5-5", first).available).toBe(true);
+  }
+});
+
 test("foreign account and foreign workspace reads do not reveal saved usage", async () => {
   const { scope } = await fixture();
   const other = await fixture();

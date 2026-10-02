@@ -199,25 +199,13 @@ describe("schedule errors", () => {
 });
 
 describe("scheduleAgentOpeningMessage", () => {
-  test("carries the request and directs the agent to research, then create with its tools", () => {
+  test("carries only the scheduling request and the person's time zone", () => {
     const message = scheduleAgentOpeningMessage(
       "  Every weekday morning, summarize new Sentry errors and post them to #eng \n",
       "Europe/Oslo",
     );
-    expect(message).toContain(
-      "What should happen, and how often:\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n",
+    expect(message).toBe(
+      "Help me create a schedule in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
     );
-    for (const tool of [
-      "scheduled_tasks_list",
-      "github_repositories_list",
-      "variable_set_list",
-      "capability_catalog_search",
-      "scheduled_tasks_create",
-    ]) {
-      expect(message).toContain(tool);
-    }
-    expect(message).toContain("my time zone (Europe/Oslo)");
-    expect(message).toContain("Ask me only for what you can't find or decide yourself.");
-    expect(message).not.toContain("\u2014");
   });
 });

@@ -15,6 +15,8 @@ import type {
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  ConnectionMetadata,
+  McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
@@ -59,6 +61,34 @@ export function connectorToolGroup(tool: ListedTool): "read" | "write" | "other"
   return "other";
 }
 
+/** A selector can supply discovery credentials only when one visible account
+ * matches. Never apply one account's approval choices to an arbitrary sibling. */
+export function unpinnedConnectorToolPermissionAccount<T extends ConnectionMetadata>(
+  ref: McpServerConnectionRef,
+  visible: T[],
+  subjectId: string,
+): T | null {
+  const matches = visible.filter(
+    (candidate) =>
+      candidate.subjectId === (ref.subjectScope === "subject" ? subjectId : null) &&
+      candidate.providerDomain === ref.providerDomain &&
+      (!ref.kind || candidate.kind === ref.kind) &&
+      candidate.status === "active",
+  );
+  if (matches.length > 1)
+    throw new HTTPException(409, {
+      message: "Choose one account to manage its tool permissions",
+    });
+  return matches[0] ?? null;
+}
+
+export function connectorToolPermissionReference(
+  ref: McpServerConnectionRef,
+  connectionId: string,
+): McpServerConnectionRef {
+  return { ...ref, accountSelection: undefined, connectionId };
+}
+
 async function resolveTarget(input: Input) {
   if (input.capabilityId.startsWith("api:")) {
     // API Integrations are not MCP connectors: their per-tool approval is part
@@ -97,20 +127,17 @@ async function resolveTarget(input: Input) {
         input.grant.subjectId,
       )
     : null;
-  if (ref?.subjectScope === "subject" && !ref.connectionId) {
+  if (
+    ref &&
+    !ref.connectionId &&
+    (ref.subjectScope === "subject" || ref.accountSelection === "all_eligible")
+  ) {
     const visible = await listConnectionsMetadata(
       input.db,
       input.workspaceId,
       input.grant.subjectId,
     );
-    connection =
-      visible.find(
-        (candidate) =>
-          candidate.subjectId === input.grant.subjectId &&
-          candidate.providerDomain === ref.providerDomain &&
-          (!ref.kind || candidate.kind === ref.kind) &&
-          candidate.status === "active",
-      ) ?? null;
+    connection = unpinnedConnectorToolPermissionAccount(ref, visible, input.grant.subjectId);
   }
   if (
     ref &&
@@ -155,7 +182,10 @@ async function listTools(
       ...(target.connection?.subjectId ? { subjectId: input.grant.subjectId } : {}),
       serverId: target.server.id,
       toolName: "tools/list",
-      connectionRef: { ...target.server.connectionRef, connectionId: target.connectionId },
+      connectionRef: connectorToolPermissionReference(
+        target.server.connectionRef,
+        target.connectionId,
+      ),
       destinationUrl: target.server.url,
     });
     if (result.status !== "ok") throw new Error("Reconnect this connector to load its tools.");

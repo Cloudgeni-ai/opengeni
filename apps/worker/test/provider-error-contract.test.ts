@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
+import { AnthropicRequestError } from "../../../packages/runtime/src/anthropic-request-error";
 import { classifyProviderQuotaError } from "../../../packages/runtime/src/provider-quota";
 import { ResponsesStreamingTerminalError } from "../../../packages/runtime/src/responses-terminal-error";
 import { agentRunFailurePayload, providerRetryAfterMs } from "../src/activities/agent-turn/errors";
 import { failedSessionCopy } from "../../web/src/lib/failed-session-copy";
+import { summarizeSessionFailure } from "../../web/src/lib/events";
 
 const provider: ResolvedModelProvider = {
   id: "claude",
@@ -13,7 +15,7 @@ const provider: ResolvedModelProvider = {
   kind: "api-key",
   api: "anthropic-messages",
   builtin: false,
-  baseUrl: "https://api.anthropic.com/v1",
+  baseUrl: "https://api.example.test/v1",
   apiKey: "fixture",
 };
 const request: ModelRequest = {
@@ -155,9 +157,20 @@ test("Responses safety and unknown codes never acquire transient recovery from w
 
 test("unknown Claude stream error does not invent a retryable HTTP server failure", async () => {
   for (const type of ["future_error", "toString", "__proto__", "constructor"]) {
-    const error = await claudeFailure({ type, message: "overloaded / rate limit" });
+    const error = await claudeFailure({
+      type,
+      message: "overloaded / rate limit",
+      request: "synthetic echoed request",
+    });
     expect((error as { status?: number }).status).toBeUndefined();
-    expect(agentRunFailurePayload(error).retryable).not.toBe(true);
+    expect((error as Error).cause).toBeInstanceOf(AnthropicRequestError);
+    expect(((error as Error).cause as AnthropicRequestError).status).toBeUndefined();
+    const failure = agentRunFailurePayload(error);
+    expect(failure.retryable).not.toBe(true);
+    expect(failure.detail).toBe(`${type}: overloaded / rate limit`);
+    expect(JSON.stringify(error)).not.toContain("overloaded / rate limit");
+    expect(JSON.stringify(error)).not.toContain("synthetic echoed request");
+    expect(JSON.stringify(failure)).not.toContain("synthetic echoed request");
   }
 });
 
@@ -257,4 +270,74 @@ test("OpenAI HTTP misalignment refusal stops automatic recovery without blaming 
       Object.assign(new Error("403"), { status: 403, code: "misalignment_policy_violation" }),
     ),
   ).toMatchObject({ code: "provider_safety_refusal", retryable: false });
+});
+
+test("typed native Claude authentication proof survives the real failure projection", async () => {
+  for (const status of [401, undefined]) {
+    const error = await claudeFailure(
+      { type: "authentication_error", message: "synthetic diagnostic" },
+      status,
+    );
+    const payload = agentRunFailurePayload(error);
+    expect(payload).toMatchObject({ code: "anthropic_authentication_error", retryable: false });
+    const failure = summarizeSessionFailure(
+      [
+        {
+          id: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+          sessionId: crypto.randomUUID(),
+          turnId: crypto.randomUUID(),
+          sequence: 1,
+          type: "turn.failed",
+          payload,
+          occurredAt: "2031-04-05T06:07:08.000Z",
+        },
+      ],
+      "failed",
+    );
+    expect(failure.failureCode).toBe("anthropic_authentication_error");
+    expect(failure.recordedDetail).toBe(`${payload.error}\n${payload.detail}`);
+    const copy = failedSessionCopy(failure, false, false, true);
+    expect(copy).toMatchObject({
+      reason:
+        "The model provider rejected the credentials for this model. Choose another model below.",
+      retryUnhelpful: true,
+      unavailableModel: false,
+      detail: failure.recordedDetail,
+    });
+    expect(JSON.stringify(error)).not.toContain("synthetic diagnostic");
+  }
+});
+
+test("authentication presentation requires typed native proof and matching status", () => {
+  const native = (status: number) =>
+    new AnthropicRequestError(
+      "synthetic request refusal",
+      status,
+      "anthropic_http_error",
+      { type: "authentication_error", message: "synthetic diagnostic" },
+      new Headers(),
+    );
+  for (const error of [
+    Object.assign(new Error("synthetic request refusal"), {
+      name: "AnthropicRequestError",
+      status: 401,
+      code: "anthropic_http_error",
+    }),
+    native(403),
+    Object.assign(new Error("synthetic request refusal"), { status: 403, cause: native(401) }),
+  ]) {
+    expect(agentRunFailurePayload(error).code).not.toBe("anthropic_authentication_error");
+  }
+  for (const failureCode of ["anthropic_http_error", "anthropic_stream_error"]) {
+    expect(
+      failedSessionCopy({
+        reason: "authentication_error: synthetic diagnostic",
+        recordedDetail: "authentication_error: synthetic diagnostic",
+        failureCode,
+        failedAt: null,
+        consecutiveRecoveryCount: null,
+      }).retryUnhelpful,
+    ).not.toBe(true);
+  }
 });

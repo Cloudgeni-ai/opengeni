@@ -1,8 +1,11 @@
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   nestedPostgresSqlState,
+  databaseFailureCode,
+  isRetryablePersistenceSqlState,
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
@@ -10,6 +13,7 @@ import {
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionProviderRejection,
@@ -19,6 +23,7 @@ import {
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
   ResponsesStreamingTerminalError,
@@ -32,6 +37,7 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  AnthropicRequestError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -359,6 +365,13 @@ function retryableDatabaseFailureCode(
   error: unknown,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  if (!persistenceFailure) {
+    const driver = findPostgresDriverError(error);
+    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
+    if (isRetryablePersistenceSqlState(driverSqlState)) {
+      return databaseFailureCode(driverSqlState);
+    }
+  }
   const sqlState = persistenceFailure?.details.sqlState ?? null;
   if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
     return "db_failure";
@@ -393,6 +406,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  sandboxSetupOutcomeUnknown?: true;
+  sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
@@ -400,6 +415,13 @@ export function postClaimDatabaseRecoveryFailure(input: {
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (
+    (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
+    ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
+      input.providerRecovery)
+  ) {
+    return null;
+  }
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
@@ -414,6 +436,8 @@ export function postClaimDatabaseRecoveryFailure(input: {
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+    ...(input.sandboxSetupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
@@ -1017,13 +1041,58 @@ function findPostgresDriverError(error: unknown): Record<string, unknown> | null
   return null;
 }
 
+function isRawDatabaseQueryError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "query" in error &&
+    typeof error.query === "string" &&
+    "params" in error &&
+    Array.isArray(error.params)
+  );
+}
+
+function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | undefined {
+  if (error instanceof AnthropicRequestError) return error;
+  return error instanceof Error && error.cause instanceof AnthropicRequestError
+    ? error.cause
+    : undefined;
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
+  const anthropic = anthropicRequestDiagnostic(error);
+  if (anthropic) {
+    const authenticationRejected =
+      anthropic.status === 401 &&
+      (error === anthropic ||
+        (error instanceof Error && (error as Error & { status?: unknown }).status === 401));
+    return {
+      ...failure,
+      code:
+        failure.code ??
+        (authenticationRejected ? "anthropic_authentication_error" : anthropic.code),
+      retryable: failure.retryable ?? false,
+      ...(anthropic.detail ? { detail: anthropic.detail } : {}),
+      ...(anthropic.request_id ? { requestId: anthropic.request_id } : {}),
+    };
+  }
   return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+/** Keep Anthropic provider text on terminal failures, never recovery events. */
+export function agentRunRecoveryFailurePayload(
+  error: unknown,
+  failure: ReturnType<typeof agentRunFailurePayload>,
+): ReturnType<typeof agentRunFailurePayload> {
+  if (!anthropicRequestDiagnostic(error)) return failure;
+  // Project a copy: retry exhaustion still needs the terminal diagnostic.
+  const recovery = { ...failure };
+  delete recovery.detail;
+  return recovery;
 }
 
 function baseAgentRunFailurePayload(
@@ -1067,7 +1136,11 @@ function baseAgentRunFailurePayload(
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
-    const underlying = isSessionEventPersistenceError(error.cause)
+    const databaseFailure =
+      isSessionEventPersistenceError(error.cause) ||
+      findPostgresDriverError(error.cause) !== null ||
+      isRawDatabaseQueryError(error.cause);
+    const underlying = databaseFailure
       ? agentRunFailurePayload(error.cause, options)
       : {
           error: error.cause instanceof Error ? error.cause.message : String(error.cause),
@@ -1075,6 +1148,32 @@ function baseAgentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  // Raw ORM wrappers can contain the full SQL and its parameters. Classify a
+  // real driver before provider message heuristics; the original cause stays
+  // available to internal diagnostics. This payload grants no replay authority.
+  const postgresDriverError = findPostgresDriverError(error);
+  const rawOrmFailure = isRawDatabaseQueryError(error);
+  if ((postgresDriverError || rawOrmFailure) && !isSessionEventPersistenceError(error)) {
+    const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
+    const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
+    return {
+      error: "OpenGeni encountered a database error.",
+      code: databaseFailureCode(sqlState),
+      sqlState,
+      ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
+  if (error instanceof AnthropicProviderRejection) {
+    return {
+      error: error.message,
+      code: error.code === "content_policy_violation" ? "provider_safety_refusal" : error.code,
+      retryable: false,
+      ...(error.request_id ? { requestId: error.request_id } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
@@ -1160,10 +1259,18 @@ function baseAgentRunFailurePayload(
       retryable: true,
     };
   }
+  if (isProviderCommandObservationUnavailableError(error)) {
+    return {
+      error:
+        "A managed sandbox command cannot be observed. Its exact invocation and writer remain retained; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_observation_unavailable",
+      retryable: false,
+    };
+  }
   if (isModalCommandStartOutcomeUnknownError(error)) {
     return {
       error:
-        "A managed sandbox command may have started, but its acknowledgement was lost. Automatic replay is disabled; inspect the sandbox state before retrying.",
+        "A managed sandbox command has an unknown outcome. Its original invocation remains fenced; setup is blocked without replay until the incomplete operation can be reconciled.",
       code: "sandbox_command_start_outcome_unknown",
       retryable: false,
     };
@@ -1377,18 +1484,6 @@ function baseAgentRunFailurePayload(
       };
     }
     return { error: message, code: "provider_unavailable", retryable: true };
-  }
-  const postgresDriverError = findPostgresDriverError(error);
-  if (postgresDriverError) {
-    const database = safeDatabaseErrorFacts(postgresDriverError);
-    const sqlState = nestedPostgresSqlState(postgresDriverError);
-    if (sqlState !== null || Object.keys(database).length > 0) {
-      return {
-        error: message,
-        sqlState,
-        ...(Object.keys(database).length > 0 ? { database } : {}),
-      };
-    }
   }
   return { error: message };
 }

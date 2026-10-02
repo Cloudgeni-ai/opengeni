@@ -20,6 +20,8 @@
 //
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
+import type { EventBus } from "@opengeni/events";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   effectiveSandboxLifecycle,
   sandboxArchiveCaptureTimeoutMs,
@@ -171,6 +173,8 @@ export type SandboxResumeServices = {
    * call. Absent, the call gets its own single replacement.
    */
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
+  /** Live fanout for background commands a provider loss settled. */
+  bus?: EventBus | null;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -2155,6 +2159,11 @@ async function resumeBoxForTurnOnce(
         expectedBackend: ids.backend,
       });
       if (marked.status === "marked") {
+        await publishDurableSessionEvents(
+          services.bus,
+          ids.workspaceId,
+          marked.backgroundCommandEvents,
+        );
         await services.onSandboxLost?.({
           sandboxGroupId: ids.sandboxGroupId,
           instanceId: live.instanceId,

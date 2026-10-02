@@ -1,5 +1,93 @@
 # @opengeni/contracts
 
+## 5.6.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- 4762e1a: Collect product usage analytics server-side, independent of browser analytics consent.
+
+  Record throttled, batched presence for managed browser sessions and publish `opengeni_active_users{window}` from control workers. Add the `user.active`, `credits.granted` (grant class) and `connection.revoked` (provider class) lifecycle facts, live `opengeni_sessions_created_total{surface,created_by_kind,root}` and `opengeni_user_messages_total{surface}` counters, and database-derived `opengeni_credit_grants_total{grant_class}` / `opengeni_credit_granted_micros_total{grant_class}` that include trigger-written trial grants.
+
+  Add an idempotent operator backfill (`bun run db:backfill-lifecycle-facts`) for lifecycle facts captured before the first lifecycle consumer registered.
+
+  Give the logical workspace capture its own `opengeni_workspace_capture_revision_duration_seconds` histogram so it no longer collides with the physical capture histogram's label set in one worker registry.
+
+## 5.5.0
+
+### Minor Changes
+
+- a6ff780: Add optional direct API-key credential metadata to access contexts, including
+  organization/workspace scope and effective workspace permissions. Export the
+  SDK AccessCredential type and document full organization-key provisioning of
+  workspaces, external members, and asUser sessions without changing existing
+  grants, membership requirements, session visibility, or literal secrets authority.
+- fd5fb34: Let workspace administrators test integration endpoints and see what they inherit. `testWorkspaceWebhook` sends a signed `webhook.test` event (accepted by `verifyWebhookEvent`, never queued), `testWorkspaceCredentialProvider` sends a `credentials.request` with `purpose: "test"` and returns only the names of what a run would get, and `getWorkspaceInheritedIntegrations` lists the organization provider and webhooks that reach a workspace. The web app's Developer settings now explain both integrations, give each webhook and the provider its own page with deliveries and a test, and manage organization-wide registrations under Organization settings > Developer.
+- b45621d: Artifacts and Sites now work inside an embedding product with the same components the OpenGeni console uses. `@opengeni/react/artifacts` gains the console's inline Site/HTML preview (`ChatInteractiveBlock`, `ArtifactSandbox`, `DeferredChatMedia`), `SiteView`, `EditableArtifactView`, and a host-mountable `SessionArtifactViewer`; `SessionConversation` renders `opengeni-site` fences inline and opens agent artifact links through `onOpenArtifact` (`viewerLinkResolver` for a custom timeline). `createSessionProxyHandler({ artifacts: true })` serves only the artifacts OpenGeni lists for the requesting session (read, editor live ticket, Site detail and sandboxed HTML), and client config advertises the live socket URL and browser cache partition. The SDK client adds `withHeaders`, `apiUrl`, and `fetchApi` for host-authenticated transports. Every built-in artifact string is translatable through a `labels` prop (partial `ArtifactLabels`) on `SessionArtifactViewer` and `ChatInteractiveBlock`, or `ArtifactLabelsProvider`. Document and presentation editors compose one projection at a time, so opening an artifact with a long history no longer floods the artifact Worker's request queue.
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+- 3545ca3: Include exact accepted-turn initiator context in signed credential-provider
+  requests, with human/service/agent attribution and bounded causal lineage for
+  children, continuations, and coalesced updates. Preserve initiating-human fields
+  and authorization; expose the additive context through the SDK verifier.
+- 5b48f00: Add recoverable allowance lifecycle state and idempotent clear receipts.
+  Preserve typed allowance scope and reset details in web, MCP, and Slack
+  refusals with administrator-specific remedies.
+  Expose browser-safe refusal helpers through `@opengeni/sdk/allowance-refusal`
+  without widening React's runtime dependency boundary.
+
+  Recheck allowance after paid compaction and align continuation admission with
+  its frozen causal lineage. Keep allowance storage compatible with rolling
+  deployment, preserve settled usage across period edits, harden definer search
+  paths, and order organization locks before tenancy fences.
+
+- 5b48f00: Add workspace and member usage allowances in integer USD micros, with
+  versioned configuration and member rules, operation-keyed credit grants,
+  current/historical usage reads, and a typed allowance-exhaustion error.
+  The session proxy exposes only the authenticated user's own usage read;
+  organization budget authority remains separate from workspace-admin member
+  splits, and agents cannot write allowance policy or grants.
+
+  Document per-seat equal splits, administrator sliders, custom shares,
+  top-ups, monthly team budgets, UTC month-end anchors, frozen causal usage
+  attribution, and model-call soft-ceiling semantics. Shares are oversubscribable
+  ceilings rather than reserved funds; admitted and concurrent calls may
+  overshoot before the next admission check.
+
+  Keep usage reads side-effect-free, retain active accounting windows across
+  period/anchor edits, and evaluate rollover, expiry, and usage notifications
+  through bounded periodic API maintenance. Preserve existing prepaid video
+  billing with exact, idempotent allowance-allocation reversal for matching
+  refunds.
+
+### Patch Changes
+
+- 0bbe2e7: `installApiIntegration` accepts `autoApprovedTools`: selected write or destructive tools of a custom or curated API Integration (a curated definition may forbid specific operations) that run without per-call human approval, so scheduled and other unattended runs no longer wait forever on an approval. It needs `capabilities:manage`, passes organization integration policy again, and is declarative (omit it and every write tool asks again). Connector tool-permission and session approval-policy errors for API Integration ids now point to this setting.
+- 45d1301: Share the complete default model and reasoning-effort fallback between client config and omitted-model session creation when the deployment default is stably blocked.
+
+  Preserve older nonempty allowedModels parsers when no model is admitted by returning one explicit unavailable legacyModelFallback hint, while keeping models as the exact admitted set and leaving creation gates unchanged.
+
+  Keep cookie-only managed browser bootstrap unscoped so account reconciliation can load before actor-fenced workspace reads.
+
+- 45d1301: Resolve caller-scoped client model lists and fresh session creation through the same workspace selection rules, including credential readiness, policy, and connection model permissions. Hide unavailable subscription models from public bootstrap, support an explicit workspace selector in client config, and allow an empty selectable model list.
+- 45d1301: Expose repeated empty final replies as a typed, informational completed-turn notice without failing goals or deferring later updates.
+- 45d1301: Expose goal-tool text limits and purposes in model-facing schemas and descriptions, and give progress statuses an 8 KiB UTF-8 budget without altering stored text.
+- 0bbe2e7: `previewApiIntegration` and `installApiIntegration` accept an inline OpenAPI document: `source: { kind: "openapi_document", sourceKey, document, baseUrl? }` (JSON or YAML, at most 8 MiB). `sourceKey` is the stable installation identity, server URLs must be absolute (or `baseUrl` given), and the preview echoes only the document's SHA-256. Calls still follow the deployment network policy, so a product on a private or loopback address still needs a public tunnel unless the operator enables private targets.
+- 45d1301: Clarify that goal completion records ledger proof, not the user-facing answer, including when late child results arrive after completion.
+- 0bbe2e7: A top-level `createSession` now selects every server it attaches through `mcpServers`, whether `tools` is omitted or explicit (including `tools: []`). Previously an attached server that `tools` did not name was stored but never contacted, so the model reported that no tools were available. An explicit ref for the same id is kept unchanged, so `tools` is only needed to set `eager` or `optional`.
+- 0bbe2e7: Every `session.requiresAction` approval entry now carries the same top-level `id`, `name`, and `arguments`, whether it is the first pause of a turn or a later one after a decision. `id` is the `approvalId` that `sendApprovalDecision` accepts (the pending tool call id). Historical fields (`rawItem`, `raw`) remain for compatibility. The SDK exports this as `SessionApprovalRequest`.
+- 45d1301: Use the same stable model admission predicate for client config and direct session creation. Preserve creation during transient provider health or deployment credential-resolver uncertainty, while exposing optional per-model availability hints for degraded UI display.
+- 5b48f00: Default missing webhook lanes only after signature verification, preserve the
+  public organization webhook event vocabulary while rejecting usage subscriptions,
+  and keep allowance refusal presentation schema-runtime-free for browsers and
+  React Native. Emit the focused integration and refusal entries in published builds.
+
+  Fence the next model dispatch on settled usage and frozen-human admission, refuse
+  fresh delegated work before interruption, and repair workspace-less Knowledge
+  indexing and historical migration fixture dependencies.
+
 ## 5.4.0
 
 ### Minor Changes

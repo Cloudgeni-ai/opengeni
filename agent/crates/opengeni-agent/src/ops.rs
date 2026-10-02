@@ -840,7 +840,7 @@ mod tests {
 
         let exit = rig.wait_for_exit_frame().await;
         assert_eq!(exit.exit_code, 3);
-        assert!(exit.failure_code.is_empty());
+        assert_eq!(exit.failure_code, "");
         assert_eq!(rig.stdout_bytes(), b"wire");
         assert_eq!(
             exit.digests.get("stdout").map(String::as_str),

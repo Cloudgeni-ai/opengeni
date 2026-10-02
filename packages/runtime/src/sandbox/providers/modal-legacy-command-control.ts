@@ -6,7 +6,7 @@ import { ModalCommandStartPreDispatchUnavailableError } from "./modal-command-ro
 import { ProviderCommandStartRejectedError } from "../provider-command-session";
 import { ModalLegacyProviderCommand } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
-import { shellQuote } from "@openai/agents-core/sandbox/internal";
+import { modalCommandArgv } from "./modal-command-argv";
 
 type ControlPlane = Pick<
   ModalClient["cpClient"],
@@ -162,14 +162,7 @@ export class ModalCommandControl {
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     if (sandboxId !== this.sandboxId)
       throw new Error("Modal sandbox changed during command preparation");
-    const login = args.shell ? (args.login ?? true) : false;
-    let command = [args.shell ?? "/bin/sh", login ? "-lc" : "-c", args.cmd];
-    if (args.runAs) {
-      const user = shellQuote(args.runAs);
-      const invocation = command.map(shellQuote).join(" ");
-      const script = `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then exec ${invocation}; elif [ "$(id -u)" = 0 ]; then exec su -s /bin/sh ${user} -c ${shellQuote(`exec ${invocation}`)}; else exec sudo -n -u ${user} -- ${invocation}; fi`;
-      command = ["/bin/sh", "-c", script];
-    }
+    let command = modalCommandArgv(args);
     const environment =
       typeof this.environment === "function" ? this.environment() : this.environment;
     if (Object.keys(environment).length) {

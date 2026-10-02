@@ -285,8 +285,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                     if (!machine.enrollmentId) return;
                     void machines.updateAgent(machine.enrollmentId).then((result) => {
                       if (result?.accepted) {
-                        toast.success(`Updating ${machine.name}`, {
-                          description: `The agent will drain current work, install signed v${result.targetVersion}, and reconnect automatically.`,
+                        toast.success(`Update requested for ${machine.name}`, {
+                          description: `Installing v${result.targetVersion} requires an idle machine. If it is busy, retry after its work finishes.`,
                         });
                       }
                     });

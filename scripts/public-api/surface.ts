@@ -126,6 +126,9 @@ function parse(path: string): { program: Node; comments: { value: string; end: n
 }
 
 function literalString(node: Node, bindings?: ReadonlyMap<string, string>): string | null {
+  if (bindings && node.type === "CallExpression" && (node.callee as Node).type === "Identifier") {
+    return bindings.get(String((node.callee as Node).name)) ?? null;
+  }
   if (node.type === "Literal" && typeof node.value === "string") return node.value;
   if (node.type === "StringLiteral" && typeof node.value === "string") return node.value;
   if (node.type === "TemplateLiteral") {
@@ -229,7 +232,11 @@ function jsdocBefore(
     : "";
 }
 
-function collectFunctionInfo(fn: Node, method: SdkMethod): void {
+function collectFunctionInfo(
+  fn: Node,
+  method: SdkMethod,
+  fileBindings: ReadonlyMap<string, string>,
+): void {
   for (const param of (fn.params as Node[] | undefined) ?? []) {
     const annotation =
       (param.typeAnnotation as Node | undefined) ??
@@ -241,7 +248,10 @@ function collectFunctionInfo(fn: Node, method: SdkMethod): void {
   for (const name of returnNames) if (name !== "Promise") method.responseTypes.add(name);
   const body = fn.body as Node | undefined;
   if (!body) return;
-  const bindings = new Map<string, string>();
+  const bindings = new Map(fileBindings);
+  for (const param of (fn.params as Node[] | undefined) ?? []) {
+    if (param.type === "Identifier") bindings.delete(String(param.name));
+  }
   walk(body, (child) => {
     if (child.type !== "VariableDeclarator" || (child.id as Node).type !== "Identifier") return;
     let init = child.init as Node | null;
@@ -249,7 +259,9 @@ function collectFunctionInfo(fn: Node, method: SdkMethod): void {
       init = init.body as Node;
     }
     const text = init ? literalString(init) : null;
-    if (text?.startsWith("/v1/")) bindings.set(String((child.id as Node).name), text);
+    const name = String((child.id as Node).name);
+    if (text?.startsWith("/v1/")) bindings.set(name, text);
+    else bindings.delete(name);
   });
   walk(body, (child) => {
     const text = literalString(child, bindings);
@@ -275,6 +287,17 @@ export function extractSdkMethods(files: readonly string[]): SdkMethod[] {
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const { program, comments } = parse(file);
+    // Only a single literal return qualifies as a file-level path helper.
+    // Unknown or computed helpers must not invent an SDK-reachable route.
+    const fileBindings = new Map<string, string>();
+    for (const node of program.body as Node[]) {
+      if (node.type !== "FunctionDeclaration" || !node.id) continue;
+      const statements = (node.body as Node).body as Node[];
+      if (statements.length !== 1 || statements[0]!.type !== "ReturnStatement") continue;
+      const argument = statements[0]!.argument as Node | null;
+      const text = argument ? literalString(argument) : null;
+      if (text?.startsWith("/v1/")) fileBindings.set(String((node.id as Node).name), text);
+    }
     const add = (name: string, fn: Node, docStart: number) => {
       const method: SdkMethod = {
         name,
@@ -284,7 +307,7 @@ export function extractSdkMethods(files: readonly string[]): SdkMethod[] {
         requestTypes: new Set(),
         responseTypes: new Set(),
       };
-      collectFunctionInfo(fn, method);
+      collectFunctionInfo(fn, method, fileBindings);
       if (method.paths.size > 0) methods.push(method);
     };
     walk(program, (node) => {

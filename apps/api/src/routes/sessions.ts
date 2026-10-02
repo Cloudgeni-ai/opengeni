@@ -1,4 +1,5 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
@@ -148,6 +149,7 @@ import {
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionsForSubject,
+  listSessionEntriesForSubject,
   getLatestStartedSessionTurn,
   listSessionTurns,
   projectEffectiveControlForRelatedAccess,
@@ -314,8 +316,7 @@ import {
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
-  workspaceSessionToolPolicyDefaultServerIds,
-  workspaceSessionToolPolicyServerIds,
+  workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
   validateVariableSetAttachment,
 } from "@opengeni/core";
@@ -780,33 +781,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
-    let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
+    const projection = c.req.query("projection");
+    if (projection !== undefined && projection !== "summary")
+      throw new HTTPException(400, { message: 'projection must be "summary"' });
+    if (projection && !pageView)
+      throw new HTTPException(400, { message: 'summary projection requires view="page"' });
+    const summary = projection === "summary";
+    let page: Awaited<
+      ReturnType<typeof listSessionsForSubject | typeof listSessionEntriesForSubject>
+    >;
     try {
-      page = await listSessionsForSubject(db, workspaceId, {
-        subjectId: grant.subjectId,
-        limit: boundedLimit(query.limit),
-        materializeSnapshot: pageView,
-        ...(query.cursor ? { cursor: query.cursor } : {}),
-        ...(query.search ? { search: query.search } : {}),
-        ...(query.pinsOnly ? { pinsOnly: true } : {}),
-        ...(query.archivedOnly ? { archivedOnly: true } : {}),
-        ...(query.sortBy ? { sortBy: query.sortBy } : {}),
-        ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
-        ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
-        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
-        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
-        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
-        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
-        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
-        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
-        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
-        ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
-        ...(authorizationScope ? { authorizationScope } : {}),
-        // A managed human's own personal workspace has no membership row, so
-        // the list's removal fence must fall back to the organization-membership
-        // pointer, only with verified native or external owning-user provenance.
-        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-      });
+      page = await (summary ? listSessionEntriesForSubject : listSessionsForSubject)(
+        db,
+        workspaceId,
+        {
+          subjectId: grant.subjectId,
+          limit: boundedLimit(query.limit),
+          materializeSnapshot: pageView,
+          ...(query.cursor ? { cursor: query.cursor } : {}),
+          ...(query.search ? { search: query.search } : {}),
+          ...(query.pinsOnly ? { pinsOnly: true } : {}),
+          ...(query.includePinned === false ? { includePinned: false } : {}),
+          ...(query.archivedOnly ? { archivedOnly: true } : {}),
+          ...(query.sortBy ? { sortBy: query.sortBy } : {}),
+          ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
+          ...(query.parentSessionId !== undefined
+            ? { parentSessionId: query.parentSessionId }
+            : {}),
+          ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+          ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+          ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+          ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+          ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+          ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+          ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+          ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
+          // A managed human's own personal workspace has no membership row, so
+          // the list's removal fence must fall back to the organization-membership
+          // pointer, only with verified native or external owning-user provenance.
+          personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+        },
+      );
     } catch (error) {
       if (error instanceof SessionListAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -827,10 +843,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
-      ...page.pinned,
-      ...page.sessions,
-    ]);
     const commandActivity = await backgroundCommandActivityForSessions(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -845,14 +857,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             [...page.pinned, ...page.sessions].map((session) => session.id),
           )
         : new Set<string>();
+    if ("projection" in page) {
+      const decorateEntry = (session: (typeof page.sessions)[number]) => ({
+        ...session,
+        hasSchedules: scheduleTargets.has(session.id),
+        ...(commandActivity.has(session.id)
+          ? { backgroundCommandActivity: commandActivity.get(session.id)! }
+          : {}),
+      });
+      return c.json({
+        ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+        pinned: page.pinned.map(decorateEntry),
+        sessions: page.sessions.map(decorateEntry),
+      });
+    }
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
+      ...page.pinned,
+      ...page.sessions,
+    ]);
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
+      const decorated = {
+        ...session,
+        hasSchedules: scheduleTargets.has(session.id),
+        ...(activity ? { backgroundCommandActivity: activity } : {}),
+      };
       return sessionWithEffectiveToolPolicy(
-        {
-          ...session,
-          hasSchedules: scheduleTargets.has(session.id),
-          ...(activity ? { backgroundCommandActivity: activity } : {}),
-        },
+        decorated,
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
         policy.effectiveToolsContext,
@@ -5190,6 +5223,7 @@ export function sessionListQuery(
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
   pinsOnly: boolean;
+  includePinned: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5235,6 +5269,13 @@ export function sessionListQuery(
     });
   }
   const pinsOnly = query.pinsOnly === "true";
+  if (query.includePinned !== undefined && !["true", "false"].includes(query.includePinned)) {
+    throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
+  }
+  const includePinned = query.includePinned !== "false";
+  if (pinsOnly && !includePinned) {
+    throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
+  }
   if (query.archivedOnly !== undefined && query.archivedOnly !== "true") {
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
@@ -5356,6 +5397,7 @@ export function sessionListQuery(
     cursor,
     search: search || undefined,
     pinsOnly,
+    includePinned,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
@@ -5715,6 +5757,21 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof UnsupportedLatencyModeError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.code,
+          modelId: error.modelId,
+          latencyMode: error.latencyMode,
+          allowedLatencyModes: [...error.allowedLatencyModes],
+        },
+      },
+      422,
+    );
+  }
   if (error instanceof SessionCreateConnectionSelectionUnavailableError) {
     return c.json({ code: error.code, message: error.message, retryable: false }, 409);
   }
@@ -5874,12 +5931,11 @@ async function loadEffectivePolicyContext(
   subjectId: string,
   sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
+  const [policy, effectiveToolsContext] = await Promise.all([
+    workspaceSessionToolPolicyContext(deps.db, workspaceId, deps.settings, subjectId),
     workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
   ]);
-  return { workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext };
+  return { ...policy, effectiveToolsContext };
 }
 
 async function withEffectivePolicy(

@@ -341,6 +341,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
+    let prepared: Awaited<ReturnType<typeof prepareBrowserSessionCreate>> | null = null;
 
     try {
       assertEphemeralBrowserCreateEnabled(
@@ -358,7 +359,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
-      let prepared = existing
+      prepared = existing
         ? await prepareBrowserSessionCreate(
             deps.db,
             browserCreateInput(grant, workspaceId, request, existing.session.placement),
@@ -591,6 +592,18 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
       );
     } catch (error) {
+      if (prepared) {
+        // The operation lock fences a concurrent dispatch. Once a controller
+        // binding exists, retain its exact receipt for physical reconciliation.
+        await failBrowserSessionOperation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          operationId: request.operationId,
+          browserSessionId: prepared.session.id,
+          onlyIfPreparedCreate: true,
+          error: interactionFailure(error),
+        }).catch(() => undefined);
+      }
       throw browserRouteError(error);
     }
   });
@@ -4012,6 +4025,7 @@ async function ensureInteractionHolder(
     },
     os: placement.lease.os,
     image: sandboxRuntime.image,
+    imagePolicy: "new_creates_only",
     rigVersionId: sourceSession.rigVersionId,
     leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
     expectedEpoch: placement.lease.leaseEpoch,

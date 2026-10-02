@@ -1,5 +1,152 @@
 # @opengeni/worker-bundle
 
+## 2.3.1
+
+### Patch Changes
+
+- Updated dependencies [3f7ff5b]
+- Updated dependencies [3a688de]
+- Updated dependencies [5e1175d]
+  - @opengeni/sdk@7.6.1
+  - @opengeni/runtime@4.6.0
+  - @opengeni/db@6.5.0
+  - @opengeni/codemode@0.6.8
+  - @opengeni/core@5.1.1
+  - @opengeni/documents@0.8.40
+  - @opengeni/events@0.4.38
+
+## 2.3.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- 4762e1a: Collect product usage analytics server-side, independent of browser analytics consent.
+
+  Record throttled, batched presence for managed browser sessions and publish `opengeni_active_users{window}` from control workers. Add the `user.active`, `credits.granted` (grant class) and `connection.revoked` (provider class) lifecycle facts, live `opengeni_sessions_created_total{surface,created_by_kind,root}` and `opengeni_user_messages_total{surface}` counters, and database-derived `opengeni_credit_grants_total{grant_class}` / `opengeni_credit_granted_micros_total{grant_class}` that include trigger-written trial grants.
+
+  Add an idempotent operator backfill (`bun run db:backfill-lifecycle-facts`) for lifecycle facts captured before the first lifecycle consumer registered.
+
+  Give the logical workspace capture its own `opengeni_workspace_capture_revision_duration_seconds` histogram so it no longer collides with the physical capture histogram's label set in one worker registry.
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/core@5.1.0
+  - @opengeni/db@6.4.0
+  - @opengeni/runtime@4.5.0
+  - @opengeni/sdk@7.6.0
+  - @opengeni/codemode@0.6.7
+  - @opengeni/codex@0.2.31
+  - @opengeni/config@3.2.1
+  - @opengeni/documents@0.8.39
+  - @opengeni/events@0.4.37
+  - @opengeni/github@0.8.2
+  - @opengeni/interaction@0.4.45
+  - @opengeni/observability@0.8.37
+  - @opengeni/storage@0.2.138
+  - @opengeni/tool-gateway@0.1.18
+
+## 2.2.1
+
+### Patch Changes
+
+- 55f1cdd: Checkpoint managed browsers before provider expiry through existing encrypted
+  suspension receipts. Exact lease and controller claims fence capture, publication
+  and cleanup; retries retain one operation and never recapture a committed artifact.
+  Share browser authority derivation through leaf exports used by API and worker.
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+- c7bb6f1: Stop deterministic goal retries for terminal or unavailable-model sessions,
+  preserve frozen connector authority through voice delegation and handoff, and
+  request advertised OAuth offline access for generic native MCP connections.
+  Distinguish MCP teardown warnings from connection failures in safe telemetry.
+
+  Freeze initial-turn connector accounts against executable workspace defaults,
+  matching follow-up admission while preserving explicit selections and exclusions.
+
+  Validate scheduled generated sessions against the full accepted agent
+  configuration and instruction alias during queued recovery.
+
+- f26c4f5: Recover transient Modal sandbox readiness failures before command dispatch and observe uncertain probe starts without replay.
+- 3545ca3: Include exact accepted-turn initiator context in signed credential-provider
+  requests, with human/service/agent attribution and bounded causal lineage for
+  children, continuations, and coalesced updates. Preserve initiating-human fields
+  and authorization; expose the additive context through the SDK verifier.
+- 665e849: Share execution's effective turn-tool selection with credential-provider MCP
+  targeting and preparation so follow-up turns retain their per-turn headers,
+  without widening tool selection or connection authority.
+- 45d1301: Preserve bounded exact OpenAI/Azure streamed failure diagnostics separately from safe error messages, and classify provider terminal codes for existing bounded same-turn recovery. Invalid requests, safety refusals, and unknown terminal codes remain non-retryable; Codex and SuperGrok keep their transport-owned behavior.
+- 45d1301: Keep streamed safety diagnostics terminal even under server-error codes, recognize bounded diagnostic-only context overflows for compaction, and retain HTTP Retry-After evidence on yielded Responses failures so long quota waits do not enter automatic recovery.
+- 0bbe2e7: Every `session.requiresAction` approval entry now carries the same top-level `id`, `name`, and `arguments`, whether it is the first pause of a turn or a later one after a decision. `id` is the `approvalId` that `sendApprovalDecision` accepts (the pending tool call id). Historical fields (`rawItem`, `raw`) remain for compatibility. The SDK exports this as `SessionApprovalRequest`.
+- Updated dependencies [e01fc8e]
+- Updated dependencies [a6ff780]
+- Updated dependencies [6a97313]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [55f1cdd]
+- Updated dependencies [6a97313]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [48f5d39]
+- Updated dependencies [c8830e0]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [c7bb6f1]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [79f4635]
+- Updated dependencies [46e3a8e]
+- Updated dependencies [f26c4f5]
+- Updated dependencies [3545ca3]
+- Updated dependencies [665e849]
+- Updated dependencies [665e849]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [dd6795c]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [6a97313]
+  - @opengeni/db@6.3.0
+  - @opengeni/sdk@7.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/agent-proto@0.6.1
+  - @opengeni/core@5.0.1
+  - @opengeni/interaction@0.4.44
+  - @opengeni/capabilities@0.3.5
+  - @opengeni/jev@0.2.1
+  - @opengeni/runtime@4.4.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/config@3.2.0
+  - @opengeni/xai-subscription@0.1.5
+  - @opengeni/documents@0.8.38
+  - @opengeni/events@0.4.36
+  - @opengeni/codemode@0.6.6
+  - @opengeni/github@0.8.1
+  - @opengeni/observability@0.8.36
+  - @opengeni/storage@0.2.137
+  - @opengeni/tool-gateway@0.1.17
+
 ## 2.2.0
 
 ### Minor Changes

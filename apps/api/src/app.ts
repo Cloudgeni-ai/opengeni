@@ -23,6 +23,7 @@ import {
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
+  UnsupportedLatencyModeError,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -87,6 +88,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  modelUnavailableHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -125,6 +127,8 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  createUserPresenceRecorder,
+  registerProductUsageMetricBaselines,
 } from "@opengeni/core";
 import {
   createManagedAuth,
@@ -470,10 +474,21 @@ export function createAppComposition(deps: AppDependencies): {
           ffmpegPath: deps.settings.voiceInputFfmpegPath,
         })
       : deps.transcriptionSegmenter;
+  registerProductUsageMetricBaselines(observability);
+  // Server-side presence counts managed people, so it exists only where
+  // canonical managed browser sessions exist. Writes are batched off the
+  // request path; see packages/core/src/user-presence.ts.
+  const userPresence =
+    deps.userPresence !== undefined
+      ? deps.userPresence
+      : deps.settings.productAccessMode === "managed"
+        ? createUserPresenceRecorder({ db: deps.db, observability })
+        : null;
   const routeDeps: ApiRouteDeps = {
     ...deps,
     resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
+    userPresence,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
@@ -557,6 +572,7 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
+      "X-OpenGeni-User-Activity",
     ],
     exposeHeaders: [
       "Accept-Ranges",
@@ -1243,6 +1259,8 @@ export function createAppComposition(deps: AppDependencies): {
         auth: clientAuthConfig(deps.settings),
         documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
+        legal: clientLegalConfig(deps.settings),
+        ...(deps.settings.supportEmail ? { supportEmail: deps.settings.supportEmail } : {}),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
@@ -1668,6 +1686,21 @@ export function createAppComposition(deps: AppDependencies): {
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
+          modelUnavailableHttpError(rawError) ??
+          (rawError instanceof UnsupportedLatencyModeError
+            ? new ApiHttpError(422, {
+                code: "validation_failed",
+                message: rawError.message,
+                retryable: false,
+                outcomeUnknown: false,
+                details: {
+                  code: rawError.code,
+                  modelId: rawError.modelId,
+                  latencyMode: rawError.latencyMode,
+                  allowedLatencyModes: [...rawError.allowedLatencyModes],
+                },
+              })
+            : null) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
@@ -2071,6 +2104,15 @@ function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
         ? { ga4: { measurementId: settings.analyticsGa4MeasurementId } }
         : {}),
     },
+  };
+}
+
+function clientLegalConfig(settings: AppDependencies["settings"]) {
+  return {
+    ...(settings.legalPrivacyPolicyUrl ? { privacyPolicyUrl: settings.legalPrivacyPolicyUrl } : {}),
+    ...(settings.legalTermsOfServiceUrl
+      ? { termsOfServiceUrl: settings.legalTermsOfServiceUrl }
+      : {}),
   };
 }
 

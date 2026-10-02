@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "7.4.0",
+  "version": "7.6.1",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -153,6 +153,10 @@
     "./hono": {
       "types": "./src/adapters/hono.ts",
       "default": "./src/adapters/hono.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
     }
   },
   "publishConfig": {

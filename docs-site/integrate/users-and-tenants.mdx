@@ -29,9 +29,22 @@ await og.addExternalWorkspaceMember(workspaceId, {
 });
 ```
 
-Grant the final permission set at onboarding. Add `files:upload` and `files:read` for attachments and `mcp_servers:attach` for [per-session tools](/integrate/your-data). To change permissions, revoke with `cancelExternalWorkspaceMemberGrant` (this also cancels the user's running turns) and add the member again with a new `operationId`.
+Add `files:upload` and `files:read` for attachments and `mcp_servers:attach` for [per-session tools](/integrate/your-data). To change permissions, call `updateExternalWorkspaceMember` with a new `operationId` and the complete new set; do not revoke and re-add. Use `cancelExternalWorkspaceMemberGrant` only to remove access: it also cancels the user's running turns.
 
 Use the same `source` everywhere: onboarding, `asUser`, and the proxy's `resolve`.
+
+Use an immutable database/auth subject ID, never an editable username, email or display name. A rename must retain the same private actor/history. If the host permits username reuse, that name must not transfer the previous actor's identity to a new account. Resolve current identity per request rather than retaining an old mounted user object.
+
+Check the host user's current enabled state, tenant membership and role on every session-control and provider route. A still-valid JWT or old `sessions:control` grant is not current host authorization. Block disallowed requests immediately and reconcile OpenGeni grants through the authorized membership lifecycle; do not re-onboard/widen grants on user requests. Revocation can cancel running work. Intentional team/site sharing and one-user workspaces are valid choices, not substitutes for live policy checks.
+
+To inspect the current inventory without granting or restoring membership:
+
+```ts
+const members = await og.listWorkspaceMembers(workspaceId);
+console.log(members.length); // WorkspaceMember[], not an object with .members
+```
+
+The raw REST `GET /v1/workspaces/:workspaceId/members` response is `{ members: WorkspaceMember[] }`. The SDK unwraps that envelope: iterate its returned array directly, not `(await og.listWorkspaceMembers(workspaceId)).members`. This read requires `workspace:read`; check each SDK method's own return type rather than assuming every list method has this shape.
 
 ## Choose who shares chats
 

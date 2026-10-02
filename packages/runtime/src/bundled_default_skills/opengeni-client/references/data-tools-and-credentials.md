@@ -40,7 +40,7 @@ The normal workspace-scoped API Integration flow is deterministic control-plane 
 2. Create or resolve the appropriate encrypted Connection when authentication is required. An `api_key` Connection must say where the secret goes: `credential: { headers: { Authorization: "Token ..." } }`, or `credential: { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }` (query and cookie placements work for API Integrations only). Match `preview.auth.carrier`/`name` from step 3; a bare `{ apiKey }` is rejected with 422, and preview adds a warning when the Connection's placement differs from the description.
 3. Call previewApiIntegration with the source and, when needed, the Connection. The source can be a URL or an inline document: `{ kind: "openapi_document", sourceKey: "<stable id>", document: "<OpenAPI JSON/YAML>", baseUrl? }` (8 MiB max, absolute server URLs or `baseUrl`; resend it on install; the preview echoes only its digest). Inlining does not make a localhost or private API reachable: tool calls still follow the deployment network policy, so a local product needs a public tunnel.
 4. Apply the customer's policy to the compiled operation list, safety classification, warnings, and approval modes. Select only intended operations.
-5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
+5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). Use the exact compiled identifiers from `preview.tools[].id`, not a guessed OpenAPI operationId or model-facing prefixed name. The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
 6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions: omit `tools` to follow the workspace defaults, or list it explicitly as `tools: [{ kind: "mcp", id: serverId }]`. An explicit `tools` array is an exact allow-list; `[]` selects no workspace server.
 
 Preview and install are ordinary backend API calls and can be automated. Human review is required only when the customer's policy or the operation risk requires it. The immutable revision/digest fence ensures that automation cannot install a different schema from the one it evaluated.
@@ -52,6 +52,13 @@ An agent-focused API description is often helpful: concise descriptions, stable 
 ## MCP lifecycle
 
 A workspace MCP capability is suitable when many sessions in that workspace use the same server and authority. A session may also receive an explicit mcpServers definition with URL, allowed tools, approval policy, and write-only credential headers or a non-secret Connection reference.
+
+For a per-session MCP server, `requireApproval: ["update_ticket"]` matches the
+original tool name returned by the server's `tools/list`, not the model-facing
+`acme__update_ticket` name (for server id `acme`). `true` gates every tool.
+This MCP name list is distinct from an API Integration's compiled
+`autoApprovedTools` identifiers; a session MCP policy does not override an API
+Integration's install-time approval policy.
 
 A server attached through a top-level createSession `mcpServers` entry is selected by that attachment, whether `tools` is omitted or explicit (including `tools: []`); there is no separate selection step. Every other MCP server (workspace capability, installed API Integration, deployment server) is reachable only when `tools` selects it or the omitted-`tools` workspace default includes it. A selected server the model never finds usually means it was not selected: check `session.effectiveToolPolicy`.
 
@@ -152,6 +159,88 @@ or rotation through the authorized owner.
 ## Authorization belongs at every layer
 
 Tool selection is not data authorization. The customer API must validate the presented credential on every operation and derive or verify the allowed tenant, user, report, and row scope. Do not trust model-supplied tenant IDs. Prefer endpoints whose server derives scope from token claims; when an ID is accepted, verify it belongs to those claims.
+
+An agent bridge needs an independently scoped provider credential, not an
+ordinary host login JWT with fewer tools listed. A token signed with the host's
+normal login secret and user ID may still authorize its account/password APIs;
+an OpenAPI/MCP allowlist does not restrict that bearer outside the tool surface.
+Prefer a separate signing key/token namespace plus a distinct issuer/audience,
+short expiry and explicit operation/record scope. Verify those claims on the
+bridge, and make ordinary host endpoints reject this credential entirely. Adding
+an audience claim is ineffective if the ordinary host verifier never checks it.
+Reuse authorized business logic, not the ordinary login credential or middleware.
+
+Before launch, test the actual middleware in both directions: the provider token
+can perform only its allowed read/title-only operation on an owned record; it
+cannot call the ordinary account/password/admin APIs, another user's record or
+an extra body field; an ordinary login token is not a bridge credential. Check
+expiry, issuer/audience and operation scope with negative tests. These are host
+authorization tests, not proof supplied by OpenGeni's tool selection or approval.
+
+### Reauthorize current host policy, not only signed claims
+
+After verifying the provider token's signature, issuer/audience and expiry,
+reload the current host user and its membership/record-owner policy for each
+call. A disabled owner or downgraded role must lose authority even while an old
+JWT remains cryptographically valid. For writes, recheck at the transaction
+boundary; a prior read is not a permission lease. The host-owned adapter below
+uses illustrative policy fields, not an OpenGeni token/SDK schema:
+
+```js
+function requireLiveToolAuthority(claims, user, grant, operation) {
+  if (typeof claims?.subjectId !== "string" || !claims.subjectId ||
+      typeof claims.tenantId !== "string" || !claims.tenantId ||
+      user?.enabled !== true || user.id !== claims.subjectId ||
+      grant?.active !== true || grant.subjectId !== user.id ||
+      grant.tenantId !== claims.tenantId ||
+      !Array.isArray(grant.operations) || !grant.operations.includes(operation) ||
+      !Array.isArray(claims.operations) || !claims.operations.includes(operation)) {
+    throw new Error("Tool request is not authorized.");
+  }
+  return { subjectId: user.id, tenantId: grant.tenantId };
+}
+
+// Website-share credentials are not team-report credentials.
+function websiteShareMayReadReport(share, report) {
+  return share?.kind === "website-share" &&
+    typeof share.websiteId === "string" && share.websiteId.length > 0 &&
+    report?.scope?.kind === "website" &&
+    report.scope.websiteId === share.websiteId;
+}
+
+// Host parses dates into validated UTC milliseconds; this example is half-open.
+function requireAuthorizedWindow(requested, allowed) {
+  if (![requested.start, requested.end, allowed.start, allowed.end].every(Number.isSafeInteger) ||
+      requested.start >= requested.end || allowed.start >= allowed.end ||
+      requested.start < allowed.start || requested.end > allowed.end) {
+    throw new Error("Requested date window is not authorized.");
+  }
+  return requested;
+}
+```
+
+Load `user` and `grant` from fresh trusted host records, never from browser/model
+fields or the token's old role alone. The token is only a ceiling. After this
+check, still authorize each requested record and field against that context.
+A one-user workspace still requires enabled-owner and record-ownership checks.
+
+### Scope report reads and publication
+
+Authorize the stored report's actual scope on list, summary, detail and export
+routes. A website-share credential must not expose a team report merely because
+that team contains the shared website. Filter summaries before returning them;
+transcript access is a separate check. Signed-in team sharing remains valid under
+its own current membership policy; the website-share helper is not that policy.
+The host derives this persisted scope from authorized records, not an unchecked
+editor-submitted authorization/provenance field.
+
+Enforce the advertised analytics window in the server/provider query, including
+time zone and the provider's boundary conventions, not only in prompts or UI.
+Bind reopening/export headers and session lookup to the currently selected
+report's immutable ID and authorized session, not the first mounted report.
+Persist generated-report provenance on the trusted backend from verified
+session/job receipts. An ordinary editor's submitted body or `generated` flag
+cannot establish that provenance or impersonate a different session/author.
 
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 

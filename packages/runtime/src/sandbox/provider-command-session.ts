@@ -54,6 +54,64 @@ export class ProviderCommandStartOutcomeUnknownError extends Error {
   }
 }
 
+/** A reserved stdin byte range was sent once but its acknowledgement was lost.
+ * The original process remains observation authority, never input replay authority. */
+export class ProviderCommandInputOutcomeUnknownError extends Error {
+  constructor(
+    readonly command: SandboxProviderCommand,
+    readonly byteOffset: number,
+    readonly byteLength: number,
+    cause: unknown,
+  ) {
+    super(
+      "Provider command stdin outcome is unknown; the input was not resent. Do not resend stdin; inspect the original command with empty input.",
+      { cause },
+    );
+    this.name = "ProviderCommandInputOutcomeUnknownError";
+  }
+}
+
+/** An already-dispatched invocation could not be observed within this read's
+ * budget. The exact locator is read authority, never Start/input replay authority. */
+export class ProviderCommandObservationUnavailableError extends Error {
+  constructor(
+    readonly command: SandboxProviderCommand,
+    cause: unknown,
+    /** Mixed or unreadable provider graphs can contain observation failure
+     * without proving that an automatic read retry is safe. */
+    readonly readRetryAllowed = true,
+  ) {
+    super("Provider command observation unavailable; do not replay the invocation", { cause });
+    this.name = "ProviderCommandObservationUnavailableError";
+  }
+}
+
+export function isProviderCommandObservationUnavailableError(error: unknown): boolean {
+  const pending = [error];
+  const seen = new Set<object>();
+  for (let count = 0; pending.length && count < 32; count++) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof ProviderCommandObservationUnavailableError) return true;
+    try {
+      for (const key of ["cause", "error"] as const) {
+        const property = Object.getOwnPropertyDescriptor(current, key);
+        if (property && "value" in property) pending.push(property.value);
+      }
+      const errors = Object.getOwnPropertyDescriptor(current, "errors");
+      if (errors && "value" in errors && Array.isArray(errors.value) && errors.value.length <= 16)
+        for (let index = 0; index < errors.value.length; index++) {
+          const item = Object.getOwnPropertyDescriptor(errors.value, String(index));
+          if (item && "value" in item) pending.push(item.value);
+        }
+    } catch {
+      /* Unknown error graphs do not acquire observation authority. */
+    }
+  }
+  return false;
+}
+
 export type ProviderCommandSession = {
   verifyCommandSupervisionCapability?(): Promise<{ sandboxId: string; taskId: string }>;
   releaseSupervisedCommand?(handle: number): Promise<void>;

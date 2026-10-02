@@ -10,19 +10,40 @@ bun add @opengeni/sdk
 
 `@opengeni/sdk` is a framework-agnostic, ESM-only TypeScript client. It needs only WHATWG `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
 
+### CommonJS hosts
+
+Use dynamic `import()` inside an async initializer in a `.cjs` host, not `require("@opengeni/sdk")` or top-level `await`. Callers await the initializer; the project can keep its existing CommonJS module type.
+
+```js
+// opengeni.cjs
+async function createOpenGeniClient() {
+  const { OpenGeniClient } = await import("@opengeni/sdk");
+  return new OpenGeniClient({
+    baseUrl: process.env.OPENGENI_API_BASE_URL,
+    apiKey: process.env.OPENGENI_API_KEY,
+  });
+}
+
+module.exports = { createOpenGeniClient };
+```
+
+Keep credential-bearing clients on the server, whether loaded with `import` or dynamic `import()`.
+
 ## Entry points
 
-| Import                                          | Use it for                                                                                    |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `@opengeni/sdk`                                 | `OpenGeniClient`: sessions, workspaces, files, tools, events, and `createSessionProxyHandler` |
-| `@opengeni/sdk/next`                            | `createSessionProxyRoute` and `toNextRouteHandlers` for the App Router                        |
-| `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                      |
-| `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                      |
-| `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                 |
-| `@opengeni/sdk/session-history-import`          | Server-only archived-session creation and event-batch append helpers                          |
-| `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                   |
-| `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                     |
-| `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                     |
+| Import                                          | Use it for                                                                                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `@opengeni/sdk`                                 | `OpenGeniClient`: sessions, workspaces, files, tools, events, and `createSessionProxyHandler`                                  |
+| `@opengeni/sdk/next`                            | `createSessionProxyRoute` and `toNextRouteHandlers` for the App Router                                                         |
+| `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                                                       |
+| `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                                                       |
+| `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                                                  |
+| `@opengeni/sdk/session-history-import`          | Server-only archived-session creation and event-batch append helpers                                                           |
+| `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                                                    |
+| `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                                                      |
+| `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                                                      |
+| `@opengeni/sdk/usage-allowances`                | Server helpers for workspace and member [usage allowances](/guides/usage-allowances)                                           |
+| `@opengeni/sdk/workspace-integrations`          | Organization webhooks and credential provider; `verifyWebhookEvent` and `verifyCredentialProviderRequest` are also on the root |
 
 For the default embed, see [Embed manually](/embed-manually).
 
@@ -68,6 +89,15 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 In a chat UI, wire Stop to `pauseSession`: it is resumable, and messages sent while paused queue until `resumeSession`. `cancelSession` is terminal for the session and its children.
 
 The complete method list is in [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
+
+### Workspace member inventory
+
+```ts
+const members = await og.listWorkspaceMembers(workspaceId);
+console.log(members.length); // WorkspaceMember[]; iterate the array directly
+```
+
+`listWorkspaceMembers()` unwraps the REST `{ members: WorkspaceMember[] }` envelope. Its result is an array, not an object with `.members`. Raw HTTP `GET /v1/workspaces/:workspaceId/members` keeps that envelope. The read requires `workspace:read` and does not grant or restore membership. Other SDK list methods have their own return shapes; inspect the installed types rather than copying a REST wrapper onto an SDK result.
 
 ## createSessionProxyHandler
 

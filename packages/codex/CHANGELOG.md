@@ -1,5 +1,38 @@
 # @opengeni/codex
 
+## 0.2.31
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+
+## 0.2.30
+
+### Patch Changes
+
+- 04640d1: Use live Codex account catalogs for browser and agent model choices and automatic new-session defaults. Require exact model support on every permitted serving account, refresh expired credentials, and preserve provider unsupported-model explanations through the OpenAI SDK error envelope.
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+
 ## 0.2.29
 
 ### Patch Changes

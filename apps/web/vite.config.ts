@@ -109,9 +109,15 @@ export default defineConfig({
               // Workspace forms, provider marks, and administration links are
               // shared route primitives. They must not pull the settings
               // implementation into the workspace shell or direct sessions.
+              // Preserve each primitive's consumers: a session-used Dialog must
+              // not carry the workspace-only administration boundary or lazy
+              // feedback Textarea into every direct session. Coalesce only the
+              // tiny shared form chunks, not the whole mixed-consumer group.
               name: "workspace-form-primitives",
               test: /apps[\\/]web[\\/]src[\\/]components[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark|settings[\\/]organization-workspace-administration)\.tsx$/,
               includeDependenciesRecursively: false,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 4 * 1024,
               priority: 20,
             },
             {
@@ -204,6 +210,12 @@ export default defineConfig({
               priority: 5,
             },
             {
+              // Isolate list title helpers so older-server fallbacks can load
+              // them without promoting the shared chat route graph to startup.
+              name: "session-list-titles",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.ts$/,
+            },
+            {
               // The SDK's error and wire-type runtime, and the attribution and
               // analytics helpers beside them, load at startup for every route.
               // Entry-aware splitting otherwise cuts this one unit in two as
@@ -246,10 +258,12 @@ export default defineConfig({
               // CalendarClock is also a session header/rail glyph. Keep it
               // here so management revision UI cannot share its route chunk
               // and make management controls static session dependencies.
+              // The mobile menu also belongs to sessions. Keep its glyph here
+              // so it cannot pull lazy settings glyphs into the shared graph.
               // The usage-limit gauge and allowance wording are drawn by the
               // conversation's refusal row and by the lazy usage pages.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -274,7 +288,7 @@ export default defineConfig({
               // lands in a chunk the workspace route imports and pulls this
               // whole surface into a sessions load.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -322,8 +336,11 @@ export default defineConfig({
               // this group they land in the section's chunk and form a cycle
               // (settings-pages <-> organization-models-section) that leaves
               // React undefined when the section evaluates.
+              // Organization API-key setup is dynamically imported by Developer
+              // settings. Pin its implementation here too so shared dependencies
+              // cannot merge it into the direct-session graph.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -370,11 +387,14 @@ export default defineConfig({
               // settings route. Keep its sizeable roster and permission editor
               // graph behind that second boundary so it cannot be folded into
               // startup or a direct session load through shared UI primitives.
+              // At 28 KiB the developer-settings graph folds lazy Site HTTP and
+              // crypto helpers into direct sessions. Keep the merge below that
+              // boundary while coalescing genuinely shared member primitives.
               name: "workspace-members",
               test: /src[\\/]routes[\\/]workspace-members-section\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 28 * 1024,
+              entriesAwareMergeThreshold: 24 * 1024,
               priority: 4,
             },
             {
@@ -412,6 +432,13 @@ export default defineConfig({
               test: /packages[\\/]contracts[\\/]src[\\/](?:document-artifact-(?:commands|query)|presentation-artifact-(?:commands|query)|spreadsheet-artifact-(?:commands|date|query)|editable-artifact-(?:binary|causal-frontier|codec-registry|committed-transaction|live|serialized-commit|versions)|editable-artifacts)\.ts$/,
               includeDependenciesRecursively: false,
               priority: 5,
+            },
+            {
+              // Keep customer model setup in its own lazy feature boundary.
+              name: "customer-model-setup",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]direct-model-provider-connections?\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
             },
             {
               // Skills administration is lazy workspace governance. Pinning

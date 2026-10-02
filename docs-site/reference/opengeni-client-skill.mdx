@@ -32,6 +32,12 @@ Use this skill when a customer's product and OpenGeni remain separate systems.
 That is the normal integration shape: the product owns its users and business
 UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 
+For first-time organization and workspace provisioning, start with
+[OpenGeni developer setup](https://docs.opengeni.ai/guides/developer-plugin), then return here to write
+the embedding code. That skills-only workflow uses the coding agent's own
+browser and public REST/SDK, with a scoped Developer setup key; no OpenGeni MCP
+server is required.
+
 Do not confuse two meanings of "skill": this file teaches a customer's coding
 agent how to integrate OpenGeni; session `skills` are runtime capabilities or
 instructions attached to an OpenGeni agent. The former designs the integration.
@@ -71,13 +77,15 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Four choices belong to the user: who shares what (`chats`: private, shared
-  or isolated), when things run (schedule and time zone), where outputs land
-  (which screen, record, or channel), and whether the agent may write. If the
-  request or repository does not settle any of them, ask ONE bundled question
-  (the structured question UI when available) with a recommended answer for
-  each, before building. This is the expected step, not an option: asking once
-  is cheap, rebuilding is not. Never ask what the repository answers. See
+- Two choices belong to the user: who can see a chat (`chats`: private, shared
+  or isolated) and whether the agent may change data. If the request or
+  repository does not settle one, ask ONE short, plain-language question with a
+  recommended answer, before building. Never ask what the repository answers.
+- Do not ask about background work, schedules, session length or credential
+  lifetime up front. Long agent sessions just work. Only when the requested
+  feature itself is scheduled or runs in the background (for example "email me
+  a weekly report"), ask for the missing details (day, time, time zone, where
+  results appear) and say in one sentence why you need them. See
   [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.
@@ -210,7 +218,10 @@ Choose one only for its stated reason; read
   materially different interaction model but still wants canonical event,
   queue, composer, approval, and human-input behavior.
 - **SDK only**: a non-React frontend (Svelte, Vue, native mobile), a CLI, or
-  backend automation. Keep the SDK on a product backend route.
+  backend automation. Keep the SDK on a product backend route. For a runnable
+  native Vue host, start with the
+  [Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md).
+  Run its consumer commands from `examples/vue-conversation/app`.
 - **A non-JavaScript backend** (Django, Rails, Go, PHP, Java): keep the React
   conversation and implement the proxy's small HTTP contract in that backend
   instead of adding a Node sidecar. See
@@ -545,7 +556,7 @@ session a short-lived per-user bearer and rotate it on every message:
    never send credential updates itself.
 4. The MCP server validates the token and enforces the user's own permissions.
 
-Make the token outlive one turn (agents can work for many minutes). Header
+Make the token outlive long agent work by default (hours, refreshed on every message); this is a default, never a question for the user. Header
 rotation cannot change the server's URL or tools. Scheduled tasks cannot carry
 inline `mcpServers`; background agents use a workspace MCP connection or
 OpenAPI Integration instead.
@@ -759,6 +770,67 @@ Beyond `initialMessage`/`tools`/`resources`, the create body (`POST /v1/workspac
 - Session creation exposes a workspace-scoped `idempotencyKey` (distinct from the per-call `clientEventId`): forward a stable value so concurrent/retried creates of the same logical session collapse to a single session. Without it every create is independent, so a blind retry can double-create — keep sending a stable key when you retry.
 - Treat unknown event types as extensible timeline entries, not client crashes.
 
+### Read a settled result without caching progress or losing text
+
+`agent.message.completed` means one message ended, not that the turn completed.
+`phase: "commentary"` is progress; even `final_answer` text precedes canonical
+settlement. For a text-result cache, wait for the expected logical turn's
+`turn.completed` and use its original `payload.output`. Empty output or
+`emptyFinalReply` is not a successful report; a wait-ended turn may contain
+`reply` for human attention without a result. Handle failure, cancellation,
+approval and human-input states separately. Do not mark the whole session/goal
+complete merely because one turn settled.
+
+REST `listEvents` defaults to a bounded monitoring/summary projection. A compact
+latest result is also a projection and can truncate long text. For an exact
+saved result, use bounded `listEventPage` reads of original events, check
+`forensicExact`, and follow the returned cursor, not a guessed sequence:
+
+```js
+async function readOriginalResultPage(client, workspaceId, sessionId, after) {
+  const page = await client.listEventPage(workspaceId, sessionId, {
+    mode: "forensic", payloadMode: "full", direction: "after", after, limit: 50,
+    includeTypes: ["agent.message.completed", "turn.completed", "turn.failed",
+      "turn.cancelled", "session.requiresAction", "session.humanInput.requested"],
+  });
+  if (!page.forensicExact ||
+      (page.hasMore && (!Number.isSafeInteger(page.nextAfter) || page.nextAfter <= after))) {
+    throw new Error("An exact result page is not available.");
+  }
+  return page; // truncated/hasMore may mean more exact events, not truncated text
+}
+
+function settledTurnResult(event, expectedTurnId) {
+  if (event.turnId !== expectedTurnId ||
+      ["late_rejected", "duplicate"].includes(event.turnAssociation)) return null;
+  if (event.type === "turn.failed" || event.type === "turn.cancelled") {
+    return { state: event.type === "turn.failed" ? "failed" : "cancelled", text: null };
+  }
+  if (event.type !== "turn.completed") return null;
+  const payload = event.payload ?? {};
+  if (payload.emptyFinalReply === true || typeof payload.output !== "string" || !payload.output.trim()) {
+    return { state: "settled_without_result", text: null };
+  }
+  return { state: "completed", text: payload.output };
+}
+```
+
+Keep the newest candidate plus its original event ID/sequence while following
+`hasMore`; publish/cache only after reaching the current page boundary. Preserve
+the original full text rather than stripping a summary's truncation marker.
+If exact retrieval is unavailable, report that explicitly; do not cache a
+snippet as the final answer. Render only authorized result fields, never raw
+forensic payloads. The existing UI/facade projections are preferable when they
+already fit; this is a narrow backend text-result example, not a new timeline.
+
+Use a background job or nonblocking bounded status ticks when a turn's tools
+call back into the same host. Holding every scarce synchronous request worker
+in a blocking wait can starve those callbacks under concurrency; it is a
+deployment-dependent risk, not an inevitable failure. Bound each read/deadline,
+retain callback capacity, and resume from the saved cursor. For static pages,
+initialize enhancement scripts after their DOM targets exist (`defer`, modules
+or `DOMContentLoaded`); retain the native form/POST fallback.
+
 ## Files
 
 The usual flow is:
@@ -886,11 +958,21 @@ export const POST = createChatHandler(og, {
     return me ? { tenant: me.accountId, user: me.userId } : new Response("Unauthorized", { status: 401 });
   },
   format: "vercel", // or "openai-chat" / "openai-responses"; default: native chunks
+  toolParts: true, // optional Vercel activity indicators; off by default
 });
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields chunks
 ```
+
+For the Vercel format, `toolParts: true` emits OpenGeni's tool activity as
+`dynamic`, `providerExecuted` parts, not tools for your app to execute. The
+successful output is only `{ status }`, not the actual result: this opt-in does
+not restore tool results, artifacts or attachments. Leave it off for text-only
+activity. Approval requests are emitted independently of this option (AI SDK
+6+ is needed to answer them). When composing your own AI SDK stream, pass the
+same option to `uiMessageStreamParts(chunks, { framing: false, toolParts: true })`;
+`framing: false` leaves message framing to the outer stream.
 
 Each tenant maps to one workspace and each conversation to one deterministic
 session. Conversation IDs are independent of the acting user; authorization
@@ -916,7 +998,7 @@ They run in the customer's backend: they do not add `/responses` or
 
 ## `references/compatibility-and-troubleshooting.md`
 
-```markdown
+````markdown
 # Verify compatibility and recover setup problems
 
 ## Product documentation without repository access
@@ -932,6 +1014,125 @@ unavailable and inspect the installed package and authorized service instead.
 Documentation availability and deployed feature availability are separate.
 Inspect the installed package exports/types and `/v1/config/client`; verify the
 chosen contract against the intended deployment before implementing against it.
+
+To check the full Skill's HTTP Markdown export from a repository checkout:
+
+```bash
+bun scripts/check-client-skill-markdown-export.ts
+```
+
+This opt-in network check compares the published `.md` sections with the local
+generated mirror, including nested code fences. A mismatch may mean the docs
+deployment has not caught up with the checkout; it is not evidence of a runtime
+API failure. Use `--url` and `--expected` to check another deployment or a known
+matching mirror. The local HTTP regression tests run without external services.
+
+## CommonJS hosts
+
+The SDK is ESM-only. In an existing `.cjs` host, use dynamic `import()` inside
+an async initializer; `require("@opengeni/sdk")` is not the supported loading
+path. Do not change the entire project's module type just to load the SDK.
+
+```js
+// opengeni.cjs — callers await createOpenGeniClient().
+async function createOpenGeniClient() {
+  const { OpenGeniClient } = await import("@opengeni/sdk");
+  return new OpenGeniClient({
+    baseUrl: process.env.OPENGENI_API_BASE_URL,
+    apiKey: process.env.OPENGENI_API_KEY,
+  });
+}
+
+module.exports = { createOpenGeniClient };
+```
+
+Keep this initialization on the server: never send the API key to a browser.
+
+## Host errors and uncertain actions
+
+Keep SDK/provider details server-only and return friendly host-branded notices,
+not `error.message`, `error.body`, raw stack traces or a provider's product name.
+Put configuration, dynamic SDK import/initialization, identity resolution,
+upstream calls and local persistence inside the route's error boundary, not only
+the final call. Log a redacted diagnostic with a non-secret correlation ID on
+the server; never copy an SDK exception into the browser response or DOM.
+
+Branding applies to UI-owned labels/notices, not legitimate source quotations,
+code, or user/assistant transcript content; do not rewrite those to hide names.
+Check the installed SDK/React error-copy API separately: changing conversation
+labels does not itself prove that upstream error messages are remapped. Host
+safe-copy guidance alone does not change a package's default error behavior.
+
+When the installed SDK exports `formatErrorMessage(error, fallback?)` (root,
+`@opengeni/sdk/core` or `@opengeni/sdk/browser`), use it for custom-renderer error
+copy. Typed errors produce neutral, state-aware messages and retain a bounded
+support reference; an unrecognized error uses the supplied safe fallback, never
+its raw message. The original error's `message`, `body`, `details`, `status`,
+`code`, `retryable` and `outcomeUnknown` remain diagnostic/policy facts.
+
+The matching React package provides `OpenGeniProvider.formatError`, with the
+exported type `ErrorMessageFormatter`:
+`(error: unknown, defaultMessage: string) => string | undefined`. It receives
+the original error and neutral default before presentation. Return a host
+message; `undefined` or an empty string keeps the default. A minimal branding
+callback preserves its state guidance and support reference. A throwing callback
+or invalid runtime return also keeps the neutral default; presentation must not
+interrupt delivery-state settlement:
+
+```js
+function formatAssistantError(_error, defaultMessage) {
+  return `ACME Assistant: ${defaultMessage}`;
+}
+```
+
+Pass this as `formatError={formatAssistantError}` on the existing provider.
+Keep heading/placeholder/label overrides separately. Explicit host-authored
+error props and custom command messages still need safe host copy; this callback
+does not rewrite user, assistant, tool, worker or Skill content. Do not regex
+scrub those strings or stringify diagnostic errors. Check the installed exports
+and provider prop before using these additive APIs; source guidance is not
+proof that an older installed/published package contains them.
+
+Formatting is presentation only: it does not authorize calls, change retry
+policy or reconcile an uncertain mutation. Preserve the default's sign-in,
+permission, setup/allowance, HTTPS-upload and unknown-outcome instructions when
+customizing it. Keep diagnostics server-only/redacted and retain only the
+bounded support reference needed by the UI, not a raw diagnostic body.
+
+For an approval route, distinguish an accepted decision from completed tool
+execution. If the call returns a decision event and local mapping/receipt save
+then fails, the decision may already be durable. `outcomeUnknown: true` also
+means acceptance may have occurred. Neither case justifies "the article is
+unchanged", a fresh approval ID or a blind replay. Keep the original session,
+approval ID and persisted `clientEventId`; reread ordered events and the
+authorized provider record to reconcile. Only retry the exact original request
+under the installed endpoint's supported idempotency contract after reconciliation.
+For stale/no-pending approval conflicts, refresh current state instead of
+recreating a pending card or exposing the raw upstream error.
+
+```js
+function assistantFailureNotice(error, { decisionAccepted = false } = {}) {
+  if (decisionAccepted || error?.outcomeUnknown === true) {
+    return {
+      state: "reconciling",
+      message: "The action may have been accepted. Check its status before trying again.",
+    };
+  }
+  if (error?.status === 409) {
+    return { state: "refresh", message: "This request has changed. Refresh before deciding." };
+  }
+  return { state: "failed", message: "The assistant is unavailable. Please try again later." };
+}
+```
+
+This helper is for the host's approval-action error boundary, not a replacement
+for authentication/authorization responses. Set `decisionAccepted = true`
+immediately after `await sendApprovalDecision(...)`, before any local save.
+Disable repeat actions while `state === "reconciling"`; render only this safe
+notice and use the existing host status/error conventions. Apply the same
+safe-copy boundary to polling, configuration and generic SDK failures. Test
+stale approval, an unknown mutation outcome, accepted-decision/local-save failure,
+SDK initialization failure and late errors after an identity switch.
 
 ## Decide what is being replaced
 
@@ -1001,7 +1202,7 @@ report the attempted repair and exact missing requirement, rather than handing
 back an avoidable package installation. Never substitute a whitespace check for
 unit, type, or integration tests. Report code written, committed, tested,
 integration verified, and published as distinct facts within the requested scope.
-```
+````
 
 ## `references/configure-the-agent.md`
 
@@ -1222,11 +1423,36 @@ Rules the server enforces:
 
 ## Verify
 
+Read response visibility from `session.tenancy?.visibility`, not
+`session.visibility`. The top-level `visibility` field belongs to create
+requests; the response's tenancy projection may be absent when private-session
+support is unavailable. Absence means unknown, not `"workspace"`.
+
+`effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
+locally if your UI needs capability sections:
+
+```ts
+import type { AgentEffectiveTools } from "@opengeni/sdk";
+
+const session = await og.getSession(workspaceId, sessionId);
+const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
+const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+for (const tool of session.effectiveTools?.tools ?? []) {
+  const group = byCapability.get(tool.capability) ?? [];
+  group.push(tool);
+  byCapability.set(tool.capability, group);
+}
+const knowledgeTools = byCapability.get("knowledge") ?? [];
+```
+
+An absent `effectiveTools` projection on an older session means the inventory is
+unknown, not that every capability is off. Each tool's `visibility` means model
+discovery (`"upfront"` or `"search"`), not who can see the session. Preserve it
+when grouping. `mcpServers[].toolsKnown: false` means that server's schemas are
+not known in this projection; do not invent tool names or treat it as disabled.
+
 - `session.agent`: the resolved configuration, including `source` (request,
   workspace default, inherited, ...) and `unavailable`.
-- `session.effectiveTools.tools`: every known tool with its capability and
-  `visibility: "upfront" | "search"`. `mcpServers[].toolsKnown: false` means that
-  server lists its tools when a turn starts.
 - The model-context inspector in the OpenGeni web app (session > Debug >
   Context) shows the instructions actually sent, split into titled sections.
 ````
@@ -1378,7 +1604,7 @@ The normal workspace-scoped API Integration flow is deterministic control-plane 
 2. Create or resolve the appropriate encrypted Connection when authentication is required. An `api_key` Connection must say where the secret goes: `credential: { headers: { Authorization: "Token ..." } }`, or `credential: { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }` (query and cookie placements work for API Integrations only). Match `preview.auth.carrier`/`name` from step 3; a bare `{ apiKey }` is rejected with 422, and preview adds a warning when the Connection's placement differs from the description.
 3. Call previewApiIntegration with the source and, when needed, the Connection. The source can be a URL or an inline document: `{ kind: "openapi_document", sourceKey: "<stable id>", document: "<OpenAPI JSON/YAML>", baseUrl? }` (8 MiB max, absolute server URLs or `baseUrl`; resend it on install; the preview echoes only its digest). Inlining does not make a localhost or private API reachable: tool calls still follow the deployment network policy, so a local product needs a public tunnel.
 4. Apply the customer's policy to the compiled operation list, safety classification, warnings, and approval modes. Select only intended operations.
-5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
+5. Call installApiIntegration with the exact preview revision and content digest, Connection, stable instance key, and allowed operations. Write and destructive operations (preview `approvalMode: "ask"`) otherwise pause every call for human approval, which a scheduled or unattended run cannot give; list the ones your policy allows to run unattended in `autoApprovedTools` (`capabilities:manage`; custom and curated Integrations alike, except operations a curated definition explicitly keeps human-approved). Use the exact compiled identifiers from `preview.tools[].id`, not a guessed OpenAPI operationId or model-facing prefixed name. The field is declarative: an update that omits it makes every write tool ask again. MCP connector tool permissions and session `mcpApprovalPolicies` do not apply to API Integrations.
 6. Persist the returned non-secret instance and server identifiers with the workspace provisioning record, then select that server for sessions: omit `tools` to follow the workspace defaults, or list it explicitly as `tools: [{ kind: "mcp", id: serverId }]`. An explicit `tools` array is an exact allow-list; `[]` selects no workspace server.
 
 Preview and install are ordinary backend API calls and can be automated. Human review is required only when the customer's policy or the operation risk requires it. The immutable revision/digest fence ensures that automation cannot install a different schema from the one it evaluated.
@@ -1390,6 +1616,13 @@ An agent-focused API description is often helpful: concise descriptions, stable 
 ## MCP lifecycle
 
 A workspace MCP capability is suitable when many sessions in that workspace use the same server and authority. A session may also receive an explicit mcpServers definition with URL, allowed tools, approval policy, and write-only credential headers or a non-secret Connection reference.
+
+For a per-session MCP server, `requireApproval: ["update_ticket"]` matches the
+original tool name returned by the server's `tools/list`, not the model-facing
+`acme__update_ticket` name (for server id `acme`). `true` gates every tool.
+This MCP name list is distinct from an API Integration's compiled
+`autoApprovedTools` identifiers; a session MCP policy does not override an API
+Integration's install-time approval policy.
 
 A server attached through a top-level createSession `mcpServers` entry is selected by that attachment, whether `tools` is omitted or explicit (including `tools: []`); there is no separate selection step. Every other MCP server (workspace capability, installed API Integration, deployment server) is reachable only when `tools` selects it or the omitted-`tools` workspace default includes it. A selected server the model never finds usually means it was not selected: check `session.effectiveToolPolicy`.
 
@@ -1491,6 +1724,88 @@ or rotation through the authorized owner.
 
 Tool selection is not data authorization. The customer API must validate the presented credential on every operation and derive or verify the allowed tenant, user, report, and row scope. Do not trust model-supplied tenant IDs. Prefer endpoints whose server derives scope from token claims; when an ID is accepted, verify it belongs to those claims.
 
+An agent bridge needs an independently scoped provider credential, not an
+ordinary host login JWT with fewer tools listed. A token signed with the host's
+normal login secret and user ID may still authorize its account/password APIs;
+an OpenAPI/MCP allowlist does not restrict that bearer outside the tool surface.
+Prefer a separate signing key/token namespace plus a distinct issuer/audience,
+short expiry and explicit operation/record scope. Verify those claims on the
+bridge, and make ordinary host endpoints reject this credential entirely. Adding
+an audience claim is ineffective if the ordinary host verifier never checks it.
+Reuse authorized business logic, not the ordinary login credential or middleware.
+
+Before launch, test the actual middleware in both directions: the provider token
+can perform only its allowed read/title-only operation on an owned record; it
+cannot call the ordinary account/password/admin APIs, another user's record or
+an extra body field; an ordinary login token is not a bridge credential. Check
+expiry, issuer/audience and operation scope with negative tests. These are host
+authorization tests, not proof supplied by OpenGeni's tool selection or approval.
+
+### Reauthorize current host policy, not only signed claims
+
+After verifying the provider token's signature, issuer/audience and expiry,
+reload the current host user and its membership/record-owner policy for each
+call. A disabled owner or downgraded role must lose authority even while an old
+JWT remains cryptographically valid. For writes, recheck at the transaction
+boundary; a prior read is not a permission lease. The host-owned adapter below
+uses illustrative policy fields, not an OpenGeni token/SDK schema:
+
+```js
+function requireLiveToolAuthority(claims, user, grant, operation) {
+  if (typeof claims?.subjectId !== "string" || !claims.subjectId ||
+      typeof claims.tenantId !== "string" || !claims.tenantId ||
+      user?.enabled !== true || user.id !== claims.subjectId ||
+      grant?.active !== true || grant.subjectId !== user.id ||
+      grant.tenantId !== claims.tenantId ||
+      !Array.isArray(grant.operations) || !grant.operations.includes(operation) ||
+      !Array.isArray(claims.operations) || !claims.operations.includes(operation)) {
+    throw new Error("Tool request is not authorized.");
+  }
+  return { subjectId: user.id, tenantId: grant.tenantId };
+}
+
+// Website-share credentials are not team-report credentials.
+function websiteShareMayReadReport(share, report) {
+  return share?.kind === "website-share" &&
+    typeof share.websiteId === "string" && share.websiteId.length > 0 &&
+    report?.scope?.kind === "website" &&
+    report.scope.websiteId === share.websiteId;
+}
+
+// Host parses dates into validated UTC milliseconds; this example is half-open.
+function requireAuthorizedWindow(requested, allowed) {
+  if (![requested.start, requested.end, allowed.start, allowed.end].every(Number.isSafeInteger) ||
+      requested.start >= requested.end || allowed.start >= allowed.end ||
+      requested.start < allowed.start || requested.end > allowed.end) {
+    throw new Error("Requested date window is not authorized.");
+  }
+  return requested;
+}
+```
+
+Load `user` and `grant` from fresh trusted host records, never from browser/model
+fields or the token's old role alone. The token is only a ceiling. After this
+check, still authorize each requested record and field against that context.
+A one-user workspace still requires enabled-owner and record-ownership checks.
+
+### Scope report reads and publication
+
+Authorize the stored report's actual scope on list, summary, detail and export
+routes. A website-share credential must not expose a team report merely because
+that team contains the shared website. Filter summaries before returning them;
+transcript access is a separate check. Signed-in team sharing remains valid under
+its own current membership policy; the website-share helper is not that policy.
+The host derives this persisted scope from authorized records, not an unchecked
+editor-submitted authorization/provenance field.
+
+Enforce the advertised analytics window in the server/provider query, including
+time zone and the provider's boundary conventions, not only in prompts or UI.
+Bind reopening/export headers and session lookup to the currently selected
+report's immutable ID and authorized session, not the first mounted report.
+Persist generated-report provenance on the trusted backend from verified
+session/job receipts. An ordinary editor's submitted body or `generated` flag
+cannot establish that provenance or impersonate a different session/author.
+
 Separate operations by risk. Read-only analytics, data export, saved-report mutation, and administrative actions should not share an unnecessarily broad token or approval policy. Keep destructive or consequential writes absent or approval-gated unless the customer explicitly wants autonomous writes.
 
 For analytics, return structured, bounded data with clear units, time zones, filters, pagination, and aggregation semantics. Provide server-side aggregates where practical. The agent may combine tool calls or use CodeMode to transform authorized results without placing every intermediate row in conversational context. Code execution happens in the selected OpenGeni sandbox or Connected Machine; provider credentials remain in the broker. Confirm that the installed tool surface is available to CodeMode before relying on that optimization.
@@ -1551,11 +1866,13 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-The four user-owned choices (who shares what, when things run and in which time
-zone, where outputs land, whether the agent may write) are never defaulted
-silently: if the request or repository does not settle one, send the single
-bundled question before building the parts that depend on it, and continue only
-independent discovery while waiting. Skip this only when the user explicitly
+The user-owned choices (who shares what, whether the agent may change data,
+and, only for background or scheduled work, when it runs and where its results
+should appear) are never defaulted silently: if the request or repository does
+not settle a relevant one, send a single short question in plain product terms
+before building the parts that depend on it, and continue only independent
+discovery while waiting. A chat assistant's replies appear in the chat; that is
+not a question to ask. Skip this only when the user explicitly
 said not to ask; then state the defaults you chose in the handoff. For other
 choices, first use facts already available from the product, repository, live
 service, or prior direction, and use a reversible recommendation instead of a
@@ -1578,26 +1895,31 @@ user accept it or adjust individual choices. Do not build a new questionnaire or
 ask every integration the same questions. A suggested answer is not consent to
 send data, share private content, or perform an external action.
 
-Use product language for the relevant unresolved choices:
+Write every question the way the end user talks about their own product. Never
+use internal terms such as "on-demand", "learning across chats", "shape",
+"capabilities" or "visibility". Only ask about what applies:
 
-- **Learning across chats:** no new lasting learning, remember for each person,
-  or shared team knowledge. Explain briefly that chat history/retention is separate
-  and disabling learning does not delete history or existing authorized Knowledge.
-- **Who can open chats:** only their owner (`chats: "private"`), the team
-  (`"shared"`), or a workspace per user (`"isolated"`). Choose the
-  workspace mapping from the actual sharing boundary; private chats alone do not
-  require a workspace per person.
-- **How the agent gets data:** current-page snapshots, read-only tools to fetch
-  more reports, or controlled queries for deeper analysis. State the meaningful
-  limitation of the recommendation. Confirm broader access or writes separately
-  only when they are part of the requested product.
-- **When things run:** on demand, or on a schedule (time and time zone).
-- **Where results land:** the chat, a product record or screen, or a channel;
-  delivery goes through product tools, or signed workspace webhooks where the
-  deployment offers them.
+- **Who can see a chat:** only the person who started it (`chats: "private"`),
+  their whole team (`"shared"`), or each user gets a fully separate space
+  (`"isolated"`). Choose the workspace mapping from the actual sharing boundary;
+  private chats alone do not require a workspace per person.
+- **What the agent may do:** only look things up (read-only), or also make
+  changes. Name the actual things ("read your analytics", "can't change
+  websites or users"). Confirm writes separately, only when they are part of
+  the requested product.
+- **What data it uses:** only what's on the current page, or it can look up
+  more on its own. State the meaningful limitation of the recommendation.
+- **Only when the requested feature is itself scheduled or runs in the
+  background** (for example "email me a weekly report"): the missing details
+  (when it runs, "every Monday at 9:00, Oslo time", and where results should
+  appear) with one sentence on why. Never ask about this up front, and never
+  for a chat assistant: long sessions work without any user decision.
+- **Memory:** don't ask by default. Use no lasting memory between chats unless
+  the product clearly needs the assistant to remember things ("remember my
+  preferences"). If it does, ask in those words. Chat history is kept either way.
 
-For example, if all three choices are unresolved for a simple dashboard, propose
-“Private chats, no learning between chats, and current-page data only” with a short
+For example, for a simple dashboard assistant, propose
+“Only you can see your chats; it uses what's on the current page and can't change anything” with a short
 explanation that the agent cannot fetch another report on its own. Do not reuse
 that default for a team assistant whose requirements already imply shared work.
 Continue independent discovery while awaiting an answer; ask again only when new
@@ -1720,6 +2042,14 @@ invalid Unicode are rejected. A native-looking ID does not impersonate a native
 user. Workspace mapping identity passed to `ensureWorkspace` is a separate
 concept from this acting-user identity.
 
+Use an immutable database/auth subject ID, never an editable username, email or
+display name. Renaming must keep the same external ID and private history;
+reassigning a username must not reassign the previous actor's identity. History
+collision on username reuse is conditional on the host allowing reuse, not a
+guarantee about every host. Derive the ID anew from current authentication rather
+than a mounted component's old user object; apply the
+[identity/session epoch fence](product-shapes-and-ui.md#bind-asynchronous-ui-work-to-the-current-identity-and-session).
+
 User mode lazily establishes an external identity but does not grant access to a
 shared workspace. An explicitly authorized service onboarding operation may use:
 
@@ -1739,6 +2069,29 @@ permissions conflict instead of overwriting a subsequently reduced grant. Instal
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
+
+Check the host user's current enabled state, tenant membership and role on every
+session read/control route and every provider call. A still-valid token or an
+old `sessions:control` onboarding grant is not proof of current host authority.
+Block newly disallowed requests immediately and reconcile OpenGeni grants using
+the authorized membership lifecycle below; do not silently re-onboard or widen
+them on a user request. Permission-changing revocation can cancel running work.
+Per-user workspaces and deliberate team/site sharing are valid product choices,
+but neither replaces these current host-policy checks.
+
+### Read the member inventory: SDK versus REST
+
+```ts
+const members = await serviceClient.listWorkspaceMembers(authorizedWorkspaceId);
+console.log(members.length); // WorkspaceMember[]: iterate the array directly
+```
+
+The SDK unwraps the raw REST response. `GET /v1/workspaces/:workspaceId/members`
+returns `{ members: WorkspaceMember[] }`, but `listWorkspaceMembers()` returns
+`WorkspaceMember[]`, not that envelope. Do not read
+`(await serviceClient.listWorkspaceMembers(...)).members`. Inspect each installed
+SDK method's return type; other list methods may have different shapes. This
+inventory read needs `workspace:read` and does not grant or restore membership.
 
 ### Removal and account-wide lifecycle
 
@@ -2415,7 +2768,7 @@ Before calling an integration complete, verify:
 
 ## `references/product-shapes-and-ui.md`
 
-```markdown
+````markdown
 # Product shapes and UI
 
 ## Default to the full conversation
@@ -2430,11 +2783,40 @@ Before calling an integration complete, verify:
 
 Default to the full conversation component. Deviate only when the product needs a materially different interaction model, a non-React frontend, or compute surfaces, and record why. Styling differences alone are not a reason: theme with `--og-*` tokens and density props. Do not mount the workbench for an ordinary analytics chat, and do not rebuild session streaming, replay, queueing, approval, or timeline projection that a package already supplies.
 
+## Stock and host-branded appearance
+
+For a custom-branded embed, visibly match the host's fonts, colors, spacing,
+radius and current theme using the shipped stylesheet, scoped `--og-*` tokens
+and supported theme/density/label hooks. Keep UI-owned copy free of OpenGeni
+branding; source quotations and user/assistant content are not UI labels. Verify
+the installed error-copy API separately, not just the heading/placeholder.
+
+Stock mode uses the shipped components and `compiled.css` without extra host
+cosmetic CSS. The quality target is simple, polished and smooth at desktop
+around 1440px and mobile around 390px in supported light/dark themes. Host
+placement/available height remains host-owned. A stock defect belongs in the
+package's React/CSS, not a host styling workaround or a replacement chat UI.
+Do not present this expectation as proof that a particular build passed.
+
+Preserve first-try evaluation evidence when later repairs improve the result.
+In coordinated trials, the coordinator captures the actual browser matrix;
+do not make screenshot submission a prerequisite for the coding-agent handoff.
+
 ## When deviating in React
 
 Inspect the installed OpenGeni React package before creating replacement components. Its subpaths are composable, and the styled surfaces use scoped compiled CSS plus runtime theme and density tokens. Prefer, in order: `SessionConversation` customized through `composerProps` and `renderMessageText`; `MessageTimeline`, `ChatComposer`, and the session hooks composed into product layout; then a fully custom SDK-driven UI. Do not force a packaged component when the product needs a materially different interaction model.
 
+## Native non-React frontends
+
 For Svelte, SvelteKit, Vue, native mobile, or another non-React frontend, use the product's native component system. Keep the privileged OpenGeni client on a compatible backend boundary. A SvelteKit server route may use the TypeScript SDK directly; a non-JavaScript backend may use the public HTTP contract or a small compatible adapter. The browser still speaks to authenticated product routes.
+
+Start with the [runnable Vue conversation recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md)
+for native Vue single-file components, Vite and the existing Bun Fetch session
+proxy using the published SDK. Follow the README's deployment and host-auth
+prerequisites; run install, onboarding and consumer checks from
+`examples/vue-conversation/app`, not the repository root. The sample handles
+durable conversations and decisions with an escaped-text UI, not a full rich
+Markdown, artifact or file renderer. Keep organization credentials server-only.
 
 ## Links, downloads, artifacts, and Sites
 
@@ -2553,6 +2935,70 @@ For live sessions, preserve event sequence, reconnect, replay, and duplicate sup
 
 Uploads may send bytes directly to a short-lived signed storage URL returned by the trusted flow. That URL is narrow transfer authority, not the OpenGeni API key. Verify storage CORS for every intended browser origin.
 
+### Bind asynchronous UI work to the current identity and session
+
+In a custom polling/static UI, backend authorization does not stop an already
+authorized response for account A arriving after account B signs in. On logout,
+login, tenant switch or session switch, invalidate the UI epoch, abort outstanding
+requests, stop polling, and clear private messages, approval cards, session IDs,
+cursors and local caches. Do not reuse A's session ID for B. Abort alone is not
+enough: a completed request or a transport that ignores abort can still resolve.
+Guard both success and failure rendering by the captured identity/session epoch.
+
+These framework-neutral helpers belong in the host's existing frontend module:
+
+```js
+function createIdentityBoundView(clearPrivateState) {
+  let epoch = 0;
+  let identityKey = null;
+  const requests = new Set();
+  return {
+    reset(nextIdentityKey) {
+      epoch += 1; // also fences A -> B -> A and a new session for the same user
+      identityKey = nextIdentityKey;
+      for (const controller of requests) controller.abort();
+      requests.clear();
+      clearPrivateState(); // include polling timers, cached IDs and decisions
+    },
+    begin() {
+      if (identityKey === null) throw new Error("No authenticated view");
+      const capturedEpoch = epoch;
+      const controller = new AbortController();
+      requests.add(controller);
+      return {
+        signal: controller.signal,
+        isCurrent: () => capturedEpoch === epoch && !controller.signal.aborted,
+        finish: () => requests.delete(controller),
+      };
+    },
+  };
+}
+
+async function readForCurrentView(view, load, render, showFailure) {
+  const request = view.begin();
+  try {
+    const result = await load(request.signal);
+    if (request.isCurrent()) render(result);
+  } catch {
+    if (request.isCurrent()) showFailure("The assistant could not refresh.");
+  } finally {
+    request.finish();
+  }
+}
+```
+
+Call `view.reset(null)` before clearing host authentication; after authenticated
+mapping, reset with a key for the tenant/user/session tuple before loading its
+view. `load(signal)` calls the host's authenticated same-origin route and passes
+the signal to `fetch`. The epoch is a presentation fence, not authorization:
+the backend must still check every request's user and session ownership. Do not
+run these browser helpers with an organization key or put that key in storage.
+
+For reopened reports, key the selected report and its authorized session together.
+Refresh request headers/mappings when that selection changes; do not keep the
+first report's session in a mounted closure. A new actor object in the same
+component still requires reset/invalidation, not only a logout-time unmount.
+
 ## Decide what the user sees
 
 OpenGeni's durable event stream can support different product projections:
@@ -2566,6 +3012,79 @@ OpenGeni's durable event stream can support different product projections:
 The customer frontend chooses which event types and fields to render. Hiding an event from the chat view does not remove it from OpenGeni's durable history or from authorized audit readers. Do not promise data erasure or secrecy from presentation filtering.
 
 Each `session.requiresAction` event replaces the pending approval set. Read only `payload.approvals[].id`, `.name`, and `.arguments` (SDK type `SessionApprovalRequest`); other fields differ between a turn's first pause and later ones and exist for compatibility. Send `sendApprovalDecision({ approvalId: approval.id, decision })`: `id` is the pending tool call id, not the event id. `approvalsFromRequiresAction` / `projectPendingApprovals` from `@opengeni/react` already normalize older events.
+
+For a custom non-React projection, fold ordered, deduplicated events rather than
+appending every historical approval as a new pending card. Keep the original
+approval ID and the durable decision event ID. A decision is terminal for that
+approval; a replay/reload must not restore its Approve button. Turn settlement
+clears that turn's undecided approvals, not approvals owned by a different turn.
+The following minimal projection uses current stable fields; use the packaged
+normalizer for older events, not generated IDs or guessed compatibility fields:
+
+```js
+function projectApprovalState(events) {
+  let pending = new Map();
+  let owningTurnId = null;
+  const decisions = new Map();
+  const settledTurns = new Set();
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    if (event.type === "session.requiresAction") {
+      owningTurnId = event.turnId ?? null;
+      pending = new Map();
+      if (owningTurnId !== null && settledTurns.has(owningTurnId)) continue;
+      for (const approval of Array.isArray(payload.approvals) ? payload.approvals : []) {
+        if (!approval || typeof approval.id !== "string" || !approval.id ||
+            typeof approval.name !== "string" || !approval.name || decisions.has(approval.id)) continue;
+        pending.set(approval.id, approval);
+      }
+    } else if (event.type === "user.approvalDecision") {
+      if (typeof payload.approvalId !== "string" || !payload.approvalId ||
+          !["approve", "reject"].includes(payload.decision) || decisions.has(payload.approvalId)) continue;
+      decisions.set(payload.approvalId, {
+        approvalId: payload.approvalId,
+        decision: payload.decision,
+        decisionEventId: event.id,
+      });
+      pending.delete(payload.approvalId);
+    } else if (["turn.completed", "turn.failed", "turn.cancelled"].includes(event.type)) {
+      if (event.turnId != null) settledTurns.add(event.turnId);
+      if (owningTurnId === null || event.turnId == null || event.turnId === owningTurnId) {
+        pending.clear();
+        owningTurnId = null;
+      }
+    }
+  }
+  return { pending: [...pending.values()], decisions: [...decisions.values()] };
+}
+
+// Example for a known title-only operation, not a generic approval formatter.
+function exactTitleProposal(approval) {
+  try {
+    const args = typeof approval.arguments === "string"
+      ? JSON.parse(approval.arguments) : approval.arguments;
+    const body = args?.body;
+    if (!body || Array.isArray(body) || Object.keys(body).some((key) => key !== "title")) return null;
+    return typeof body.title === "string" && body.title.trim() ? body.title : null;
+  } catch {
+    return null;
+  }
+}
+```
+
+Render arguments using the selected operation's schema: for this example the
+title is `arguments.body.title`, not `arguments.title`. Use escaped text, retain
+the exact string (do not silently trim/change it), and also display the target
+record and operation. Enable Approve only for a currently pending, authorized
+request whose exact proposal and target can be shown. Missing/malformed proposal
+means disabled Approve, not a placeholder beside an enabled button; Reject or
+refresh can remain available. The provider still enforces record ownership,
+allowed fields and any expected-version/CAS precondition on the actual write.
+
+Persist a stable `clientEventId` before `sendApprovalDecision`, retain the
+returned decision event, and reconcile after an uncertain response or a local
+save failure. Accepted approval means a decision was accepted, not that its
+provider write completed. See [Failure and reconciliation](compatibility-and-troubleshooting.md#host-errors-and-uncertain-actions).
 
 Even a final-answer-only UI should surface states the user must act on: failure, cancellation, credit or policy denial, approval requests, human-input requests, reconnect status, and a way to retry safely. Avoid presenting tool failures as ordinary assistant prose when product state can represent them more clearly.
 
@@ -2584,7 +3103,7 @@ session return path rather than relying on browser history.
 Follow existing navigation, accessibility, responsive, loading, error, observability, localization, and design-system conventions. Keep OpenGeni IDs behind product-native identifiers. Make the smallest dependency addition that improves correctness.
 
 The integration should feel native to the customer product while retaining OpenGeni's session semantics. Framework adaptation is expected; protocol reimplementation is not a goal.
-```
+````
 
 ## `references/proxy-from-any-backend.md`
 

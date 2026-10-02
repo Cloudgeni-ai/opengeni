@@ -118,6 +118,16 @@ on every deployment that never opted in, so never read it as "the trial is live"
 
 ## Meaningful child attention (0503)
 
+`0585_session_attention_cursor.sql` persists the newest meaningful attention
+sequence in the narrow event cursor. Stop the declared application login roles
+for this maintenance migration: it backfills one indexed history probe per
+existing cursor and restores FORCE RLS in the same transaction. Cursor-backed
+readers must start after the migration commits. Older writers remain compatible
+because the existing event-insert trigger advances the raw and meaningful
+frontiers together; the change does not alter personal acknowledgements or
+rewrite event history. The current partial attention index remains available
+for exact content and lifecycle evidence reads.
+
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
@@ -1389,7 +1399,56 @@ and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For each subsequent activation:
+For the **fleet activation** cutover, rolling migration
+`0583_session_tenancy_operator_permission.sql` is inert preparation only. It
+adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
+it neither activates organizations nor changes sessions. The CLI additionally
+requires the separately reviewed maintenance marker
+`0586_private_sessions_fleet_activation.sql` before accepting:
+
+```bash
+bun run db:activate-session-tenancy -- \
+  --all-organizations \
+  --activated-by '<bounded-operator-identity>'
+```
+
+Run this only inside the existing protected, drained maintenance release after
+fresh all-organization evidence and release admission clearance. Persist and
+prove canonical activation `true` in durable Helm values **while the runtime is
+parked and before the first committed witness**; a Job-only override is not
+sufficient. Recovery and every later release must retain that value after any
+activation witness. Before a witness, an unwind additionally requires verified
+zero activation receipts; after one, recovery is forward-only.
+
+The fleet command freezes `managed_accounts`, preflights pending activations,
+then writes receipts for pending accounts in one transaction. It checks final
+receipt coverage before committing. Both activation scopes preserve all
+existing organization preferences byte-identically, including missing settings
+and explicit OFF or ON choices. The fleet command rejects the retired
+`--enable-organization-private-sessions` override and never invokes the 0583
+preference-enable helper. After activation, an organization owner or admin opts
+in separately through organization settings; shared-workspace Only me remains
+unavailable while that setting is OFF. No existing session visibility, chat
+default, credential owner, or authority is changed. Marker ordinal references
+must follow the project renumber command
+if newer main migrations claim these ordinals.
+
+The CLI validates every supplied runtime identity as an existing restricted
+database login (no superuser or BYPASSRLS), clears PostgreSQL's transaction-cached
+activity snapshot before its initial drain check and each guarded activation,
+then clears and checks again after receipt coverage while source locks remain
+held, before commit. A late application reconnect rejects and rolls back the
+entire transaction. The already-activated replay-only fleet must pass the same
+fresh initial and final drain checks; it never uses preference enablement as a
+drain mechanism.
+
+The activation CLI's migration-owner connection carries the same canonical
+`application_name` protocol identity as `createDb`, including through a
+transaction pooler. An unversioned raw connection is not a supported operator
+substitute: the current sessions policy rejects it even when the backfill
+receipts and parity evidence are ready.
+
+For each subsequent single-organization activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
@@ -1400,11 +1459,11 @@ For each subsequent activation:
    `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
-3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only. Never flip it on a running pre-activation
-   generation as a way to "test" activation;
+3. prepare canonical activation `true` for the new image generation. Never
+   flip it on a running pre-activation generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
-   migration-only secret and Job identity;
+   migration-only secret and Job identity, then persist and verify canonical
+   activation `true` in durable Helm values while they remain parked;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
 6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
@@ -1468,6 +1527,35 @@ For each subsequent activation:
 After the activation migration commits, rollback to an earlier application image
 is forbidden, and setting the switch back to `false` is not a rollback - it
 cannot restore the legacy authority. Remain in maintenance and fix forward.
+
+### Production all-organization Only me availability cutover
+
+Migration `0586_private_sessions_fleet_activation.sql` is a maintenance-classified
+release marker, not an activation shortcut. The protected production release
+parks application database clients, applies the candidate migrations, then runs
+`db:activate-session-tenancy -- --all-organizations --activated-by
+production-release:<source-sha>` in its migration Job. The command takes a
+fixed snapshot of `managed_accounts`, checks the required migration, inventory,
+parity and six backfill receipt families for every not-yet-activated account,
+and calls the existing guarded SQL activation for each. All receipts commit in
+**one transaction**, including final coverage verification. An unready
+organization fails the entire Job without activating any new organization; do
+not bypass this gate or insert activation rows by hand. The maintenance lease
+owns forward recovery once the migration Job is authorized.
+An empty fleet also fails: without an initial activation receipt, migration
+0349 has no witness to auto-activate the first future signup.
+
+Before admitting that release, prepare and retain per-organization evidence
+using the fresh-key membership, resource, connection and final session
+backfills and the parity/RLS/revocation checks in
+[`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation).
+Fix unresolved cases first. The migration Job's 40-minute deadline is not a
+substitute for this preflight; a large fleet may require a deliberately budgeted
+maintenance window. The protected Helm reconciliation enables
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` on the new runtime
+and preserves it for later releases. Existing organizations' independent
+`organization_private_session_settings` remain disabled until their owner or
+admin opts in; this cutover makes that toggle available, not automatically on.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
@@ -2685,6 +2773,21 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- Stripe Checkout accepts customer-entered promotion codes on credit packages.
+  Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
+  origins; Checkout and billing-portal return URLs may use that configured web
+  origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web
+  origin. Unconfigured external origins remain rejected.
+  OpenGeni owns the generic redemption and credit-ledger contract. Operators
+  manage Stripe products, coupons, promotion codes, customer eligibility,
+  redemption limits, and expiry in their own operations workflow; campaign
+  creation and account-specific offers are not part of the source package.
+  A discount changes the checkout price while OpenGeni credits the selected
+  package's full face value after the signed completion webhook, including a
+  zero-dollar checkout. For coupons restricted to the credits product, configure
+  `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
+  dispute holds on new checkouts remove the corresponding fraction of package
+  credits. Existing customer balances are account-wide.
 - sandbox backend credentials when required
 
 Do not commit real secret values.
@@ -3544,6 +3647,7 @@ Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`. `route` is a bounded template, never a raw path: an explicit established label, or else the registered path template of the Hono handler that answers the request (for example `/v1/organizations/:organizationId/members`). Better Auth endpoints behind the `/v1/auth/*` registration keep a closed set of labels (`/v1/auth/sign-up/email`, `/v1/auth/callback/google`, and so on). `/v1/unknown` and `/unknown` now mean that no registered handler matched, so a sustained rise indicates 404 probing or a client/server route mismatch rather than unlabeled product traffic.
 - Sign-up funnel (managed access mode): `opengeni_auth_events_total{event="sign_up"|"email_verified"|"sign_in",method="email"|"google"|"github"|"other"}`, `opengeni_organization_setup_total{outcome="created"|"failed"}` for the self-service post-sign-in organization setup, and `opengeni_signup_acquisition_total{source="producthunt"|"website"|"direct"|"other"}` for new accounts. Every series initializes at zero. `sign_up` counts Better Auth user creation (a duplicate sign-up for an existing address is not counted); `sign_in` counts non-discarded provider sessions, including the first session of a new social account and, in the default `legacy` session-set mode, the session that the first successful email-verification click creates (a reused link creates none). A new email user's first `sign_in` is therefore normally that click, the session they continue into organization setup with, not a later password sign-in; read the funnel as `sign_up` -> `email_verified` -> `sign_in` -> organization setup `created`. `sign_in` is a session count that includes returning sign-ins, not a unique-user count. A mail link scanner that follows the verification link first takes that automatic sign-in, so the person's later password sign-in is a second `sign_in` and `sign_in` can exceed one per new email user. Invited-user account setup is not a sign-up. The acquisition source is normalized server-side from first-touch `utm_*`/`ref` parameters the web app forwards with the sign-up request or OAuth state (including the session-set social start in `dual`/`broker` mode); no per-user acquisition data is stored. The acquisition counter increments when the account is created, before email verification, so it includes accounts that never verify (and bot sign-ups); `email_verified` carries no source label, so compare the two only in aggregate. A Product Hunt listing adds `?ref=producthunt` to its link, and a `producthunt` `ref` wins over any `utm_source`: point the listing at `https://app.opengeni.ai/?mode=signup&ref=producthunt`, or at the marketing site only while it forwards the inbound `ref` onto its app links, otherwise those visitors count as `website`. An idempotent replay of a committed organization setup request counts `created` again. These counters are process-local; aggregate them with `sum` across API replicas and use `increase()` over the reporting window.
+- Product usage (server-side, consent-independent): `opengeni_sessions_created_total{surface,created_by_kind,root}` counts newly created sessions (`surface` is the fixed turn-surface list plus `unknown`; `created_by_kind` is `subject` or `service`; `root` is `true` for a session without a parent and `false` for a child), and `opengeni_user_messages_total{surface}` counts accepted user messages: the initial message of a created session unless its first turn is deferred, every accepted Send/Steer (web, API key, Slack, MCP, embedded), and each accepted scheduled occurrence (`surface="scheduled"`). Idempotent replays are not counted. Both are process-local counters that initialize at zero: aggregate with `sum` across API and control-worker replicas. `opengeni_active_users{window="5m"|"15m"|"1h"|"24h"|"7d"|"30d"}` is the number of distinct managed people active inside the window: a canonical managed browser request that the web console marks with `x-opengeni-user-activity: active`, which it sends only while the tab is visible and the person interacted with it in the last 5 minutes. Idle open tabs, background polling, and event streams never count. API processes record presence throttled to once per person per minute and batched off the request path; API keys, services, agents, embedded-host and local subjects are never counted. Every control worker publishes the same global database value, so aggregate it with `max`, never `sum`. `opengeni_credit_grants_total{grant_class="signup_trial"|"coupon"|"manual"|"other"}` and `opengeni_credit_granted_micros_total{grant_class}` are cumulative totals of positive credit grants observed by a ledger trigger since migration 0565, so they include the verified-signup trial grant (written by a database trigger) and operator grants that no application process writes; they are global gauges, so use `max` across control workers and then `increase()`. `opengeni_credit_micros_total{kind="grant"}` remains the process-local counter for grants written in application code. Per-person history for the same activity is the `user.active`, `credits.granted`, and `connection.revoked` lifecycle facts; see [`embedding.md`](embedding.md#product-lifecycle-facts).
 - Analytics consent: `opengeni_analytics_consent_total{decision="granted"|"denied"}` counts answers to the web console's optional-analytics banner, and `opengeni_analytics_consent_reports_rejected_total{reason}` counts refused reports; both initialize at zero. Only a changed answer is counted, so it is a count of decisions, not of people. Use the `denied` share to state how much of the consenting audience PostHog cannot see; people who never answer the banner are not counted at all, so also compare PostHog's consented sign-ins with the server `sign_in` counter. See [`application-observability.md`](application-observability.md#analytics-consent).
 - Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
@@ -3586,6 +3690,18 @@ sum by (event, method) (increase(opengeni_auth_events_total{environment="product
 
 ```promql
 sum by (source) (increase(opengeni_signup_acquisition_total{environment="production"}[1d]))
+```
+
+```promql
+max by (window) (opengeni_active_users{environment="production"})
+```
+
+```promql
+max by (grant_class) (increase(opengeni_credit_grants_total{environment="production"}[7d]))
+```
+
+```promql
+sum by (surface) (increase(opengeni_user_messages_total{environment="production"}[1d]))
 ```
 
 ```promql

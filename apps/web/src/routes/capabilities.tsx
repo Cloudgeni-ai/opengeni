@@ -32,6 +32,14 @@ import {
 import { capabilityStateChip } from "@/lib/capabilities";
 import { CatalogHeader, CatalogActionContext } from "@/components/capabilities/catalog-header";
 import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
+import {
+  beginIntegrationConnect,
+  integrationClassFromDomain,
+  integrationConnectErrorOutcome,
+  useIntegrationConnectJourney,
+  type IntegrationClass,
+  type IntegrationConnectTracker,
+} from "@/lib/integration-connect-analytics";
 
 // Capabilities has one overview and dedicated Connections, Skills, and Plugins
 // tabs. Connections group provider accounts and use the normal connection
@@ -45,6 +53,7 @@ import {
   Fragment,
   Suspense,
   useLayoutEffect,
+  type ComponentProps,
   type ReactNode,
   useCallback,
   useEffect,
@@ -888,7 +897,16 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
   }
 
+  // Consent-gated connect journey for a custom API: started when the person
+  // submits credentials (or installs a keyless API), finished by the install.
+  const customApiJourney = useRef<IntegrationConnectTracker | null>(null);
+  const startCustomApiJourney = () => {
+    customApiJourney.current?.finish("abandoned");
+    customApiJourney.current = beginIntegrationConnect("other", "custom");
+  };
+
   async function authenticateCustomApi() {
+    startCustomApiJourney();
     let connection: ConnectionMetadata;
     dispatchCustomApi({ type: "phase", phase: "creating_connection", error: null });
     try {
@@ -914,6 +932,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       dispatchCustomApi({ type: "connection", connection });
       await previewCustomApi(connection);
     } catch (error) {
+      customApiJourney.current?.finish(integrationConnectErrorOutcome(error));
+      customApiJourney.current = null;
       dispatchCustomApi({
         type: "phase",
         phase: "auth",
@@ -942,6 +962,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     dispatchCustomApi({ type: "phase", phase: "installing", error: null });
     const editing = customApi.editingInstance;
+    if (!customApiJourney.current && !editing) startCustomApiJourney();
     try {
       await client.installApiIntegration(workspaceId, {
         source,
@@ -960,8 +981,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       toast.success(`${customApi.draft.displayName.trim()} ${editing ? "updated" : "installed"}`, {
         description: `${customApi.selectedTools.length} tools are available through this exact instance.`,
       });
+      customApiJourney.current?.finish("connected");
+      customApiJourney.current = null;
       dispatchCustomApi({ type: "reset" });
     } catch (error) {
+      customApiJourney.current?.finish(integrationConnectErrorOutcome(error));
+      customApiJourney.current = null;
       dispatchCustomApi({
         type: "phase",
         phase: "review",
@@ -1379,7 +1404,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         // connect flow drives it rather than firing a bare enable that 422s.
         const plan = capabilityConnectPlan(created);
         if (plan.mode === "enable") {
-          await client.enableCapability(workspaceId, created.id);
+          const journey = beginIntegrationConnect("other", "custom");
+          try {
+            await client.enableCapability(workspaceId, created.id);
+          } catch (error) {
+            journey.finish(integrationConnectErrorOutcome(error));
+            throw error;
+          }
+          journey.finish("connected");
           if (created.kind === "mcp") onRuntimeChanged();
           toast.success(
             created.kind === "mcp"
@@ -1985,21 +2017,24 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         ))}
 
         {accountConnectOpen &&
-        rawSelectedItem?.kind === "mcp" &&
-        rawSelectedItem.authKind === "oauth2" &&
-        !rawSelectedItem.enabled ? (
-          <McpConnectionCard
+        selectedItem?.kind === "mcp" &&
+        selectedItem.authKind === "oauth2" &&
+        !selectedItem.enabled ? (
+          <TrackedMcpConnectionCard
+            integrationClass={integrationClassFromDomain(
+              selectedItem.providerDomain ?? selectedItem.mcpUrl ?? selectedItem.endpointUrl,
+            )}
             client={client}
             workspaceId={workspaceId}
-            capabilityId={rawSelectedItem.id}
-            name={rawSelectedItem.name}
+            capabilityId={selectedItem.id}
+            name={selectedItem.name}
             returnUrl={window.location.href}
             dialogOnly
-            personalOnly={personalOnlyCapability(rawSelectedItem)}
-            connectLabel={`Connect ${rawSelectedItem.name}`}
+            personalOnly={personalOnlyCapability(selectedItem)}
+            connectLabel={`Connect ${selectedItem.name}`}
             dialogSubtitle="Review access, then sign in"
-            description={capabilityDescription(rawSelectedItem) ?? undefined}
-            logoSrc={logoUrl(rawSelectedItem)}
+            description={capabilityDescription(selectedItem) ?? undefined}
+            logoSrc={logoUrl(selectedItem)}
             ownershipCopy={{
               legend: "Who can use it?",
               workspace: OWNERSHIP_HELP.workspace,
@@ -2139,5 +2174,23 @@ function ConnectedServiceList({ services }: { services: ConnectionCatalogService
         />
       ))}
     </RowList>
+  );
+}
+
+/** The Plugins page MCP OAuth dialog with its consent-gated connect journey. */
+function TrackedMcpConnectionCard({
+  integrationClass,
+  onConfigured,
+  ...props
+}: ComponentProps<typeof McpConnectionCard> & { integrationClass: IntegrationClass }) {
+  const finish = useIntegrationConnectJourney(integrationClass, "oauth");
+  return (
+    <McpConnectionCard
+      {...props}
+      onConfigured={async () => {
+        finish("connected");
+        await onConfigured?.();
+      }}
+    />
   );
 }

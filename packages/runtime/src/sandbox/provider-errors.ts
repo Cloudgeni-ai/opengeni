@@ -18,6 +18,11 @@ export type ProviderSandboxFailure = {
 
 const GRPC_TRANSIENT = new Set([1, 2, 4, 13, 14]);
 const TRANSIENT_CODES = new Set([
+  "1",
+  "2",
+  "4",
+  "13",
+  "14",
   "CANCELLED",
   "UNKNOWN",
   "DEADLINE_EXCEEDED",
@@ -36,21 +41,39 @@ type ErrorSignals = {
   numbers: number[];
   codes: string[];
   messages: string[];
+  incomplete: boolean;
 };
+
+const UNREADABLE_ERROR_SIGNAL = Symbol("unreadable-error-signal");
 
 function safeRead(record: object, key: string): unknown {
   try {
-    return Reflect.get(record, key);
+    const descriptor = Object.getOwnPropertyDescriptor(record, key);
+    return descriptor
+      ? "value" in descriptor
+        ? descriptor.value
+        : UNREADABLE_ERROR_SIGNAL
+      : undefined;
   } catch {
-    return undefined;
+    return UNREADABLE_ERROR_SIGNAL;
   }
 }
 
 function collectSignals(value: unknown): ErrorSignals {
-  const out: ErrorSignals = { numbers: [], codes: [], messages: [] };
+  const out: ErrorSignals = { numbers: [], codes: [], messages: [], incomplete: false };
   const seen = new Set<object>();
+  const read = (record: object, key: string): unknown => {
+    const signal = safeRead(record, key);
+    if (signal !== UNREADABLE_ERROR_SIGNAL) return signal;
+    out.incomplete = true;
+    return undefined;
+  };
   const visit = (current: unknown, depth: number): void => {
-    if (depth > 3 || current === null || current === undefined) return;
+    if (current === null || current === undefined) return;
+    if (depth > 6 || seen.size >= 64) {
+      out.incomplete = true;
+      return;
+    }
     if (typeof current === "string") {
       if (current.length <= 512) out.messages.push(current);
       return;
@@ -66,7 +89,7 @@ function collectSignals(value: unknown): ErrorSignals {
       "errorCode",
       "code",
     ]) {
-      const signal = safeRead(current, key);
+      const signal = read(current, key);
       if (typeof signal === "number" && Number.isFinite(signal)) out.numbers.push(signal);
       if (typeof signal === "string") {
         const code = signal.trim().toUpperCase();
@@ -74,12 +97,22 @@ function collectSignals(value: unknown): ErrorSignals {
       }
     }
     for (const key of ["name", "message", "details", "cause"]) {
-      const signal = safeRead(current, key);
+      const signal = read(current, key);
       if (typeof signal === "string" && signal.length <= 512) out.messages.push(signal);
       else visit(signal, depth + 1);
     }
-    visit(safeRead(current, "response"), depth + 1);
-    visit(safeRead(current, "error"), depth + 1);
+    visit(read(current, "response"), depth + 1);
+    visit(read(current, "error"), depth + 1);
+    const errors = read(current, "errors");
+    if (errors !== undefined) {
+      if (!Array.isArray(errors) || !errors.length || errors.length > 16) out.incomplete = true;
+      else
+        for (let index = 0; index < errors.length; index++) {
+          const nested = read(errors, String(index));
+          if (!nested || typeof nested !== "object") out.incomplete = true;
+          visit(nested, depth + 1);
+        }
+    }
   };
   visit(value, 0);
   return out;
@@ -140,6 +173,7 @@ export function classifyProviderSandboxFailure(
   if (hasTransientSignal(signals)) {
     return { kind: "transient_transport", diagnostic };
   }
+  if (signals.incomplete) return { kind: "other", diagnostic };
   if (
     signals.numbers.some((status) => status === 404) ||
     signals.codes.some((code) => NOT_FOUND_CODES.has(code))
@@ -233,7 +267,7 @@ export function isProviderSandboxGoneDuringRoutedOperation(
 ): boolean {
   if (backendId === "selfhosted" || !error) return false;
   const signals = collectSignals(error);
-  if (hasTransientSignal(signals)) return false;
+  if (hasTransientSignal(signals) || signals.incomplete) return false;
   if (signals.codes.includes("SANDBOX_NOT_FOUND")) return true;
   return backendId === "modal" && hasModalTerminalSandboxMessage(signals);
 }

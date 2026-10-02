@@ -482,6 +482,32 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Removed-model recovery (composer notice, catalog check, default
+    // preselection, refusal copy): Linux/x64 Bun 1.4 measures 2,590,762 raw.
+    // Retain the established 1.5 KiB allowance; compressed caps stay fixed.
+    wholeKibEnvelope(2_590_762, 1.5 * kib),
+    // Main cbb3e36e1 measures 2,592,804 raw / 730,596 gzip on macOS/arm64
+    // Bun 1.4, already above both caps. The schedule Skill id adds 29 raw
+    // bytes: 2,592,833 / 730,558. Keep the established 1.5 KiB allowance;
+    // per-file, file-count, and unrelated caps stay fixed.
+    wholeKibEnvelope(2_592_833, 1.5 * kib),
+    // Current main's shared client error handling measures 2,595,849 raw
+    // bytes on Bun 1.4 macOS/arm64; the integrated graph is identical.
+    // Restore the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_595_849, 1.5 * kib),
+    // Custom MCP OAuth endpoint discovery and isolated popup completion:
+    // Linux/x64 Bun 1.4 CI measures at most 2,585,890 raw bytes. Retain the
+    // established 1.5 KiB allowance; compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_585_890, 1.5 * kib),
+    // Current-main model recovery and the subscription merge tree emit the
+    // same browser graph: 2,592,768 raw bytes on Bun 1.4 macOS/arm64.
+    // Restore the established 1.5 KiB allowance; unrelated caps stay fixed.
+    wholeKibEnvelope(2_592_768, 1.5 * kib),
+    // Browser failure signals (failed-request classifier, live-stream health,
+    // beacon retry-once queue) plus the onboarding/failed-turn journey hooks:
+    // 2,583,361 raw on Bun 1.4 Linux/x64 rebased on main aa5661dec (with the
+    // presence header). Web vitals stay lazy. Keep 1.5 KiB headroom.
+    wholeKibEnvelope(2_583_361, 1.5 * kib),
     // Usage allowances UI (composer limit notice, conversation refusal row)
     // with #3053's final-reply notice: 2,536,098 raw on Bun 1.4 macOS/arm64.
     wholeKibEnvelope(2_536_098, 1.5 * kib),
@@ -619,9 +645,24 @@ const effectiveBudgets = {
     // Bound only these measured aggregates with the established 1.5 KiB
     // headroom; every initial, per-file, file-count, lazy and CSS cap stays fixed.
     wholeKibEnvelope(2_572_187, 1.5 * kib),
+    // Server-side presence: the shared API client marks requests made while the
+    // tab is visible and recently used (lib/user-activity plus its contract
+    // header constants), so idle tabs and polling never count as activity.
+    // Linux/x64 CI measures 2,575,385 raw on main 6a9731344. Keep the
+    // established 1.5 KiB headroom; gzip and every other cap stay fixed.
+    wholeKibEnvelope(2_575_385, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Bound the larger unchanged-main measurement documented above using
+    // the established 1.5 KiB allowance; the candidate is 38 bytes smaller.
+    wholeKibEnvelope(730_596, 1.5 * kib),
+    // Browser failure signals: 727,806 gzip on Bun 1.4 Linux/x64 rebased on
+    // main aa5661dec. Keep the established 1.5 KiB allowance.
+    wholeKibEnvelope(727_806, 1.5 * kib),
+    // The same unchanged current-main graph measures 730,608 gzip bytes.
+    // Retain the established 1.5 KiB platform-skew allowance.
+    wholeKibEnvelope(730_608, 1.5 * kib),
     // Runtime robustness on main f874217f5: the empty-final-reply notice and
     // per-model availability in the session timeline measure 711,698 gzip
     // (Linux/x64 CI). Keep the established 1.5 KiB allowance.
@@ -799,7 +840,11 @@ const cssMetrics = await metrics(
 const largestCss = largest(cssMetrics, "gzip");
 
 const report = {
-  initial: { ...initialTotal, files: initialMetrics.length, largestGzip: largestInitial },
+  initial: {
+    ...initialTotal,
+    files: initialMetrics.length,
+    largestGzip: largestInitial,
+  },
   directSession: { ...directSessionTotal, files: directSessionMetrics.length },
   lazy: {
     files: lazyMetrics.length,

@@ -1,4 +1,5 @@
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
+export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
 export * from "./domain/session-connection-accounts";
@@ -35,6 +36,8 @@ export * from "./domain/knowledge-search";
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
 export * from "./workflow-wake-contract";
+export * from "./user-presence";
+export * from "./product-usage-metrics";
 
 // Boundary type slots referenced by dependencies.ts. The IMPLEMENTATIONS that
 // construct these (the real sandbox client / Better Auth instance) stay in

@@ -1,5 +1,43 @@
 # @opengeni/browserd
 
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/interaction@0.4.45
+
+## 0.2.3
+
+### Patch Changes
+
+- d7e5c70: Defer native agent upgrades while browser or computer controllers remain open,
+  including queued creation and shutdown. Keep idle proof private to the host and
+  preserve ordinary work when controller state cannot be verified.
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [55f1cdd]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/interaction@0.4.44
+
 ## 0.2.2
 
 ### Patch Changes

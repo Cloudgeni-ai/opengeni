@@ -13,12 +13,15 @@ import {
   readLease,
   SandboxLeaseSupersededError,
   isSessionEventPersistenceError,
+  SANDBOX_SETUP_RECOVERY_LIMIT,
   type CodexLeaseAccountStatus,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   maxTurnsExceededRunState,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
 } from "@opengeni/runtime";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -67,6 +70,7 @@ import {
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
   agentRunFailurePayload,
+  agentRunRecoveryFailurePayload,
   codexCredentialCooldownUntil,
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
@@ -338,6 +342,69 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // back to the workflow-claimed turn when the local lookup had not
   // finished yet.
   const recoveryTurnId = attempt.turnId;
+  // Unlike proven pre-dispatch failure, a genuine SDK Start/Wait uncertainty
+  // cannot reconstruct setup on a replacement attempt. The exact command and
+  // writer remain retained by sandbox-runtime; the logical turn is parked as
+  // recovering with a durable no-replay marker, not failed or completed.
+  const observationUnavailable = isProviderCommandObservationUnavailableError(error);
+  if (
+    (isModalCommandStartOutcomeUnknownError(error) || observationUnavailable) &&
+    recoveryTurnId &&
+    attempt.triggerEventId &&
+    attempt.executionGeneration > 0
+  ) {
+    let recovery: Awaited<ReturnType<typeof requestSessionTurnRecovery>>;
+    try {
+      if (eventing.turnStartedPublished) {
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ requireDurable: true });
+      }
+      recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: input.attemptId,
+        reason: observationUnavailable
+          ? "sandbox_command_observation_unavailable"
+          : "sandbox_command_start_outcome_unknown",
+        sandboxSetupOutcomeUnknown: true,
+        detail: {
+          code: observationUnavailable
+            ? "sandbox_command_observation_unavailable"
+            : "sandbox_command_start_outcome_unknown",
+          retryable: false,
+          setupOutcome: "unknown",
+          replay: "blocked",
+          providerRecoveryCount: attempt.providerRecoveryCount,
+        },
+      });
+    } catch (checkpointError) {
+      const databaseRecovery = postClaimDatabaseRecoveryFailure({
+        error: checkpointError,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        executionGeneration: attempt.executionGeneration,
+        sandboxSetupOutcomeUnknown: true,
+      });
+      if (!databaseRecovery) throw checkpointError;
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      throw databaseRecovery;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    acknowledgeRecoveryQuiescence();
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    control.activityStatus = "recovering";
+    control.turnMetricOutcome = "recovering";
+    control.activityError = error;
+    return claimedResult({ status: "recovering", deferredUntilWake: true });
+  }
   // A true epoch supersession and a provider lifecycle transition are both
   // recoverable control-plane states, never session failures. A rotation
   // persists an exact group/epoch wait marker so the workflow parks before
@@ -1690,7 +1757,45 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       attemptNumber: nextProviderRecoveryCount,
       retryAfterMs: providerRetryAfterMs(error),
     });
+    const setupRecoveryExhausted =
+      earlyCommandStartUnavailable &&
+      recoveryResult.status === "exhausted" &&
+      attempt.providerRecoveryCount === SANDBOX_SETUP_RECOVERY_LIMIT;
     try {
+      if (setupRecoveryExhausted) {
+        // This is positive pre-dispatch proof, not an ambiguous command. Park
+        // the SAME accepted turn without resetting or advancing its budget.
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: attempt.turnId,
+          triggerEventId: attempt.triggerEventId!,
+          attemptId: input.attemptId,
+          reason: "sandbox_command_start_recovery_exhausted",
+          sandboxSetupRecoveryExhausted: true,
+          detail: {
+            code: failure.code,
+            error:
+              "Automatic sandbox setup recovery exhausted after five retries; the accepted turn remains parked without starting a command.",
+            retryable: false,
+            setupOutcome: "not_started",
+            replay: "blocked",
+            recoveryExhausted: true,
+            providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          control.activityStatus = "cancelled";
+          control.turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        control.turnMetricOutcome = "recovering";
+        control.activityStatus = "recovering";
+        control.activityError = error;
+        return claimedResult({ status: "recovering" });
+      }
       if (recoveryResult.status === "recovering") {
         if (!earlyRecoverableSetup) {
           await flushRuntimeBatcher();
@@ -1704,7 +1809,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           reason: failure.code ?? "provider_unavailable",
           providerRecoveryCount: nextProviderRecoveryCount,
           detail: {
-            ...failure,
+            ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
             providerRecoveryCount: nextProviderRecoveryCount,
           },
@@ -1772,7 +1877,15 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
                 providerRecoveryCount: nextProviderRecoveryCount,
               },
             })
-          : null;
+          : setupRecoveryExhausted
+            ? postClaimDatabaseRecoveryFailure({
+                error: recoveryError,
+                turnId: attempt.turnId,
+                triggerEventId: attempt.triggerEventId!,
+                executionGeneration: attempt.executionGeneration,
+                sandboxSetupRecoveryExhausted: true,
+              })
+            : null;
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
