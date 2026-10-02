@@ -1365,6 +1365,9 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda supports semantic observations only.
 
+The operation lock settles only prepared creates without controller generations;
+dispatched bindings survive activation persistence failures for reconciliation.
+
 Typing batches: [React](../packages/react/README.md).
 
 Native macOS operations drain Cocoa pools and clean up pending capture starts.
