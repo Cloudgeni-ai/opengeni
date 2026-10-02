@@ -2854,7 +2854,8 @@ async function streamPlacementPrivateFile(
   input: ReturnType<typeof placementPrivateWrite>,
   backendKind: string,
 ): Promise<void> {
-  if (!session.exec || !session.writeStdin) {
+  const exec = session.exec?.bind(session) ?? session.execCommand?.bind(session);
+  if (!exec || !session.writeStdin) {
     throw new RoutingUnsupportedError("writePlacementPrivate", backendKind);
   }
   const bytes = typeof input.content === "string" ? Buffer.from(input.content) : input.content;
@@ -2865,7 +2866,7 @@ async function streamPlacementPrivateFile(
     ...(input.createParents ? [`install -d -m 0700 -- ${shellSingleQuote(parent)}`] : []),
   ];
   if (bytes.byteLength === 0) {
-    const result = await session.exec({
+    const result = await exec({
       cmd: [
         ...prelude,
         `: > ${shellSingleQuote(input.path)}`,
@@ -2893,7 +2894,7 @@ async function streamPlacementPrivateFile(
     `chmod 0600 -- ${shellSingleQuote(input.path)}`,
     `printf %s ${shellSingleQuote(marker)}`,
   ].join("; ");
-  const started = await session.exec({
+  const started = await exec({
     cmd: command,
     ...(input.runAs ? { runAs: input.runAs } : {}),
     yieldTimeMs: 250,
