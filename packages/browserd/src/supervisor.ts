@@ -1750,6 +1750,7 @@ async function createBrowserDriver(
       runner,
       connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
       targetLifecycle: "cdp",
+      focusEmulation: true,
     });
   }
   const route = context.networkRoute;
@@ -1810,8 +1811,7 @@ async function createBrowserDriver(
             : {}),
         }
       : {}),
-    // A visible browser can still receive target-scoped input and capture in
-    // the background. Foreground changes are explicit activate actions.
+    focusEmulation: true,
     ...(headlessShell && browserExecutablePath === headlessShell.path
       ? { userAgentMetadataSource: "intercepted_local" as const }
       : {}),

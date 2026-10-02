@@ -1,7 +1,8 @@
+import { existsSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
@@ -32,11 +33,13 @@ async function action(name: string): Promise<string> {
 
 async function workspaceManifestPaths(): Promise<Map<string, string>> {
   const manifests = new Map<string, string>();
-  const workspace = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as {
-    workspaces: string[];
-  };
-  for (const pattern of workspace.workspaces) {
-    for await (const manifestPath of new Bun.Glob(`${pattern}/package.json`).scan({ cwd: root })) {
+  for (const scope of ["apps", "examples", "packages"] as const) {
+    for (const entry of await readdir(resolve(root, scope), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = `${scope}/${entry.name}/package.json`;
+      // Bun's `scope/*` workspace globs skip directories without a manifest
+      // (for example an example whose app lives in a subdirectory).
+      if (!existsSync(resolve(root, manifestPath))) continue;
       const manifest = JSON.parse(await readFile(resolve(root, manifestPath), "utf8")) as {
         name?: string;
       };
