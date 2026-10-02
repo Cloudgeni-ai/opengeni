@@ -88,6 +88,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  modelUnavailableHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -1685,6 +1686,7 @@ export function createAppComposition(deps: AppDependencies): {
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
+          modelUnavailableHttpError(rawError) ??
           (rawError instanceof UnsupportedLatencyModeError
             ? new ApiHttpError(422, {
                 code: "validation_failed",

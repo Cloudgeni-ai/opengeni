@@ -482,6 +482,10 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Removed-model recovery (composer notice, catalog check, default
+    // preselection, refusal copy): Linux/x64 Bun 1.4 measures 2,590,762 raw.
+    // Retain the established 1.5 KiB allowance; compressed caps stay fixed.
+    wholeKibEnvelope(2_590_762, 1.5 * kib),
     // The schedule Skill id adds 29 raw bytes to main 15234d2e19, whose
     // 2,587,885-byte graph already exceeds the old envelope. Bun 1.4 builds
     // measure 2,587,914 on macOS/arm64 and Linux/x64 CI. Keep the established
