@@ -8009,7 +8009,7 @@ export type InsightsSeriesPoint = {
   totalTokens: number;
   tokenKnownCalls: number;
   cacheKnownCalls: number;
-  cacheHitPct: number | null;
+  cacheHitPct: number;
   calls: number;
 };
 
@@ -8038,7 +8038,7 @@ export type InsightsSpendDriver = {
   equivalentCreditUsd: number;
   equivalentCreditCostKnownCalls: number;
   tokens: number;
-  cacheHitPct: number | null;
+  cacheHitPct: number;
   pctOfCreditUsd: number;
   pctOfTokens: number;
   deltaUsdVsPrior: number;
@@ -8166,6 +8166,17 @@ export type WorkspaceInsightsSnapshot = {
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
   projects: InsightsProjectRow[];
+  privateChats: {
+    ownerKey: string;
+    name: string | null;
+    you: boolean;
+    calls: number;
+    tokens: number;
+    creditUsd: number;
+    estimatedProviderUsd: number;
+    estimatedProviderCostKnownCalls: number;
+  }[];
+  privateChatsTruncated: boolean;
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
   promptContributions: InsightsPromptContributions;
@@ -8191,7 +8202,7 @@ export type WorkspaceInsightsSnapshot = {
   modelCalls: number;
   priorInputTokens: number;
   priorTotalTokens: number;
-  priorCacheHitPct: number | null;
+  priorCacheHitPct: number;
   priorCalls: number;
   goalsActive: number;
   goalsCompleted: number;
@@ -8207,7 +8218,7 @@ export type WorkspaceInsightsSnapshot = {
   agentRunCap: number | null;
   modelFilterActive: boolean;
   dataThrough: string | null;
-  cacheHitPct: number | null;
+  cacheHitPct: number;
   scope: InsightsScope;
   driverGroups: number;
   driversTruncated: boolean;
