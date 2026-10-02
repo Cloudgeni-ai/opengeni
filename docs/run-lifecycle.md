@@ -1361,6 +1361,21 @@ locks the session on a turn update; a turn-only acknowledgment would therefore
 invert against claim, settlement, event append, or a parallel pending-result
 writer. Repeated reads remain lock-free no-ops, and a busy acknowledgment stays
 best effort without replaying the read tool or provider effects.
+Workflow-wake failure marking also owns the control/workspace/session/cursor
+prefix before its revision-conditional outbox update. The archive guard on the
+wake row locks the session; an outbox-first update would invert against a goal
+turn settlement that holds the session and enqueues its continuation wake.
+The global dispatcher uses the same tenancy/control/workspace/session prefix
+with nonblocking advisory acquisition and row `SKIP LOCKED`, then locks the
+current due outbox row. Its unlocked preview traverses workspace/session UUID
+order (not delivery priority) and does not pre-limit busy candidates; only
+actually lockable wakes count toward the bounded batch. It revalidates due
+time and undelivered revision under the locks, and retains the existing lease
+backoff and control/unquiesced-interruption projection. Migration 0586 replaces
+only the claim function, preserving its signature, owner, and app grant for old
+dispatchers during a rolling release; old failure-marker binaries remain
+outbox-first until the source rollout completes. Neither path retries delivery,
+tools, or provider effects, and the imported-archive guard remains unchanged.
 `lockWorkspaceInferenceControl` takes
 `pg_advisory_xact_lock[_shared](hashtextextended('workspace-control:<id>', 0))`
 in the same mode before the row lock. The row lock alone is unfair: PostgreSQL

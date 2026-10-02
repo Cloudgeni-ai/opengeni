@@ -82170,6 +82170,15 @@ export async function markSessionWorkflowWakeFailed(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // 0560's archive guard locks the session during the outbox UPDATE.
+      // Own the canonical prefix first, like delivery ACK and wake enqueue,
+      // so a failed transport cannot deadlock the turn committing that wake.
+      const locks = await lockSessionEventWriteRows(scopedDb, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+      });
+      if (!locks.sessions[0]) return false;
       const [row] = await scopedDb
         .update(schema.sessionWorkflowWakeOutbox)
         .set({

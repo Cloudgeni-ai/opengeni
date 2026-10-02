@@ -26,10 +26,13 @@ import {
   armCodexCapacityWait,
   applySessionTurnSettlement,
   canonicalSessionCommandHash,
+  claimPendingSessionWorkflowWakes,
   createDb,
+  enqueueSessionWorkflowWake,
   ensureCodexRotationSettings,
   getOrCreateSessionSystemUpdateOutbox,
   markSessionAttemptQuiesced,
+  markSessionWorkflowWakeFailed,
   mutateSessionControlInTransaction,
   nestedPostgresSqlState,
   QueueCommandConflictError,
@@ -248,6 +251,17 @@ async function seedGoal(fixture: RunningFixture): Promise<string> {
     returning id
   `;
   return goal!.id;
+}
+
+async function deferExistingWakeFixtures(): Promise<void> {
+  // Global claims deliberately span tenants. Keep earlier race fixtures from
+  // becoming due again after their one-second first lease while a later test
+  // asserts an exact batch. Only this isolated database's named fixtures move.
+  await admin`
+    update session_workflow_wake_outbox set next_attempt_at = now() + interval '1 hour'
+    where account_id in (select id from managed_accounts
+      where name = 'event-ordering invariant event lock account')
+  `;
 }
 
 async function seedRecording(fixture: RunningFixture): Promise<string> {
@@ -1016,6 +1030,316 @@ afterAll(async () => {
 }, 60_000);
 
 describe("event-ordering invariant canonical session-event lock order", () => {
+  for (const writer of ["failure", "claim", "turn-victim"] as const) {
+    test(`workflow wake ${writer} cannot deadlock goal turn settlement`, async () => {
+      const fixture = await seedRunningSession();
+      await seedGoal(fixture);
+      const wakeRevision = await enqueueSessionWorkflowWake(db, {
+        ...fixture,
+        temporalWorkflowId: `session-${fixture.sessionId}`,
+        reason: "event-ordering wake race",
+      });
+      const lockId = nextBarrierId++;
+      const observerKey = `wake-settlement:${fixture.sessionId}`;
+      await admin.unsafe(`
+        create sequence if not exists eventorder_wake_settlement_attempts;
+        create or replace function eventorder_wake_settlement_observer()
+        returns trigger language plpgsql security definer
+        set search_path = pg_catalog, public as $function$
+        begin
+          if new.type = 'turn.completed' and exists (
+            select 1 from public.eventorder_event_barriers
+            where event_type = 'wake-settlement:' || new.session_id::text
+          ) then
+            perform nextval('public.eventorder_wake_settlement_attempts');
+          end if;
+          return new;
+        end $function$;
+        drop trigger if exists aaa_eventorder_wake_settlement_observer on session_events;
+        create trigger aaa_eventorder_wake_settlement_observer before insert on session_events
+          for each row execute function eventorder_wake_settlement_observer();
+        alter sequence eventorder_wake_settlement_attempts restart with 1;
+      `);
+      await barrier`select pg_advisory_lock(${BARRIER_CLASS}, ${lockId})`;
+      await admin`
+        insert into eventorder_event_barriers (event_type, lock_class, lock_id)
+        values ('turn.completed', ${BARRIER_CLASS}, ${lockId}),
+          (${observerKey}, ${BARRIER_CLASS}, ${lockId})
+      `;
+      // Only the detector timing changes. This lets the canonical TURN writer,
+      // rather than the wake writer, detect the ORIGINAL cycle first. Count
+      // real transaction restarts with a nontransactional sequence, not an
+      // injected SQLSTATE; the existing DB-only settlement retry can hide it.
+      let slowConnection: postgres.Sql | undefined;
+      let failureDb = db;
+      let grantedDetectorPermission = false;
+      if (writer === "turn-victim") {
+        const [permission] = await admin<{ can_set: boolean }[]>`
+          select has_parameter_privilege('opengeni_app', 'deadlock_timeout', 'SET') as can_set
+        `;
+        if (!permission?.can_set) {
+          await admin.unsafe("GRANT SET ON PARAMETER deadlock_timeout TO opengeni_app");
+          grantedDetectorPermission = true;
+        }
+        slowConnection = postgres(shared.appUrl, {
+          max: 1,
+          prepare: false,
+          connection: { deadlock_timeout: "5s" },
+        });
+        failureDb = drizzle(slowConnection, { schema }) as unknown as Database;
+        registerDbBinding(failureDb, { rlsStrategy: "force" });
+      }
+      let settlement: Promise<unknown> | undefined;
+      let wakeWriter: Promise<unknown> | undefined;
+      let released = false;
+      try {
+        settlement = applySessionTurnSettlement(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          turnId: fixture.turnId,
+          triggerEventId: fixture.triggerEventId,
+          attemptId: fixture.attemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [{ type: "turn.completed", payload: { output: "wake race complete" } }],
+        });
+        void settlement.catch(() => undefined);
+        await waitForAdvisoryWaiter();
+        await admin`delete from eventorder_event_barriers where event_type = 'turn.completed'`;
+        wakeWriter =
+          writer === "claim"
+            ? claimPendingSessionWorkflowWakes(db, 1000)
+            : markSessionWorkflowWakeFailed(
+                failureDb,
+                {
+                  ...fixture,
+                  temporalWorkflowId: `session-${fixture.sessionId}`,
+                  wakeRevision,
+                  interruptionRequested: false,
+                },
+                "transport unavailable",
+              );
+        let writerFinished = false;
+        void wakeWriter.then(
+          () => {
+            writerFinished = true;
+          },
+          () => {
+            writerFinished = true;
+          },
+        );
+        await waitFor(
+          "wake writer to skip or reach its row lock",
+          async () => {
+            if (writerFinished) return 1;
+            const [row] = await monitor<{ count: number }[]>`
+            select count(*)::int as count from pg_stat_activity
+            where datname = current_database() and usename = 'opengeni_app'
+              and wait_event_type = 'Lock'
+          `;
+            return (row?.count ?? 0) >= 2 ? 1 : 0;
+          },
+          1,
+        );
+        const graph = await monitor`
+          select pid, pg_blocking_pids(pid) as blockers, query
+          from pg_stat_activity where datname = current_database()
+            and usename = 'opengeni_app' and wait_event_type = 'Lock' order by pid
+        `;
+        console.info(`wake ${writer} lock graph`, JSON.stringify(graph));
+        await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
+        released = true;
+        const outcomes = await within(
+          Promise.allSettled([settlement, wakeWriter]),
+          "wake/turn commit",
+        );
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") {
+            console.error(`wake ${writer} SQLSTATE`, nestedPostgresSqlState(outcome.reason));
+            for (
+              let error = outcome.reason, depth = 0;
+              error && depth < 6;
+              error = error.cause, depth++
+            ) {
+              if (error.detail) console.error("wake detector DETAIL", error.detail);
+            }
+          }
+        }
+        expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "fulfilled"]);
+        const [attempts] = await admin<{ last_value: string }[]>`
+          select last_value from eventorder_wake_settlement_attempts
+        `;
+        console.info(`wake ${writer} settlement transaction attempts`, attempts?.last_value);
+        expect(Number(attempts?.last_value)).toBe(1);
+        expect(await assertCommittedSequence(fixture, 1)).toMatchObject([
+          { type: "turn.completed" },
+        ]);
+        if (writer === "claim") {
+          expect(
+            (outcomes[1] as PromiseFulfilledResult<Array<{ sessionId: string }>>).value.some(
+              (wake) => wake.sessionId === fixture.sessionId,
+            ),
+          ).toBeFalse();
+          const claimed = await claimPendingSessionWorkflowWakes(db, 1000);
+          expect(claimed.some((wake) => wake.sessionId === fixture.sessionId)).toBeTrue();
+          expect(
+            (await claimPendingSessionWorkflowWakes(db, 1000)).some(
+              (wake) => wake.sessionId === fixture.sessionId,
+            ),
+          ).toBeFalse();
+        }
+      } finally {
+        if (!released) await barrier`select pg_advisory_unlock(${BARRIER_CLASS}, ${lockId})`;
+        await Promise.allSettled([settlement, wakeWriter].filter(Boolean) as Promise<unknown>[]);
+        await admin`delete from eventorder_event_barriers where event_type in ('turn.completed', ${observerKey})`;
+        await slowConnection?.end();
+        if (grantedDetectorPermission) {
+          await admin.unsafe("REVOKE SET ON PARAMETER deadlock_timeout FROM opengeni_app");
+        }
+      }
+    }, 180_000);
+  }
+
+  test("workflow wake claim skips busy sessions and outbox rows before applying its limit", async () => {
+    for (const busyRow of ["session", "outbox"] as const) {
+      await deferExistingWakeFixtures();
+      const workspace = await freshWorkspace();
+      const ids = orderedParentChildIds("parent-first");
+      const busy = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
+      const free = await seedRunningSession(workspace, { sessionId: ids.childSessionId });
+      for (const fixture of [busy, free]) {
+        await enqueueSessionWorkflowWake(db, {
+          ...fixture,
+          temporalWorkflowId: `session-${fixture.sessionId}`,
+          reason: "busy candidate limit regression",
+        });
+      }
+      await readModelBlocker`begin`;
+      try {
+        if (busyRow === "session") {
+          await readModelBlocker`select id from sessions where id = ${busy.sessionId} for no key update`;
+        } else {
+          await readModelBlocker`select session_id from session_workflow_wake_outbox
+            where session_id = ${busy.sessionId} for update`;
+        }
+        const claimed = await within(
+          claimPendingSessionWorkflowWakes(db, 1),
+          "skip busy wake",
+          2000,
+        );
+        expect(claimed.map((wake) => wake.sessionId)).toEqual([free.sessionId]);
+        const rows = await admin<{ session_id: string; attempts: number }[]>`
+          select session_id, attempts from session_workflow_wake_outbox
+          where session_id in (${busy.sessionId}, ${free.sessionId}) order by session_id
+        `;
+        expect([...rows]).toEqual([
+          { session_id: busy.sessionId, attempts: 0 },
+          { session_id: free.sessionId, attempts: 1 },
+        ]);
+      } finally {
+        await readModelBlocker`rollback`;
+      }
+      expect((await claimPendingSessionWorkflowWakes(db, 1)).map((wake) => wake.sessionId)).toEqual(
+        [busy.sessionId],
+      );
+    }
+  }, 180_000);
+
+  test("workflow wake claim skips tenancy, control, and workspace fences without leasing", async () => {
+    for (const fence of [
+      "session-tenancy",
+      "workspace-control",
+      "control-row",
+      "workspace-row",
+    ] as const) {
+      await deferExistingWakeFixtures();
+      const fixture = await seedRunningSession();
+      await enqueueSessionWorkflowWake(db, {
+        ...fixture,
+        temporalWorkflowId: `session-${fixture.sessionId}`,
+        reason: "global dispatcher prefix fence",
+      });
+      await readModelBlocker`begin`;
+      try {
+        if (fence === "control-row") {
+          await readModelBlocker`select workspace_id from workspace_inference_controls
+            where workspace_id = ${fixture.workspaceId} for update`;
+        } else if (fence === "workspace-row") {
+          await readModelBlocker`select id from workspaces where id = ${fixture.workspaceId} for update`;
+        } else {
+          await readModelBlocker`select pg_advisory_xact_lock(hashtextextended(
+            ${`${fence}:${fixture.workspaceId}`}, 0))`;
+        }
+        const claimed = await within(
+          claimPendingSessionWorkflowWakes(db, 1000),
+          "skip busy prefix",
+          2000,
+        );
+        expect(claimed.some((wake) => wake.sessionId === fixture.sessionId)).toBeFalse();
+        const [row] = await admin<{ attempts: number }[]>`
+          select attempts from session_workflow_wake_outbox where session_id = ${fixture.sessionId}
+        `;
+        expect(row?.attempts).toBe(0);
+      } finally {
+        await readModelBlocker`rollback`;
+      }
+      expect((await claimPendingSessionWorkflowWakes(db, 1)).map((wake) => wake.sessionId)).toEqual(
+        [fixture.sessionId],
+      );
+    }
+  }, 180_000);
+
+  test("workflow wake parallel claims preserve exact leases, backoff, and dispatcher ABI", async () => {
+    await deferExistingWakeFixtures();
+    const fixtures = await Promise.all(Array.from({ length: 3 }, () => seedRunningSession()));
+    for (const fixture of fixtures) {
+      await enqueueSessionWorkflowWake(db, {
+        ...fixture,
+        temporalWorkflowId: `session-${fixture.sessionId}`,
+        reason: "parallel lease regression",
+      });
+    }
+    const claims = await Promise.all([
+      claimPendingSessionWorkflowWakes(db, 2),
+      claimPendingSessionWorkflowWakes(db, 2),
+    ]);
+    const sessionIds = claims.flat().map((wake) => wake.sessionId);
+    expect(new Set(sessionIds).size).toBe(sessionIds.length);
+    expect(sessionIds.sort()).toEqual(fixtures.map((fixture) => fixture.sessionId).sort());
+    expect(await claimPendingSessionWorkflowWakes(db, 1000)).toEqual([]);
+    const [lease] = await admin<{ attempts: number; delay_seconds: number }[]>`
+      select attempts, extract(epoch from next_attempt_at - updated_at)::double precision as delay_seconds
+      from session_workflow_wake_outbox where session_id = ${fixtures[0]!.sessionId}
+    `;
+    expect(lease).toEqual({ attempts: 1, delay_seconds: 1 });
+    await deferExistingWakeFixtures();
+    await admin`update session_workflow_wake_outbox set attempts = 9, next_attempt_at = now()
+      where session_id = ${fixtures[0]!.sessionId}`;
+    expect((await claimPendingSessionWorkflowWakes(db, 0)).map((wake) => wake.sessionId)).toEqual([
+      fixtures[0]!.sessionId,
+    ]);
+    const [backoff] = await admin<{ attempts: number; delay_seconds: number }[]>`
+      select attempts, extract(epoch from next_attempt_at - updated_at)::double precision as delay_seconds
+      from session_workflow_wake_outbox where session_id = ${fixtures[0]!.sessionId}
+    `;
+    expect(backoff).toEqual({ attempts: 10, delay_seconds: 256 });
+    const [posture] = await admin`
+      select prosecdef, proconfig, pg_get_function_result(oid) as result,
+        has_function_privilege('opengeni_app', oid, 'EXECUTE') as app_execute,
+        exists(select 1 from aclexplode(proacl) acl where acl.grantee = 0
+          and acl.privilege_type = 'EXECUTE') as public_execute
+      from pg_proc where oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure
+    `;
+    expect(posture).toEqual({
+      prosecdef: true,
+      proconfig: ["search_path=pg_catalog"],
+      result:
+        "TABLE(account_id uuid, workspace_id uuid, session_id uuid, temporal_workflow_id text, wake_revision bigint, interruption_requested boolean)",
+      app_execute: true,
+      public_execute: false,
+    });
+  }, 180_000);
+
   test("child-answer acknowledgment cannot deadlock a parallel pending tool result", async () => {
     const parent = await seedRunningSession();
     const child = await seedIdleChild(parent, crypto.randomUUID(), parent.sessionId);
