@@ -2491,6 +2491,19 @@ including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
 
+**Closed-attempt command recovery.** A missing quiescence receipt can leave
+queued successor work behind legacy retained commands whose provider output is
+unobservable. Once the control activity verifies settlement of the exact
+Temporal dispatch, reconciliation may enroll a `quiescence_containment` drain.
+Enrollment requires no nonclosed attempt in the group, only unsupervised
+processes of that exact attempt, no independently adopted background command,
+and no other holder or open admission. It bypasses neither a live owner nor an
+unresolved interruption. The existing drain saves the workspace and terminates
+the exact provider before settling those commands lost and atomically queuing
+an owner workflow wake. Admission and the quiescence receipt stay fenced until
+physical settlement and exact reconciliation; missing output or an elapsed
+observation window is never substituted for termination proof.
+
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
 runs for it and the box would stay up until the provider deadline kills it

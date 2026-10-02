@@ -52029,8 +52029,8 @@ type LostProviderBlockerScope = {
 };
 
 /** Take the session-event write prefix (workspace control share, workspace,
- * sessions, cursors) for every session whose background command is linked to
- * an active process in the exact lost-provider scope. Call it before the
+ * sessions, cursors) for linked background commands and attempt owners in the
+ * exact lost-provider scope. Call it before the
  * process/admission/PTY/lease locks so terminal command delivery keeps the
  * canonical control -> session -> process -> admission -> lease order. */
 async function linkedLostProviderCommandSessionIdsTx(
@@ -52040,7 +52040,8 @@ async function linkedLostProviderCommandSessionIdsTx(
   const sessions = await rawRows<{ session_id: string }>(
     tx,
     sql`
-      select distinct command.session_id
+      select distinct session_id from (
+      select command.session_id
       from session_background_commands command
       join sandbox_retained_processes process on process.id = command.retained_process_id
         and process.workspace_id = command.workspace_id
@@ -52054,7 +52055,21 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
         and command.state in ('running', 'stopping')
-      order by command.session_id
+      union
+      select process.session_id
+      from sandbox_retained_processes process
+      join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id
+        and attempt.session_id = process.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+      ) owners order by session_id
     `,
   );
   return sessions.map((row) => row.session_id);
@@ -52273,6 +52288,37 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+    }
+  }
+
+  if (lostProcesses.length) {
+    // The session prefix was locked before blockers and revalidated afterward.
+    // Unadopted writers have no background-command delivery to wake their owner;
+    // persist that obligation atomically with physical provider settlement.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from session_turn_attempts attempt
+        join sandbox_retained_processes process on process.owner_attempt_id = attempt.id
+          and process.workspace_id = attempt.workspace_id
+          and process.session_id = attempt.session_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and process.id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
     }
   }
 
@@ -53818,23 +53864,69 @@ export async function reapStaleLeaseHolders(
 }
 
 /** Settlement reasons for legacy retained commands that containment stopped
- * after a verified checkpoint. Neither is exit proof: the command settles
+ * after a verified checkpoint. None is exit proof: the command settles
  * `lost` with no exit code. */
 export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
 export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+export const QUIESCENCE_COMMAND_CONTAINMENT_REASON = "quiescence_containment";
+
+type SettledCommandOwner = {
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  temporalWorkflowRunId: string;
+  temporalActivityId: string;
+};
+
+/** Exact dispatch settlement is enrollment authority, never physical proof. */
+async function settledCommandOwnerMatchesTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  owner: SettledCommandOwner,
+): Promise<boolean> {
+  const [row] = await rawRows<{ eligible: boolean }>(
+    tx,
+    sql`
+    select exists (
+      select 1 from session_turn_attempts attempt
+      join sessions session on session.id = attempt.session_id
+        and session.workspace_id = attempt.workspace_id
+      where attempt.account_id = ${input.accountId}
+        and attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${owner.sessionId} and attempt.id = ${owner.attemptId}
+        and attempt.temporal_workflow_id = ${owner.temporalWorkflowId}
+        and attempt.temporal_workflow_run_id = ${owner.temporalWorkflowRunId}
+        and attempt.temporal_activity_id = ${owner.temporalActivityId}
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+        and session.sandbox_group_id = ${input.sandboxGroupId}
+        and not exists (select 1 from session_attempt_interruptions interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.session_id = attempt.session_id and interruption.attempt_id = attempt.id
+            and interruption.state in ('pending', 'delivered', 'acknowledged'))
+    ) and not exists (
+      select 1 from session_turn_attempts live
+      join sessions member on member.id = live.session_id and member.workspace_id = live.workspace_id
+      where live.workspace_id = ${input.workspaceId}
+        and member.sandbox_group_id = ${input.sandboxGroupId} and live.state <> 'closed'
+    ) as eligible
+  `,
+  );
+  return row?.eligible === true;
+}
 
 /** Bounded per-candidate containment inspection outcomes (metric labels). */
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
   | "inspection_failed";
 
 export type CommandContainmentEnrollment = ReapDrainable & {
-  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+  /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "resumed";
+  mode: "idle" | "deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
@@ -54022,6 +54114,8 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Internal recovery authority: caller verified exact Temporal settlement. */
+    settledOwner?: SettledCommandOwner;
   },
 ): Promise<CommandContainmentEnrollment | null> {
   const screened = await withRlsContext(db, input, async (tx) => {
@@ -54034,6 +54128,8 @@ export async function enrollRetainedCommandContainment(
       // Enrolled drains resume; any requested rotation also refreshes command
       // observation backoff below and may meet the deadline rule.
       (Boolean(lease.unobservableCommandDrainIds?.length) ||
+        (input.settledOwner !== undefined &&
+          (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))) ||
         lease.rotationRequestedAt !== null ||
         (input.idleCommandContainmentMs !== undefined &&
           (await sandboxGroupIdleForCommandContainmentTx(tx, {
@@ -54083,11 +54179,17 @@ export async function enrollRetainedCommandContainment(
       supervised: boolean;
       owned: boolean;
       deadline_ready: boolean;
+      adopted: boolean;
     }>(
       tx,
       sql`
       select process.id, process.session_id, process.owner_attempt_id,
         process.parent_admission_id, process.holder_id,
+        exists (select 1 from session_background_commands background
+          where background.retained_process_id = process.id
+            and background.workspace_id = process.workspace_id
+            and background.session_id = process.session_id
+            and background.state in ('running', 'stopping')) as adopted,
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
@@ -54161,8 +54263,19 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | null = null;
+    let mode: "idle" | "deadline" | "quiescence" | null = null;
     if (
+      input.settledOwner !== undefined &&
+      processes.every(
+        (p) =>
+          p.owner_attempt_id === input.settledOwner!.attemptId &&
+          p.session_id === input.settledOwner!.sessionId &&
+          !p.adopted,
+      ) &&
+      (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))
+    ) {
+      mode = "quiescence";
+    } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
       !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
@@ -54186,9 +54299,11 @@ export async function enrollRetainedCommandContainment(
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
         command_containment_reason = ${
-          mode === "deadline"
-            ? DEADLINE_COMMAND_CONTAINMENT_REASON
-            : IDLE_COMMAND_CONTAINMENT_REASON
+          mode === "quiescence"
+            ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
+            : mode === "deadline"
+              ? DEADLINE_COMMAND_CONTAINMENT_REASON
+              : IDLE_COMMAND_CONTAINMENT_REASON
         },
         liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
         rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
@@ -54728,7 +54843,8 @@ export async function confirmDrainCold(
             !input.providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
-              reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+              reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
+              reason === QUIESCENCE_COMMAND_CONTAINMENT_REASON) &&
             row.unobservable_command_drain_ids?.length
               ? row.unobservable_command_drain_ids
               : [];
@@ -74310,6 +74426,28 @@ export async function reconcileSessionAttemptQuiescence(
     };
   }
   if (!input.activitySettled || eligibility.writer_pending) {
+    if (input.activitySettled && eligibility.writer_pending) {
+      const group = await withRlsContext(db, input, async (tx) => {
+        const [row] = await tx
+          .select({ id: schema.sessions.sandboxGroupId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        return row?.id;
+      });
+      if (group)
+        await enrollRetainedCommandContainment(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: group,
+          settledOwner: input,
+        });
+    }
     return { action: "pending", events: [] };
   }
   const events = await markSessionAttemptQuiesced(db, {

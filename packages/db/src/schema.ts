@@ -9792,7 +9792,7 @@ export const sandboxLeases = pgTable(
     // Why an enrolled drain contains its commands (0547); cleared with the
     // enrollment. Null for a pre-0547 enrollment: settle with neutral wording.
     commandContainmentReason: text("command_containment_reason", {
-      enum: ["idle_containment", "provider_deadline_containment"],
+      enum: ["idle_containment", "provider_deadline_containment", "quiescence_containment"],
     }),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
