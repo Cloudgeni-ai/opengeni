@@ -160,6 +160,15 @@ before shipping a long-lived integration, provision a separately scoped runtime
 credential through the authenticated organization administrator, not by granting
 key-management permission to the setup key.
 
+Carry the appearance choice into that handoff: custom-branded embeds should
+match host fonts/colors/spacing/radius/theme with no UI-owned OpenGeni branding;
+stock shipped UI should need no cosmetic host CSS. Expect polished desktop
+around 1440px/mobile around 390px and supported light/dark. Stock defects belong
+to package React/CSS, not host workarounds. Preserve first-try evidence; in
+coordinated trials the coordinator captures the browser matrix. Do not require
+screenshot submission for the coding-agent handoff. These are expectations,
+not a passed UI qualification or a reason to broaden setup permissions.
+
 For staging verification, delete only resources recorded as created by this
 run, verify removal, and revoke its disposable key through the authenticated
 administrator. Never clean up a reused product workspace or another run's

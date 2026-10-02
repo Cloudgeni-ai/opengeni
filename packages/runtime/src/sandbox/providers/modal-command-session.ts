@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
 import { ModalProcessObservationUnavailableError } from "../errors";
+import { classifyProviderSandboxFailure } from "../provider-errors";
 import { markTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import {
   MAX_PROVIDER_COMMAND_HANDLE,
@@ -11,6 +12,7 @@ import {
   type ProviderCommandSession,
   admittedProviderCommandHandle,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
 import { verifyModalMaterializedPath } from "./modal-materialization-verification";
@@ -407,7 +409,26 @@ export function installModalCommandSession(
       if (!retained || !sameExecution(entry.command, retained))
         throw new Error("Original Modal command identity is unavailable");
       const index = await entry.persistence.reserveInput(Buffer.byteLength(args.chars));
-      await control.write(retained, args.chars, index);
+      try {
+        await control.write(retained, args.chars, index);
+      } catch (error) {
+        // Native gRPC transport failure does not establish whether this reserved
+        // range reached stdin. Never resend it or recommend another input write.
+        if (
+          retained.kind === "modal-router-v1" &&
+          // Contain supported transport graphs, including mixed failures. This
+          // grants no read/write retry permission; the locator and byte range
+          // come only from the retained command and its one input reservation.
+          classifyProviderSandboxFailure("modal", error).kind === "transient_transport"
+        )
+          throw new ProviderCommandInputOutcomeUnknownError(
+            retained,
+            index,
+            Buffer.byteLength(args.chars),
+            error,
+          );
+        throw error;
+      }
     }
     return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens, args.signal);
   };

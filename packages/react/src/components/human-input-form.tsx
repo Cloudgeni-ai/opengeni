@@ -8,12 +8,15 @@ import type {
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 
 export type HumanInputAnswerDraft = {
   values: string[];
   other: string;
   otherSelected: boolean;
 };
+
+class SkillReviewVerificationError extends Error {}
 
 export type HumanInputFormMessages = {
   title: string;
@@ -116,6 +119,7 @@ function HumanInputRequestForm({
   defaultCollapsed = false,
   className,
 }: HumanInputFormProps) {
+  const formatError = useErrorMessage();
   const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   const resolvedTitle =
@@ -184,7 +188,7 @@ function HumanInputRequestForm({
       questions.map(async (question) => {
         if (!loadSkillReview)
           throw new Error(
-            "This client cannot preview Skill files. Open this request in Opengeni to review it.",
+            "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
           );
         const reference = question.reference;
         const record = await loadSkillReview(reference);
@@ -194,7 +198,9 @@ function HumanInputRequestForm({
           (record.removalOperationId ?? undefined) !== reference.removalOperationId ||
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
-          throw new Error("The requested Skill revision could not be verified.");
+          throw new SkillReviewVerificationError(
+            "The requested Skill revision could not be verified.",
+          );
         }
         return [question.id, record] as const;
       }),
@@ -214,13 +220,20 @@ function HumanInputRequestForm({
             loader: loadSkillReview,
             identity: reviewIdentity,
             records: {},
-            error: cause instanceof Error ? cause.message : "Could not load the Skill files.",
+            error: formatError(
+              cause,
+              cause instanceof SkillReviewVerificationError
+                ? cause.message
+                : !loadSkillReview
+                  ? "This client cannot preview Skill files. Ask your administrator for a review-capable client."
+                  : undefined,
+            ),
           });
       });
     return () => {
       current = false;
     };
-  }, [loadSkillReview, reviewIdentity, reviewReload]);
+  }, [loadSkillReview, reviewIdentity, reviewReload, formatError]);
   const visibleReviews =
     reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
   const preview = (question: HumanInputQuestion) => {
@@ -319,7 +332,7 @@ function HumanInputRequestForm({
       await onSubmit(response);
     } catch (cause) {
       if (generation === submissionGeneration.current) {
-        setSubmissionError(cause instanceof Error ? cause.message : String(cause));
+        setSubmissionError(formatError(cause));
       }
     } finally {
       if (generation === submissionGeneration.current) {

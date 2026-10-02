@@ -656,6 +656,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "workspace_environment",
   "rig",
   "artifacts",
+  "media",
   "goals",
   "subagents",
   "knowledge",
@@ -676,6 +677,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   workspace_environment: "Workspace environment",
   rig: "Sandbox environment",
   artifacts: "Documents, files, and visuals",
+  media: "Images and video",
   goals: "Goals",
   subagents: "Session coordination",
   knowledge: "Knowledge",
@@ -689,6 +691,7 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
   Partial<Record<AgentCapabilityId, readonly AgentPromptModuleId[]>>
 > = {
   artifacts: ["artifacts"],
+  media: ["media"],
   goals: ["goals"],
   subagents: ["subagents"],
   knowledge: ["knowledge"],

@@ -70,6 +70,7 @@ import {
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
   agentRunFailurePayload,
+  agentRunRecoveryFailurePayload,
   codexCredentialCooldownUntil,
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
@@ -1808,7 +1809,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           reason: failure.code ?? "provider_unavailable",
           providerRecoveryCount: nextProviderRecoveryCount,
           detail: {
-            ...failure,
+            ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
             providerRecoveryCount: nextProviderRecoveryCount,
           },

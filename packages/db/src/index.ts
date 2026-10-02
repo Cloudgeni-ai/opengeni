@@ -1,3 +1,4 @@
+import { heartbeatSubscriptionCredentialLeaseUntil } from "./subscription-credential-leases";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
 import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
 import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
@@ -28892,19 +28893,13 @@ export async function heartbeatCodexCredentialLeaseUntil(
   leaseTtlMs: number = CODEX_CREDENTIAL_LEASE_TTL_MS,
 ): Promise<Date | null> {
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
-    const rows = await scopedDb.execute(sql<{ leased_until: Date | string }>`
-      update codex_credential_leases
-      set leased_until = clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'),
-          updated_at = clock_timestamp()
-      where account_id = ${accountId}
-        and workspace_id = ${workspaceId}
-        and turn_id = ${turnId}
-        and holder_id = ${holderId}
-        and generation = ${generation}
-        and leased_until > clock_timestamp()
-      returning leased_until
-    `);
-    return codexMetadataDate(rows[0]?.leased_until);
+    return heartbeatSubscriptionCredentialLeaseUntil(scopedDb, "codex_credential_leases", {
+      workspaceId,
+      turnId,
+      holderId,
+      generation,
+      ttlMs: leaseTtlMs,
+    });
   });
 }
 

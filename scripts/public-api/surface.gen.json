@@ -8176,7 +8176,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
@@ -9835,7 +9835,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
       }
     },
     "CancelExternalWorkspaceMemberGrantRequest": {
@@ -10113,9 +10113,28 @@
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.requestRestrictions": "array?",
+        "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
+        "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageRequestStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.observedAt": "string!",
+        "$.overageResetsAt": "string! null",
+        "$.overageStatus": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.representativeClaim": "ref(ClaudeUsageWindowId)! null",
+        "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.upstreamModelId": "string! null"
       }
     },
     "ClaudeUsageWindow": {
@@ -10127,6 +10146,7 @@
         "$.id": "ref(ClaudeUsageWindowId)!",
         "$.observedAt": "string!",
         "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
         "$.usedPercent": "number! null"
       }
@@ -24927,6 +24947,7 @@
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
@@ -25210,6 +25231,7 @@
       "FirstPartyMcpToolName": "type",
       "ForkSessionRequest": "type",
       "ForkSessionResponse": "type",
+      "formatErrorMessage": "value",
       "formatSseEvent": "value",
       "FsChangedPayload": "type",
       "FsChangeKind": "type",
@@ -26324,6 +26346,7 @@
       "ConnectorToolPermissionsResponse": "type",
       "FetchLike": "type",
       "FetchResponse": "type",
+      "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
@@ -26452,6 +26475,7 @@
     "@opengeni/sdk/core": {
       "FetchLike": "type",
       "FetchResponse": "type",
+      "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
@@ -27373,6 +27397,7 @@
       "EnrollmentConsentProps": "type",
       "EnrollmentDeviceFlow": "value",
       "EnrollmentDeviceFlowProps": "type",
+      "ErrorMessageFormatter": "type",
       "execTruncated": "value",
       "extractSessionRef": "value",
       "FILE_ONLY_MESSAGE_TEXT": "value",
@@ -28561,6 +28586,7 @@
       "CreateToolRegistryOptions": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "defaultToolRegistry": "value",
+      "ErrorMessageFormatter": "type",
       "GenieLoadingOptions": "type",
       "HumanInputAnswerDraft": "type",
       "HumanInputForm": "value",

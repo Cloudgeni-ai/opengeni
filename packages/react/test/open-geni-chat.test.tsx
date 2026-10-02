@@ -195,7 +195,7 @@ describe("OpenGeniChat", () => {
       await actRun(() => textarea.form!.requestSubmit());
       await flush(30);
       expect(view.container.querySelector("[role='alert']")?.textContent).toBe(
-        "custom create failed",
+        "The request could not be completed.",
       );
     } finally {
       await view.unmount();

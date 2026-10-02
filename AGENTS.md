@@ -126,6 +126,9 @@ families from legacy columns. Null configurations retain legacy behavior.
 Configured Skill read means only `skill_read` with a nonempty catalog; sandbox
 tools and wait/command/title mechanics are not capability toggles. Router history
 preserves the router, never removed execution authority.
+Media owns its modular image/video guidance. Keep adapter schemas deferred;
+empty literal-prefix listings may suggest authorized names but never restore
+disabled tools or grant execution outside the current catalog.
 
 - Public clients talk only to the API.
 - Organization-tenancy Slices A+B stage the `Organization → Workspace → User`
@@ -263,6 +266,12 @@ preserves the router, never removed execution authority.
   allocator/rotation consume hook. See `docs/codex-subscription-rotation.md`.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
+
+Claude Messages requests group retained system inputs after the user inputs in
+the same assistant-delimited phase: the system beta forbids `user → system → user`.
+This is a request-local projection; keep canonical roles/content and compaction
+truth unchanged. Bounded provider error type/message belongs on `turn.failed`
+detail, not in generic transport exception text or serialized request logs.
 
 Message-boundary forks may copy an active source's validated retained prefix
 under the existing exclusive tenancy and workspace/source row locks. Preserve

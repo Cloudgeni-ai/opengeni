@@ -647,7 +647,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         if (
           request.method() === "GET" &&
           url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
-          url.searchParams.get("view") === "page"
+          url.searchParams.get("view") === "page" &&
+          // The separate Recent sessions panel needs full model/resource data.
+          // Identify sidebar reads by their query shape, independently of projection.
+          (url.searchParams.get("parentSessionId") === "null" ||
+            url.searchParams.has("channelId") ||
+            url.searchParams.get("pinsOnly") === "true")
         ) {
           paginationRequests.push(url);
         }
@@ -673,6 +678,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(
         paginationRequests.some((request) => request.searchParams.get("pinsOnly") === "true"),
       ).toBe(true);
+      expect(
+        paginationRequests.some(
+          (request) =>
+            request.searchParams.get("parentSessionId") === "null" &&
+            !request.searchParams.has("channelId"),
+        ),
+      ).toBe(true);
+      for (const project of [projectA, projectB, emptyProject]) {
+        expect(
+          paginationRequests.some(
+            (request) => request.searchParams.get("channelId") === project.id,
+          ),
+        ).toBe(true);
+      }
       expect(projectAPage.sessions).toHaveLength(4);
       expect(projectAPage.sessions[0]).not.toHaveProperty("initialMessage");
       expect(projectAPage.sessions[0]).not.toHaveProperty("metadata");

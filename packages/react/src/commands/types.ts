@@ -41,6 +41,8 @@ export type CommandContext = {
   permissions: Permission[];
   /** Surface a transient ok/error notice in the composer. */
   notice: (notice: Notice) => void;
+  /** Optional presentation hook for native command failures; never rewrites command content. */
+  formatError?: ((error: unknown, defaultMessage: string) => string) | undefined;
   /** Open the in-composer /help panel (rendered from the registry). */
   openHelp: () => void;
   /**

@@ -37,6 +37,7 @@ import {
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 
 export type SessionConversationProps = ClientOverride & {
   sessionId: string;
@@ -120,6 +121,7 @@ function Conversation({
 }: SessionConversationProps) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
+  const formatError = useErrorMessage();
   const config = useClientConfigFlags(context.client);
   const showModelPicker = modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({
@@ -203,7 +205,7 @@ function Conversation({
       style={{ height }}
       data-og-conversation=""
     >
-      {error && <p role="alert">{error.message}</p>}
+      {error && <p role="alert">{formatError(error)}</p>}
       <MessageTimeline
         renderMessageText={renderMessageText}
         resolveLink={links}
@@ -265,7 +267,7 @@ function Conversation({
                 await human.respond(id, response);
               }}
               respondingRequestId={human.respondingRequestId}
-              error={human.mutationError?.message}
+              error={human.mutationError ? formatError(human.mutationError) : null}
               autoFocus={false}
             />
             {terminal ? (

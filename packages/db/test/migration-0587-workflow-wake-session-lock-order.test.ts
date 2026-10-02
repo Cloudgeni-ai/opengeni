@@ -45,7 +45,7 @@ test("rolling wake replacement preserves owner, ACL, scoped FORCE-RLS, and calle
     "utf8",
   );
   const replacement = await readFile(
-    new URL("../drizzle/0586_workflow_wake_session_lock_order.sql", import.meta.url),
+    new URL("../drizzle/0587_workflow_wake_session_lock_order.sql", import.meta.url),
     "utf8",
   );
   // Exercise an old dispatcher against the unchanged six-column SQL ABI and

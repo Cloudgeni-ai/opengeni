@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
+import { AnthropicRequestError } from "./anthropic-request-error";
 import {
   protocol,
   Usage,
@@ -9,6 +10,7 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
+import { withClaudeModelRequest } from "./claude-subscription-usage";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
@@ -301,6 +303,37 @@ export function anthropicMessages(input: ModelRequest["input"]): Message[] {
   return messages;
 }
 
+/**
+ * Compaction retains user/system inputs but removes their intervening assistant
+ * replies. Anthropic's system beta requires a system message after a user and
+ * before an assistant (or at the end), not user -> system -> user. Coalesce each
+ * user phase and its system blocks at that boundary, retaining their own roles,
+ * exact content and relative order. Never move a system across an assistant.
+ */
+function placeConversationSystems(messages: Message[]): Message[] {
+  const result: Message[] = [];
+  let systems: Json[] = [];
+  const flush = () => {
+    if (!systems.length) return;
+    if (result.at(-1)?.role !== "user")
+      throw new AnthropicProtocolError("Claude system messages require a preceding user message");
+    result.push({ role: "system", content: systems });
+    systems = [];
+  };
+  for (const message of messages) {
+    if (message.role === "system") {
+      systems.push(...message.content);
+      continue;
+    }
+    if (message.role === "assistant") flush();
+    const previous = result.at(-1);
+    if (previous?.role === message.role) previous.content.push(...message.content);
+    else result.push(message);
+  }
+  flush();
+  return result;
+}
+
 export function buildAnthropicRequest(
   request: ModelRequest,
   model: string,
@@ -330,16 +363,16 @@ export function buildAnthropicRequest(
       );
     return matches[0]![0];
   };
-  const messages = anthropicMessages(request.input);
+  let messages = anthropicMessages(request.input);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   const system = request.systemInstructions
     ? ([{ type: "text", text: request.systemInstructions }] as Json[])
     : [];
-  // Even with mid-conversation-system enabled, initial system/developer
-  // instructions belong in the top-level system field. Keep later system
-  // messages at their original history position.
+  // Initial system/developer instructions belong in the top-level field. Later
+  // systems keep their authority within the same assistant-delimited phase.
   while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
+  messages = placeConversationSystems(messages);
   const tools: Json[] = request.tools.map((tool) => {
     if (tool.type !== "function")
       throw new AnthropicProtocolError(`Claude does not support the ${tool.type} tool transport`);
@@ -601,12 +634,14 @@ export class AnthropicMessagesModel implements Model {
         previousRequestId: this.previousRequestId,
       });
     }
-    const response = await this.fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
+    const response = await withClaudeModelRequest(this.model, () =>
+      this.fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+    );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
       request.signal.throwIfAborted();
@@ -634,14 +669,19 @@ export class AnthropicMessagesModel implements Model {
         : response.status === 401
           ? "Claude credentials expired or were revoked. Replace the key or setup token in Models."
           : "Claude request failed (HTTP " + response.status + ")";
-      throw Object.assign(new Error(message), {
-        status: response.status,
-        request_id: response.headers.get("request-id"),
-        headers: response.headers.has("retry-after")
-          ? { "retry-after": response.headers.get("retry-after")! }
-          : {},
-        code: contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
-      });
+      let source: unknown;
+      try {
+        source = JSON.parse(detail)?.error;
+      } catch {
+        // Malformed, truncated or non-JSON bodies retain structural status only.
+      }
+      throw new AnthropicRequestError(
+        message,
+        response.status,
+        contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
+        source,
+        response.headers,
+      );
     }
     this.previousRequestId = response.headers.get("request-id") ?? undefined;
     return response;
@@ -691,6 +731,15 @@ export class AnthropicMessagesModel implements Model {
           headers: response.headers.has("retry-after")
             ? { "retry-after": response.headers.get("retry-after")! }
             : {},
+          // Keep the structural stream wrapper stable for provider rejection
+          // guards while the typed cause keeps provider text private.
+          cause: new AnthropicRequestError(
+            `Claude stream failed (HTTP ${status})`,
+            status,
+            status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+            event.error,
+            response.headers,
+          ),
         });
       }
       switch (event.type) {

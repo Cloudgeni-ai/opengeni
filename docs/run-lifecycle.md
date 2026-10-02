@@ -1371,7 +1371,7 @@ current due outbox row. Its unlocked preview traverses workspace/session UUID
 order (not delivery priority) and does not pre-limit busy candidates; only
 actually lockable wakes count toward the bounded batch. It revalidates due
 time and undelivered revision under the locks, and retains the existing lease
-backoff and control/unquiesced-interruption projection. Migration 0586 replaces
+backoff and control/unquiesced-interruption projection. Migration 0587 replaces
 only the claim function, preserving its signature, owner, and app grant for old
 dispatchers during a rolling release; old failure-marker binaries remain
 outbox-first until the source rollout completes. Neither path retries delivery,
@@ -2511,6 +2511,24 @@ dispatch instead observes the same UUID, retrying transient reads without anothe
 Start. Budget expiry and attempt cancellation abort the native RPCs; success
 requires zero exit and EOF on both streams. Definitive rejection and nonzero
 exit remain failures. This applies to both new boxes and warm reattachment.
+
+Fixed supervision-capability and materialization-visibility probes likewise
+observe their original task/exec identity after a typed lost Start acknowledgement.
+They keep their existing five-second and thirty-second budgets. Visibility
+observation can continue across multiple unavailable read windows while preserving
+its private partial output and exact cursors; contradictory identities and mixed
+no-retry failures remain authoritative. Probe continuation never repeats Start
+or the surrounding workspace mutation.
+
+For native retained stdin, a transport acknowledgement failure after reserving
+the byte range carries typed input-outcome uncertainty. The reserved range remains
+consumed and the input is never resent. The worker's retained-process tool returns
+explicit no-resend guidance and permits empty-input observation of the original
+command. Settling the rejected child RPC promise is not proof that input bytes
+were rejected; the retained parent command and holder keep their existing lifetime
+and exact terminal-proof fence. See the
+[October 2 recovery audit](design/modal-recovery-assurance-2026-10-02.md) for
+the remaining durable automatic-continuity requirements.
 
 Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range

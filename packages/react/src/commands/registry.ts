@@ -1,4 +1,5 @@
 import type { Permission } from "@opengeni/sdk";
+import { formatErrorMessage } from "@opengeni/sdk";
 import type { CommandContext, SlashArg, SlashCommand } from "./types";
 
 /**
@@ -182,7 +183,10 @@ export const defaultCommands: readonly SlashCommand[] = [
         });
         return { status: "ok", message: action === "pause" ? "Goal paused." : "Goal resumed." };
       } catch (cause) {
-        return { status: "error", message: goalErrorMessage(cause, action) };
+        return {
+          status: "error",
+          message: commandErrorMessage(ctx, cause, goalErrorMessage(cause, action)),
+        };
       }
     },
   },
@@ -197,7 +201,7 @@ export const defaultCommands: readonly SlashCommand[] = [
         const result = await ctx.client.compactSessionContext(ctx.workspaceId, sessionId);
         return { status: "ok", message: result.message };
       } catch (cause) {
-        return { status: "error", message: errorMessage(cause) ?? "Could not compact context." };
+        return { status: "error", message: commandErrorMessage(ctx, cause) };
       }
     },
   },
@@ -219,22 +223,21 @@ export const defaultCommands: readonly SlashCommand[] = [
         await ctx.client.clearSessionContext(ctx.workspaceId, sessionId);
         return { status: "ok", message: "Context cleared." };
       } catch (cause) {
-        return { status: "error", message: clearErrorMessage(cause) };
+        return {
+          status: "error",
+          message: commandErrorMessage(ctx, cause, clearErrorMessage(cause)),
+        };
       }
     },
   },
 ];
 
-function errorMessage(cause: unknown): string | undefined {
-  if (
-    cause &&
-    typeof cause === "object" &&
-    "message" in cause &&
-    typeof (cause as { message?: unknown }).message === "string"
-  ) {
-    return (cause as { message: string }).message;
-  }
-  return undefined;
+function commandErrorMessage(
+  ctx: CommandContext,
+  cause: unknown,
+  message = formatErrorMessage(cause),
+): string {
+  return ctx.formatError?.(cause, message) || message;
 }
 
 function statusCode(cause: unknown): number | undefined {
@@ -259,12 +262,12 @@ function goalErrorMessage(cause: unknown, action: "pause" | "resume"): string {
       ? "Only a paused goal can be resumed."
       : "Goal is already in a terminal state.";
   }
-  return errorMessage(cause) ?? `Could not ${action} the goal.`;
+  return formatErrorMessage(cause);
 }
 
 function clearErrorMessage(cause: unknown): string {
   if (statusCode(cause) === 409) {
     return "Pause the session and wait for the current inference to settle, then clear context.";
   }
-  return errorMessage(cause) ?? "Could not clear context.";
+  return formatErrorMessage(cause);
 }

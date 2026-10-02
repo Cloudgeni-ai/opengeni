@@ -381,6 +381,11 @@ provider identity and all other executable fields remain exact.
 permitted serving account for browser/default/agent choices. It rechecks authority,
 refreshes tokens, and caches support by workspace/credential/revision.
 
+Claude's request-local system placement groups each assistant-delimited input
+phase at Anthropic's user/system boundary without changing canonical roles or
+content; `anthropic-request-error.ts` exposes bounded provider diagnostics to
+durable failure settlement while transport exception text stays structural.
+
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
 
@@ -904,35 +909,29 @@ Canonical: [`human-input.md`](human-input.md),
 
 ### 5.5 Model, tool, and compute preparation
 
-The accepted turn freezes its public model choice, provider/deployment routing,
-billing attribution, governance context, initiating authority, and relevant
-tool/connection delegations. Recovery reuses that accepted truth rather than
-sampling mutable workspace defaults again.
+Accepted turns freeze model choice, provider/deployment routing, billing,
+governance, initiating authority, and tool/connection delegations. Recovery
+reuses these snapshots, never mutable workspace defaults.
 
-Workspace built-in tool and MCP-server defaults inherit independently when
-their respective `settings.sessionToolDefaults` key is absent. Existing arrays
-remain exact custom selections (including empty arrays). The settings API
-merges these nested keys atomically; explicit `null` removes only that override.
-The UI requires deliberate customization and exposes partial selections;
-saving plugin defaults never freezes built-in defaults. Persistence lives in
-`packages/db/src/workspace-tool-defaults.ts`; deployment ceilings still apply,
-and changing defaults never rewrites existing sessions or accepted attempts.
+Built-in tool and MCP-server defaults inherit independently when their
+`settings.sessionToolDefaults` key is absent. Arrays, including empty ones,
+remain exact selections; atomic settings updates use `null` to remove only
+that override. The UI requires deliberate customization, exposes partial
+selections, and keeps plugin/built-in defaults independent.
+`packages/db/src/workspace-tool-defaults.ts` owns persistence. Deployment
+ceilings apply; defaults never rewrite sessions or accepted attempts.
 
-A fresh session selecting a workspace Gateway or OpenRouter custom model, an
-existing session explicitly switching from another model, a new/materially
-reaccepted scheduled task, automation trigger, or PR-review binding, or a fresh
-generated-session scheduled occurrence rechecks that exact provider-qualified
-active slug under the model catalog's shared transaction lock before the
-session, turn, task, trigger, binding, or accepted occurrence can commit.
-Adapter-rendered automation templates are the acceptance authority, so adapter
-parameters cannot hide a model override from this gate. Deployment-curated
-workspace provider models use their provider's public prefix but no mutable
-custom row, so they do not enter this fence. Custom-model retirement holds the
-exclusive counterpart; already accepted work, exact occurrence replay,
-same-model/existing-session continuations, and administrative-only task,
-trigger, or binding edits use retained definitions instead of reopening
-fresh-selection authority. Committed keyed session shells replay before
-active-only catalog checks, preserving repairable initialization.
+Fresh provider-qualified Gateway/OpenRouter selections recheck the exact active
+slug under the catalog's shared transaction lock before committing a session,
+turn, task, trigger, binding, or occurrence. This covers fresh sessions,
+explicit switches, new/materially reaccepted schedules, automation triggers,
+PR-review bindings, and fresh generated-session occurrences. Automation adapter
+templates own acceptance; parameters cannot bypass this gate. Deployment-curated
+workspace models retain public provider prefixes but have no mutable custom row
+and bypass this fence. Retirement holds the exclusive counterpart. Accepted
+work, exact replays, same-model/existing-session continuations, and
+administrative-only task/trigger/binding edits retain definitions. Committed
+keyed session shells replay before active-only checks.
 
 Human preferences require frozen causal identity. Command/timeout successors
 preserve immutable receipts, separate causal claims and live personal-grant
@@ -942,51 +941,50 @@ admission; see [run lifecycle](run-lifecycle.md).
 `artifacts:publish`, archive, restore, and exact mutation fences apply;
 pure service work fails closed. See [run lifecycle](run-lifecycle.md).
 
-Tool disclosure is progressive, but authority is not. A tool may be eager or
-lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
-still resolves through the current authorized catalog and the same execution
-fences. Approval-required tools remain approval-required regardless of access
-path.
+All tool calls share the current authorized catalog, execution fences, and
+approval requirements, regardless of loading, backend, or model/Codemode entry.
 
-The closed always-visible local first-request set is `exec_command`,
+The closed always-visible first-request local tool set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists selectable models; never switches
-them), and optional [`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
-remain behind progressive search.
+`request_human_input`, `list_models` (lists, never switches models), and optional
+[`code_search`](code-search.md). Other non-MCP function tools and non-eager MCP schemas
+require progressive search.
 
-Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
-managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
+Repository descriptors use sandbox-bound `repository_skill_read`, separate
+from managed `skill_read`: [run lifecycle](run-lifecycle.md).
 
-Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
-ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
-`opengeni-client`, `opengeni-help`, `opengeni-visualize`, and `document-parsing`,
-unless explicitly overridden. `.agents/skills/opengeni-client` is canonical;
-`scripts/sync-client-skill.ts` generates bundled and docs-site copies with drift tests.
-Every deployment can read it without installation or sandbox setup.
+Repository Skills: `.agents/skills`; runtime bundles:
+`packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
+client assets/docs from `.agents/skills/opengeni-client`; tests detect drift.
+Tools/host selection gate `opengeni-schedules`; the Schedules shortcut sends
+only the request and time zone.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
-Before every follow-up provider request, the worker reconciles the SDK's
-complete prior history into durable call/result truth; the first request has no
-prior model/tool history to flush. An empty Responses terminal is reconstructed
-from observed `output_item.done` events in numeric `output_index` order. Sparse
-indices do not create synthetic history items, while duplicate indices remain
-invalid.
+Each follow-up provider request reconciles complete SDK history into durable
+call/result truth; the first request has none to flush. Empty Responses
+terminals reconstruct observed `output_item.done` events in numeric
+`output_index` order, without synthetic items for sparse indices; duplicates
+remain invalid.
 
-Compute is established lazily where possible. A text-only turn can begin
-without provisioning a box or contacting a Connected Machine. Once a tool
-needs filesystem, process, Git, browser, or computer access, routing resolves
-the exact current target and validates its epoch and authority.
+Text-only turns can start without compute provisioning or contacting a
+Connected Machine. Filesystem, process, Git, browser, or computer tools resolve
+the exact current target and validate its epoch and authority.
 
-Explicit Variable Sets are ordered from low to high precedence and are frozen
-for execution. Reconfiguration is a quiescent session-control mutation that
-rotates managed compute rather than hot-swapping credentials into active work.
+Explicit Variable Sets freeze for execution in ascending precedence.
+Session-control reconfiguration requires quiescence and rotates managed compute; it never
+hot-swaps active credentials.
 
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
 [`connected-machines.md`](connected-machines.md). Variable Set lifecycle and
 ordering are canonical in [`variable-sets.md`](variable-sets.md).
+
+Configured agents always receive discovery mechanics; `media` gates image/video
+guidance. An unmatched literal `tool_list.namePrefix` preserves the empty page
+and may suggest bounded authorized descriptors. Suggestions neither load schemas
+nor grant execution; exact `tool_search` resolves them.
 
 ### 5.6 Files, knowledge, and artifacts
 
@@ -1182,10 +1180,10 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
 
 ### 7.1 API adapters versus core domain behavior
 
-`apps/api` owns HTTP concerns: middleware, request/response translation,
-cookies and bearer extraction, route composition, SSE, callbacks, and API-side
-control adapters. `@opengeni/core` owns reusable access, domain, billing, and
-admission behavior. Routes reuse domain rules shared with MCP, workers, and embedded hosts.
+`apps/api` owns HTTP: middleware, request/response translation, cookies/bearer
+extraction, route composition, SSE, callbacks and API-side control adapters.
+`@opengeni/core` owns access/domain/billing/admission behavior; routes share
+rules with MCP, workers and embedded hosts.
 
 Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
 serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
@@ -1200,21 +1198,19 @@ Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 
 ### 7.2 Worker orchestration versus runtime execution
 
-`apps/worker` owns durable activity/workflow sequencing, turn claim and
-settlement, recovery, capacity waits, scheduling, and injected process
-dependencies. `@opengeni/runtime` owns provider-neutral agent construction,
-model input/output handling, tool execution, progressive disclosure, and the
-sandbox interface.
+`apps/worker` owns durable activity/workflow sequencing, turn claim/settlement,
+recovery, capacity waits, scheduling and injected process dependencies.
+`@opengeni/runtime` owns provider-neutral agents, model input/output,
+tool execution, progressive disclosure and sandbox interfaces.
 
-The embedding process—not the Agents SDK—owns process-global rejection and
-termination policy. SDK background lifecycle work must settle an owned promise;
-it may not detach a rejecting task or install an `unhandledRejection` handler
-that exits the shared worker. The worker's global rejection listener is a
-last-resort observational boundary, while deliberate restart remains an
-OpenGeni drain-and-checkpoint decision.
+Embedding processes—not the Agents SDK—own global rejection/termination policy.
+SDK background lifecycle work must settle owned promises, never detach rejecting
+tasks or install `unhandledRejection` handlers exiting shared workers. Worker global
+rejection listeners provide last-resort observation; OpenGeni drains/checkpoints
+before deliberate restarts.
 
-The worker supplies frozen authority and durable sinks. Runtime must not invent
-tenancy or persistence authority from its in-memory agent context.
+Workers supply frozen authority and durable sinks. Runtime must not invent
+tenancy/persistence authority from in-memory agent context.
 
 Canonical: `apps/worker/src/workflows/`,
 `apps/worker/src/activities/agent-turn/`, and `packages/runtime/src/`.
@@ -1437,29 +1433,27 @@ Sites install exact SDK/React/Codemode/CLI versions via virtual skill file
 `OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased `/opt/opengeni/site-packages`
 archives locally, never in deployed images.
 
-`packages/react` owns timeline history; `use-session-events.ts` fences navigation by
-session/client lifetime independently of SSE reconnects. Web supplies source
-events and session keys. Overlap uses retained event identity; prepends may change
-partial-message row IDs. `timeline-anchor.tsx` captures pre-mutation position;
-`message-timeline.tsx` corrects residual browser-anchor movement without resuming
-tip-follow. Upward input loads bounded older pages despite collapsed rows.
-Underfill preserves tails, offers explicit earlier navigation at limits, never
-auto-pages forward; Jump to latest restores live tails. Normalization
-joins chunks by provider identity; each message completes once, in order, with
-`phase` (see `docs/run-lifecycle.md`).
-Pre-transfer metadata planning bounds database batches to 256 events and the
-default 1 MiB full-payload page budget.
+`packages/react` owns timeline history. `use-session-events.ts` fences navigation by
+session/client lifetime independently of SSE reconnects; Web supplies events/session keys.
+Overlap uses retained event identity; prepends may change partial-message row IDs.
+`timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx` corrects
+residual browser-anchor movement without resuming tip-follow. Upward input loads
+bounded older pages despite collapsed rows. Underfill preserves tails, offers
+earlier navigation at limits, never auto-pages forward; Jump to latest restores
+live tails. Normalization joins chunks by provider identity, completing each message
+once, in order, with `phase` (see `docs/run-lifecycle.md`).
+Pre-transfer metadata planning bounds batches to 256 events and default 1 MiB full-payload pages.
 
-The lazy rail dialog and Find bar search retained user/completed-assistant text
-through the browser SDK—not DOM, tools, reasoning or unfinished deltas. Rail
-providers retain dialog state across session navigation and collapsed/mobile rails.
-Links carry query, event sequence and original UTF-16 offset.
-`useSessionEvents.jumpToSequence` loads cancellable,
-bounded target windows; `MessageTimeline.searchTarget` owns disclosure/occurrence
-navigation. Browser batches/scan continuations are bounded; counts remain
-provisional until traversal ends. Labeled, bounded Markdown source excerpts
-prevent raw offsets selecting wrong rendered occurrences. Closing Find removes
-highlights but preserves excerpt/reading position; formatted restoration is explicit.
+Lazy rail/Find search retained user/completed-assistant text through the browser SDK,
+excluding DOM/tools/reasoning/unfinished deltas. Rail providers preserve dialog state
+across sessions and collapsed/mobile rails. Links carry query/event sequence/original
+UTF-16 offset.
+`useSessionEvents.jumpToSequence` loads cancellable, bounded target windows;
+`MessageTimeline.searchTarget` owns disclosure/occurrence navigation.
+Bounded browser batches/scan continuations keep counts provisional until traversal
+ends. Labeled, bounded Markdown source excerpts prevent raw offsets selecting wrong rendered
+occurrences. Closing Find removes highlights, preserves excerpt/reading position;
+formatted restoration is explicit.
 
 Web imports `@opengeni/sdk/browser`; operator backfills use
 `@opengeni/sdk/document-authority`. Root/`core` retain compatibility.

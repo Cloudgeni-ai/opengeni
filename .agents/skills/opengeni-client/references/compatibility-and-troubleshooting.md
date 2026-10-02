@@ -56,6 +56,48 @@ upstream calls and local persistence inside the route's error boundary, not only
 the final call. Log a redacted diagnostic with a non-secret correlation ID on
 the server; never copy an SDK exception into the browser response or DOM.
 
+Branding applies to UI-owned labels/notices, not legitimate source quotations,
+code, or user/assistant transcript content; do not rewrite those to hide names.
+Check the installed SDK/React error-copy API separately: changing conversation
+labels does not itself prove that upstream error messages are remapped. Host
+safe-copy guidance alone does not change a package's default error behavior.
+
+When the installed SDK exports `formatErrorMessage(error, fallback?)` (root,
+`@opengeni/sdk/core` or `@opengeni/sdk/browser`), use it for custom-renderer error
+copy. Typed errors produce neutral, state-aware messages and retain a bounded
+support reference; an unrecognized error uses the supplied safe fallback, never
+its raw message. The original error's `message`, `body`, `details`, `status`,
+`code`, `retryable` and `outcomeUnknown` remain diagnostic/policy facts.
+
+The matching React package provides `OpenGeniProvider.formatError`, with the
+exported type `ErrorMessageFormatter`:
+`(error: unknown, defaultMessage: string) => string | undefined`. It receives
+the original error and neutral default before presentation. Return a host
+message; `undefined` or an empty string keeps the default. A minimal branding
+callback preserves its state guidance and support reference. A throwing callback
+or invalid runtime return also keeps the neutral default; presentation must not
+interrupt delivery-state settlement:
+
+```js
+function formatAssistantError(_error, defaultMessage) {
+  return `ACME Assistant: ${defaultMessage}`;
+}
+```
+
+Pass this as `formatError={formatAssistantError}` on the existing provider.
+Keep heading/placeholder/label overrides separately. Explicit host-authored
+error props and custom command messages still need safe host copy; this callback
+does not rewrite user, assistant, tool, worker or Skill content. Do not regex
+scrub those strings or stringify diagnostic errors. Check the installed exports
+and provider prop before using these additive APIs; source guidance is not
+proof that an older installed/published package contains them.
+
+Formatting is presentation only: it does not authorize calls, change retry
+policy or reconcile an uncertain mutation. Preserve the default's sign-in,
+permission, setup/allowance, HTTPS-upload and unknown-outcome instructions when
+customizing it. Keep diagnostics server-only/redacted and retain only the
+bounded support reference needed by the UI, not a raw diagnostic body.
+
 For an approval route, distinguish an accepted decision from completed tool
 execution. If the call returns a decision event and local mapping/receipt save
 then fails, the decision may already be durable. `outcomeUnknown: true` also

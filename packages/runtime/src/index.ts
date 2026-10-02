@@ -12,6 +12,7 @@ import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengen
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
+export { AnthropicRequestError } from "./anthropic-request-error";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
