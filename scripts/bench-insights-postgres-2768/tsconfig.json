@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["./*.ts", "../bench-insights-postgres-2768.ts"]
+}
