@@ -24,11 +24,18 @@ import {
   verificationLinkErrorFromSearch,
   type VerificationLinkError,
 } from "@/lib/managed-auth-url";
+import { SIGNUPS_PAUSED_MESSAGE } from "@/lib/signups-paused";
 
 export function ManagedAuthPanel(props: {
   initialMode?: ManagedAuthMode;
   allowedModes?: readonly ManagedAuthMode[];
   emailVerificationRequired?: boolean;
+  /**
+   * False while the deployment has paused new account creation. The Sign up
+   * view then explains it instead of offering a form or social buttons;
+   * Sign in stays available.
+   */
+  newSignupsEnabled?: boolean;
   /** An expired or invalid email-verification link returned the person here. */
   verificationLinkError?: VerificationLinkError | null;
   /**
@@ -65,6 +72,7 @@ export function ManagedAuthPanel(props: {
       : (allowedModes[0] ?? "signin"),
   );
   const emailVerificationRequired = props.emailVerificationRequired ?? true;
+  const newSignupsEnabled = props.newSignupsEnabled ?? true;
   const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const [invitationDismissed, setInvitationDismissed] = useState(false);
   const invitation = invitationDismissed ? null : (props.invitation ?? null);
@@ -77,6 +85,7 @@ export function ManagedAuthPanel(props: {
     () => emailVerificationRequired && Boolean(verificationLinkError),
   );
   const emailOnlyMode = resetMode || linkResendMode;
+  const signupsPausedView = mode === "signup" && !emailOnlyMode && !newSignupsEnabled;
   // When the page query brought the link error, this panel owns it from here.
   const [ownsLocationLinkError] = useState(
     () => linkResendMode && !props.verificationLinkError && props.search !== undefined,
@@ -294,11 +303,13 @@ export function ManagedAuthPanel(props: {
                   : "That verification link is no longer valid. Enter your email and we'll send a new one."
                 : resetMode
                   ? "Enter your email to receive a password-reset link."
-                  : invitation
-                    ? mode === "signup"
-                      ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                      : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                    : "Use your preferred account to access the managed console."}
+                  : signupsPausedView
+                    ? "Existing accounts can still sign in."
+                    : invitation
+                      ? mode === "signup"
+                        ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                        : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                      : "Use your preferred account to access the managed console."}
             </p>
           </div>
         </div>
@@ -338,7 +349,17 @@ export function ManagedAuthPanel(props: {
             </Button>
           </div>
         ) : null}
-        {!emailOnlyMode && !invitation && props.socialProviders?.length && props.onSocialSubmit ? (
+        {signupsPausedView ? (
+          <SignupsPausedNotice
+            invitation={invitation}
+            onSignIn={allowedModes.includes("signin") ? () => selectMode("signin") : undefined}
+          />
+        ) : null}
+        {!signupsPausedView &&
+        !emailOnlyMode &&
+        !invitation &&
+        props.socialProviders?.length &&
+        props.onSocialSubmit ? (
           <>
             <ManagedSocialAuthButtons
               providers={props.socialProviders}
@@ -349,7 +370,7 @@ export function ManagedAuthPanel(props: {
             <ManagedAuthDivider />
           </>
         ) : null}
-        {mode === "signup" ? (
+        {mode === "signup" && !signupsPausedView ? (
           <div className="mb-3">
             <Label htmlFor="managed-auth-name">Name</Label>
             <Input
@@ -373,32 +394,34 @@ export function ManagedAuthPanel(props: {
             ) : null}
           </div>
         ) : null}
-        <div className="mb-3">
-          <Label htmlFor="managed-auth-email">Email</Label>
-          <Input
-            id="managed-auth-email"
-            type="email"
-            value={email}
-            disabled={formInteractionBusy}
-            readOnly={invitation !== null}
-            onChange={(event) => updateField("email", event.target.value)}
-            autoComplete="email"
-            className="mt-2"
-            autoFocus
-            aria-invalid={Boolean(fieldErrors.email)}
-            aria-describedby={fieldErrors.email ? "managed-auth-email-error" : undefined}
-          />
-          {fieldErrors.email ? (
-            <p
-              id="managed-auth-email-error"
-              role="alert"
-              className="mt-1.5 text-xs text-status-failed"
-            >
-              {fieldErrors.email}
-            </p>
-          ) : null}
-        </div>
-        {!emailOnlyMode ? (
+        {signupsPausedView ? null : (
+          <div className="mb-3">
+            <Label htmlFor="managed-auth-email">Email</Label>
+            <Input
+              id="managed-auth-email"
+              type="email"
+              value={email}
+              disabled={formInteractionBusy}
+              readOnly={invitation !== null}
+              onChange={(event) => updateField("email", event.target.value)}
+              autoComplete="email"
+              className="mt-2"
+              autoFocus
+              aria-invalid={Boolean(fieldErrors.email)}
+              aria-describedby={fieldErrors.email ? "managed-auth-email-error" : undefined}
+            />
+            {fieldErrors.email ? (
+              <p
+                id="managed-auth-email-error"
+                role="alert"
+                className="mt-1.5 text-xs text-status-failed"
+              >
+                {fieldErrors.email}
+              </p>
+            ) : null}
+          </div>
+        )}
+        {!emailOnlyMode && !signupsPausedView ? (
           <div>
             <Label htmlFor="managed-auth-password">Password</Label>
             <Input
@@ -485,20 +508,22 @@ export function ManagedAuthPanel(props: {
             {resendVerificationControl}
           </Notice>
         ) : null}
-        <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
-          {busy ? (
-            <Loader2Icon className="size-4 animate-spin" />
-          ) : (
-            <CheckIcon className="size-4" />
-          )}
-          {linkResendMode
-            ? "Send new link"
-            : resetMode
-              ? "Send reset link"
-              : mode === "signup"
-                ? "Create account"
-                : "Sign in"}
-        </Button>
+        {signupsPausedView ? null : (
+          <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
+            {busy ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              <CheckIcon className="size-4" />
+            )}
+            {linkResendMode
+              ? "Send new link"
+              : resetMode
+                ? "Send reset link"
+                : mode === "signup"
+                  ? "Create account"
+                  : "Sign in"}
+          </Button>
+        )}
         {mode === "signin" && !emailOnlyMode && allowedModes.includes("signup") ? (
           <p className="mt-3 text-center text-sm text-fg-subtle">
             New here?{" "}
@@ -514,7 +539,7 @@ export function ManagedAuthPanel(props: {
             </Button>
           </p>
         ) : null}
-        {mode === "signup" ? (
+        {mode === "signup" && !signupsPausedView ? (
           <p className="mt-2 text-center text-xs text-fg-subtle">
             {emailVerificationRequired
               ? "We'll email you a link before you can sign in."
@@ -523,5 +548,26 @@ export function ManagedAuthPanel(props: {
         ) : null}
       </form>
     </section>
+  );
+}
+
+function SignupsPausedNotice(props: {
+  invitation: { organizationName: string; targetEmail: string } | null;
+  onSignIn: (() => void) | undefined;
+}) {
+  return (
+    <div data-testid="managed-auth-signups-paused">
+      <Notice tone="info" title="New accounts are paused" live="polite">
+        {SIGNUPS_PAUSED_MESSAGE}
+        {props.invitation
+          ? ` To join ${props.invitation.organizationName}, open the invitation link from your email to set up your account.`
+          : null}
+      </Notice>
+      {props.onSignIn ? (
+        <Button type="button" className="mt-4 w-full" onClick={props.onSignIn}>
+          Sign in to an existing account
+        </Button>
+      ) : null}
+    </div>
   );
 }

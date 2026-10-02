@@ -132,6 +132,7 @@ import {
 import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
 } from "./auth/managed-auth";
@@ -877,6 +878,16 @@ export function createAppComposition(deps: AppDependencies): {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (
+        pathname === "/v1/auth/sign-up/email" &&
+        c.req.method === "POST" &&
+        !deps.settings.managedAuthNewSignupsEnabled
+      ) {
+        // Launch-load safety switch: refuse before Better Auth hashes the
+        // password or sends mail. Better Auth's own disableSignUp flags and
+        // the user-create hook remain the backstop for every other path.
+        return managedAuthNewSignupsPausedResponse();
+      }
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1853,6 +1864,7 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: settings.environment !== "local",
+      newSignupsEnabled: settings.managedAuthNewSignupsEnabled,
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)

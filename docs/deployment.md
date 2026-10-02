@@ -3960,3 +3960,65 @@ change organization API keys, external-user authentication, sandbox credentials,
 webhook signatures or signed storage URLs. Review existing issued credentials
 separately when restricting an already-running deployment: removing an email does
 not revoke its previously issued API keys or cancel already accepted work.
+
+### Pausing new account sign-ups
+
+`OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` (default `true`) is the launch-load
+safety switch for managed deployments. Set it to `false` to stop new people from
+creating accounts without affecting anyone who already has one. While it is
+`false`:
+
+- `POST /v1/auth/sign-up/email` is refused with `403`
+  `{ "code": "NEW_SIGNUPS_PAUSED", "message": "..." }` before any password
+  hashing or email, for new and already-registered addresses alike (no account
+  enumeration). Better Auth's `emailAndPassword.disableSignUp` and the
+  user-create hook stay as a backstop for every other creation path.
+- Google and GitHub refuse an unknown provider account (Better Auth
+  per-provider `disableSignUp`, not only the client-overridable
+  `disableImplicitSignUp`); the browser returns with `error=signup_disabled`.
+- Existing humans are unaffected: email and social sign-in (including verified
+  linking of a new provider to an existing human), existing sessions, password
+  reset, email verification of accounts that already exist, post-sign-in
+  organization setup, and invitation acceptance by a signed-in human.
+- Invited people can still create their account from the invitation link
+  (`/setup-account`, `POST /v1/auth/organization-setup`): that path is bound to
+  the pending invitation and does not create users through Better Auth sign-up.
+  See [organization tenancy](organization-tenancy.md#post-sign-in-organization-setup-and-one-time-invited-user-setup-0348).
+- `GET /v1/config/client` reports `auth.newSignupsEnabled: false`, so the web
+  sign-up screen shows a capacity message with sign-in still available instead
+  of the form and social buttons.
+
+The API reads the flag at startup. Flipping it is a config change plus a rolling
+restart of the API pods only; workers and web do not need to restart. Sessions
+live in PostgreSQL, so nobody is signed out. Set the same value on every API
+replica: until the rollout finishes, a request that reaches an old pod still
+follows the old value.
+
+To pause sign-ups with the Helm chart, add the variable to the API's own
+environment so only the API Deployment rolls (changing the shared `config` map
+restarts every component that mounts it):
+
+```yaml
+api:
+  extraEnv:
+    - name: OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED
+      value: "false"
+```
+
+Apply it with the deployment's normal `helm upgrade` path and wait for
+`kubectl rollout status deployment/<release>-api`. In an emergency,
+`kubectl set env deployment/<release>-api OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false`
+rolls the API immediately; record the same value in the Helm values right
+after, or the next upgrade will reopen sign-ups. After the rollout completes,
+verify that the public client config reports the pause:
+
+```bash
+curl -s "$OPENGENI_PUBLIC_BASE_URL/v1/config/client" | jq '.auth.newSignupsEnabled'   # false
+```
+
+Do not probe by submitting a real sign-up: if a pod still has sign-ups open it
+creates an account and sends a verification email.
+
+To reopen sign-ups, set the value back to `"true"` (or remove the entry) and
+roll the API again. Nothing is queued while sign-ups are paused; people who
+were turned away simply try again later.

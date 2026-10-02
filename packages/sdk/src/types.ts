@@ -4112,6 +4112,11 @@ export type ClientAuthConfig =
       emailVerificationRequired?: boolean;
       /** Configured managed sign-in providers; omitted by older deployments. */
       socialProviders?: ("google" | "github")[];
+      /**
+       * False while the deployment has paused new account creation; existing
+       * accounts can still sign in. Omitted (treat as true) by older deployments.
+       */
+      newSignupsEnabled?: boolean;
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract

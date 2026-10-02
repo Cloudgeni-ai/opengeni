@@ -2030,6 +2030,15 @@ describe("GET /v1/config/client", () => {
     expect(JSON.stringify(config.auth)).not.toContain("secret");
   });
 
+  test("projects whether new managed accounts may be created", async () => {
+    const open = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
+    expect(open.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: true });
+    const paused = await fetchClientConfig(
+      testSettings({ productAccessMode: "managed", managedAuthNewSignupsEnabled: false }),
+    );
+    expect(paused.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: false });
+  });
+
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
     const disabled = await fetchClientConfig(testSettings());
     expect(disabled.analytics).toEqual({ consentRequired: true, providers: {} });

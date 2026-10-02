@@ -1,4 +1,5 @@
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
+import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
   type ManagedAuth,
@@ -60,11 +61,33 @@ export function managedAuthUserCreateOverride(
   return { data: { ...user, emailVerified: true } };
 }
 
+export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_MESSAGE =
+  "We're at capacity for new accounts right now. Please try again later.";
+
+/**
+ * Typed refusal for a new account while the deployment has paused sign-ups.
+ * Existing accounts are unaffected; the body mirrors Better Auth's
+ * `{ code, message }` error shape so browser and SDK callers parse it alike.
+ */
+export function managedAuthNewSignupsPausedResponse(): Response {
+  return Response.json(
+    {
+      code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+      message: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_MESSAGE,
+    },
+    { status: 403, headers: { "cache-control": "no-store" } },
+  );
+}
+
 export function managedAuthUserCreateAdmission(
-  settings: Pick<Settings, "environment" | "allowedUserEmails">,
+  settings: Pick<Settings, "environment" | "allowedUserEmails"> &
+    Partial<Pick<Settings, "managedAuthNewSignupsEnabled">>,
   user: { emailVerified: boolean } & Record<string, unknown>,
   providerId: string,
 ): { data: typeof user } | false | undefined {
+  // Backstop for every Better Auth user-create path. Invited-user account
+  // setup does not create users through Better Auth, so it is unaffected.
+  if (settings.managedAuthNewSignupsEnabled === false) return false;
   if (!managedUserEmailAllowed(settings.allowedUserEmails, user.email)) return false;
   if (
     managedAuthRequiresEmailVerification(settings) &&
@@ -74,6 +97,21 @@ export function managedAuthUserCreateAdmission(
     return false;
   }
   return managedAuthUserCreateOverride(settings, user);
+}
+
+/**
+ * Per-provider Better Auth options while sign-ups are paused. A social sign-in
+ * for an existing human still signs in (and may link a verified provider);
+ * an unknown human is redirected back with `error=signup_disabled`.
+ * `disableSignUp` is the hard switch: `disableImplicitSignUp` alone can be
+ * overridden by a client-supplied `requestSignUp`.
+ */
+export function managedAuthSocialSignupOptions(
+  settings: Pick<Settings, "managedAuthNewSignupsEnabled">,
+): { disableImplicitSignUp?: true; disableSignUp?: true } {
+  return settings.managedAuthNewSignupsEnabled
+    ? {}
+    : { disableImplicitSignUp: true, disableSignUp: true };
 }
 
 /** Keep Better Auth password policy and storage format behind this boundary. */
@@ -173,6 +211,7 @@ export function createManagedAuth(
     : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
+  const newSignupsSocialProviderOptions = managedAuthSocialSignupOptions(settings);
   const auth = betterAuth({
     appName: "OpenGeni",
     baseURL: betterAuthBaseUrl(settings),
@@ -316,6 +355,7 @@ export function createManagedAuth(
               clientId: settings.managedAuthGoogleClientId,
               clientSecret: settings.managedAuthGoogleClientSecret,
               prompt: "select_account" as const,
+              ...newSignupsSocialProviderOptions,
             },
           }
         : {}),
@@ -324,6 +364,7 @@ export function createManagedAuth(
             github: {
               clientId: settings.managedAuthGithubClientId,
               clientSecret: settings.managedAuthGithubClientSecret,
+              ...newSignupsSocialProviderOptions,
             },
           }
         : {}),
@@ -339,6 +380,9 @@ export function createManagedAuth(
     },
     emailAndPassword: {
       enabled: true,
+      // Sign-in, password reset, and verification stay enabled; only new
+      // account creation is refused while sign-ups are paused.
+      disableSignUp: !settings.managedAuthNewSignupsEnabled,
       // Local managed mode exists so the complete human/org tenancy flow can
       // be exercised without first configuring a transactional-email vendor.
       // Every non-local deployment retains the verified-email boundary.
