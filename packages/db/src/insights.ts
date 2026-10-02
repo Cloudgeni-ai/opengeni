@@ -569,6 +569,17 @@ export async function listLiveWarmLeases(
         lastMeterAt: schema.sandboxLeases.lastMeterAt,
       })
       .from(schema.sandboxLeases)
+      // A shared child may use an invisible parent's box. It cannot attest
+      // that group's identity; require the visible session owning the group.
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.accountId, schema.sandboxLeases.accountId),
+          eq(schema.sessions.workspaceId, schema.sandboxLeases.workspaceId),
+          eq(schema.sessions.id, schema.sandboxLeases.sandboxGroupId),
+          sql`(${schema.sessions.sandboxGroupId} is null or ${schema.sessions.sandboxGroupId} = ${schema.sessions.id})`,
+        ),
+      )
       .where(
         and(
           eq(schema.sandboxLeases.workspaceId, workspaceId),

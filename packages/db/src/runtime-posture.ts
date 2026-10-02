@@ -97,7 +97,6 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
-  "organization_private_chat_usage(uuid, timestamp with time zone, timestamp with time zone)",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -1720,8 +1719,6 @@ export type RuntimeRoutinePosture = {
   owner: string;
   execute: boolean;
   publicExecute?: boolean;
-  /** Direct ACLs for any non-owner role, including roles other than this runtime. */
-  nonOwnerExecute?: boolean;
   securityDefiner: boolean;
   configuration?: string[] | null;
 };
@@ -2175,7 +2172,6 @@ export async function inspectRuntimeDatabasePosture(
         owner: string;
         can_execute: boolean;
         public_execute: boolean;
-        non_owner_execute: boolean;
         security_definer: boolean;
         configuration: string[] | null;
       }>(
@@ -2189,11 +2185,6 @@ export async function inspectRuntimeDatabasePosture(
               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
-            exists (
-              select 1
-              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-              where acl.grantee <> p.proowner and acl.privilege_type = 'EXECUTE'
-            ) as non_owner_execute,
             p.prosecdef as security_definer,
             p.proconfig as configuration
           from pg_proc p
@@ -2207,7 +2198,6 @@ export async function inspectRuntimeDatabasePosture(
         owner: row.owner,
         execute: row.can_execute,
         publicExecute: row.public_execute,
-        nonOwnerExecute: row.non_owner_execute,
         securityDefiner: row.security_definer,
         configuration: row.configuration,
       }));
@@ -4140,10 +4130,6 @@ export function evaluateRuntimeDatabasePosture(
     `search_path=pg_catalog, ${quotedIntegrationSchema}, pg_temp`,
     `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, pg_temp`,
   ];
-  const privateChatHelperSearchPaths = [
-    `search_path=pg_catalog, ${quotedIntegrationSchema}, opengeni_private, pg_temp`,
-    `search_path=pg_catalog, ${/^[a-z_][a-z0-9_$]*$/.test(targetSchema) ? targetSchema : quotedIntegrationSchema}, opengeni_private, pg_temp`,
-  ];
   if (tableByName.has("organization_credential_providers")) {
     for (const [name] of integrationRoutine) {
       if (posture.privateRoutines.filter((routine) => routine.name === name).length !== 1) {
@@ -4152,18 +4138,6 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
   for (const routine of posture.privateRoutines) {
-    if (
-      routine.name ===
-        "organization_private_chat_usage(uuid, timestamp with time zone, timestamp with time zone)" &&
-      (routine.execute ||
-        routine.publicExecute ||
-        routine.nonOwnerExecute !== false ||
-        !routine.securityDefiner ||
-        routine.owner !== tableByName.get("usage_events")?.owner ||
-        !routine.configuration?.some((path) => privateChatHelperSearchPaths.includes(path)))
-    ) {
-      violations.push("organization private chat helper has unsafe owner, ACL or search path");
-    }
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }

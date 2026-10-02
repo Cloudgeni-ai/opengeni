@@ -230,47 +230,29 @@ END
 $organization_totals$;
 
 DO $private_chat_amounts$
-DECLARE data_schema text := current_schema(); definition text;
+DECLARE
+  data_schema text := current_schema();
+  original text;
+  definition text;
+  private_amounts text;
 BEGIN
-  EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.organization_private_chat_usage(
-      p_account_id uuid, p_since timestamptz, p_until timestamptz
-    ) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER
-    SET search_path = pg_catalog, %1$I, opengeni_private, pg_temp
-    SET enable_nestloop = off
-    AS $fn$
-    DECLARE
-      subject_value text := nullif(current_setting('opengeni.subject_id', true), '');
-      human_value text := nullif(current_setting('opengeni.initiating_human_subject_id', true), '');
-      inventory uuid;
-      previous_lifecycle text;
-      shared_ids uuid[];
-      response jsonb;
-    BEGIN
-      IF nullif(current_setting('opengeni.account_id', true), '') IS DISTINCT FROM p_account_id::text
-        OR nullif(current_setting('opengeni.workspace_id', true), '') IS NOT NULL THEN
-        RAISE EXCEPTION 'Private chat amounts require exact account-only context' USING ERRCODE = '42501';
-      END IF;
-      IF p_since IS NULL OR p_until IS NULL OR NOT isfinite(p_since) OR NOT isfinite(p_until)
-        OR p_until < p_since OR p_until - p_since > interval '366 days' THEN
-        RAISE EXCEPTION 'Private chat amount window is invalid' USING ERRCODE = '22023';
-      END IF;
-      PERFORM opengeni_private.session_variable_set_attachments_protocol_v1_active();
-      SELECT coalesce(array_agg(workspace_id), '{}'::uuid[]) INTO shared_ids
-        FROM %1$I.list_organization_workspace_ids(p_account_id);
-      inventory := opengeni_private.open_session_tenancy_fence_inventory(%2$s::oid);
-      previous_lifecycle := current_setting('opengeni.organization_tenancy_lifecycle', true);
-      PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true);
-      INSERT INTO opengeni_private.organization_usage_read_capabilities
-        (backend_pid, transaction_id, account_id, subject_id, initiating_human_subject_id)
-      VALUES (pg_backend_pid(), pg_current_xact_id(), p_account_id, subject_value, human_value);
-      BEGIN
+  -- Stay inside the released summary's validated account/window, existing
+  -- capability and inventory. A new owner-only private-schema helper would
+  -- fail a frozen old binary's generic EXECUTE inventory during a rolling deploy.
+  private_amounts := format($aggregate$
+      IF p_include_period THEN
+        previous_lifecycle := current_setting('opengeni.organization_tenancy_lifecycle', true);
+        PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true);
+        BEGIN
         WITH private_sessions AS MATERIALIZED (
           SELECT session_row.id, session_row.workspace_id, session_row.owner_subject_id,
             session_row.owner_organization_membership_id
           FROM %1$I.sessions session_row
-          WHERE session_row.account_id = p_account_id AND session_row.workspace_id = ANY(shared_ids)
-            AND subject_value IS NOT NULL AND session_row.visibility = 'user_private'
+          WHERE session_row.account_id = context_account_id
+            AND session_row.workspace_id IN (
+              SELECT workspace_id FROM %1$I.list_organization_workspace_ids(context_account_id)
+            )
+            AND context_subject_id IS NOT NULL AND session_row.visibility = 'user_private'
             AND NOT %1$I.session_private_actor_visible(session_row.account_id, session_row.workspace_id,
               session_row.owner_organization_membership_id, session_row.owner_subject_id)
         ), owner_totals AS (
@@ -281,7 +263,7 @@ BEGIN
           FROM %1$I.usage_events usage_row
           JOIN private_sessions session_row ON session_row.id = usage_row.session_id
             AND session_row.workspace_id = usage_row.workspace_id
-          WHERE usage_row.account_id = p_account_id
+          WHERE usage_row.account_id = context_account_id
             AND usage_row.occurred_at >= p_since AND usage_row.occurred_at < p_until
           GROUP BY session_row.workspace_id, session_row.owner_subject_id,
             session_row.owner_organization_membership_id, usage_row.event_type, usage_row.unit
@@ -292,62 +274,41 @@ BEGIN
               'quantity', quantity::text, 'eventCount', event_count::text) ORDER BY event_type, unit) AS totals,
             coalesce(sum(quantity) FILTER (WHERE event_type = 'model.cost' AND unit = 'usd_micros'), 0) AS spend
           FROM owner_totals owner_row
-          LEFT JOIN %1$I.workspace_memberships access ON access.account_id = p_account_id
+          LEFT JOIN %1$I.workspace_memberships access ON access.account_id = context_account_id
             AND access.workspace_id = owner_row.workspace_id AND access.subject_id = owner_row.owner_subject_id
           LEFT JOIN %1$I.auth_users auth_user ON access.subject_id = 'user:' || auth_user.id
           GROUP BY owner_row.workspace_id, owner_row.owner_subject_id, owner_row.membership_id,
             auth_user.name, access.subject_label
         )
-        SELECT jsonb_build_object(
+        SELECT response || jsonb_build_object(
           'privateChats', coalesce((SELECT jsonb_agg(jsonb_build_object(
             'workspaceId', workspace_id, 'membershipId', membership_id, 'name', name, 'totals', totals
           ) ORDER BY spend DESC, workspace_id, membership_id, owner_subject_id)
           FROM (SELECT * FROM owners ORDER BY spend DESC, workspace_id, membership_id, owner_subject_id LIMIT 200) listed), '[]'::jsonb),
           'privateChatsTruncated', (SELECT count(*) > 200 FROM owners)
         ) INTO response;
-        DELETE FROM opengeni_private.organization_usage_read_capabilities
-          WHERE backend_pid = pg_backend_pid() AND transaction_id = pg_current_xact_id_if_assigned();
-        PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
+        EXCEPTION WHEN OTHERS THEN
+          PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true);
+          RAISE;
+        END;
         PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true);
-        RETURN response;
-      EXCEPTION WHEN OTHERS THEN
-        DELETE FROM opengeni_private.organization_usage_read_capabilities
-          WHERE backend_pid = pg_backend_pid() AND transaction_id = pg_current_xact_id_if_assigned();
-        PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
-        PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true);
-        RAISE;
-      END;
-    END
-    $fn$;
-    REVOKE ALL ON FUNCTION opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz) FROM PUBLIC;
-  $ddl$, data_schema, (SELECT oid FROM pg_namespace WHERE nspname = data_schema));
-  SELECT pg_get_functiondef('opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean)'::regprocedure) INTO definition;
-  definition := replace(definition, 'RETURN response;',
-    'IF p_include_period THEN
-          response := response || opengeni_private.organization_private_chat_usage(p_account_id, p_since, p_until);
-        END IF;
-        RETURN response;');
+      END IF;
+  $aggregate$, data_schema);
+  SELECT pg_get_functiondef('opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean)'::regprocedure) INTO original;
+  -- Replace the first (successful) cleanup only, before its capability closes.
+  definition := regexp_replace(original,
+    'DELETE FROM opengeni_private.organization_usage_read_capabilities',
+    private_amounts || chr(10) || '        DELETE FROM opengeni_private.organization_usage_read_capabilities');
+  IF definition = original OR position('''privateChatsTruncated''' IN definition) = 0 THEN
+    RAISE EXCEPTION 'Organization private amount insertion contract changed';
+  END IF;
   EXECUTE definition;
 END
 $private_chat_amounts$;
 
--- PUBLIC is not the only possible CREATE-time grant. Owner defaults may admit
--- arbitrary reporting roles; this helper must stay exclusively internal.
-DO $private_chat_usage_acl$
-DECLARE role_name text;
-BEGIN
-  REVOKE ALL ON FUNCTION opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz) FROM PUBLIC;
-  FOR role_name IN
-    SELECT DISTINCT role_row.rolname FROM pg_proc procedure
-    CROSS JOIN LATERAL aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) privilege
-    JOIN pg_roles role_row ON role_row.oid = privilege.grantee
-    WHERE procedure.oid = 'opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz)'::regprocedure
-      AND privilege.grantee <> procedure.proowner
-  LOOP
-    EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz) FROM %I CASCADE', role_name);
-  END LOOP;
-END
-$private_chat_usage_acl$;
+-- Clean up only the unreleased helper from an earlier #2768 draft, if present.
+-- No new owner-only routine is introduced into old binaries' generic inventory.
+DROP FUNCTION IF EXISTS opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz);
 
 DO $acl$
 DECLARE role_name text; target regprocedure;
@@ -356,6 +317,9 @@ BEGIN
     'opengeni_private.complete_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[])'::regprocedure,
     'opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)'::regprocedure
   ] LOOP
+    -- PUBLIC has no pg_roles row and must be scrubbed separately, including
+    -- when an owner default privilege reintroduces it on a fresh routine.
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', target);
     FOR role_name IN SELECT DISTINCT role_row.rolname FROM pg_proc procedure
       CROSS JOIN LATERAL aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) privilege
       JOIN pg_roles role_row ON role_row.oid = privilege.grantee

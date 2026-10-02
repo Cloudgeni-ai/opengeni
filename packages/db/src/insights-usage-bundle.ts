@@ -156,11 +156,11 @@ export async function readWorkspaceInsightsUsageBundle(
         select
           coalesce(sum(usage_row.quantity) filter (
             where usage_row.event_type = 'model.tokens'
-              and usage_row.occurred_at > ${input.monthSince.toISOString()}::timestamp with time zone
+              and usage_row.occurred_at >= ${input.monthSince.toISOString()}::timestamp with time zone
           ), 0) as billable_tokens_used,
           coalesce(sum(usage_row.quantity) filter (
             where usage_row.event_type = 'agent_run.created'
-              and usage_row.occurred_at > ${input.monthSince.toISOString()}::timestamp with time zone
+              and usage_row.occurred_at >= ${input.monthSince.toISOString()}::timestamp with time zone
           ), 0) as agent_runs_used
         from opengeni_private.complete_workspace_insights_usage_projection(
           ${input.workspaceId},
