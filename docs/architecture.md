@@ -1245,16 +1245,15 @@ See [`session-mcp-servers.md`](session-mcp-servers.md).
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 
 `@opengeni/tool-gateway` owns catalogs, validation, authorization, approvals, and
-execution shared by model, exact-attempt Codemode, current-human MCP, and
-HTTP/SDK adapters. Names, stable identity-derived paths, and bounded aliases
-project `{serverId, toolName}`, never authority. Historical hashes resolve only
-in the authorized catalog. Allocation rejects namespace/tool-prefix and exact
-collisions. Event metadata changes neither identity nor approvals; local tools
-bind to the final combined attempt environment.
+execution. Identity-derived paths/aliases represent
+`{serverId, toolName}`, never authority. Historical hashes require current
+authorization; namespace/tool-prefix and exact collisions block publication.
+Event metadata preserves identity and approvals. Local tools use the
+final combined attempt environment.
 
-`apps/api/src/mcp/contract-input.ts` projects contracts, rejects opaque inputs,
-and preserves omission until parsing. Union diagnostics:
-`packages/tool-gateway/src/input-issues.ts`. Details: [MCP surfaces](mcp-surfaces.md).
+First-party contract projection, opacity checks, omission preservation:
+`apps/api/src/mcp/contract-input.ts`. Union diagnostics:
+`packages/tool-gateway/src/input-issues.ts`; [MCP surfaces](mcp-surfaces.md).
 
 Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
 Mid-turn home repair fences client-only preparation to the exact replacement
