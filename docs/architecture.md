@@ -475,7 +475,9 @@ supervision. See [command supervision](command-supervision.md).
 Modal `TaskExecStart` recovery requires read-only task/router lookup or local
 channel-readiness failure before any Start RPC, for native and pinned-SDK
 setup/filesystem/archive commands alike. Typed proof permits finite
-five-replacement same-turn recovery; server DNS text and post-dispatch errors
+five-replacement same-turn recovery. Exhaustion parks proven non-dispatch as
+`sandboxSetupRecoveryExhausted`, retaining count five; peek and claim refuse
+automatic replay. Server DNS text and post-dispatch errors
 never prove non-execution. Uncertain Starts return typed outcome-unknown
 results, never transport retries, and block replay. An unwound setup parks its
 turn as recovering with `sandboxSetupOutcomeUnknown`; peek and claim refuse

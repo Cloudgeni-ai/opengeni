@@ -72015,11 +72015,13 @@ export async function claimSessionWorkForAttempt(
               return { action: "unclaimed", reason: "stale-approval" };
             }
             if (activeTurn.status === "recovering") {
-              // An internal setup coroutine unwound after possible dispatch.
-              // A new attempt would replay the whole helper, not just observe
-              // its original command. Neither a wake nor lease/command loss
-              // proves that the remaining setup finished.
-              if (sandboxSetupOutcomeUnknownFromTurnMetadata(activeTurn.metadata)) {
+              // Unknown dispatch cannot replay an unwound helper. Positive
+              // non-dispatch also cannot replenish its exhausted budget.
+              // Neither a wake nor lease/command loss clears either fence.
+              if (
+                sandboxSetupOutcomeUnknownFromTurnMetadata(activeTurn.metadata) ||
+                sandboxSetupRecoveryExhaustedFromTurnMetadata(activeTurn.metadata)
+              ) {
                 return { action: "unclaimed", reason: "no-work" };
               }
               const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(activeTurn.metadata);
@@ -74326,8 +74328,8 @@ export type SessionWorkPeek =
   | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
   | {
       kind: "admission-blocked";
-      reason?: "sandbox_setup_outcome_unknown";
-      ref?: SandboxSetupOutcomeUnknown;
+      reason?: "sandbox_setup_outcome_unknown" | "sandbox_setup_recovery_exhausted";
+      ref?: SandboxSetupOutcomeUnknown | SandboxSetupRecoveryExhausted;
     }
   | {
       kind: "sandbox-lifecycle-wait";
@@ -74864,6 +74866,14 @@ export async function peekSessionWork(
             kind: "admission-blocked",
             reason: "sandbox_setup_outcome_unknown",
             ref: setupUnknown,
+          };
+        }
+        const setupExhausted = sandboxSetupRecoveryExhaustedFromTurnMetadata(turn.metadata);
+        if (turn.status === "recovering" && setupExhausted) {
+          return {
+            kind: "admission-blocked",
+            reason: "sandbox_setup_recovery_exhausted",
+            ref: setupExhausted,
           };
         }
         const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(turn.metadata);
@@ -77106,6 +77116,42 @@ async function wakeSandboxLifecycleWaitersTx(
 
 const SANDBOX_LIFECYCLE_WAIT_METADATA_KEY = "sandboxLifecycleWait";
 const SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY = "sandboxSetupOutcomeUnknown";
+const SANDBOX_SETUP_RECOVERY_EXHAUSTED_METADATA_KEY = "sandboxSetupRecoveryExhausted";
+
+/** Version-one pre-dispatch setup recovery has exactly five automatic retries. */
+export const SANDBOX_SETUP_RECOVERY_LIMIT = 5;
+
+/** Proven not started, but its finite automatic recovery budget is exhausted.
+ * Wakes, time, and lease changes cannot replenish this accepted turn's budget. */
+export type SandboxSetupRecoveryExhausted = {
+  version: 1;
+  turnId: string;
+  attemptId: string;
+  reason: "sandbox_command_start_recovery_exhausted";
+  setupOutcome: "not_started";
+  providerRecoveryCount: typeof SANDBOX_SETUP_RECOVERY_LIMIT;
+};
+
+function sandboxSetupRecoveryExhaustedFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SandboxSetupRecoveryExhausted | null {
+  const value = metadata?.[SANDBOX_SETUP_RECOVERY_EXHAUSTED_METADATA_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const marker = value as Partial<SandboxSetupRecoveryExhausted>;
+  if (
+    marker.version !== 1 ||
+    typeof marker.turnId !== "string" ||
+    marker.turnId.length === 0 ||
+    typeof marker.attemptId !== "string" ||
+    marker.attemptId.length === 0 ||
+    marker.reason !== "sandbox_command_start_recovery_exhausted" ||
+    marker.setupOutcome !== "not_started" ||
+    marker.providerRecoveryCount !== SANDBOX_SETUP_RECOVERY_LIMIT
+  ) {
+    return null;
+  }
+  return marker as SandboxSetupRecoveryExhausted;
+}
 
 /** Logical setup is incomplete even if one retained physical command exits.
  * There is deliberately no deadline or lease-liveness clearing condition. */
@@ -79336,6 +79382,8 @@ export type RequestSessionTurnRecoveryInput = {
   sandboxLifecycleWait?: SandboxLifecycleWait;
   /** Park incomplete setup; this never authorizes a replacement setup attempt. */
   sandboxSetupOutcomeUnknown?: true;
+  /** Park proven non-dispatch after the existing five-recovery budget. */
+  sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
@@ -79435,6 +79483,20 @@ export async function requestSessionTurnRecovery(
       }
 
       const now = new Date();
+      if (
+        input.sandboxSetupRecoveryExhausted &&
+        (input.sandboxSetupOutcomeUnknown ||
+          input.providerRecoveryCount !== undefined ||
+          input.sandboxLifecycleWait ||
+          input.providerArtifactInvalidation ||
+          input.triggerEventId !== turn.triggerEventId ||
+          turn.metadata?.providerRecoveryCount !== SANDBOX_SETUP_RECOVERY_LIMIT ||
+          sandboxSetupOutcomeUnknownFromTurnMetadata(turn.metadata))
+      ) {
+        throw new Error(
+          "sandbox setup exhaustion requires the unchanged exhausted recovery budget",
+        );
+      }
       if (
         input.providerRecoveryCount !== undefined &&
         (!Number.isSafeInteger(input.providerRecoveryCount) || input.providerRecoveryCount <= 0)
@@ -79609,6 +79671,18 @@ export async function requestSessionTurnRecovery(
                     attemptId: input.attemptId,
                     reason: "sandbox_command_start_outcome_unknown",
                   } satisfies SandboxSetupOutcomeUnknown,
+                }
+              : {}),
+            ...(input.sandboxSetupRecoveryExhausted
+              ? {
+                  [SANDBOX_SETUP_RECOVERY_EXHAUSTED_METADATA_KEY]: {
+                    version: 1,
+                    turnId: input.turnId,
+                    attemptId: input.attemptId,
+                    reason: "sandbox_command_start_recovery_exhausted",
+                    setupOutcome: "not_started",
+                    providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+                  } satisfies SandboxSetupRecoveryExhausted,
                 }
               : {}),
             ...(input.providerRecoveryCount !== undefined
