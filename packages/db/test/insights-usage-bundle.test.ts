@@ -143,9 +143,9 @@ async function fixture(): Promise<Fixture> {
   const currentAt = new Date(now.getTime() + 1_000);
   const priorAt = new Date(now.getTime() - 90 * 60_000);
   const monthSince = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const privateGroup = crypto.randomUUID();
-  const sharedGroup = crypto.randomUUID();
-  const workspaceGroup = crypto.randomUUID();
+  const privateGroup = privateSession.sandboxGroupId ?? privateSession.id;
+  const sharedGroup = sharedSession.sandboxGroupId ?? sharedSession.id;
+  const workspaceGroup = sharedGroup;
   const values: Array<[string, number, string, string | null, string | null, Date]> = [];
   const add = (
     eventType: string,
@@ -327,11 +327,14 @@ describe("Workspace Insights usage bundle", () => {
       expect(comparable({ ...bundled, warmGroups: [] })).toEqual(
         comparable({ ...complete, warmGroups: [] }),
       );
-      expect(bundled.warmGroups).toEqual(legacy.warmGroups);
+      expect(bundled.warmGroups).toEqual(
+        legacy.warmGroups.filter((group) => !group.groupId.startsWith("77777777-")),
+      );
+      expect(bundled.warmSeconds).toBe(151);
       expect(bundled.billableTokensUsed).toBe(700);
       expect(bundled.agentRunsUsed).toBe(7);
       expect(bundled.warmGroups.every((group) => group.groupId !== "not-a-uuid")).toBe(true);
-      expect(bundled.warmGroups.some((group) => group.groupId.startsWith("77777777-"))).toBe(true);
+      expect(bundled.warmGroups.some((group) => group.groupId.startsWith("77777777-"))).toBe(false);
     }
 
     const emptyInput = {

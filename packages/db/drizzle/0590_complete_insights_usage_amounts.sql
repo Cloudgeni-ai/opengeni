@@ -19,16 +19,36 @@ BEGIN
   definition := replace(original, 'visible_workspace_insights_usage_projection', 'complete_workspace_insights_usage_projection');
   definition := regexp_replace(definition,
     $pattern$[[:space:]]+AND \([[:space:]]+usage_row.session_id IS NULL.*?\);$pattern$, ';');
+  definition := replace(definition, 'id, account_id, workspace_id, visibility,',
+    'id, account_id, workspace_id, sandbox_group_id, visibility,');
+  -- Warm usage may have no session_id but still carry a private group/root ID.
+  -- Attest group identity once from visible sessions, never from ledger input.
+  definition := replace(definition, 'SELECT usage_row.event_type, usage_row.quantity,',
+    format(', visible_warm_groups AS MATERIALIZED (
+          SELECT DISTINCT coalesce(sandbox_group_id, id)::text AS group_id
+          FROM visible_sessions
+          WHERE context_subject_id IS NULL OR visibility = ''workspace_shared''
+            OR %I.session_private_actor_visible(account_id, workspace_id,
+              owner_organization_membership_id, owner_subject_id)
+        )
+        SELECT usage_row.event_type, usage_row.quantity,', data_schema));
   definition := replace(definition, 'usage_row.occurred_at, usage_row.source_resource_id',
-    format('usage_row.occurred_at, CASE WHEN usage_row.session_id IS NULL
+    format('usage_row.occurred_at, CASE WHEN (usage_row.session_id IS NULL
           OR (session_row.id IS NOT NULL AND (context_subject_id IS NULL
             OR session_row.visibility = ''workspace_shared''
             OR %I.session_private_actor_visible(session_row.account_id, session_row.workspace_id,
-              session_row.owner_organization_membership_id, session_row.owner_subject_id)))
+              session_row.owner_organization_membership_id, session_row.owner_subject_id))))
+          AND (usage_row.event_type <> ''sandbox.warm_seconds'' OR warm_group.group_id IS NOT NULL)
           THEN usage_row.source_resource_id END', data_schema));
+  definition := replace(definition, 'WHERE usage_row.account_id = context_account_id',
+    'LEFT JOIN visible_warm_groups warm_group
+          ON usage_row.event_type = ''sandbox.warm_seconds''
+          AND warm_group.group_id = split_part(usage_row.source_resource_id, '':'', 1)
+        WHERE usage_row.account_id = context_account_id');
   IF definition = original
     OR definition ~ 'AND \([[:space:]]+usage_row.session_id IS NULL'
-    OR position('CASE WHEN usage_row.session_id IS NULL' IN definition) = 0 THEN
+    OR position('CASE WHEN (usage_row.session_id IS NULL' IN definition) = 0
+    OR position('LEFT JOIN visible_warm_groups warm_group' IN definition) = 0 THEN
     RAISE EXCEPTION 'Complete usage projection source contract changed';
   END IF;
   EXECUTE definition;

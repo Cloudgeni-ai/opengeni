@@ -284,6 +284,21 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
     estimate: 881,
     at: "2026-09-13T23:59:59.999Z",
   });
+  const publicGroup = publicRoot.sandboxGroupId ?? publicRoot.id;
+  const privateGroup = privateRoot.sandboxGroupId ?? privateRoot.id;
+  // Warm usage can be workspace-level yet still carry a private root/group ID.
+  // Its amount is billable; its group must not become a visible detail row.
+  for (const [sessionId, groupId, seconds] of [
+    [null, publicGroup, 11],
+    [null, privateGroup, 23],
+    [privateRoot.id, privateGroup, 29],
+  ] as const) {
+    await shared.admin`insert into usage_events
+      (account_id, workspace_id, session_id, event_type, quantity, unit,
+       source_resource_type, source_resource_id, idempotency_key, occurred_at)
+      values (${seeded.accountId}, ${seeded.workspaceId}, ${sessionId}, 'sandbox.warm_seconds',
+        ${seconds}, 'seconds', 'sandbox_group', ${`${groupId}:1`}, ${crypto.randomUUID()}, ${occurredAt})`;
+  }
   // Usage/facts deliberately survive their session. No test-only RLS bypass on reads.
   await shared.admin`delete from sessions where id in (${deleted.id}, ${missingId})`;
   const viewer = `user:ledger-viewer-${crypto.randomUUID()}`;
@@ -302,6 +317,15 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   expect(snapshot.workspaceCreditUsd).toBe(Number(expected.ledger.amount) / 1_000_000);
   expect(snapshot.creditUsd).toBe(Number(expected.ledger.amount) / 1_000_000);
   expect(snapshot.modelCalls).toBe(Number(expected.facts.calls));
+  expect(snapshot.warmSeconds).toBe(63);
+  expect(snapshot.series.reduce((sum, row) => sum + row.warmSeconds, 0)).toBe(63);
+  expect(snapshot.warmGroups.map((row) => row.groupId)).toEqual([publicGroup]);
+  expect(organization.totals.find((row) => row.eventType === "sandbox.warm_seconds")).toEqual({
+    eventType: "sandbox.warm_seconds",
+    unit: "seconds",
+    quantity: "63",
+    eventCount: "3",
+  });
   expect(snapshot.estimatedProviderUsd).toBe(Number(expected.facts.estimate) / 1_000_000);
   expect(snapshot.estimatedProviderCostKnownCalls).toBe(Number(expected.facts.known));
   expect(snapshot.models.reduce((sum, row) => sum + row.totalTokens, 0)).toBe(
@@ -333,6 +357,7 @@ test("complete org/workspace accounting reconciles to ledger/debits and separate
   for (const secret of [
     privateRoot.id,
     privateChild.id,
+    privateGroup,
     deleted.id,
     missingId,
     hidden.turnId,
