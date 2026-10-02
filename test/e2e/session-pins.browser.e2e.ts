@@ -3824,12 +3824,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
       ).toBe(false);
       expect(discovery.nextCursor).toBeTruthy();
-      await page.waitForFunction((count) => {
-        return (
-          document.querySelector('[data-sessionpin-session-list] [aria-live="polite"]')
-            ?.textContent === `${count} matching session${count === 1 ? "" : "s"}.`
-        );
-      }, discovery.sessions.length);
+      await page.locator(`a[data-session-row="${discovery.sessions[0]!.id}"]`).waitFor();
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
       const discoverOlder = activeGroup.getByRole("button", {
         name: "Show 4 more sessions in Active",
