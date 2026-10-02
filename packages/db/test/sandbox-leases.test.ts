@@ -5564,6 +5564,26 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       image: "pin-B",
     });
     expect(direct).toMatchObject({ role: "attached", lease: { image: "pin-A" } });
+    for (const holderId of ["browser-session:after-repin", "computer-session:after-repin"]) {
+      expect(
+        await acquireLease(db, {
+          ...base,
+          kind: "interaction",
+          holderId,
+          image: "pin-B",
+          expectedEpoch: epoch,
+        }),
+      ).toMatchObject({
+        role: "attached",
+        lease: {
+          image: "pin-A",
+          instanceId: "sb-pin-A",
+          leaseEpoch: epoch,
+          rotationRequestedAt: null,
+          resumeState: committed.lease!.resumeState,
+        },
+      });
+    }
     expect(
       await acquireLease(db, {
         ...base,
@@ -5588,6 +5608,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     for (const [kind, holderId] of [
       ["turn", "turn-2"],
       ["direct", "direct-after-repin"],
+      ["interaction", "browser-session:after-repin"],
+      ["interaction", "computer-session:after-repin"],
       ["viewer", "keeper"],
     ] as const) {
       await releaseLeaseHolder(db, { ...base, kind, holderId, idleGraceMs: 45_000 });
