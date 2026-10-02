@@ -71,7 +71,7 @@ describe("reviewed human-route classification", () => {
       "/v1/pr-review/github/setup",
       "/v1/pr-review/github/install/callback",
     ])
-      expect(entries.get(`GET ${path}`)?.class).toBe("person_present");
+      expect(entries.get(`GET ${path}`)?.class).toBe("organization_allowed");
     for (const operation of ["prepare", "redeem"])
       expect(
         entries.get(
@@ -83,6 +83,7 @@ describe("reviewed human-route classification", () => {
     ).toBe("delegable_to_user");
     expect(entries.get("GET /v1/identity")?.class).toBe("delegable_to_user");
     expect(entries.get("GET /v1/auth/sign-in-methods")?.class).toBe("delegable_to_user");
+    expect(entries.get("POST /v1/auth/sign-in-methods/connect")?.class).toBe("delegable_to_user");
     expect(entries.get("GET /v1/organizations/:organizationId/recovery")?.class).toBe(
       "delegable_to_user",
     );

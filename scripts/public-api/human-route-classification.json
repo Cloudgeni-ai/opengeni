@@ -151,8 +151,8 @@
       "path": "/v1/auth/sign-in-methods/connect",
       "source": "apps/api/src/routes/managed-sign-in-methods.ts",
       "gates": ["admitManagedSignInMutation", "requireCanonicalHumanRequestIdentity"],
-      "class": "person_present",
-      "reason": "This creates, exposes, selects or revokes browser-session/login credentials; a delegated application must not manufacture native browser authentication."
+      "class": "delegable_to_user",
+      "reason": "The verified person may initiate sign-in-method enrollment; independent native browser authentication and provider consent remain mandatory before a credential binding is committed."
     },
     {
       "method": "POST",
@@ -203,8 +203,8 @@
         "requireConnectOwnerAuthority",
         "requireLegacyOAuthActor"
       ],
-      "class": "person_present",
-      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
+      "class": "organization_allowed",
+      "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
     },
     {
       "method": "GET",
@@ -227,8 +227,8 @@
         "requireConnectOwnerAuthority",
         "requireLegacyOAuthActor"
       ],
-      "class": "person_present",
-      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
+      "class": "organization_allowed",
+      "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
     },
     {
       "method": "GET",
@@ -1017,8 +1017,8 @@
         "requireConnectOwnerAuthority",
         "requireLegacyOAuthActor"
       ],
-      "class": "person_present",
-      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
+      "class": "organization_allowed",
+      "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
     },
     {
       "method": "GET",
@@ -1041,8 +1041,8 @@
         "requireConnectOwnerAuthority",
         "requireLegacyOAuthActor"
       ],
-      "class": "person_present",
-      "reason": "This consumes a provider installation/login callback; signed state and independent consenting-browser identity prevent linking an attacker-controlled account or app."
+      "class": "organization_allowed",
+      "reason": "Signed installation state may advance to an independent provider-consent destination; this route neither redeems login credentials nor supplies browser consent."
     },
     {
       "method": "GET",
@@ -1412,7 +1412,7 @@
       "source": "apps/api/src/routes/connections.ts",
       "gates": ["principalKind=human_session", "requireConnectOwnerAuthority"],
       "class": "organization_allowed",
-      "reason": "Verified paste-a-token installation creates a workspace-owned connection, not browser OAuth consent."
+      "reason": "An authorized machine token configures a workspace-owned connection under live write authority; it neither authenticates a native browser nor grants provider user consent."
     },
     {
       "method": "POST",
@@ -2661,6 +2661,20 @@
       "when": "action starts or reads the outcome of a personal OAuth/device-code/login flow",
       "class": "delegable_to_user",
       "reason": "The verified user may drive flow orchestration; provider credentials and independent consent are not fabricated by the delegation proof."
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
+      "when": "action=credentials configures a workspace-owned machine API token, bearer credential or secret headers",
+      "class": "organization_allowed",
+      "reason": "Live scoped connection-write authority may administer approved machine secrets; this does not establish native login credentials, bind a person identity or redeem user OAuth consent."
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
+      "when": "ownership=user for machine-secret configuration",
+      "class": "delegable_to_user",
+      "reason": "Only the exact verified owning person may configure their personal connection; organization machine-secret administration does not imply personal ownership."
     },
     {
       "method": "POST|DELETE",

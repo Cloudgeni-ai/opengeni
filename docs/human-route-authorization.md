@@ -32,12 +32,23 @@ confirm and revoke. Its native confirmation is independent consent, not an
 opportunity for the external product to consent on the person's behalf.
 Provider flow initiation/polling can delegate to the exact verified user; actual
 provider consent or credential entry completes at the returned browser URL.
-Provider callbacks/code redemption, browser login/session changes, canonical
+Provider code redemption, browser login/session changes, canonical
 identity recovery, reset-credit payment confirmation and new native identity
 binding consent remain independent browser ceremonies. Merely returning a
-configuration or handoff link is not provider consent.
+configuration or handoff link is not provider consent. GitHub installation
+setup/callback redirects only advance signed state toward OAuth and are not
+credential-redemption ceremonies. Sign-in-method enrollment initiation may
+return a native browser handoff; committing a new login credential stays strict.
 Checkout/portal link creation is not payment confirmation; the hosted payment
 page still needs the person.
+
+Organization-owned machine API keys, Fiken tokens and MCP bearer/header secrets
+are scoped connection administration, not native browser authentication or
+third-party user consent. They remain callable with live write authority and
+the existing destination, secret-handling and ownership checks. Personal
+connection configuration still requires the exact verified owner. Native login
+passwords, account-recovery secrets and provider authorization-code redemption
+are different: delegation never substitutes their independent ceremonies.
 
 ## Phase 2 delegation proof contract
 
