@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
 import { ModalProcessObservationUnavailableError } from "../errors";
+import { classifyProviderSandboxFailure } from "../provider-errors";
 import { markTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import {
   MAX_PROVIDER_COMMAND_HANDLE,
@@ -412,14 +413,12 @@ export function installModalCommandSession(
       } catch (error) {
         // Native gRPC transport failure does not establish whether this reserved
         // range reached stdin. Never resend it or recommend another input write.
-        const code =
-          error && typeof error === "object"
-            ? Object.getOwnPropertyDescriptor(error, "code")?.value
-            : undefined;
         if (
           retained.kind === "modal-router-v1" &&
-          typeof code === "number" &&
-          [1, 2, 4, 13, 14].includes(code)
+          // Contain supported transport graphs, including mixed failures. This
+          // grants no read/write retry permission; the locator and byte range
+          // come only from the retained command and its one input reservation.
+          classifyProviderSandboxFailure("modal", error).kind === "transient_transport"
         )
           throw new ProviderCommandInputOutcomeUnknownError(
             retained,

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 import {
   ModalCommandRouterWire,
   modalRouterWire,
@@ -14,11 +15,19 @@ import { installModalCommandSession } from "../src/sandbox/providers/modal-comma
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 import {
   ProviderCommandObservationUnavailableError,
+  ProviderCommandInputOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
 } from "../src/sandbox/provider-command-session";
 import { ModalCommandStartOutcomeUnknownError } from "../src/sandbox/providers/modal-command-start-errors";
 import { agentRunFailurePayload } from "../../../apps/worker/src/activities/agent-turn/errors";
 import { ModalCommandStartRejectedError } from "../src/sandbox/providers/modal-command-router-wire";
+import { isModalCommandObservationTransportError } from "../src/sandbox/providers/modal-command-observation-errors";
+import { testSettings } from "@opengeni/testing";
+import { buildAgentCapabilities } from "../src/index";
+import {
+  RoutingSandboxSession,
+  type ResolvedActiveBackend,
+} from "../src/sandbox/routing/routing-session";
 
 const prefix = "/modal.task_command_router.TaskCommandRouter/";
 const definition = (method: string, input: string, output: string, streaming = false) => ({
@@ -287,24 +296,192 @@ test("materialization retries same locator beyond one read window while original
   const f = await fixture({ slowReadOutage: true });
   const pending = new Set<AbortController>();
   const began = performance.now();
+  const windows: Array<{ command: unknown; waitMs: number; elapsed: number }> = [];
+  const unavailable: ProviderCommandObservationUnavailableError[] = [];
+  const attemptsPerWindow: number[] = [];
+  const readProbe = f.control.readProbe.bind(f.control);
+  f.control.readProbe = async (command, waitMs, cancellation) => {
+    const before = f.reads.filter((attempt) => attempt.stream === 0).length;
+    windows.push({ command: structuredClone(command), waitMs, elapsed: performance.now() - began });
+    try {
+      return await readProbe(command, waitMs, cancellation);
+    } catch (error) {
+      if (error instanceof ProviderCommandObservationUnavailableError) unavailable.push(error);
+      throw error;
+    } finally {
+      attemptsPerWindow.push(f.reads.filter((attempt) => attempt.stream === 0).length - before);
+    }
+  };
   const result = await verifyModalMaterializedPath(f.control, "ready", "/workspace", pending).then(
     () => "verified",
     (error) => error,
   );
+  const elapsed = performance.now() - began;
+  expect(result).toBe("verified");
   expect(f.starts).toHaveLength(1);
   expect(pending.size).toBe(0);
+  const original = originalLocator(f.starts[0]!.execId);
+  expect(unavailable.length).toBeGreaterThan(0);
+  expect(
+    unavailable.every(
+      (error) => error.readRetryAllowed && isDeepStrictEqual(error.command, original),
+    ),
+  ).toBe(true);
+  expect(windows.length).toBeGreaterThan(1);
+  expect(windows.length).toBeLessThanOrEqual(12);
+  expect(attemptsPerWindow).toHaveLength(windows.length);
+  expect(attemptsPerWindow.every((attempts) => attempts >= 1 && attempts <= 5)).toBe(true);
+  expect(
+    windows.every(
+      (window) => window.waitMs === 1_000 && isDeepStrictEqual(window.command, original),
+    ),
+  ).toBe(true);
+  expect(windows.at(-1)!.elapsed).toBeGreaterThan(1_000);
+  expect(windows.at(-1)!.elapsed).toBeLessThan(30_000);
   expect(new Set(f.reads.map((read) => read.execId))).toEqual(new Set([f.starts[0]!.execId]));
   expect(f.reads.every((read) => read.offset === 0)).toBe(true);
-  if (result !== "verified") await new Promise<void>((resolve) => setTimeout(resolve, 2_600));
-  const observed = await f.control.read(originalLocator(f.starts[0]!.execId), 1_000);
+  const observed = await f.control.read(original, 1_000);
   expect(observed.exitCode).toBe(0);
   expect(observed.chunks.map((chunk) => chunk.text).join("")).toBe(
     "__OPENGENI_MATERIALIZED_PATH_VISIBLE__",
   );
   expect(f.starts).toHaveLength(1);
+  expect(elapsed).toBeGreaterThanOrEqual(2_500);
+  expect(elapsed).toBeLessThan(5_000);
   expect(performance.now() - began).toBeLessThan(5_000);
-  expect(result).toBe("verified");
 }, 35_000);
+
+test.each([
+  ["write_stdin", false],
+  ["command_input", false],
+  ["write_stdin", true],
+  ["command_input", true],
+] as const)(
+  "production shell %s lost stdin ACK (settlement outage: %s) preserves exact retained identity without retry advice",
+  async (alias, settlementOutage) => {
+    const f = await fixture({ lostInputAck: true });
+    const original = await f.control.start({ cmd: "cat", tty: true });
+    let command = structuredClone(original);
+    let inputOffset = 0;
+    let reservations = 0;
+    let captures = 0;
+    const terminalProofs: unknown[] = [];
+    const settlements: unknown[] = [];
+    const session: Record<string, any> = { supportsPty: () => true };
+    installModalCommandSession(session as never, f.control);
+    const write = session.writeStdin;
+    let inputFailure: unknown;
+    session.writeStdin = async (args: unknown) => {
+      try {
+        return await write(args);
+      } catch (error) {
+        inputFailure = error;
+        throw error;
+      }
+    };
+    const backend: ResolvedActiveBackend = {
+      session,
+      sandboxId: null,
+      kind: "modal",
+      leaseEpoch: 3,
+      providerInstanceId: original.sandboxId,
+      activeEpoch: 0,
+    };
+    const routed = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => {
+        throw new Error("retained stdin must not resolve the current route");
+      },
+      providerCommandPersistence: () => ({
+        load: async () => structuredClone(command),
+        acknowledge: async (next) => {
+          throw new Error(`output must use atomic capture, not acknowledge ${next.kind}`);
+        },
+        reserveInput: async (length = 1) => {
+          reservations++;
+          const offset = inputOffset;
+          inputOffset += length;
+          return offset;
+        },
+        captureRouterPage: async (page) => {
+          captures++;
+          command = page.command;
+          return { command, captured: true };
+        },
+      }),
+      beforeProcessMutation: async () => "exact-stdin-admission",
+      afterProcessMutation: async (input) => {
+        settlements.push(input);
+        if (settlementOutage && settlements.length === 1)
+          throw new Error("exact stdin admission settlement unavailable");
+      },
+      settleProcess: async ({ proof }) => {
+        terminalProofs.push(proof);
+      },
+    });
+    const process = {
+      id: crypto.randomUUID(),
+      providerSessionId: 77,
+      providerCommand: original,
+    };
+    routed.adoptRetainedProcess({ process, backend: { ...backend, activeEpoch: 0 } });
+    const shell = buildAgentCapabilities(testSettings({ sandboxBackend: "modal" }), []).find(
+      (capability) => capability.type === "shell",
+    )!;
+    const sdkTools = shell
+      .clone()
+      .bind(routed as never)
+      .tools();
+    // No direct retained-session bypass: the alias invokes the actual SDK-built
+    // write tool, which does not use the execCommandErrorFunction override.
+    const tools =
+      alias === "command_input"
+        ? createTurnToolCancellationController().wrapTools(sdkTools)
+        : sdkTools;
+    const input = tools.find((tool) => tool.type === "function" && tool.name === alias)!;
+    if (input.type !== "function") throw new Error("missing native stdin tool");
+    const chars = "å✓\n";
+    const result = await input.invoke(
+      {},
+      JSON.stringify({ session_id: 77, chars, yield_time_ms: 1_000 }),
+    );
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("Do not resend stdin");
+    expect(result).toContain("session_id 77 and empty chars");
+    expect(result).not.toContain("Please try again");
+    expect(result).not.toContain("Process exited");
+    expect(inputFailure).toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
+    expect(inputFailure).toMatchObject({ command: original, byteOffset: 0, byteLength: 6 });
+    expect(f.starts).toHaveLength(1);
+    expect(f.writes).toEqual([{ execId: original.execId, offset: 0, data: chars }]);
+    expect(reservations).toBe(1);
+    expect(inputOffset).toBe(6);
+    expect(captures).toBe(0);
+    expect(f.reads).toHaveLength(0);
+    expect(terminalProofs).toHaveLength(0);
+    expect(command).toEqual(original);
+    expect(session.getProviderCommand(77)).toEqual(original);
+    expect(routed.hasRetainedProcess(77)).toBe(true);
+    expect(routed.retainedProcessIdentity(77)).toEqual(process);
+    expect(settlements).toEqual([
+      expect.objectContaining({ process, outcome: "rejected", admission: "exact-stdin-admission" }),
+    ]);
+    const observed = await routed.writeStdinForProcessRead({
+      sessionId: 77,
+      chars: "",
+      yieldTimeMs: 1_000,
+    });
+    expect(observed).toContain("Process exited with code 0");
+    expect(new Set(f.reads.map((read) => read.execId))).toEqual(new Set([original.execId]));
+    expect(f.writes).toHaveLength(1);
+    expect(reservations).toBe(1);
+    expect(f.starts).toHaveLength(1);
+    expect(terminalProofs).toHaveLength(1);
+    expect(settlements).toHaveLength(settlementOutage ? 2 : 1);
+    if (settlementOutage) expect(settlements[1]).toEqual(settlements[0]);
+  },
+);
 
 test.each(["write_stdin", "command_input"] as const)(
   "%s accepted UTF-8 stdin with lost ACK retains its writer and renders no-resend uncertainty",
@@ -385,6 +562,155 @@ test.each(["write_stdin", "command_input"] as const)(
     expect(f.writes).toHaveLength(1);
     expect(reservations).toBe(1);
     expect(f.starts).toHaveLength(1);
+  },
+);
+
+test.each([
+  "cause",
+  "error",
+  "aggregate",
+  "string code",
+  "mixed permission",
+  "mixed unreadable",
+] as const)(
+  "native stdin contains %s transport uncertainty without granting read or write replay",
+  async (shape) => {
+    const f = await fixture({ lostInputAck: true });
+    const original = await f.control.start({ cmd: "cat", tty: true });
+    const write = f.control.write.bind(f.control);
+    let providerFault: unknown;
+    let getterCalls = 0;
+    f.control.write = async (...args) => {
+      try {
+        await write(...args);
+      } catch (error) {
+        if (shape === "cause") providerFault = new Error("wrapper", { cause: error });
+        else if (shape === "error") providerFault = Object.assign(new Error("wrapper"), { error });
+        else if (shape === "string code")
+          providerFault = Object.assign(new Error("normalized gRPC status"), { code: "14" });
+        else {
+          const other = new Error("nontransport sibling");
+          if (shape === "mixed permission")
+            Object.assign(other, { code: status.PERMISSION_DENIED });
+          if (shape === "mixed unreadable")
+            Object.defineProperty(other, "code", {
+              get() {
+                getterCalls++;
+                throw new Error("untrusted getter must not run");
+              },
+            });
+          providerFault = new AggregateError(shape === "aggregate" ? [error] : [other, error]);
+        }
+        throw providerFault;
+      }
+    };
+    let reservations = 0;
+    let inputOffset = 0;
+    const session: Record<string, any> = {};
+    installModalCommandSession(session as never, f.control);
+    session.bindProviderCommand(77, original, {
+      load: async () => structuredClone(original),
+      reserveInput: async (length: number) => {
+        reservations++;
+        const offset = inputOffset;
+        inputOffset += length;
+        return offset;
+      },
+      acknowledge: async () => {
+        throw new Error("uncertain stdin must not acknowledge output");
+      },
+      captureRouterPage: async () => {
+        throw new Error("uncertain stdin must not capture output");
+      },
+    });
+    const chars = "å✓\n";
+    const failure = await session
+      .writeStdin({ sessionId: 77, chars })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
+    expect(failure).toMatchObject({
+      command: original,
+      byteOffset: 0,
+      byteLength: 6,
+      cause: providerFault,
+    });
+    expect(session.getProviderCommand(77)).toEqual(original);
+    expect(f.starts).toHaveLength(1);
+    expect(f.reads).toHaveLength(0);
+    expect(f.writes).toEqual([{ execId: original.execId, offset: 0, data: chars }]);
+    expect(reservations).toBe(1);
+    expect(inputOffset).toBe(6);
+    expect(getterCalls).toBe(0);
+    if (shape.startsWith("mixed"))
+      expect(isModalCommandObservationTransportError(providerFault)).toBe(false);
+  },
+);
+
+test.each(["missing code", "getter", "proxy", "spoof", "permission", "load", "reserve"] as const)(
+  "native stdin %s control cannot fabricate transport authority or another input write",
+  async (shape) => {
+    const f = await fixture({ lostInputAck: true });
+    const original = await f.control.start({ cmd: "cat", tty: true });
+    let getterCalls = 0;
+    const fault =
+      shape === "proxy"
+        ? new Proxy(new Error("opaque graph"), {
+            getOwnPropertyDescriptor() {
+              throw new Error("unreadable graph");
+            },
+          })
+        : new Error("not transport proof");
+    if (shape === "getter")
+      Object.defineProperty(fault, "code", {
+        get() {
+          getterCalls++;
+          return 14;
+        },
+      });
+    if (shape === "permission") Object.assign(fault, { code: status.PERMISSION_DENIED });
+    if (shape === "load" || shape === "reserve") Object.assign(fault, { code: status.UNAVAILABLE });
+    if (shape === "spoof")
+      Object.assign(fault, {
+        name: "ProviderCommandInputOutcomeUnknownError",
+        command: { ...original, execId: "untrusted-locator" },
+        byteOffset: 99,
+        byteLength: 99,
+      });
+    const write = f.control.write.bind(f.control);
+    f.control.write = async (...args) => {
+      await write(...args).catch(() => {
+        throw fault;
+      });
+    };
+    let reservations = 0;
+    let inputOffset = 0;
+    const session: Record<string, any> = {};
+    installModalCommandSession(session as never, f.control);
+    session.bindProviderCommand(77, original, {
+      load: async () => {
+        if (shape === "load") throw fault;
+        return structuredClone(original);
+      },
+      reserveInput: async (length: number) => {
+        reservations++;
+        if (shape === "reserve") throw fault;
+        const offset = inputOffset;
+        inputOffset += length;
+        return offset;
+      },
+    });
+    const failure = await session
+      .writeStdin({ sessionId: 77, chars: "å✓\n" })
+      .catch((error: unknown) => error);
+    expect(failure).toBe(fault);
+    expect(failure).not.toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
+    expect(session.getProviderCommand(77)).toEqual(original);
+    expect(f.starts).toHaveLength(1);
+    expect(f.reads).toHaveLength(0);
+    expect(f.writes).toHaveLength(shape === "load" || shape === "reserve" ? 0 : 1);
+    expect(reservations).toBe(shape === "load" ? 0 : 1);
+    expect(inputOffset).toBe(shape === "load" || shape === "reserve" ? 0 : 6);
+    expect(getterCalls).toBe(0);
   },
 );
 
