@@ -150,7 +150,12 @@ ogcurl GET "/v1/workspaces/$WORKSPACE_ID/members"
 ```
 
 SDK: `addExternalWorkspaceMember(workspaceId, request)` and
-`listWorkspaceMembers(workspaceId)`. Reuse the exact operation id/request on an
+`listWorkspaceMembers(workspaceId)`. The raw GET response is
+`{ members: WorkspaceMember[] }`; the SDK already unwraps it and returns
+`WorkspaceMember[]`. Use `const members = await og.listWorkspaceMembers(workspaceId)`
+and `members.length` or iterate `members` directly, not `members.members`.
+Other SDK list methods have their own return shapes; inspect the installed types.
+Reuse the exact operation id/request on an
 uncertain retry. An existing conflicting/revoked grant is not successful
 onboarding; do not silently revoke or widen it. Follow the embedding skill's
 explicit membership-update contract for an authorized permission change.

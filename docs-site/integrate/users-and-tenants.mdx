@@ -33,6 +33,15 @@ Grant the final permission set at onboarding. Add `files:upload` and `files:read
 
 Use the same `source` everywhere: onboarding, `asUser`, and the proxy's `resolve`.
 
+To inspect the current inventory without granting or restoring membership:
+
+```ts
+const members = await og.listWorkspaceMembers(workspaceId);
+console.log(members.length); // WorkspaceMember[], not an object with .members
+```
+
+The raw REST `GET /v1/workspaces/:workspaceId/members` response is `{ members: WorkspaceMember[] }`. The SDK unwraps that envelope: iterate its returned array directly, not `(await og.listWorkspaceMembers(workspaceId)).members`. This read requires `workspace:read`; check each SDK method's own return type rather than assuming every list method has this shape.
+
 ## Choose who shares chats
 
 Set `chats` on the session proxy or the chat facade:

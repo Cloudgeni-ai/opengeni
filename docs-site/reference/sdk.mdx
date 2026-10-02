@@ -88,6 +88,15 @@ In a chat UI, wire Stop to `pauseSession`: it is resumable, and messages sent wh
 
 The complete method list is in [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
 
+### Workspace member inventory
+
+```ts
+const members = await og.listWorkspaceMembers(workspaceId);
+console.log(members.length); // WorkspaceMember[]; iterate the array directly
+```
+
+`listWorkspaceMembers()` unwraps the REST `{ members: WorkspaceMember[] }` envelope. Its result is an array, not an object with `.members`. Raw HTTP `GET /v1/workspaces/:workspaceId/members` keeps that envelope. The read requires `workspace:read` and does not grant or restore membership. Other SDK list methods have their own return shapes; inspect the installed types rather than copying a REST wrapper onto an SDK result.
+
 ## createSessionProxyHandler
 
 `createSessionProxyHandler(client, options)` returns a web-standard `(request: Request) => Promise<Response>`. Mount it at a catch-all route such as `/api/opengeni/*` and point a browser `new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it. Every request calls `resolve`, runs as the resolved user through `asUser`, is pinned to the resolved workspace, and may use only the routes the conversation needs. Other routes return `404`; Cancel and workspace Pause are refused.
