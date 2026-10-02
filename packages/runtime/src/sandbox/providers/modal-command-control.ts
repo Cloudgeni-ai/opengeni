@@ -2,7 +2,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import { posix } from "node:path";
 import { status } from "@grpc/grpc-js";
 import { setTimeout as delay } from "node:timers/promises";
-import { shellQuote } from "@openai/agents-core/sandbox/internal";
+import { modalCommandArgv } from "./modal-command-argv";
 import {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -256,20 +256,7 @@ export class ModalCommandControl {
           controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
         }
       : undefined;
-    let commandArgs = [
-      args.shell ?? "/bin/sh",
-      args.shell && (args.login ?? true) ? "-lc" : "-c",
-      args.cmd,
-    ];
-    if (args.runAs) {
-      const user = shellQuote(args.runAs),
-        invocation = commandArgs.map(shellQuote).join(" ");
-      commandArgs = [
-        "/bin/sh",
-        "-c",
-        `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then exec ${invocation}; elif [ "$(id -u)" = 0 ]; then exec su -s /bin/sh ${user} -c ${shellQuote(`exec ${invocation}`)}; else exec sudo -n -u ${user} -- ${invocation}; fi`,
-      ];
-    }
+    let commandArgs = modalCommandArgv(args);
     const env = typeof this.environment === "function" ? this.environment() : this.environment;
     if (supervision)
       commandArgs = [
@@ -638,24 +625,53 @@ export class ModalCommandControl {
     if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
     if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 50_000)
       throw new Error("Invalid Modal output read bounds");
+    signal?.throwIfAborted();
+    const stdout = command.streams.stdout;
+    const stderr = command.streams.stderr;
+    if (
+      stdout.eof &&
+      stderr.eof &&
+      stdout.utf8Remainder === "" &&
+      stderr.utf8Remainder === "" &&
+      stdout.exitCode !== null &&
+      stdout.exitCode === stderr.exitCode
+    ) {
+      // Both complete streams and their matching terminal observation were
+      // already captured. An expired provider handle cannot revoke that exact
+      // evidence; the session still atomically verifies the retained cursor.
+      return {
+        command: structuredClone(command),
+        expected: structuredClone(command),
+        chunks: [],
+        exitCode: stdout.exitCode,
+        providerExited: true,
+        streamFidelity: command.pty ? "merged" : "separate",
+      };
+    }
     const budget = new AbortController();
     const abort = () => budget.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
+    // The router deliberately ends a quiet stream at its read deadline with
+    // a partial page. Let that deadline settle before outer containment aborts
+    // the whole page, including bytes already read from the other stream.
+    // Caller cancellation still bounds this allowance independently.
     const deadline = performance.now() + Math.max(1, waitMs);
     const timeout = setTimeout(
       () => budget.abort(new Error("Modal command read budget exhausted")),
-      Math.max(1, waitMs),
+      Math.max(1, waitMs) + 5_000,
     );
     let lastError: unknown;
     try {
       for (let attempt = 0; attempt < 5; attempt++) {
         signal?.throwIfAborted();
+        if (attempt > 0 && performance.now() >= deadline) break;
         try {
           return await this.readRouterPage(
             command,
-            Math.max(1, deadline - performance.now()),
+            Math.min(Math.max(1, waitMs), Math.max(1, deadline - performance.now())),
             budget.signal,
+            deadline,
           );
         } catch (error) {
           signal?.throwIfAborted();
@@ -672,7 +688,7 @@ export class ModalCommandControl {
             throw error;
           }
           lastError = error;
-          if (budget.signal.aborted || attempt === 4) break;
+          if (budget.signal.aborted || performance.now() >= deadline || attempt === 4) break;
           try {
             await delay(Math.min(100, Math.max(1, deadline - performance.now())), undefined, {
               signal: budget.signal,
@@ -694,14 +710,38 @@ export class ModalCommandControl {
     command: ModalRouterProviderCommand,
     waitMs: number,
     signal: AbortSignal,
+    deadline: number,
   ): Promise<ModalProviderOutputPage> {
     const next = structuredClone(command);
     const cancellation = new AbortController();
-    const abort = () => cancellation.abort(signal?.reason);
+    const lookupCancellation = new AbortController();
+    const abort = () => {
+      cancellation.abort(signal.reason);
+      lookupCancellation.abort(signal.reason);
+    };
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
+    const lookupTimeout = setTimeout(
+      () =>
+        lookupCancellation.abort(
+          new ProviderCommandObservationUnavailableError(
+            structuredClone(command),
+            new Error("Modal command read access budget exhausted"),
+          ),
+        ),
+      Math.max(1, deadline - performance.now()),
+    );
     try {
-      return await this.withRouter(command.taskId, cancellation.signal, async (router) => {
+      return await this.withRouter(command.taskId, lookupCancellation.signal, async (router) => {
+        clearTimeout(lookupTimeout);
+        lookupCancellation.signal.throwIfAborted();
+        signal.throwIfAborted();
+        if (performance.now() >= deadline)
+          throw new ProviderCommandObservationUnavailableError(
+            structuredClone(command),
+            new Error("Modal command read budget exhausted"),
+          );
+        const remainingWait = Math.max(1, Math.min(waitMs, deadline - performance.now()));
         const operations = [
           ...(["stdout", "stderr"] as const).map(async (stream) =>
             command.streams[stream].eof
@@ -710,7 +750,7 @@ export class ModalCommandControl {
                   command,
                   stream,
                   command.streams[stream].byteOffset,
-                  waitMs,
+                  remainingWait,
                   cancellation.signal,
                 ),
           ),
@@ -765,6 +805,7 @@ export class ModalCommandControl {
         };
       });
     } finally {
+      clearTimeout(lookupTimeout);
       signal?.removeEventListener("abort", abort);
     }
   }

@@ -11771,10 +11771,9 @@ const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 // Modal's command transport caps aggregate argv at 64 KiB. Cancellation and
 // run-as wrappers duplicate/expand this command, so stage moderate scripts too.
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
-// The cancellation fence embeds a lifecycle command twice, then the current
-// runAs wrapper repeats it across several execution branches. Keep each base64
-// chunk below Modal's 64-KiB aggregate argument ceiling after both wrappers.
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 7 * 1024;
+// Both cancellation and the SDK run-as wrapper repeat the payload three times.
+// Leave room for their fixed shell programs under Modal's 64-KiB argv ceiling.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 
 export type RigSetupScriptCommandOptions = {
@@ -11912,12 +11911,14 @@ async function stageRigSetupScript(
   session: SandboxSessionLike,
   script: string,
   context: SandboxLifecycleHookContext,
+  options: { payloadRoot?: string; label?: string } = {},
 ): Promise<string> {
-  const payloadPath = `${RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const payloadRoot = options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT;
+  const payloadPath = `${payloadRoot}/${randomUUID()}.sh`;
   const encodedPath = `${payloadPath}.b64`;
   const encoded = Buffer.from(script, "utf8").toString("base64");
   const commands = [
-    `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}\n: > ${shellQuote(encodedPath)}`,
+    `set -eu\numask 077\nmkdir -p ${shellQuote(payloadRoot)}\n: > ${shellQuote(encodedPath)}`,
   ];
   for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
     commands.push(
@@ -11925,7 +11926,7 @@ async function stageRigSetupScript(
     );
   }
   commands.push(
-    `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+    `set -eu\nbase64 -d < ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
   );
   try {
     for (const command of commands) {
@@ -11940,7 +11941,10 @@ async function stageRigSetupScript(
         },
         context.commandRunner,
       );
-      assertSandboxCommandSucceeded(result, "Sandbox Environment setup payload staging");
+      assertSandboxCommandSucceeded(
+        result,
+        options.label ?? "Sandbox Environment setup payload staging",
+      );
     }
     return payloadPath;
   } catch (error) {
@@ -12173,6 +12177,7 @@ export async function runRepositoryCloneHook(
     editor: null,
     staged: [],
   };
+  let stagedCloneScript: string | null = null;
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -12200,9 +12205,19 @@ export async function runRepositoryCloneHook(
       stagedBrokerSeeds.staged,
       options,
     );
-    const command = sandboxGitProvisioningCommand(
+    let command = sandboxGitProvisioningCommand(
       seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,
     );
+    // SDK setup also wraps run-as commands and cancellation can expand them.
+    // Reuse the bounded script transport instead of sending the whole clone
+    // program through those nested shell arguments.
+    if (Buffer.byteLength(command, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES) {
+      stagedCloneScript = await stageRigSetupScript(session, command, context, {
+        payloadRoot: "/tmp/opengeni/repository-setup-payloads",
+        label: "Repository setup payload staging",
+      });
+      command = `exec /bin/sh ${shellQuote(stagedCloneScript)}`;
+    }
     const result = await runSandboxLifecycleCommand(
       session,
       {
@@ -12242,6 +12257,19 @@ export async function runRepositoryCloneHook(
     });
     throw error;
   } finally {
+    if (stagedCloneScript) {
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: `rm -f ${shellQuote(stagedCloneScript)} ${shellQuote(`${stagedCloneScript}.b64`)}`,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ).catch(() => undefined);
+    }
     if (stagedBrokerSeeds.editor) {
       await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
     }
