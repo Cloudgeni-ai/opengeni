@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import type postgres from "postgres";
+import postgres from "postgres";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../packages/db/src/lossless-json";
 import {
   activationConnectionOptions,
+  activationDatabaseUrl,
   activationScope,
   activateSessionTenancyTransaction,
   assertSessionTenancyApplicationRolesDrained,
@@ -16,6 +17,96 @@ const id = "00000000-0000-4000-8000-000000000001";
 const secondId = "00000000-0000-4000-8000-000000000002";
 
 describe("session tenancy fleet activation admission", () => {
+  test("the actual driver URL overrides connection options unless the activation identity is normalized", async () => {
+    const databaseUrl =
+      "postgresql://fixture%40user:fixture%3Apw@127.0.0.1:6543/tenant%2Fdb?sslmode=require&search_path=operator_schema&statement_timeout=2100000&lock_timeout=300000&connect_timeout=7&options=-c%20idle_in_transaction_session_timeout%3D90000&application_name=opengeni-production-migration";
+    // postgres-js is lazy: constructing clients and inspecting parsed options opens no connection.
+    const legacy = postgres(databaseUrl, activationConnectionOptions("embedded_fixture"));
+    const current = postgres(
+      activationDatabaseUrl(databaseUrl),
+      activationConnectionOptions("embedded_fixture"),
+    );
+    try {
+      expect(legacy.options.connection.application_name).toBe("opengeni-production-migration");
+      expect(current.options.connection.application_name).toBe(
+        LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+      );
+      expect(current.options).toMatchObject({
+        host: legacy.options.host,
+        port: legacy.options.port,
+        path: legacy.options.path,
+        user: legacy.options.user,
+        pass: legacy.options.pass,
+        database: legacy.options.database,
+        ssl: legacy.options.ssl,
+        connect_timeout: legacy.options.connect_timeout,
+        connection: {
+          ...legacy.options.connection,
+          application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+        },
+      });
+      expect(current.options.connection).toMatchObject({
+        search_path: "operator_schema",
+        statement_timeout: "2100000",
+        lock_timeout: "300000",
+        options: "-c idle_in_transaction_session_timeout=90000",
+      });
+    } finally {
+      await Promise.all([legacy.end(), current.end()]);
+    }
+  });
+
+  test("normalization replaces every identity override and preserves all other URL components and parameters", () => {
+    for (const databaseUrl of [
+      "postgres://fixture%40user:fixture%3Apw@localhost:6543/tenant%2Fdb",
+      "postgresql://fixture%40user:fixture%3Apw@[::1]:6543/tenant%2Fdb?application_name=old&search_path=embedded%2Cpublic&application_name=other&options=-c%20statement_timeout%3D2100000&custom=&custom=two#operator-fragment?unchanged",
+    ]) {
+      const original = new URL(databaseUrl);
+      const normalized = new URL(activationDatabaseUrl(databaseUrl));
+      for (const component of [
+        "protocol",
+        "username",
+        "password",
+        "host",
+        "pathname",
+        "hash",
+      ] as const)
+        expect(normalized[component]).toBe(original[component]);
+      expect(normalized.searchParams.getAll("application_name")).toEqual([
+        LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+      ]);
+      expect([...normalized.searchParams].filter(([key]) => key !== "application_name")).toEqual(
+        [...original.searchParams].filter(([key]) => key !== "application_name"),
+      );
+    }
+  });
+
+  test("normalization preserves actual driver multi-host authority and failover options", async () => {
+    const authority =
+      "postgres://fixture%40user:fixture%3Apw@first.invalid:6543,second.invalid:6544/tenant";
+    const databaseUrl = `${authority}?target_session_attrs=read-write&statement_timeout=2100000&lock_timeout=300000&application_name=opengeni-production-migration`;
+    const normalized = activationDatabaseUrl(databaseUrl);
+    expect(normalized.startsWith(`${authority}?`)).toBe(true);
+    const legacy = postgres(databaseUrl, activationConnectionOptions());
+    const current = postgres(normalized, activationConnectionOptions());
+    try {
+      expect(current.options).toMatchObject({
+        host: legacy.options.host,
+        port: legacy.options.port,
+        user: legacy.options.user,
+        pass: legacy.options.pass,
+        database: legacy.options.database,
+        target_session_attrs: "read-write",
+        connection: {
+          ...legacy.options.connection,
+          application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+        },
+      });
+    } finally {
+      await Promise.all([legacy.end(), current.end()]);
+    }
+  });
+
   test("the actual CLI connection carries the canonical current protocol and preserves schema selection", () => {
     expect(activationConnectionOptions()).toEqual({
       max: 1,
