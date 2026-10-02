@@ -18,6 +18,7 @@ import {
   ProviderCommandObservationUnavailableError,
 } from "../provider-command-session";
 import { isModalCommandObservationTransportError } from "./modal-command-observation-errors";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
 import { classifyProviderSandboxFailure } from "../provider-errors";
 import {
   ModalCommandControl as LegacyControl,
@@ -340,16 +341,55 @@ export class ModalCommandControl {
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
     await this.withStartRouter(task.taskId, signal, async (router) => {
       const identity = { taskId: task.taskId!, execId: randomUUID() };
-      await router.start(
-        {
+      const observation: ControlObservation = {
+        command: {
+          kind: "modal-router-v1",
+          sandboxId,
           ...identity,
-          commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
-          workdir: "/tmp",
-          env: {},
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
         },
-        signal,
-      );
-      const { output, exit } = await this.readControlOutput(identity, 128, signal);
+        output: "",
+      };
+      let startUnknown: ModalCommandStartOutcomeUnknownError | undefined;
+      try {
+        await router.start(
+          {
+            ...identity,
+            commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
+            workdir: "/tmp",
+            env: {},
+          },
+          signal,
+        );
+      } catch (error) {
+        // A lost acknowledgement does not authorize another Start. This fixed
+        // read-only probe can still prove capability by observing its original
+        // invocation inside the same five-second budget.
+        if (!(error instanceof ModalCommandStartOutcomeUnknownError)) throw error;
+        if (error.taskId !== identity.taskId || error.execId !== identity.execId) throw error;
+        startUnknown = error;
+      }
+      let result: { output: string; exit: number };
+      try {
+        result = await this.readControlOutput(identity, 128, signal, observation);
+      } catch (error) {
+        if (!startUnknown) throw error;
+        // Missing/denied observation cannot erase a genuine unknown Start or
+        // turn it into sandbox-loss or replay authority.
+        throw new ProviderCommandObservationUnavailableError(
+          structuredClone(observation.command),
+          new AggregateError(
+            [startUnknown, error],
+            "Original capability Start and observation remain uncertain",
+          ),
+          error instanceof ProviderCommandObservationUnavailableError && error.readRetryAllowed,
+        );
+      }
+      signal.throwIfAborted();
+      const { output, exit } = result;
       if (exit !== 0 || output !== "native-subreaper-v1")
         throw new Error(
           "Exact Modal instance lacks compatible native supervision; command not admitted",
