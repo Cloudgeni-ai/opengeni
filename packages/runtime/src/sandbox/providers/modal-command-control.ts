@@ -113,9 +113,14 @@ export class ModalCommandControl {
     const entry = await pending;
     // Refresh credentials between operations, never close another active read.
     if (reused && !entry.users && Date.now() > entry.refreshAt) {
-      clearTimeout(entry.idle);
-      entry.router.close();
-      this.routers.delete(taskId);
+      // Another continuation may already have installed fresh access. Retire
+      // only the captured cache entry, then join its replacement rather than
+      // deleting or closing the newer transport.
+      if (this.routers.get(taskId) === pending) {
+        this.routers.delete(taskId);
+        clearTimeout(entry.idle);
+        entry.router.close();
+      }
       return await this.withRouter(taskId, signal, run);
     }
     clearTimeout(entry.idle);

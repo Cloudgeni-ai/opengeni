@@ -63,8 +63,8 @@ function collectSignals(value: unknown): ErrorSignals {
   const out: ErrorSignals = { numbers: [], codes: [], messages: [], incomplete: false };
   const seen = new Set<object>();
   const read = (record: object, key: string): unknown => {
-    const value = safeRead(record, key);
-    if (value !== UNREADABLE_ERROR_SIGNAL) return value;
+    const signal = safeRead(record, key);
+    if (signal !== UNREADABLE_ERROR_SIGNAL) return signal;
     out.incomplete = true;
     return undefined;
   };
@@ -108,9 +108,9 @@ function collectSignals(value: unknown): ErrorSignals {
       if (!Array.isArray(errors) || !errors.length || errors.length > 16) out.incomplete = true;
       else
         for (let index = 0; index < errors.length; index++) {
-          const value = read(errors, String(index));
-          if (!value || typeof value !== "object") out.incomplete = true;
-          visit(value, depth + 1);
+          const nested = read(errors, String(index));
+          if (!nested || typeof nested !== "object") out.incomplete = true;
+          visit(nested, depth + 1);
         }
     }
   };
