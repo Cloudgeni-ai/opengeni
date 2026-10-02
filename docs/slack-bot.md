@@ -21,7 +21,7 @@ Slack permits unlisted apps for early customer pilots; commercial scale and host
 
 ## Provider identity and deployment prerequisites
 
-Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. An existing internal app may be reused for hosted MCP and may retain its current name. The first-party workspace-bot flow is stricter: if that surface is used, an authorized Slack app administrator must configure the same app as follows rather than adding generated text or changing message payloads:
+Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. An existing Slack app may serve the account API MCP bridge and may retain its current name. The first-party workspace-bot flow is stricter: if that surface is used, an authorized Slack app administrator must configure the same app as follows rather than adding generated text or changing message payloads:
 
 1. Set the production Slack app name to `OpenGeni`. Use an environment-qualified app name such as `OpenGeni Staging` for a non-production deployment so administrators can distinguish simultaneous installations.
 2. Set the bot user display name to the deployment's exact configured identity: `OpenGeni` in production or `OpenGeni Staging` in managed staging.
@@ -74,7 +74,7 @@ Deleting the OpenGeni personal connection removes local use of that grant; it do
 
 ## Workspace bot manifest
 
-The separate workspace-shared principal uses this deliberately narrow bot manifest:
+The default `limited` manifest requests 17 bot scopes and 11 separate user scopes for the account API MCP bridge:
 
 ```yaml
 display_information:
@@ -110,7 +110,6 @@ oauth_config:
       - chat:write
       - commands
       - files:read
-      - files:write
       - groups:history
       - groups:read
       - im:history
@@ -118,37 +117,21 @@ oauth_config:
       - im:write
       - mpim:history
       - mpim:read
+      - users:read
       - reactions:read
-      - users:read
-      - search:read.public
-      - search:read.files
-      - search:read.users
+      - files:write
     user:
-      - search:read.public
-      - search:read.private
-      - search:read.mpim
-      - search:read.im
-      - search:read.files
-      - files:read
-      - emoji:read
-      - search:read.users
-      - chat:write
-      - channels:history
-      - groups:history
-      - mpim:history
-      - im:history
-      - channels:write
-      - groups:write
-      - im:write
-      - mpim:write
-      - reactions:write
-      - canvases:read
-      - canvases:write
-      - users:read
-      - users:read.email
       - channels:read
       - groups:read
+      - im:read
       - mpim:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - users:read
+      - im:write
+      - chat:write
 settings:
   event_subscriptions:
     bot_events:
@@ -499,7 +482,7 @@ When the current workspace has no bot connection or installation binding, the we
 
 Slack OAuth outcomes open the Slack panel automatically. A failed callback remains visible across reloads through its bounded URL outcome until dismissed or replaced by a successful callback. Dismissal removes only Slack outcome parameters. These parameters are display hints, never repair authority. Conflicts and lost permissions explain the next owner/admin action instead of inviting repeated installation attempts. Cross-organization moves and quarantined installation recovery still require an administrator-led forward fix; this panel does not advertise an unsupported self-service transfer.
 
-Disconnecting a personal hosted-MCP connection in OpenGeni disables that exact subject-owned row and does not revoke the grant at Slack. Disconnecting the bot likewise disables only the bot row; it does not uninstall the Slack app or affect hosted-MCP OAuth. To remove provider access, an authorized Slack administrator must revoke or uninstall the app in Slack as a separate action.
+Disconnecting a personal account API MCP bridge connection in OpenGeni disables that exact subject-owned row and does not revoke the grant at Slack. Disconnecting the bot likewise disables only the bot row; it does not uninstall the Slack app or affect user-account OAuth. To remove provider access, an authorized Slack administrator must revoke or uninstall the app in Slack as a separate action.
 
 Slack authentication errors that prove invalid, inactive, expired, or revoked credentials mark the connection for reinstall. Provider transport failures, HTTP 5xx responses, missing channel membership, missing scope, or a missing channel do not falsely poison the credential. Reinstall preserves an existing row only after exact principal validation; otherwise use **Install another Slack workspace/bot** and explicitly review scheduled tasks.
 
