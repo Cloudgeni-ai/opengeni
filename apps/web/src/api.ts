@@ -29,6 +29,7 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 let apiContractReloadTimer: number | null = null;
+let apiUpdateNoticeContainer: HTMLElement | null = null;
 const boundedHttp1SseTransport = "http1-bounded";
 const boundedHttp1SseBatchContentType = "application/vnd.opengeni.sse-batch";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 4_000;
@@ -1192,6 +1193,15 @@ function reloadForApiContract(config: { apiContractRevision: string }): void {
   }, 150);
 }
 
+/** The stock app reserves layout space for the existing update notice. */
+export function mountApiUpdateNotice(container: HTMLElement | null): void {
+  apiUpdateNoticeContainer = container;
+  if (container) {
+    const notice = document.getElementById("opengeni-api-update-notice");
+    if (notice) container.append(notice);
+  }
+}
+
 function showApiUpdateNotice(willReload: boolean): void {
   if (typeof document === "undefined") {
     return;
@@ -1204,19 +1214,16 @@ function showApiUpdateNotice(willReload: boolean): void {
     ? "Opengeni updated — reloading…"
     : "Opengeni updated. Reload this tab to continue.";
   Object.assign(notice.style, {
-    position: "fixed",
-    inset: "16px 16px auto auto",
-    zIndex: "2147483647",
-    border: "1px solid var(--og-color-border)",
-    borderRadius: "10px",
+    width: "100%",
+    boxSizing: "border-box",
+    borderBottom: "1px solid var(--og-color-border)",
     background: "var(--og-color-surface-1)",
     color: "var(--og-color-fg)",
-    boxShadow: "var(--og-shadow-lg)",
     font: "500 14px/1.4 Inter, system-ui, sans-serif",
     padding: "10px 14px",
   });
   if (!existing) {
-    document.body.append(notice);
+    (apiUpdateNoticeContainer ?? document.body).append(notice);
   }
 }
 

@@ -1658,10 +1658,14 @@ test("a mounted tab refreshes a changed deployment while retaining its URL, draf
   }
 }, 45_000);
 
-for (const mismatch of ["header", "config"] as const) {
-  test(`contract ${mismatch} reload preserves a draft started during the update notice`, async () => {
+for (const [mismatch, width] of [
+  ["header", 1280],
+  ["config", 1280],
+  ["header", 390],
+] as const) {
+  test(`contract ${mismatch} notice preserves controls and drafts at ${width}px`, async () => {
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
+      viewport: { width, height: 900 },
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
@@ -1678,14 +1682,22 @@ for (const mismatch of ["header", "config"] as const) {
     });
     await installApi(page, state);
     const pin = gate();
+    const pinWrites: boolean[] = [];
     await page.route(
       `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
       async (route) => {
+        const request = route.request().postDataJSON() as { pinned: boolean };
+        pinWrites.push(request.pinned);
         await pin.wait();
+        Object.assign(state.session, {
+          pinned: request.pinned,
+          pinVersion: pinWrites.length,
+          pinnedAt: request.pinned ? state.session.updatedAt : null,
+        });
         return route.fulfill({
           contentType: "application/json",
           headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
-          body: JSON.stringify({ ...state.session, pinned: true, pinVersion: 1 }),
+          body: JSON.stringify(state.session),
         });
       },
     );
@@ -1746,12 +1758,35 @@ for (const mismatch of ["header", "config"] as const) {
       assert.equal(documents, 1, "A contract update must preserve an existing draft");
       assert.equal(await input.count(), 1, "The stock provider must keep the draft mounted");
       assert.equal(await input.inputValue(), "Preserve the existing draft.");
+      const notice = page.locator("#opengeni-api-update-notice");
+      await notice.waitFor();
+      const noticeBounds = await notice.boundingBox();
+      const headerBounds = await page.locator("header").boundingBox();
+      const inputBounds = await input.boundingBox();
+      assert(noticeBounds && headerBounds && inputBounds);
+      assert(
+        noticeBounds.y + noticeBounds.height <= headerBounds.y,
+        "The update notice must reserve space above the header controls",
+      );
+      assert(
+        inputBounds.y >= headerBounds.y + headerBounds.height &&
+          inputBounds.y + inputBounds.height <= 900,
+        "The notice must leave the composer within the viewport",
+      );
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        true,
+        "The notice must not introduce horizontal overflow",
+      );
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
+      });
       const pinButton = page
         .locator("header")
         .getByRole("button", { name: "Pin session", exact: true });
-      await pinButton.focus();
-      await pinButton.press("Enter");
+      await pinButton.click();
       await pin.entered;
+      assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
       await input.fill("");
       await page.clock.runFor(1_000);
       await check();
@@ -1768,6 +1803,18 @@ for (const mismatch of ["header", "config"] as const) {
       pin.release();
       await pinned;
       await page.clock.runFor(1_000);
+      const unpinButton = page
+        .locator("header")
+        .getByRole("button", { name: "Unpin session", exact: true });
+      await unpinButton.focus();
+      const unpinned = page.waitForResponse((response) =>
+        response.url().endsWith(`/${sessionId}/pin`),
+      );
+      await unpinButton.press("Enter");
+      await unpinned;
+      assert.deepEqual(pinWrites, [true, false], "Keyboard activation must reach the second save");
+      assert.equal(await input.inputValue(), "Preserve while the save settles.");
+      assert.equal(documents, 1, "The notice and both saves must leave the draft mounted");
       setContract(OPENGENI_API_CONTRACT_REVISION);
       await page.clock.runFor(1_000);
       await input.fill("");
@@ -1784,7 +1831,9 @@ for (const mismatch of ["header", "config"] as const) {
         await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
         null,
       );
-      await page.screenshot({ path: `${output}/contract-${mismatch}-draft-protected.png` });
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-draft-protected.png`,
+      });
       setContract(OPENGENI_API_CONTRACT_REVISION);
       await page.clock.runFor(1_000);
       await input.fill("");
