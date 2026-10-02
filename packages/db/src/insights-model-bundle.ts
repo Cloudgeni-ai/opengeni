@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { WorkspaceInsightsSnapshot } from "@opengeni/contracts";
 
 import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
@@ -62,6 +63,8 @@ export type WorkspaceInsightsModelBundle = {
   priorRootDrivers: RootSessionDriverRow[];
   /** Every root group in the window, grouped by project; sums to the totals. */
   projects: InsightsProjectAggregateRow[];
+  privateChats: WorkspaceInsightsSnapshot["privateChats"];
+  privateChatsTruncated: boolean;
   scheduleFacts: ScheduleFactAggregate[];
   facets: ModelCallFacetRow[];
   recentCalls: RecentModelCallRow[];
@@ -237,6 +240,17 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
       estimatedProviderCostMicros: numberValue(row, "estimatedProviderCostMicros"),
       estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
     })),
+    privateChats: records(payload.privateChats ?? [], "privateChats").map((row) => ({
+      ownerKey: stringValue(row, "ownerKey"),
+      name: nullableString(row, "name"),
+      you: false,
+      calls: numberValue(row, "calls"),
+      tokens: numberValue(row, "tokens"),
+      creditUsd: numberValue(row, "creditMicros") / 1_000_000,
+      estimatedProviderUsd: numberValue(row, "estimatedProviderMicros") / 1_000_000,
+      estimatedProviderCostKnownCalls: numberValue(row, "estimatedProviderCostKnownCalls"),
+    })),
+    privateChatsTruncated: payload.privateChatsTruncated === true,
     scheduleFacts: records(payload.scheduleFacts, "scheduleFacts").map((row) => ({
       scheduledTaskId: stringValue(row, "scheduledTaskId"),
       pricedCostMicros: numberValue(row, "pricedCostMicros"),
@@ -314,7 +328,7 @@ export async function readWorkspaceInsightsModelBundle(
   const sessionId = input.sessionId ?? null;
   const narrowed = provider != null || model != null || rootSessionId != null || sessionId != null;
   const factRows = (since: Date, until: Date, scoped: boolean) => sql`
-    opengeni_private.visible_workspace_insights_model_fact_rows(
+    opengeni_private.workspace_insights_amount_fact_rows(
       ${input.workspaceId}::uuid,
       ${since.toISOString()}::timestamp with time zone,
       ${until.toISOString()}::timestamp with time zone,
@@ -469,6 +483,7 @@ export async function readWorkspaceInsightsModelBundle(
         from (
           select *
           from current_root_aggregates
+          where root_session_id is not null
           order by total_tokens desc, root_session_id
           limit ${INSIGHTS_ROOT_DRIVER_LIMIT + 1}
         ) aggregate
@@ -559,6 +574,7 @@ export async function readWorkspaceInsightsModelBundle(
       ), recent_limited as (
         select fact.*
         from current_visible fact
+        where fact.id is not null
         order by fact.occurred_at desc, fact.id desc
         limit ${INSIGHTS_RECENT_CALL_LIMIT + 1}
       ), recent_rows as (
@@ -573,10 +589,10 @@ export async function readWorkspaceInsightsModelBundle(
           and session.id = fact.session_id
       ), contribution_coverage as (
         select
-          coalesce(sum(calls), 0)::bigint as total_calls,
-          coalesce(sum(covered_calls), 0)::bigint as covered_calls
-        from current_grouped
-        where by_model
+          count(*)::bigint as total_calls,
+          count(context_contributions)::bigint as covered_calls
+        from current_visible
+        where id is not null
       ), contribution_source_rows as (
         select
           contribution.entry->>'source' as source,
@@ -610,6 +626,23 @@ export async function readWorkspaceInsightsModelBundle(
         group by source
       )
       select jsonb_build_object(
+        'privateChatsTruncated', (select count(distinct private_owner_key) > 200
+          from current_visible where private_owner_key is not null),
+        'privateChats', coalesce((
+          select jsonb_agg(to_jsonb(owner_row) order by "tokens" desc, "ownerKey")
+          from (
+            select private_owner_key as "ownerKey", max(private_name) as "name",
+              count(*) as "calls", coalesce(sum(total_tokens), 0) as "tokens",
+              coalesce(sum(priced_cost_micros) filter (where billing_path = 'opengeni_credits'), 0) as "creditMicros",
+              coalesce(sum(estimated_provider_cost_micros), 0) as "estimatedProviderMicros",
+              count(estimated_provider_cost_micros) as "estimatedProviderCostKnownCalls"
+            from current_visible
+            where private_owner_key is not null
+            group by private_owner_key
+            order by "tokens" desc, "ownerKey"
+            limit 200
+          ) owner_row
+        ), '[]'::jsonb),
         'modelRows', coalesce((
           select jsonb_agg(${modelRowJson} order by provider, model, billing_path)
           from current_grouped where by_model
@@ -739,7 +772,7 @@ export async function readWorkspaceInsightsModelBundle(
             from contribution_rows
           ), '[]'::jsonb)
         ),
-        'driverGroups', (select count(*) from current_root_aggregates),
+        'driverGroups', (select count(*) from current_root_aggregates where root_session_id is not null),
         'driversTruncated', (select count(*) > ${INSIGHTS_ROOT_DRIVER_LIMIT} from current_root_rows),
         'facetsTruncated', (select count(*) > ${INSIGHTS_FACET_LIMIT} from facet_rows),
         'recentCallsTruncated', (select count(*) > ${INSIGHTS_RECENT_CALL_LIMIT} from recent_limited),

@@ -44,6 +44,14 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
 
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
+    "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+    "Insights complete usage amount projection is missing or unsafe",
+  ],
+  [
+    "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+    "Insights amount fact projection is missing or unsafe",
+  ],
+  [
     "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
     "organization model usage aggregate is missing or unsafe",
   ],

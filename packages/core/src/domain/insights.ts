@@ -316,6 +316,8 @@ export async function getWorkspaceInsights(
     rootDrivers,
     priorRootDrivers,
     projects,
+    privateChats,
+    privateChatsTruncated,
     scheduleFacts,
     facets,
     recentCalls,
@@ -576,6 +578,8 @@ export async function getWorkspaceInsights(
     })),
     drivers,
     projects: projectRows,
+    privateChats,
+    privateChatsTruncated,
     schedules,
     recentCalls: recentCalls.map((row) => ({
       id: row.id,
