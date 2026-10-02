@@ -1,6 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-type Observer = (providerId: string, response: Response, upstreamModelId?: string) => void;
+type Observer = (
+  providerId: string,
+  response: Response,
+  upstreamModelId?: string,
+  requestToken?: string | null,
+) => void;
 type Prepare = (providerId: string, headers: Headers) => Promise<Headers>;
 const observers = new AsyncLocalStorage<{
   observe: Observer;
@@ -35,9 +40,25 @@ export async function prepareClaudeSubscriptionRequest(
   new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
   return { ...init, headers: await prepare(providerId, headers) };
 }
-export function observeClaudeUsageResponse(providerId: string, response: Response): void {
+export function captureClaudeRequestToken(input: Parameters<typeof fetch>[0], init?: RequestInit) {
+  if (!observers.getStore()) return undefined;
+  const headers = new Headers(
+    init?.headers !== undefined
+      ? init.headers
+      : input instanceof Request
+        ? input.headers
+        : undefined,
+  );
+  return headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1] ?? null;
+}
+
+export function observeClaudeUsageResponse(
+  providerId: string,
+  response: Response,
+  requestToken?: string | null,
+): void {
   try {
-    observers.getStore()?.observe(providerId, response, modelRequests.getStore());
+    observers.getStore()?.observe(providerId, response, modelRequests.getStore(), requestToken);
   } catch {
     // Usage telemetry must never change or consume a model response.
   }

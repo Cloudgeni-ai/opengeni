@@ -6,6 +6,8 @@ import {
   type CapturedClaudeUsage,
 } from "../src/activities/agent-turn/claude-usage-observer";
 import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import { withClaudeUsageObserver } from "../../../packages/runtime/src/claude-subscription-usage";
+import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 
 const providers = parseModelProvidersJson(
   JSON.stringify([
@@ -107,6 +109,57 @@ test("account and generation observations never merge within the same scope", as
     ["22222222-2222-4222-8222-222222222222", 1, 20],
     ["11111111-1111-4111-8111-111111111111", 2, 30],
   ]);
+});
+
+test("a late authentication failure belongs to its dispatched token, not a concurrent renewal", async () => {
+  const latest = new Map<string, CapturedClaudeUsage>();
+  const observe = await createClaudeUsageObserver(providers, latest, async () => ({
+    token: providers[0]!.apiKey!,
+    connectionId: "original",
+    credentialVersion: 7,
+  }));
+  let finishOld!: (response: Response) => void;
+  let startedOld!: () => void;
+  const started = new Promise<void>((resolve) => {
+    startedOld = resolve;
+  });
+  const dispatched: string[] = [];
+  const fetcher = instrumentedModelFetch(providers[0]!.id, (async (_input, init) => {
+    const auth = new Headers(init?.headers).get("authorization")!;
+    dispatched.push(auth);
+    if (dispatched.length === 1) {
+      startedOld();
+      return new Promise<Response>((resolve) => {
+        finishOld = resolve;
+      });
+    }
+    return new Response(null, { headers: { "anthropic-ratelimit-unified-5h-utilization": ".2" } });
+  }) as typeof fetch);
+  let token = providers[0]!.apiKey!;
+  await withClaudeUsageObserver(
+    observe,
+    async () => {
+      const old = fetcher("https://example.test/v1/messages", { method: "POST", body: "{}" });
+      await started;
+      token = "sk-ant-oat01-renewed-fixture";
+      await fetcher("https://example.test/v1/messages", { method: "POST", body: "{}" });
+      finishOld(new Response(null, { status: 401 }));
+      await old;
+    },
+    (id, headers) =>
+      observe.prepareRequest(id, headers, async () => ({
+        token,
+        connectionId: "original",
+        credentialVersion: 7,
+      })),
+  );
+  expect(dispatched).toEqual([`Bearer ${providers[0]!.apiKey}`, `Bearer ${token}`]);
+  expect(latest.size).toBe(2);
+  expect([...latest.values()].find((item) => item.token === token)?.refresh).toBeUndefined();
+  expect(
+    [...latest.values()].find((item) => item.token === providers[0]!.apiKey)?.refresh?.status,
+  ).toBe("reconnect");
+  expect([...latest.keys()].every((key) => !key.includes("sk-ant-oat01"))).toBe(true);
 });
 
 test("native generation bindings survive another replica renewing between catalog load and dispatch", async () => {

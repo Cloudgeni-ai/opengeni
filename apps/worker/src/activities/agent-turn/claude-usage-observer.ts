@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   emptyClaudeUsage,
   mergeClaudeUsage,
@@ -84,11 +85,21 @@ export async function createClaudeUsageObserver(
       }),
   );
   const captured = new Map(bindings.filter((binding) => binding !== null));
-  const observe = (providerId: string, response: Response, upstreamModelId?: string) => {
+  const observe = (
+    providerId: string,
+    response: Response,
+    upstreamModelId?: string,
+    requestToken?: string | null,
+  ) => {
+    if (requestToken === null) return;
     const binding = captured.get(providerId);
     if (!binding) return;
-    const { scope, ...identity } = binding;
-    const captureKey = `${scope}:${identity.expectedConnectionId}:${identity.expectedCredentialVersion}`;
+    const { scope, ...capturedIdentity } = binding;
+    const identity = { ...capturedIdentity, token: requestToken ?? capturedIdentity.token };
+    // Same-generation OAuth renewal can overlap an older request. Never attach
+    // its authentication failure to the newly renewed token or merge the two.
+    const tokenKey = createHash("sha256").update(identity.token).digest("hex");
+    const captureKey = `${scope}:${identity.expectedConnectionId}:${identity.expectedCredentialVersion}:${tokenKey}`;
     const previous = latest.get(captureKey);
     let observation = parseClaudeUsageHeaders(response.headers, new Date(), upstreamModelId);
     if (observation && previous?.observation) {
