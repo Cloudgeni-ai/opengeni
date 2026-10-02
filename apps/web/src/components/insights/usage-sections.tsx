@@ -99,9 +99,10 @@ export function percentDelta(
 /* --------------------------------------------------------------- Paid with */
 
 const PAID_WITH_COLUMNS: RowListColumn[] = [
+  // Amount first: on a phone the row folds to its first fact.
+  { id: "amount", label: "Amount", width: 120, align: "end" },
   { id: "calls", label: "Calls", width: 96, align: "end" },
   { id: "tokens", label: "Tokens", width: 96, align: "end" },
-  { id: "amount", label: "Amount", width: 120, align: "end" },
 ];
 
 const PAYER_MONOGRAM = { opengeni_credits: "C", subscription: "S", own_key: "K" } as const;
@@ -144,11 +145,10 @@ export function PaidWithList(props: { totals: readonly PayerTotal[] }) {
 /* --------------------------------------------------------------- By model */
 
 const MODEL_COLUMNS: RowListColumn[] = [
-  { id: "payer", label: "Paid with", width: 128 },
-  { id: "calls", label: "Calls", width: 80, align: "end" },
-  { id: "tokens", label: "Tokens", width: 88, align: "end" },
-  { id: "cache", label: "Cache hit", width: 80, align: "end" },
   { id: "amount", label: "Amount", width: 104, align: "end" },
+  { id: "tokens", label: "Tokens", width: 88, align: "end" },
+  { id: "calls", label: "Calls", width: 80, align: "end" },
+  { id: "cache", label: "Cache hit", width: 80, align: "end" },
 ];
 
 function hitPct(cached: number, input: number): number | null {
@@ -186,11 +186,10 @@ export function ModelUsageList(props: {
             key={row.id}
             leading={<LogoTile name={row.model} />}
             title={row.model}
-            meta={[providerLabel(row.provider)]}
+            meta={[providerLabel(row.provider), rowPayerLabel(row.billing, row.provider)]}
             selected={selected}
             onOpen={selected ? undefined : () => props.onSelect(row)}
             cells={{
-              payer: <Quiet>{rowPayerLabel(row.billing, row.provider)}</Quiet>,
               calls: <Quiet>{row.calls.toLocaleString()}</Quiet>,
               tokens: (
                 <Amount title={tokenBreakdown(row)}>

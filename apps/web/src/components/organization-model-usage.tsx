@@ -174,17 +174,17 @@ function modelAmount(row: Totals): string {
 }
 
 const PAYER_COLUMNS: RowListColumn[] = [
+  // Amount first: on a phone the row folds to its first fact.
+  { id: "amount", label: "Amount", width: 120, align: "end" },
   { id: "calls", label: "Calls", width: 96, align: "end" },
   { id: "tokens", label: "Tokens", width: 96, align: "end" },
-  { id: "amount", label: "Amount", width: 120, align: "end" },
 ];
 
 const MODEL_COLUMNS: RowListColumn[] = [
-  { id: "payer", label: "Paid with", width: 128 },
-  { id: "calls", label: "Calls", width: 88, align: "end" },
-  { id: "tokens", label: "Tokens", width: 88, align: "end" },
-  { id: "cache", label: "Cache hit", width: 80, align: "end" },
   { id: "amount", label: "Amount", width: 112, align: "end" },
+  { id: "tokens", label: "Tokens", width: 88, align: "end" },
+  { id: "calls", label: "Calls", width: 88, align: "end" },
+  { id: "cache", label: "Cache hit", width: 80, align: "end" },
 ];
 
 const PAYER_MONOGRAM = { opengeni_credits: "C", subscription: "S", own_key: "K" } as const;
@@ -318,9 +318,11 @@ export function OrganizationModelUsagePanel(props: {
               key={`${row.provider}:${row.model}:${row.totals.billingPath}`}
               leading={<LogoTile name={row.model} />}
               title={row.model}
-              meta={[providerLabel(row.provider)]}
+              meta={[
+                providerLabel(row.provider),
+                rowPayerLabel(row.totals.billingPath, row.provider),
+              ]}
               cells={{
-                payer: <Quiet>{rowPayerLabel(row.totals.billingPath, row.provider)}</Quiet>,
                 calls: <Quiet>{BigInt(row.totals.calls).toLocaleString("en-US")}</Quiet>,
                 tokens: (
                   <span className="text-fg tabular-nums">

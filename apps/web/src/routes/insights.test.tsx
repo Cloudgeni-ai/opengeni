@@ -355,17 +355,20 @@ describe("Insights route presentation", () => {
     const rendered = await renderRoute();
     try {
       expect(tableRows(rendered.container, "Spend by who pays")).toEqual([
-        ["Opengeni credits", "10", "1.1K", "$2.50"],
-        ["Subscriptions", "10", "1.1K", "~$4.00"],
-        ["Your API keys", "10", "1.1K", "~$1.00"],
+        ["Opengeni credits", "$2.50", "10", "1.1K"],
+        ["Subscriptions", "~$4.00", "10", "1.1K"],
+        ["Your API keys", "~$1.00", "10", "1.1K"],
       ]);
       expect(rendered.container.textContent).toContain("4 of 10 calls priced");
       const models = tableRows(rendered.container, "Usage by model");
       expect(models.map((row) => [row[0], row[1]])).toEqual([
-        ["gpt-5", "Opengeni credits"],
-        ["gpt-6", "ChatGPT plan"],
-        ["claude", "Your API key"],
+        ["gpt-5", "$2.50"],
+        ["gpt-6", "~$4.00"],
+        ["claude", "~$1.00"],
       ]);
+      const table = rendered.container.querySelector('[role="table"][aria-label="Usage by model"]');
+      expect(table?.textContent).toContain("ChatGPT plan");
+      expect(table?.textContent).toContain("Your API key");
     } finally {
       await rendered.unmount();
     }
@@ -519,7 +522,7 @@ describe("Insights route presentation", () => {
     const rendered = await renderRoute();
     try {
       const [cells] = tableRows(rendered.container, "Usage by model");
-      expect(cells?.[3]).toBe("Unknown");
+      expect(cells?.[2]).toBe("Unknown");
       expect(cells?.[4]).toBe("Unknown");
     } finally {
       await rendered.unmount();
