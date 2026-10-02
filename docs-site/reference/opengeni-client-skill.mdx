@@ -2193,8 +2193,11 @@ approval is incomplete setup, not a connected account. Discovery currently suppo
 at most 99 existing installations plus the new-install option; a larger result
 fails explicitly instead of silently selecting or dropping installations.
 
-`slack-bot` is a workspace bot installation, while `slack-personal` is the official
-personal Slack MCP authorization flow. Do not substitute one for the other.
+`slack-bot` is a workspace bot installation. `slack-personal` uses Slack user OAuth
+with OpenGeni's API-backed MCP tools for authorized conversations, recent messages
+and threads, users, and sending messages. It does not require installing the bot.
+General workspace-wide message search is unavailable. Do not substitute one flow
+for the other.
 `x` and `reddit` use the existing social-account domain and OAuth scopes. Workspace
 social setup requires workspace administration; personal setup requires a verified
 owning user. Native and host clients share callback receipts and exact returns.
