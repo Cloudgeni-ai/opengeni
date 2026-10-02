@@ -220,6 +220,32 @@ describe("default model precedence", () => {
     });
   });
 
+  test("a credits-billed deployment default that is the credits default model takes the credits effort", () => {
+    const settings = hostedSettings({ openaiModel: "gpt-6-luna", openaiReasoningEffort: "low" });
+    // Credit holders (for example the verified-signup trial) get the credits
+    // default effort on the unchanged deployment default model.
+    expect(decide(settings, { credits: true })).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      source: "credits",
+    });
+    // Without credits the deployment default keeps the deployment effort.
+    expect(decide(settings)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "low",
+      source: "deployment",
+    });
+    expect(
+      creditsDefaultSessionModel({
+        settings,
+        selections: selections(settings),
+        workspaceSettings: {},
+      }),
+    ).toEqual({ model: "gpt-6-luna", reasoningEffort: "xhigh", source: "credits" });
+    // A subscription still wins.
+    expect(decide(settings, { codex: true, credits: true }).source).toBe("subscription");
+  });
+
   test("a saved workspace default is an explicit choice that beats subscriptions and credits", () => {
     expect(
       decide(hostedSettings(), {
