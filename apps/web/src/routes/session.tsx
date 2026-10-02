@@ -1723,6 +1723,11 @@ function SessionChatPane(props: {
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
+  // The API's authoritative "model is not available" refusal for this session,
+  // which also covers connection-owned models the catalog cannot judge.
+  const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
+    null,
+  );
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -2212,6 +2217,8 @@ function SessionChatPane(props: {
       // Retrying cannot help: re-read the catalog so the composer offers a
       // replacement, and open the picker so the next step is visible.
       if (isModelUnavailableSubmissionError(error)) {
+        const refused = refusedModelId(error, input);
+        if (refused) setRefusedModel({ sessionId: props.session.id, model: refused });
         void modelCatalog.refresh();
         setModelPickerSession(props.session.id);
       }
@@ -2302,18 +2309,29 @@ function SessionChatPane(props: {
   );
   // A model the catalog no longer lists (retired or removed) is refused by the
   // API, so the frozen session policy stops counting as sendable for it.
-  const composerModelUnavailable = sessionModelMissingFromCatalog({
-    model,
-    models: modelCatalog.models,
-    loading: modelCatalog.loading,
-    error: modelCatalog.error,
-  });
-  const sessionModelUnavailable = sessionModelMissingFromCatalog({
-    model: props.session.model,
-    models: modelCatalog.models,
-    loading: modelCatalog.loading,
-    error: modelCatalog.error,
-  });
+  const refusedSessionModel =
+    refusedModel?.sessionId === props.session.id ? refusedModel.model : null;
+  const composerModelUnavailable =
+    model === refusedSessionModel ||
+    sessionModelMissingFromCatalog({
+      model,
+      models: modelCatalog.models,
+      error: modelCatalog.error,
+    });
+  const sessionModelUnavailable =
+    props.session.model === refusedSessionModel ||
+    sessionModelMissingFromCatalog({
+      model: props.session.model,
+      models: modelCatalog.models,
+      error: modelCatalog.error,
+    });
+  // Only someone who can send may have the composer's model replaced: the
+  // replacement is saved to their durable draft.
+  const canControlSession = Boolean(
+    context.accessContext.workspaceGrants
+      .find((grant) => grant.workspaceId === props.session.workspaceId)
+      ?.permissions.includes("sessions:control"),
+  );
   const composerPolicyValid = Boolean(
     composerPolicy &&
     (catalogComboValid || (matchesFrozenSessionPolicy && !composerModelUnavailable)),
@@ -2337,7 +2355,6 @@ function SessionChatPane(props: {
     () =>
       composerModelUnavailable || sessionModelUnavailable
         ? unavailableModelReplacement({
-            models: modelCatalog.models,
             rows: modelCatalog.rows,
             defaultSelection: modelCatalog.defaultSelection,
             latencyMode,
@@ -2347,7 +2364,6 @@ function SessionChatPane(props: {
     [
       composerModelUnavailable,
       sessionModelUnavailable,
-      modelCatalog.models,
       modelCatalog.rows,
       modelCatalog.defaultSelection,
       latencyMode,
@@ -2357,12 +2373,14 @@ function SessionChatPane(props: {
   useEffect(() => {
     if (!composerModelUnavailable || !unavailableReplacement) return;
     if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
+    if (!canControlSession) return;
     setComposerModel(unavailableReplacement.model);
     setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
     if (unavailableReplacement.latencyMode) {
       setComposerLatencyMode(unavailableReplacement.latencyMode);
     }
   }, [
+    canControlSession,
     composerDraftLoading,
     composerModelUnavailable,
     hasComposerPolicy,
@@ -2378,7 +2396,7 @@ function SessionChatPane(props: {
       <UnavailableModelNotice
         modelName={unavailableModelName(sessionModelUnavailable ? props.session.model : model)}
         replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
-        canChooseModel={!modelPickerDisabled}
+        canChooseModel={canControlSession && !modelPickerDisabled}
         onChooseModel={() => setModelPickerSession(props.session.id)}
       />
     ) : null;
@@ -3248,4 +3266,12 @@ function SessionChatPane(props: {
       </div>
     </ChatViewportFileDropTarget>,
   );
+}
+
+/** The model a "model is not available" refusal named: the API detail, else the attempted input. */
+function refusedModelId(error: Error, input: unknown): string | null {
+  const details = (error as { details?: Record<string, unknown> }).details;
+  if (typeof details?.modelId === "string" && details.modelId) return details.modelId;
+  const attempted = (input as { model?: unknown } | null)?.model;
+  return typeof attempted === "string" && attempted ? attempted : null;
 }

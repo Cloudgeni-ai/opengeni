@@ -297,14 +297,17 @@ and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
 
-Sessions whose stored model leaves the catalog keep their history and frozen
-turns. A new message that would use the removed model is refused with 422
+Sessions whose stored deployment model leaves the catalog keep their history
+and frozen turns. A new message that would use the removed model is refused
+with 422
 `validation_failed` (`model is not available: <id>`) plus
 `details: { code: "model_unavailable", modelId }`; retrying the same request
 cannot succeed, so clients must choose another model. The web console detects
-the missing model from the workspace catalog, says the chat's model is no longer
-available, and preselects the resolved default for the next message only. A
-refused send keeps the typed message behind Edit message instead of Retry.
+a deployment model missing from the workspace catalog (connection-owned custom
+and subscription models are judged only by that refusal, because a session may
+keep a retained definition), says the chat's model is no longer available, and
+preselects the resolved default for the next message only. A refused send keeps
+the typed message behind Edit message instead of Retry.
 
 Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
 retirement, not a hard delete. The provider-qualified slug leaves new model

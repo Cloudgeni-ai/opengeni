@@ -61,7 +61,7 @@ const models = [astra, sol, codex];
 const rows = sortPickerRows(projectPickerRows(models));
 
 describe("sessionModelMissingFromCatalog", () => {
-  const loaded = { models, loading: false, error: null };
+  const loaded = { models, error: null };
 
   test("a model the loaded catalog no longer lists is unavailable", () => {
     expect(
@@ -101,11 +101,30 @@ describe("sessionModelMissingFromCatalog", () => {
     ).toBe(false);
   });
 
-  test("stays unknown while the catalog is loading, failed, or empty", () => {
+  test("stays unknown until the catalog has loaded, or when it failed", () => {
     const model = "gpt-6-luna";
-    expect(sessionModelMissingFromCatalog({ ...loaded, model, loading: true })).toBe(false);
     expect(sessionModelMissingFromCatalog({ ...loaded, model, error: "Try again." })).toBe(false);
     expect(sessionModelMissingFromCatalog({ ...loaded, model, models: [] })).toBe(false);
+  });
+
+  test("leaves connection- and subscription-owned models to the API refusal", () => {
+    // An existing session may keep running a retained custom definition the
+    // catalog no longer lists, and the edge admits subscription namespaces.
+    for (const model of [
+      "workspace-gateway/vendor/retired-slug",
+      "organization-openrouter/vendor/retired-slug",
+      "workspace-anthropic/claude-retired",
+      "organization-claude-subscription/claude-retired",
+      "workspace-openai-00000000-0000-4000-8000-000000000001/gpt-custom",
+      "codex/gpt-legacy",
+      "supergrok/grok-legacy",
+    ]) {
+      expect(sessionModelMissingFromCatalog({ ...loaded, model })).toBe(false);
+    }
+    // The deployment OpenRouter rail is catalog-owned.
+    expect(
+      sessionModelMissingFromCatalog({ ...loaded, model: "openrouter/vendor/retired-model:free" }),
+    ).toBe(true);
   });
 });
 
@@ -123,7 +142,6 @@ describe("unavailableModelReplacement", () => {
   test("prefers the server-resolved default and keeps a runnable speed", () => {
     expect(
       unavailableModelReplacement({
-        models,
         rows,
         defaultSelection: { model: "gpt-6-sol", reasoningEffort: "high", source: "credits" },
         latencyMode: "standard",
@@ -140,7 +158,6 @@ describe("unavailableModelReplacement", () => {
   test("resets a speed the replacement cannot run", () => {
     expect(
       unavailableModelReplacement({
-        models,
         rows,
         defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
         latencyMode: "priority",
@@ -152,7 +169,6 @@ describe("unavailableModelReplacement", () => {
   test("a remote-compaction session is only offered Codex models", () => {
     expect(
       unavailableModelReplacement({
-        models,
         rows,
         defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
         latencyMode: "standard",
@@ -161,10 +177,31 @@ describe("unavailableModelReplacement", () => {
     ).toBe("codex/gpt-6-sol");
   });
 
+  test("falls back to another selectable row when the preferred one is filtered out", () => {
+    const codexMini = catalogModel({
+      id: "codex/gpt-6-mini",
+      label: "GPT-6 Mini (Codex)",
+      source: "codex",
+    });
+    const unselectableCodex = catalogModel({
+      id: "codex/gpt-6-sol",
+      source: "codex",
+      availability: { status: "unavailable", selectable: false, reason: null, checkedAt: null },
+    });
+    const pool = [astra, unselectableCodex, codexMini];
+    const replacement = unavailableModelReplacement({
+      rows: sortPickerRows(projectPickerRows(pool)),
+      defaultSelection: { model: "gpt-6-astra", reasoningEffort: "low", source: "deployment" },
+      latencyMode: "standard",
+      codexOnly: true,
+    });
+    expect(replacement?.model).toBe("codex/gpt-6-mini");
+    expect(replacement?.reasoningEffort).toBe("low");
+  });
+
   test("returns null when nothing is selectable", () => {
     expect(
       unavailableModelReplacement({
-        models: [],
         rows: [],
         defaultSelection: null,
         latencyMode: "standard",
