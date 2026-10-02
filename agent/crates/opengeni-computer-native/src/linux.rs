@@ -2848,7 +2848,7 @@ mod action_tests {
         let error = result.expect_err("empty action list cannot invoke");
         assert_eq!(error.code, NativeAdapterErrorCode::Unsupported);
         assert!(!error.dispatched);
-        assert!(mutations.is_empty());
+        assert_eq!(mutations, [] as [i32; 0]);
     }
 
     #[tokio::test]
@@ -2857,7 +2857,7 @@ mod action_tests {
         let error = result.expect_err("action-list read must fail before mutation");
         assert_eq!(error.code, NativeAdapterErrorCode::DriverFailed);
         assert!(!error.dispatched);
-        assert!(mutations.is_empty());
+        assert_eq!(mutations, [] as [i32; 0]);
     }
 
     #[tokio::test]
