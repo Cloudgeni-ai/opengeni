@@ -94,6 +94,64 @@ async function fixture() {
       expectedAuthorityEpoch: 1,
       operationKey: crypto.randomUUID(),
     });
+  const createPrivateChild = async (parentSessionId: string) => {
+    const submitted = await withWorkspaceSubjectSessionActivityRls(
+      client!.db,
+      workspaceId,
+      subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId,
+            workspaceId,
+            sessionId: parentSessionId,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "SECRET CHILD PROMPT",
+            resources: [],
+            model: "fixture-model",
+            reasoningEffort: "medium",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client!.db, workspaceId, {
+      sessionId: parentSessionId,
+      workflowId: `session-${parentSessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId)
+      throw new Error("Visible parent was not claimed");
+    const child = await createSession(client!.db, {
+      accountId,
+      workspaceId,
+      parentSessionId,
+      visibility: "workspace_shared",
+      initialMessage: "SECRET PRIVATE CHILD CONTENT",
+      resources: [],
+      metadata: {},
+      model: "fixture-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: parentSessionId,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+      },
+    });
+    await makePrivate(child.id);
+    return child;
+  };
   const readWorkspace = (
     viewer: string,
     filter: { provider?: string; model?: string; rootSessionId?: string; sessionId?: string } = {},
@@ -120,6 +178,7 @@ async function fixture() {
     subjectId,
     create,
     makePrivate,
+    createPrivateChild,
     readWorkspace,
     readOrganization,
     readModels,
@@ -138,6 +197,7 @@ async function charge(
     credits: number;
     estimate: number | null;
     tokens?: number | null;
+    scheduledTaskId?: string | null;
     at?: string;
   },
 ) {
@@ -151,13 +211,13 @@ async function charge(
   await shared.admin`insert into model_call_facts
     (account_id, workspace_id, session_id, turn_id, source_key, provider, provider_api, model,
      billing_path, input_tokens, output_tokens, cached_tokens, total_tokens, priced_cost_micros,
-     estimated_provider_cost_micros, pricing_source, context_contributions, occurred_at)
+     estimated_provider_cost_micros, pricing_source, context_contributions, scheduled_task_id, occurred_at)
     values (${seeded.accountId}, ${seeded.workspaceId}, ${sessionId}, ${turnId}, ${source},
       ${provider}, 'responses', ${input.model ?? "ledger-model"}, ${billingPath},
       ${tokens}, 0, null, ${tokens}, ${input.credits}, ${input.estimate},
       ${input.estimate === null ? null : "configured_list_price"},
       '[{"source":"company_profile","items":1,"utf8Bytes":40,"estimatedTokens":10}]'::jsonb,
-      ${at})`;
+      ${input.scheduledTaskId ?? null}, ${at})`;
   await shared.admin`insert into usage_events
     (account_id, workspace_id, session_id, event_type, quantity, unit,
      source_resource_type, source_resource_id, idempotency_key, occurred_at)
@@ -483,8 +543,10 @@ test("201 owners truncate only private rows; >50 models never cap payer accounti
   const seeded = await fixture();
   const viewer = seeded.subjectId;
   const sessions: string[] = [];
+  let highestOwnerSubject = "";
   for (let index = 0; index < 201; index++) {
     const subjectId = `user:private-owner-${crypto.randomUUID()}`;
+    if (index === 200) highestOwnerSubject = subjectId;
     const personalId = crypto.randomUUID();
     await shared.admin`insert into workspaces (id, account_id, name) values (${personalId}, ${seeded.accountId}, 'Personal')`;
     await shared.admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
@@ -546,5 +608,62 @@ test("201 owners truncate only private rows; >50 models never cap payer accounti
   expect(onlyOne.privateChats).toHaveLength(1);
   expect(onlyOne.privateChatsTruncated).toBe(false);
   expect(onlyOne.modelCalls).toBe(1);
+  const stableKey = onlyOne.privateChats[0]!.ownerKey;
+  // Missing workspace membership must not erase amounts or turn the stable
+  // person key into a chat identity. Names become null after that owner leaves.
+  await shared.admin`delete from workspace_memberships where account_id = ${seeded.accountId}
+    and workspace_id = ${seeded.workspaceId} and subject_id = ${highestOwnerSubject}`;
+  const departed = (await seeded.readWorkspace(viewer, { model: "capped-model-200" })).snapshot;
+  expect(departed.privateChats[0]).toMatchObject({ ownerKey: stableKey, name: null, calls: 1 });
+  const departedOrganization = await seeded.readOrganization(viewer);
+  expect(departedOrganization.privateChats[0]!.name).toBeNull();
+  expect(cost(departedOrganization.totals)?.quantity).toBe(expected.ledger.amount);
+  expect(JSON.stringify({ departed, departedOrganization })).not.toContain(highestOwnerSubject);
+  expect(await accountingState(seeded)).toEqual(unchanged);
+});
+
+test("private child under a visible root contributes amounts but not root drivers, schedules or prompt details", async () => {
+  if (!shared || !client) return;
+  const seeded = await fixture();
+  const publicRoot = await seeded.create();
+  const privateChild = await seeded.createPrivateChild(publicRoot.id);
+  const hiddenSchedule = crypto.randomUUID();
+  await shared.admin`update sessions set title = 'SECRET PRIVATE CHILD TITLE' where id = ${privateChild.id}`;
+  await charge(seeded, publicRoot.id, { credits: 101, estimate: 77 });
+  const hidden = await charge(seeded, privateChild.id, {
+    credits: 47,
+    estimate: 31,
+    scheduledTaskId: hiddenSchedule,
+  });
+  const viewer = `user:child-viewer-${crypto.randomUUID()}`;
+  const expected = await oracle(seeded);
+  const unchanged = await accountingState(seeded);
+  const response = await seeded.readWorkspace(viewer);
+  const organization = await seeded.readOrganization(viewer);
+  expect(response.snapshot.workspaceCreditUsd).toBe(Number(expected.ledger.amount) / 1_000_000);
+  expect(cost(organization.totals)?.quantity).toBe(expected.ledger.amount);
+  expect(response.snapshot.modelCalls).toBe(2);
+  expect(response.snapshot.drivers).toHaveLength(1);
+  expect(response.snapshot.drivers[0]).toMatchObject({
+    id: `root:${publicRoot.id}`,
+    creditUsd: 101 / 1_000_000,
+  });
+  expect(response.snapshot.privateChats[0]).toMatchObject({ calls: 1, creditUsd: 47 / 1_000_000 });
+  expect(response.snapshot.recentCalls.map((row) => row.sessionId)).toEqual([publicRoot.id]);
+  expect(response.snapshot.promptContributions.estimatedTokens).toBe(10);
+  expect(response.snapshot.schedules).toEqual([]);
+  const scoped = await seeded.readWorkspace(viewer, { rootSessionId: publicRoot.id });
+  expect(scoped.snapshot.modelCalls).toBe(1);
+  expect(scoped.snapshot.privateChats).toEqual([]);
+  const wire = JSON.stringify({ response, organization, scoped });
+  for (const secret of [
+    privateChild.id,
+    hidden.turnId,
+    hidden.source,
+    hiddenSchedule,
+    "SECRET PRIVATE CHILD TITLE",
+    "SECRET PRIVATE CHILD CONTENT",
+  ])
+    expect(wire).not.toContain(secret);
   expect(await accountingState(seeded)).toEqual(unchanged);
 });

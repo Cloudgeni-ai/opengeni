@@ -867,6 +867,10 @@ describe("Workspace Insights model bundle", () => {
           ${`usage:model.cost:${sourceResourceId}`},
           ${occurredAt}::timestamptz + ${`${call.position} minutes`}::interval
         )`;
+      await shared.admin`insert into credit_ledger_entries
+        (account_id, workspace_id, type, amount_micros, source_type, source_id, idempotency_key, occurred_at)
+        values (${seeded.accountId}, ${seeded.workspaceId}, 'usage_debit', ${-call.costMicros},
+          'model_response', ${sourceResourceId}, ${`debit:${sourceResourceId}`}, ${occurredAt})`;
     }
     for (const call of [calls[0]!, calls[2]!]) {
       await shared.admin`
@@ -910,6 +914,18 @@ describe("Workspace Insights model bundle", () => {
       until: new Date("2026-08-16T00:00:00.000Z"),
     };
 
+    const ledgerState = async () =>
+      await shared!.admin`
+        select 'usage' as source, count(*)::text as rows,
+          md5(coalesce(string_agg(to_jsonb(row)::text, '' order by row.id), '')) as fingerprint
+        from usage_events row where account_id = ${seeded.accountId}
+        union all
+        select 'debits', count(*)::text,
+          md5(coalesce(string_agg(to_jsonb(row)::text, '' order by row.id), ''))
+        from credit_ledger_entries row where account_id = ${seeded.accountId}
+        order by source`;
+    const unchanged = await ledgerState();
+
     const bounded = await reconcileModelCallFacts(client.db, { ...window, limit: 1 });
     expect(bounded).toEqual({ missing: 1, repaired: 1, unrepaired: 0, truncated: true });
 
@@ -925,6 +941,7 @@ describe("Workspace Insights model bundle", () => {
 
     const again = await reconcileModelCallFacts(client.db, window);
     expect(again).toEqual({ missing: 1, repaired: 0, unrepaired: 1, truncated: false });
+    expect(await ledgerState()).toEqual(unchanged);
   });
 
   test("reduces model sources from nine legacy reads to two by default and three with filtered facets", async () => {
