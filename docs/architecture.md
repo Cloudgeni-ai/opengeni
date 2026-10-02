@@ -104,6 +104,11 @@ Conversation/goals/queues/usage/provider/tool transcripts never enter workflow h
 Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 
+Stalled turn finalization requests host-owned graceful shutdown, so peer turns
+checkpoint and hand off before the existing shutdown ceiling contains a stuck
+writer. Cleanup may consume an independently committed exact retained-process
+terminal proof; it never manufactures quiescence or replays an unknown command.
+
 Control observation is not settlement: unavailable reads/owned attempts keep
 bounded, interruptible waits without marking idle, revoking writers or dispatching
 successors; Temporal metadata never proves writer quiescence.
