@@ -50,6 +50,7 @@ import {
   createOpenGeniClient,
   fetchAuthSession,
   fetchClientConfig,
+  checkDeploymentRevision,
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
@@ -68,6 +69,7 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { readBootstrap } from "@/lib/bootstrap-read";
+import { startDeploymentRefresh } from "@/lib/deployment-refresh";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -916,6 +918,7 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (isPublicDevHarness) return;
     let cancelled = false;
+    let stopDeploymentRefresh = () => {};
     const controller = new AbortController();
     // Let synchronous effect cleanup (including StrictMode's discarded mount)
     // cancel before starting I/O. Active requests still abort on real cleanup.
@@ -940,6 +943,7 @@ export function RootRouteComponent() {
         // the deployer's configured default — a silent billing footgun).
         setReasoningEffort(initialReasoningEffort(config));
         setLatencyMode("standard");
+        stopDeploymentRefresh = startDeploymentRefresh(checkDeploymentRevision);
       })
       .catch((error) => {
         if (cancelled) {
@@ -951,6 +955,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
       controller.abort();
+      stopDeploymentRefresh();
     };
   }, [configRequestVersion, isPublicDevHarness]);
 
