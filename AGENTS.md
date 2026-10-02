@@ -264,6 +264,12 @@ preserves the router, never removed execution authority.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+Claude Messages requests group retained system inputs after the user inputs in
+the same assistant-delimited phase: the system beta forbids `user → system → user`.
+This is a request-local projection; keep canonical roles/content and compaction
+truth unchanged. Bounded provider error type/message belongs on `turn.failed`
+detail, not in generic transport exception text or serialized request logs.
+
 Message-boundary forks may copy an active source's validated retained prefix
 under the existing exclusive tenancy and workspace/source row locks. Preserve
 fail-closed boundary checks, ordered history and receipt replay; do not relax

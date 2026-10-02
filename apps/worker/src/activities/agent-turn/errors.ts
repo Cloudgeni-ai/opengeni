@@ -12,6 +12,7 @@ import {
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicRequestError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionProviderRejection,
@@ -1047,7 +1048,28 @@ export function agentRunFailurePayload(
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
+  if (error instanceof AnthropicRequestError) {
+    return {
+      ...failure,
+      code: failure.code ?? error.code,
+      retryable: failure.retryable ?? false,
+      ...(error.detail ? { detail: error.detail } : {}),
+      ...(error.request_id ? { requestId: error.request_id } : {}),
+    };
+  }
   return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+/** Keep Anthropic provider text on terminal failures, never recovery events. */
+export function agentRunRecoveryFailurePayload(
+  error: unknown,
+  failure: ReturnType<typeof agentRunFailurePayload>,
+): ReturnType<typeof agentRunFailurePayload> {
+  if (!(error instanceof AnthropicRequestError)) return failure;
+  // Project a copy: retry exhaustion still needs the terminal diagnostic.
+  const recovery = { ...failure };
+  delete recovery.detail;
+  return recovery;
 }
 
 function baseAgentRunFailurePayload(

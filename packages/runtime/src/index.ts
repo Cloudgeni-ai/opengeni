@@ -6,6 +6,7 @@ import {
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+export { AnthropicRequestError } from "./anthropic-request-error";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";

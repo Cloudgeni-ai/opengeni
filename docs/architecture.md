@@ -361,6 +361,10 @@ catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
 provider/billing identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
+Its request-local system placement groups each assistant-delimited input phase
+at Anthropic's user/system boundary without changing canonical roles or content;
+`anthropic-request-error.ts` exposes bounded provider diagnostics to durable
+failure settlement while transport exception text stays structural.
 Accepted turns freeze provider identity, not cost; drain/fence before changing
 `free`/`credits`. Database `codexModels` changes membership, not credentials;
 retirement preserves exact accepted execution.

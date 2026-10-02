@@ -12,6 +12,8 @@ import {
 import { isModelCallFetch } from "../src/model-provider-transport";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { MultiProviderModelProvider } from "../src/model-provider-routing";
+import { buildCompactionReplacementHistory } from "../src/context-compaction";
+import compactedStagingShapes from "./fixtures/anthropic-compacted-staging-shapes.json";
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -49,7 +51,7 @@ const response = (content: unknown[], stop = "end_turn") => ({
   },
 });
 
-test("initial system and developer instructions move to top-level while later policy stays in place", () => {
+test("initial instructions move to top-level and later systems retain their input phase", () => {
   const input: ModelRequest["input"] = [
     { role: "system", content: "Skill catalog" },
     { role: "developer", content: "Initial policy" },
@@ -65,7 +67,11 @@ test("initial system and developer instructions move to top-level while later po
     "Initial policy",
   ]);
   expect(body.system.at(-1).cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
-  expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system", "user"]);
+  expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+  expect(body.messages[0].content.map((block: any) => block.text)).toEqual([
+    "Draw a chart",
+    "Continue",
+  ]);
   expect(body.messages[1].content[0].text).toBe("Later policy");
   expect(JSON.stringify(input)).toBe(before);
   expect(() =>
@@ -76,6 +82,153 @@ test("initial system and developer instructions move to top-level while later po
       true,
     ),
   ).toThrow("conversation message");
+});
+
+function expectValidSystemPlacement(messages: any[]) {
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== "system") continue;
+    expect(messages[index - 1]?.role).toBe("user");
+    expect(messages[index + 1]?.role ?? "assistant").toBe("assistant");
+  }
+}
+
+for (const fixture of compactedStagingShapes) {
+  test(`real staging post-compaction and machine-input shape ${fixture.sessionId} recovers without history writes`, async () => {
+    // Provenance: scoped read of durable session_history_items. Text is redacted;
+    // active row order, roles, string/array content and block counts are retained.
+    const input = fixture.input as ModelRequest["input"];
+    const before = JSON.stringify(input);
+    const oldProjection = anthropicMessages(input);
+    oldProjection.shift(); // Leading developer catalog goes to top-level system.
+    expect(oldProjection.map((message) => message.role)).toEqual([
+      "user",
+      "system",
+      "user",
+      "system",
+    ]);
+    let calls = 0;
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+      calls += 1;
+      const body = JSON.parse(String(init?.body));
+      // Strict provider-shape oracle: the pre-fix request fails this assertion.
+      expectValidSystemPlacement(body.messages);
+      expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+      expect(body.messages[0].content).toHaveLength(fixture.wireUserBlocks);
+      expect(body.messages[1].content).toHaveLength(fixture.wireSystemBlocks);
+      const sourceText = fixture.input.flatMap((item) =>
+        typeof item.content === "string" ? [item.content] : item.content.map((block) => block.text),
+      );
+      const wireText = [
+        ...body.system,
+        ...body.messages.flatMap((message: any) => message.content),
+      ].map((block: any) => block.text);
+      for (const text of sourceText)
+        expect(wireText.filter((value: string) => value === text)).toHaveLength(1);
+      return stream(events([{ type: "text", text: "Recovered" }]));
+    }) as typeof fetch);
+    const result: any = (await collect(model, request(input))).at(-1);
+    expect(result.response.output[0].content[0].text).toBe("Recovered");
+    expect(calls).toBe(1);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+}
+
+test("portable compaction's retained user/system inputs and user summary remain valid on Claude", () => {
+  const history = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Task" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Child result" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Continuing" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Follow up" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Goal context" }] },
+  ];
+  const compacted = buildCompactionReplacementHistory(history, "Work already completed");
+  // The canonical replacement deliberately preserves system-role machine input.
+  expect(compacted.map((item) => item.role)).toEqual(["user", "system", "user", "system", "user"]);
+  const input = compacted as ModelRequest["input"];
+  const before = JSON.stringify(input);
+  for (const streamed of [false, true]) {
+    const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, streamed);
+    expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+    expect(body.messages[1].content.map((block: any) => block.text)).toEqual([
+      "Child result",
+      "Goal context",
+    ]);
+    expect(body.messages[0].content.map((block: any) => block.text)).toEqual([
+      "Task",
+      "Follow up",
+      compacted.at(-1)!.content,
+    ]);
+    expectValidSystemPlacement(body.messages);
+  }
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+test("system placement preserves assistant phases, tool pairing and exact signed thinking", () => {
+  const thinking = { type: "thinking", thinking: "Thought", signature: "signature" };
+  const input: ModelRequest["input"] = [
+    { role: "user", content: "Task" },
+    { role: "system", content: "First system" },
+    { role: "user", content: "More input" },
+    { type: "reasoning", content: [], providerData: { anthropic: { block: thinking } } },
+    { type: "function_call", name: "lookup", callId: "call_1", arguments: "{}" },
+    { role: "system", content: "Tool phase system" },
+    { type: "function_call_result", name: "lookup", callId: "call_1", output: "Result" },
+    { role: "system", content: "Second tool phase system" },
+    { role: "assistant", content: "Done" },
+    { role: "user", content: "Next turn" },
+  ];
+  const before = JSON.stringify(input);
+  const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, true);
+  expect(body.messages.map((message: any) => message.role)).toEqual([
+    "user",
+    "system",
+    "assistant",
+    "user",
+    "system",
+    "assistant",
+    "user",
+  ]);
+  expectValidSystemPlacement(body.messages);
+  expect(body.messages[2].content[0]).toEqual(thinking);
+  expect(body.messages[3].content[0]).toMatchObject({ type: "tool_result", tool_use_id: "call_1" });
+  expect(body.messages[4].content.map((block: any) => block.text)).toEqual([
+    "Tool phase system",
+    "Second tool phase system",
+  ]);
+  expect(JSON.stringify(input)).toBe(before);
+  expect(() =>
+    buildAnthropicRequest(
+      request([
+        { role: "user", content: "Task" },
+        { role: "assistant", content: "Done" },
+        { role: "system", content: "Unplaceable system" },
+        { role: "assistant", content: "More" },
+      ]),
+      "claude",
+      provider,
+      true,
+    ),
+  ).toThrow("preceding user");
+});
+
+test("successful continuation keeps the compacted request prefix stable on the next turn", () => {
+  const compacted: ModelRequest["input"] = [
+    { role: "user", content: "Retained task" },
+    { role: "system", content: "Retained machine input" },
+    { role: "user", content: "Checkpoint summary" },
+  ];
+  const before = buildAnthropicRequest(request(compacted), "claude-opus-5-5", provider, true);
+  const continued: ModelRequest["input"] = [
+    ...compacted,
+    { role: "assistant", content: "Resumed successfully" },
+    { role: "user", content: "Next turn" },
+    { role: "system", content: "New machine input" },
+  ];
+  const after = buildAnthropicRequest(request(continued), "claude-opus-5-5", provider, true);
+  expect(after.messages.slice(0, before.messages.length)).toEqual(before.messages);
+  expect(after.system).toEqual(before.system);
+  expectValidSystemPlacement(after.messages);
 });
 
 function stream(frames: unknown[], oneByte = false) {
@@ -469,6 +622,76 @@ test("HTTP context overflow exposes a typed recovery signal without echoing inpu
   } catch (error: any) {
     expect(error.code).toBe("context_length_exceeded");
     expect(error.message).not.toContain("private user text");
+  }
+});
+
+test("HTTP and SSE provider type/message reach turn.failed detail without retaining the body or request", async () => {
+  const { agentRunFailurePayload } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const streamed of [false, true]) {
+    const envelope = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "messages.2: system must precede assistant",
+        request: "private echoed content",
+      },
+      request: "private body field",
+    };
+    const model = new AnthropicMessagesModel(provider, "claude", (async () =>
+      streamed
+        ? new Response(stream([envelope]).body, { headers: { "request-id": "req_invalid" } })
+        : Response.json(envelope, {
+            status: 400,
+            headers: { "request-id": "req_invalid" },
+          })) as typeof fetch);
+    let error: any;
+    try {
+      if (streamed) await collect(model, request("private outgoing request"));
+      else await model.getResponse(request("private outgoing request"));
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error.status).toBe(400);
+    const failure = agentRunFailurePayload(error);
+    expect(failure).toMatchObject({
+      detail: "invalid_request_error: messages.2: system must precede assistant",
+      requestId: "req_invalid",
+      retryable: false,
+    });
+    expect(JSON.stringify(failure)).not.toContain("private");
+    expect(error.message).not.toContain("system must precede");
+    expect(JSON.stringify(error)).not.toContain("system must precede");
+  }
+});
+
+test("provider diagnostics are UTF-8 bounded and malformed/non-JSON bodies retain status only", async () => {
+  const { agentRunFailurePayload } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const body of [
+    JSON.stringify({ error: { type: "invalid_request_error", message: "💥".repeat(4000) } }),
+    "private HTML error",
+    '{"error":',
+  ]) {
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude",
+      (async () => new Response(body, { status: 400 })) as typeof fetch,
+    );
+    let error: any;
+    try {
+      await model.getResponse(request());
+    } catch (caught) {
+      error = caught;
+    }
+    const failure = agentRunFailurePayload(error);
+    expect(failure.code).toBe("anthropic_http_error");
+    expect(failure.retryable).toBe(false);
+    if (body.startsWith('{"error":{"')) {
+      expect(Buffer.byteLength(failure.detail!)).toBeLessThanOrEqual(4096);
+      expect(failure.detail).toEndWith("… [truncated]");
+      expect(failure.detail).not.toContain("\ufffd");
+    } else expect(failure.detail).toBeUndefined();
   }
 });
 
