@@ -348,6 +348,10 @@ Find current MCP behavior in config parsing, tool validation, runtime `prepareTo
 
 ## Scheduling Discovery
 
+The stock Schedules chat shortcut sends the request and time zone. Its setup
+procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
+selected through the worker's configured bundled-Skill rules.
+
 For queueing or scheduling work:
 
 1. Inspect turn queue state and claim logic.

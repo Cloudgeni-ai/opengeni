@@ -942,11 +942,8 @@ admission; see [run lifecycle](run-lifecycle.md).
 `artifacts:publish`, archive, restore, and exact mutation fences apply;
 pure service work fails closed. See [run lifecycle](run-lifecycle.md).
 
-Tool disclosure is progressive, but authority is not. A tool may be eager or
-lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
-still resolves through the current authorized catalog and the same execution
-fences. Approval-required tools remain approval-required regardless of access
-path.
+Eager/lazy, local/MCP-backed, and model/Codemode tool calls share the current
+authorized catalog, execution fences, and approval requirements.
 
 The closed always-visible local first-request set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -957,12 +954,11 @@ remain behind progressive search.
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
-Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
-ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
-`opengeni-client`, `opengeni-help`, `opengeni-visualize`, and `document-parsing`,
-unless explicitly overridden. `.agents/skills/opengeni-client` is canonical;
-`scripts/sync-client-skill.ts` generates bundled and docs-site copies with drift tests.
-Every deployment can read it without installation or sandbox setup.
+Repository guidance lives in `.agents/skills`; runtime bundles in
+`packages/runtime/src/bundled_*_skills`. `scripts/sync-client-skill.ts` generates
+client assets/docs from `.agents/skills/opengeni-client`, with drift tests.
+`opengeni-schedules` supplies creation guidance when tools/host selection permit;
+the Schedules shortcut sends only the request and time zone.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
