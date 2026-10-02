@@ -1397,6 +1397,99 @@ describe("ComputerViewer", () => {
     await rendered.unmount();
   });
 
+  test("keeps usable background controls visible after a large structural tree", async () => {
+    const backgroundWindow = { ...target(), focused: false };
+    const observed = observation(backgroundWindow);
+    observed.semantic = {
+      kind: "snapshot",
+      nodeCount: 129,
+      roots: [
+        {
+          ref: "root",
+          role: "frame",
+          name: "Test window",
+          states: [],
+          actions: ["invoke"],
+          children: [
+            ...Array.from({ length: 125 }, (_, index) => ({
+              ref: `panel-${index}`,
+              role: "panel",
+              name: "Layout container",
+              states: [],
+              actions: ["invoke"],
+            })),
+            { ref: "run", role: "button", name: "Run checks", states: [], actions: ["invoke"] },
+            { ref: "focus", role: "entry", name: "Focus only", states: [], actions: ["focus"] },
+            {
+              ref: "value",
+              role: "entry",
+              name: "Name",
+              value: "first",
+              states: [],
+              actions: ["set_value"],
+            },
+          ],
+        },
+      ],
+    };
+    const actions: unknown[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [backgroundWindow],
+      }),
+      observeComputerTarget: async () => observed,
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        actions.push(request);
+        return receipt(observed, request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+    const controls = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Controls 2",
+    );
+    expect(controls).toBeDefined();
+    await actRun(() => controls!.click());
+    const panel = rendered.container.querySelector("aside")!;
+    expect(panel.textContent).not.toContain("Layout container");
+    expect(panel.textContent).not.toContain("Focus only");
+    expect(panel.querySelector<HTMLInputElement>('input[aria-label="Set Name"]')?.value).toBe(
+      "first",
+    );
+    const run = [...panel.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Run checks"),
+    );
+    expect(run?.disabled).toBe(false);
+    await actRun(() => run!.click());
+    await flush(5);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      expectedObservationId: observed.observationId,
+      action: { type: "semantic", locator: { kind: "ref", ref: "run" }, action: "invoke" },
+    });
+    expect(
+      rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Desktop keyboard input']",
+      )?.disabled,
+    ).toBe(true);
+    await rendered.unmount();
+  });
+
   test("keeps semantic controls live but disables raw input for an unfocused background window", async () => {
     const backgroundWindow = { ...target(), focused: false };
     const actions: unknown[] = [];
