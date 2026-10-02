@@ -18,75 +18,6 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
-/** Closed provider rejections carry authored copy, never arbitrary response text. */
-export class AnthropicProviderRejection extends Error {
-  readonly name = "AnthropicProviderRejection";
-  constructor(
-    readonly code:
-      | "anthropic_model_access_suspended"
-      | "anthropic_permission_denied"
-      | "content_policy_violation",
-    readonly status: number,
-    readonly request_id?: string,
-    readonly suspendedUntil?: string,
-    readonly headers: Record<string, string> = {},
-  ) {
-    super(
-      code === "anthropic_model_access_suspended"
-        ? suspendedUntil
-          ? `Claude suspended access to this model for the connected account until ${suspendedUntil.replace("T", " ").replace(/(?:\.000)?Z$/, " UTC")}. Try again after that time.`
-          : "Claude suspended access to this model for the connected account. Signing in again will not lift this restriction."
-        : code === "content_policy_violation"
-          ? "Claude blocked this request through its safety systems. Automatic retries stopped."
-          : "Claude denied this request (HTTP 403). Check the connected account's permissions.",
-    );
-  }
-}
-
-function suspensionDeadline(error: Json): string | undefined {
-  if (typeof error.message !== "string") return undefined;
-  const raw =
-    /^model: "[A-Za-z0-9._:/-]{1,128}" is suspended for this organization until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/.exec(
-      error.message,
-    )?.[1];
-  if (!raw) return undefined;
-  const date = new Date(raw);
-  if (!Number.isFinite(date.getTime())) return undefined;
-  const normalized = date.toISOString();
-  return normalized.replace(/\.000Z$/, "Z") === raw.replace(/\.000Z$/, "Z")
-    ? normalized
-    : undefined;
-}
-
-function providerRejection(
-  status: number,
-  detail: unknown,
-  responseHeaders: Headers,
-): AnthropicProviderRejection | undefined {
-  if (status !== 403) return undefined;
-  const requestId = responseHeaders.get("request-id") ?? undefined;
-  const headers = responseHeaders.has("retry-after")
-    ? { "retry-after": responseHeaders.get("retry-after")! }
-    : {};
-  const error =
-    detail && typeof detail === "object" && !Array.isArray(detail) ? (detail as Json) : {};
-  if (error.type === "permission_error" && error.details?.error_code === "model_access_suspended")
-    return new AnthropicProviderRejection(
-      "anthropic_model_access_suspended",
-      status,
-      requestId,
-      suspensionDeadline(error),
-      headers,
-    );
-  return new AnthropicProviderRejection(
-    "anthropic_permission_denied",
-    status,
-    requestId,
-    undefined,
-    headers,
-  );
-}
-
 function object(value: unknown): Json {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new AnthropicProtocolError("Expected an object in the Claude protocol");
@@ -622,25 +553,23 @@ export class AnthropicMessagesModel implements Model {
       const contextExceeded =
         response.status === 400 &&
         /prompt is too long|context_length_exceeded|exceeds.*context window/i.test(detail);
-      let providerError: unknown;
-      try {
-        providerError = JSON.parse(detail).error;
-      } catch {
-        /* Diagnostics can be truncated. */
-      }
-      const rejection = providerRejection(response.status, providerError, response.headers);
-      if (rejection) throw rejection;
       // Classify the bounded provider detail without leaking echoed prompts or credentials.
       const message = contextExceeded
         ? "Claude context window exceeded"
         : response.status === 401
           ? "Claude credentials expired or were revoked. Replace the key or setup token in Models."
           : "Claude request failed (HTTP " + response.status + ")";
+      let source: unknown;
+      try {
+        source = JSON.parse(detail)?.error;
+      } catch {
+        // Malformed, truncated or non-JSON bodies retain structural status only.
+      }
       throw new AnthropicRequestError(
         message,
         response.status,
         contextExceeded ? "context_length_exceeded" : "anthropic_http_error",
-        providerError,
+        source,
         response.headers,
       );
     }
@@ -682,15 +611,23 @@ export class AnthropicMessagesModel implements Model {
           overloaded_error: 529,
         };
         const status = typeof kind === "string" ? (statuses[kind] ?? 502) : 502;
-        const rejection = providerRejection(status, event.error, response.headers);
-        if (rejection) throw rejection;
-        throw new AnthropicRequestError(
-          `Claude stream failed (HTTP ${status})`,
+        throw Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
           status,
-          status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
-          event.error,
-          response.headers,
-        );
+          code: status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+          request_id: response.headers.get("request-id"),
+          headers: response.headers.has("retry-after")
+            ? { "retry-after": response.headers.get("retry-after")! }
+            : {},
+          // Keep the structural stream wrapper stable for provider rejection
+          // guards while the typed cause keeps provider text private.
+          cause: new AnthropicRequestError(
+            `Claude stream failed (HTTP ${status})`,
+            status,
+            status === 429 ? "rate_limit_exceeded" : "anthropic_stream_error",
+            event.error,
+            response.headers,
+          ),
+        });
       }
       switch (event.type) {
         case "message_start":

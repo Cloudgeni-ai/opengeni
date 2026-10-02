@@ -6,13 +6,12 @@ import {
 } from "./prepared-compaction-request";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
-export { AnthropicProviderRejection } from "./anthropic-messages";
-export { AnthropicRequestError } from "./anthropic-request-error";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
+export { AnthropicRequestError } from "./anthropic-request-error";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,

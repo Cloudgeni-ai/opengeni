@@ -1,4 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import { inspect } from "node:util";
 import * as opengeniDb from "@opengeni/db";
 import { AnthropicRequestError } from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
@@ -15,7 +16,7 @@ import {
   type TurnFailureDeps,
 } from "../src/activities/agent-turn/failure-settlement";
 
-function failureDeps(error: AnthropicRequestError) {
+function failureDeps(error: Error) {
   const settle = mock(async () => true);
   const deps = {
     error,
@@ -79,20 +80,31 @@ function failureDeps(error: AnthropicRequestError) {
 }
 
 describe("Anthropic failure diagnostic purpose", () => {
-  for (const [status, type, failureCode] of [
-    [429, "rate_limit_error", "provider_rate_limited"],
-    [503, "api_error", "provider_unavailable"],
+  for (const [status, type, failureCode, wrapped] of [
+    [429, "rate_limit_error", "provider_rate_limited", false],
+    [503, "api_error", "provider_unavailable", false],
+    [429, "rate_limit_error", "provider_rate_limited", true],
+    [503, "api_error", "provider_unavailable", true],
   ] as const) {
-    test(`${status} recovery omits provider text and exhausted turn.failed retains it`, async () => {
+    test(`${status} ${wrapped ? "SSE" : "HTTP"} recovery omits provider text and exhausted turn.failed retains it`, async () => {
       const providerMessage = "private provider diagnostic";
       const providerDetail = `${type}: ${providerMessage}`;
-      const error = new AnthropicRequestError(
+      const diagnostic = new AnthropicRequestError(
         `Claude request failed (HTTP ${status})`,
         status,
         "anthropic_http_error",
         { type, message: providerMessage, request: "private echoed request" },
         new Headers({ "request-id": "req_diagnostic", "retry-after": "120" }),
       );
+      const error = wrapped
+        ? Object.assign(new Error(`Claude stream failed (HTTP ${status})`), {
+            status,
+            code: diagnostic.code,
+            request_id: diagnostic.request_id,
+            headers: diagnostic.headers,
+            cause: diagnostic,
+          })
+        : diagnostic;
       const terminal = agentRunFailurePayload(error);
       const before = JSON.stringify(terminal);
       const projected = agentRunRecoveryFailurePayload(error, terminal);
@@ -109,6 +121,8 @@ describe("Anthropic failure diagnostic purpose", () => {
       expect(providerRetryAfterMs(error)).toBe(120_000);
       expect(isTransientProviderError(error)).toBe(status === 503);
       expect(JSON.stringify(safeErrorDiagnostic(error))).not.toContain(providerMessage);
+      expect(JSON.stringify(error)).not.toContain(providerMessage);
+      expect(inspect(error)).not.toContain(providerMessage);
 
       const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
         action: "recovering",

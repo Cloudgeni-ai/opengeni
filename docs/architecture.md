@@ -364,15 +364,14 @@ provider/billing identities for identical slugs. Claude setup:
 Accepted turns freeze provider identity, not cost; drain/fence before changing
 `free`/`credits`. Database `codexModels` changes membership, not credentials;
 retirement preserves exact accepted execution.
+`packages/core/src/codex-model-availability.ts` requires exact live support on every
+permitted serving account for browser/default/agent choices. It rechecks authority,
+refreshes tokens, and caches support by workspace/credential/revision.
 
 Claude's request-local system placement groups each assistant-delimited input
 phase at Anthropic's user/system boundary without changing canonical roles or
 content; `anthropic-request-error.ts` exposes bounded provider diagnostics to
 durable failure settlement while transport exception text stays structural.
-
-`packages/core/src/codex-model-availability.ts` requires exact live support on every
-permitted serving account for browser/default/agent choices. It rechecks authority,
-refreshes tokens, and caches support by workspace/credential/revision.
 
 Cross-boundary enums are additive within major releases unless the release
 train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
