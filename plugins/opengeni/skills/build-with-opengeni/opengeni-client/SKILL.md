@@ -63,14 +63,15 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Four choices belong to the user: who shares what (`chats`: private, shared
-  or isolated), when things run (schedule and time zone), where outputs land
-  (which screen, record, or channel), and whether the agent may write. If the
-  request or repository does not settle any of them, ask ONE bundled question
-  (the structured question UI when available) with a recommended answer for
-  each, before building. This is the expected step, not an option: asking once
-  is cheap, rebuilding is not. Never ask what the repository answers. See
-  [Discovery and autonomy](references/discovery-and-autonomy.md).
+- Some choices belong to the user: who shares what (`chats`: private, shared
+  or isolated) and whether the agent may change data. Only when the integration
+  runs work in the background or on a schedule, also: when it runs (schedule and
+  time zone) and where its results should appear (a page in the app, a note on
+  a record, or a Slack/email message). A chat assistant's answers simply appear
+  in the chat; never ask about that. If the request or repository does not
+  settle a relevant choice, ask ONE short, plain-language question with a
+  recommended answer for each, before building. Never ask what the repository
+  answers. See [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.
 - Match the requested delivery autonomy. Repository or cloud access is

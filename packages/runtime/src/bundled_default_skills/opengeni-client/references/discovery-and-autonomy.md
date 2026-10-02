@@ -37,11 +37,13 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-The four user-owned choices (who shares what, when things run and in which time
-zone, where outputs land, whether the agent may write) are never defaulted
-silently: if the request or repository does not settle one, send the single
-bundled question before building the parts that depend on it, and continue only
-independent discovery while waiting. Skip this only when the user explicitly
+The user-owned choices (who shares what, whether the agent may change data,
+and, only for background or scheduled work, when it runs and where its results
+should appear) are never defaulted silently: if the request or repository does
+not settle a relevant one, send a single short question in plain product terms
+before building the parts that depend on it, and continue only independent
+discovery while waiting. A chat assistant's replies appear in the chat; that is
+not a question to ask. Skip this only when the user explicitly
 said not to ask; then state the defaults you chose in the handoff. For other
 choices, first use facts already available from the product, repository, live
 service, or prior direction, and use a reversible recommendation instead of a
