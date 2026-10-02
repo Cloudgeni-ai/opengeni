@@ -313,12 +313,12 @@ test.each(["chrome_internal", "intercepted_local"] as const)(
 );
 
 test.each([
-  { targetLifecycle: "runner", foregroundManagedTabs: false },
-  { targetLifecycle: "runner", foregroundManagedTabs: true },
-  { targetLifecycle: "cdp", foregroundManagedTabs: false },
+  { targetLifecycle: "runner", focusEmulation: false },
+  { targetLifecycle: "runner", focusEmulation: true },
+  { targetLifecycle: "cdp", focusEmulation: false },
 ] as const)(
-  "settles a new target using $targetLifecycle lifecycle (foreground=$foregroundManagedTabs)",
-  async ({ targetLifecycle, foregroundManagedTabs }) => {
+  "settles a new target using $targetLifecycle lifecycle (focusEmulation=$focusEmulation)",
+  async ({ targetLifecycle, focusEmulation }) => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "controller-background";
     let created = false;
@@ -445,7 +445,7 @@ test.each([
       controllerGeneration,
       runner,
       targetLifecycle,
-      foregroundManagedTabs,
+      focusEmulation,
       connect: async () => connection,
     });
     try {
@@ -481,8 +481,9 @@ test.each([
       });
       expect(createdTargetReads).toBeGreaterThanOrEqual(2);
       expect(createdFrameReads).toBeGreaterThanOrEqual(3);
-      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(
-        foregroundManagedTabs,
+      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
+      expect(calls.some((call) => call.method === "Emulation.setFocusEmulationEnabled")).toBe(
+        focusEmulation,
       );
       // Chromium can briefly report a non-URL main-frame placeholder even
       // after the target itself advertises the requested absolute URL.

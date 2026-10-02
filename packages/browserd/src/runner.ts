@@ -1061,6 +1061,9 @@ export function browserLaunchArguments(
   }
   return [
     "--restore-last-session",
+    // Compiled Chromium testing experiments can alter offscreen rendering.
+    // Keep managed automation on the browser's deterministic default behavior.
+    "--disable-field-trial-config",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
     // Component-update suppression does not stop Chromium's on-demand local

@@ -280,8 +280,8 @@ export type AgentBrowserDriverOptions = {
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
   tabControl?: boolean;
-  /** Private managed Chromium tabs must be foregrounded for scheduled UI updates. */
-  foregroundManagedTabs?: boolean;
+  /** Keep owned Chromium pages active without changing the foreground tab. */
+  focusEmulation?: boolean;
   frameStreaming?: boolean;
   emulation?: BrowserSessionEmulation;
   permissionControl?: boolean;
@@ -353,8 +353,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
   private readonly tabControl: boolean;
-  private readonly foregroundManagedTabs: boolean;
-  private foregroundTail: Promise<void> = Promise.resolve();
+  private readonly focusEmulation: boolean;
   private readonly frameStreaming: boolean;
   private readonly emulation: BrowserSessionEmulation | null;
   private readonly permissionControl: boolean;
@@ -395,13 +394,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       options.browserContextId !== undefined &&
       (!options.browserContextId ||
         options.targetLifecycle !== "cdp" ||
-        options.foregroundManagedTabs ||
         options.runner.externalAuth ||
         (options.engine !== undefined && options.engine !== "chromium"))
     ) {
-      throw new Error(
-        "ephemeral contexts require Chromium CDP lifecycle without foreground or external auth",
-      );
+      throw new Error("ephemeral contexts require Chromium CDP lifecycle without external auth");
     }
     this.browserContextId = options.browserContextId;
     this.browserSessionId = options.browserSessionId;
@@ -425,7 +421,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
     this.tabControl = options.tabControl ?? true;
-    this.foregroundManagedTabs = options.foregroundManagedTabs ?? false;
+    this.focusEmulation = options.focusEmulation ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.permissionControl = options.permissionControl ?? true;
@@ -485,7 +481,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       target = page;
     }
     this.selectedTargetId = target.targetId;
-    await this.activateManagedTarget(target.targetId);
     if (deferNavigation) {
       await this.navigate(await this.ensureTargetState(target), url);
     }
@@ -535,7 +530,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
-    await this.activateManagedTarget(result.targetId);
     if (deferNavigation) {
       await this.navigate(createdState, url);
     }
@@ -546,7 +540,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     this.selectedTargetId = targetId;
-    await this.activateManagedTarget(targetId);
     return await this.observe(targetId);
   }
 
@@ -854,80 +847,76 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const normalized = normalizeScreenshotOptions(options);
-    return await this.withTarget(
-      targetId,
-      async (state) => {
-        if (this.protectedAuthQuiet(state)) {
-          throw new InteractionDefiniteDriverError(
-            "permission_denied",
-            "browser screenshot is unavailable during protected authentication",
-          );
-        }
-        const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
-        await this.screenshotRead(
-          "Page.getFrameTree",
-          deadline,
-          async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+    return await this.withTarget(targetId, async (state) => {
+      if (this.protectedAuthQuiet(state)) {
+        throw new InteractionDefiniteDriverError(
+          "permission_denied",
+          "browser screenshot is unavailable during protected authentication",
         );
-        const metrics = await this.screenshotRead(
-          "Page.getLayoutMetrics",
-          deadline,
-          async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-        );
-        const capture: Record<string, unknown> = {
-          format: normalized.format,
-          fromSurface: true,
-          captureBeyondViewport: normalized.fullPage,
-          ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+      }
+      const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
+      await this.screenshotRead(
+        "Page.getFrameTree",
+        deadline,
+        async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+      );
+      const metrics = await this.screenshotRead(
+        "Page.getLayoutMetrics",
+        deadline,
+        async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+      );
+      const capture: Record<string, unknown> = {
+        format: normalized.format,
+        fromSurface: true,
+        captureBeyondViewport: normalized.fullPage,
+        ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+      };
+      let cssWidth = metrics.viewport.width;
+      let cssHeight = metrics.viewport.height;
+      let scrollX = metrics.viewport.x;
+      let scrollY = metrics.viewport.y;
+      if (normalized.fullPage) {
+        cssWidth = metrics.content.width;
+        cssHeight = metrics.content.height;
+        scrollX = 0;
+        scrollY = 0;
+        assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+        capture.clip = {
+          x: 0,
+          y: 0,
+          width: cssWidth,
+          height: cssHeight,
+          scale: 1,
         };
-        let cssWidth = metrics.viewport.width;
-        let cssHeight = metrics.viewport.height;
-        let scrollX = metrics.viewport.x;
-        let scrollY = metrics.viewport.y;
-        if (normalized.fullPage) {
-          cssWidth = metrics.content.width;
-          cssHeight = metrics.content.height;
-          scrollX = 0;
-          scrollY = 0;
-          assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-          capture.clip = {
-            x: 0,
-            y: 0,
-            width: cssWidth,
-            height: cssHeight,
-            scale: 1,
-          };
-        }
-        const response = await this.screenshotRead(
-          "Page.captureScreenshot",
-          deadline,
-          async (timeoutMs) =>
-            await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
-              timeoutMs,
-            }),
+      }
+      const response = await this.screenshotRead(
+        "Page.captureScreenshot",
+        deadline,
+        async (timeoutMs) =>
+          await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+            timeoutMs,
+          }),
+      );
+      const data = decodeBoundedBase64Image(response.data);
+      if (this.protectedAuthQuiet(state)) {
+        throw new InteractionDefiniteDriverError(
+          "permission_denied",
+          "browser screenshot is unavailable during protected authentication",
         );
-        const data = decodeBoundedBase64Image(response.data);
-        if (this.protectedAuthQuiet(state)) {
-          throw new InteractionDefiniteDriverError(
-            "permission_denied",
-            "browser screenshot is unavailable during protected authentication",
-          );
-        }
-        const dimensions = imageDimensions(data, normalized.format);
-        return this.imageFrame({
-          state,
-          sequence: 0,
-          format: normalized.format,
-          data,
-          width: dimensions.width,
-          height: dimensions.height,
-          deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-          scrollX,
-          scrollY,
-        });
-      },
-      true,
-    );
+      }
+      const dimensions = imageDimensions(data, normalized.format);
+      return this.imageFrame({
+        state,
+        sequence: 0,
+        format: normalized.format,
+        data,
+        width: dimensions.width,
+        height: dimensions.height,
+        deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
+        scrollX,
+        scrollY,
+      });
+    });
   }
 
   async subscribeFrames(
@@ -1033,118 +1022,114 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue>;
   async dispatch(commandInput: BrowserActionCommandValue): Promise<BrowserObservationValue | null> {
     const command = BrowserActionCommand.parse(commandInput);
-    const observation = await this.withTarget(
-      command.targetId,
-      async (state, info) => {
-        if (!state.dialog) await this.refreshFrame(state);
-        this.assertExpectedGenerations(command, state);
-        const actions = command.action.type === "batch" ? command.action.actions : [command.action];
-        if (state.dialog && actions[0]?.type !== "handle_dialog") {
-          throw new InteractionDefiniteDriverError(
-            "invalid_action",
-            "browser JavaScript dialog must be handled before another action",
-          );
-        }
-        let completedActions = 0;
-        for (const action of actions) {
-          try {
-            if (
-              completedActions > 0 &&
-              command.action.type === "batch" &&
-              command.action.fenceEachAction
-            ) {
-              await this.refreshFrame(state);
-              this.assertExpectedGenerations(command, state);
-            }
-            await this.dispatchAction(state, action, command.operationId);
-            completedActions += 1;
-            if (state.dialog) {
-              if (completedActions < actions.length) {
-                throw new Error("browser action batch paused on a JavaScript dialog");
-              }
-              break;
-            }
-          } catch (error) {
-            if (error instanceof DialogOpenedSignal) {
-              completedActions += 1;
-              if (completedActions < actions.length) {
-                throw new Error("browser action batch paused on a JavaScript dialog", {
-                  cause: error,
-                });
-              }
-              break;
-            }
-            if (error instanceof InteractionDefiniteDriverError && completedActions === 0)
-              throw error;
-            throw error instanceof InteractionDefiniteDriverError
-              ? new InteractionOutcomeUnknownDriverError(
-                  "outcome_unknown",
-                  `browser action batch completed ${completedActions} action(s) before a later action failed (${error.code}); re-observe before continuing`,
-                )
-              : error;
-          }
-        }
-        if (command.observationMode === "none") return null;
-        if (command.observationMode === "input") {
-          // A live viewer already has pixels. Only native dropdowns need the
-          // semantic options that Chromium's page stream cannot paint. Keep
-          // ordinary clicks off the full accessibility/snapshot path.
-          if (
-            command.action.type !== "pointer" ||
-            command.action.action !== "click" ||
-            (command.action.button !== undefined && command.action.button !== "left") ||
-            state.dialog ||
-            this.protectedAuthQuiet(state) ||
-            !this.focusedInputObservations
-          )
-            return null;
-          try {
-            if (!(await this.mayHaveFocusedNativeSelect(state))) return null;
-            const currentInfo = await this.requireTargetInfo(
-              await this.ensureConnection(),
-              info.targetId,
-            );
-            const observed = await this.observeUnlocked(state, currentInfo);
-            // A focused iframe is a hint only. The authoritative AX focus and
-            // redacted DOM metadata must actually identify a native select.
-            const pending = [
-              ...(observed.semantic?.kind === "snapshot" ? observed.semantic.roots : []),
-            ];
-            while (pending.length) {
-              const node = pending.pop()!;
-              if (node.children) pending.push(...node.children);
-              if (
-                node.ref === observed.focusedRef &&
-                node.native?.platform === "dom" &&
-                isRecord(node.native.data) &&
-                node.native.data.kind === "native-select"
-              )
-                return observed;
-            }
-          } catch {
-            // The click already completed. An optional focus read must never
-            // turn it into a failed mutation or invite a duplicate click.
-          }
-          return null;
-        }
+    const observation = await this.withTarget(command.targetId, async (state, info) => {
+      if (!state.dialog) await this.refreshFrame(state);
+      this.assertExpectedGenerations(command, state);
+      const actions = command.action.type === "batch" ? command.action.actions : [command.action];
+      if (state.dialog && actions[0]?.type !== "handle_dialog") {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser JavaScript dialog must be handled before another action",
+        );
+      }
+      let completedActions = 0;
+      for (const action of actions) {
         try {
+          if (
+            completedActions > 0 &&
+            command.action.type === "batch" &&
+            command.action.fenceEachAction
+          ) {
+            await this.refreshFrame(state);
+            this.assertExpectedGenerations(command, state);
+          }
+          await this.dispatchAction(state, action, command.operationId);
+          completedActions += 1;
+          if (state.dialog) {
+            if (completedActions < actions.length) {
+              throw new Error("browser action batch paused on a JavaScript dialog");
+            }
+            break;
+          }
+        } catch (error) {
+          if (error instanceof DialogOpenedSignal) {
+            completedActions += 1;
+            if (completedActions < actions.length) {
+              throw new Error("browser action batch paused on a JavaScript dialog", {
+                cause: error,
+              });
+            }
+            break;
+          }
+          if (error instanceof InteractionDefiniteDriverError && completedActions === 0)
+            throw error;
+          throw error instanceof InteractionDefiniteDriverError
+            ? new InteractionOutcomeUnknownDriverError(
+                "outcome_unknown",
+                `browser action batch completed ${completedActions} action(s) before a later action failed (${error.code}); re-observe before continuing`,
+              )
+            : error;
+        }
+      }
+      if (command.observationMode === "none") return null;
+      if (command.observationMode === "input") {
+        // A live viewer already has pixels. Only native dropdowns need the
+        // semantic options that Chromium's page stream cannot paint. Keep
+        // ordinary clicks off the full accessibility/snapshot path.
+        if (
+          command.action.type !== "pointer" ||
+          command.action.action !== "click" ||
+          (command.action.button !== undefined && command.action.button !== "left") ||
+          state.dialog ||
+          this.protectedAuthQuiet(state) ||
+          !this.focusedInputObservations
+        )
+          return null;
+        try {
+          if (!(await this.mayHaveFocusedNativeSelect(state))) return null;
           const currentInfo = await this.requireTargetInfo(
             await this.ensureConnection(),
             info.targetId,
           );
-          return await this.observeUnlocked(state, currentInfo);
-        } catch (error) {
-          // Input has already been dispatched. A closing popup or failed
-          // follow-up read cannot prove that the mutation itself failed.
-          if (!(error instanceof InteractionDefiniteDriverError)) throw error;
-          throw new InteractionOutcomeUnknownDriverError(
-            "outcome_unknown",
-            "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
-          );
+          const observed = await this.observeUnlocked(state, currentInfo);
+          // A focused iframe is a hint only. The authoritative AX focus and
+          // redacted DOM metadata must actually identify a native select.
+          const pending = [
+            ...(observed.semantic?.kind === "snapshot" ? observed.semantic.roots : []),
+          ];
+          while (pending.length) {
+            const node = pending.pop()!;
+            if (node.children) pending.push(...node.children);
+            if (
+              node.ref === observed.focusedRef &&
+              node.native?.platform === "dom" &&
+              isRecord(node.native.data) &&
+              node.native.data.kind === "native-select"
+            )
+              return observed;
+          }
+        } catch {
+          // The click already completed. An optional focus read must never
+          // turn it into a failed mutation or invite a duplicate click.
         }
-      },
-      true,
-    ).catch((error: unknown) => {
+        return null;
+      }
+      try {
+        const currentInfo = await this.requireTargetInfo(
+          await this.ensureConnection(),
+          info.targetId,
+        );
+        return await this.observeUnlocked(state, currentInfo);
+      } catch (error) {
+        // Input has already been dispatched. A closing popup or failed
+        // follow-up read cannot prove that the mutation itself failed.
+        if (!(error instanceof InteractionDefiniteDriverError)) throw error;
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
+        );
+      }
+    }).catch((error: unknown) => {
       if (error instanceof CdpSessionDetachedError) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
@@ -1175,122 +1160,116 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     commandInput: BrowserProtectedAuthFillCommandValue,
   ): Promise<BrowserProtectedAuthObservationValue> {
     const command = BrowserProtectedAuthFillCommand.parse(commandInput);
-    return await this.withTarget(
-      command.targetId,
-      async (state, info) => {
-        if (state.dialog) {
-          throw new InteractionDefiniteDriverError(
-            "invalid_action",
-            "browser JavaScript dialog must be handled before protected fill",
-          );
+    return await this.withTarget(command.targetId, async (state, info) => {
+      if (state.dialog) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser JavaScript dialog must be handled before protected fill",
+        );
+      }
+      await this.refreshFrame(state);
+      this.assertProtectedAuthGenerations(command, state);
+      state.protectedAuthActive = true;
+      const startingDocumentGeneration = state.documentGeneration;
+      const startingNetworkActivitySequence = state.networkActivitySequence;
+      const allowedOrigins = new Set(command.allowedOrigins);
+      const resolvedFields: ResolvedProtectedField[] = [];
+      let submitNodeId: number | null = null;
+      let submitted = false;
+      try {
+        for (const field of command.fields) {
+          const node = await this.resolveLocator(state, field.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill field has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedField(metadata, field.purpose, allowedOrigins);
+          resolvedFields.push({
+            backendDOMNodeId: node.backendDOMNodeId,
+            purpose: field.purpose,
+            value: field.value,
+          });
         }
+        if (command.submit.type === "click") {
+          const node = await this.resolveLocator(state, command.submit.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill submit control has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedSubmit(metadata, allowedOrigins);
+          submitNodeId = node.backendDOMNodeId;
+        } else if (command.submit.type === "press" && command.submit.locator) {
+          const node = await this.resolveLocator(state, command.submit.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill key target has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedSubmit(metadata, allowedOrigins);
+          submitNodeId = node.backendDOMNodeId;
+        }
+
+        // Locator resolution refreshes browser state. Recheck every causal
+        // fence once more immediately before the first value crosses CDP.
         await this.refreshFrame(state);
         this.assertProtectedAuthGenerations(command, state);
-        state.protectedAuthActive = true;
-        const startingDocumentGeneration = state.documentGeneration;
-        const startingNetworkActivitySequence = state.networkActivitySequence;
-        const allowedOrigins = new Set(command.allowedOrigins);
-        const resolvedFields: ResolvedProtectedField[] = [];
-        let submitNodeId: number | null = null;
-        let submitted = false;
-        try {
-          for (const field of command.fields) {
-            const node = await this.resolveLocator(state, field.locator);
-            if (node.backendDOMNodeId === null) {
-              throw new InteractionDefiniteDriverError(
-                "invalid_action",
-                "protected-fill field has no DOM action target",
-              );
-            }
-            const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
-            this.assertProtectedField(metadata, field.purpose, allowedOrigins);
-            resolvedFields.push({
-              backendDOMNodeId: node.backendDOMNodeId,
-              purpose: field.purpose,
-              value: field.value,
-            });
-          }
-          if (command.submit.type === "click") {
-            const node = await this.resolveLocator(state, command.submit.locator);
-            if (node.backendDOMNodeId === null) {
-              throw new InteractionDefiniteDriverError(
-                "invalid_action",
-                "protected-fill submit control has no DOM action target",
-              );
-            }
-            const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
-            this.assertProtectedSubmit(metadata, allowedOrigins);
-            submitNodeId = node.backendDOMNodeId;
-          } else if (command.submit.type === "press" && command.submit.locator) {
-            const node = await this.resolveLocator(state, command.submit.locator);
-            if (node.backendDOMNodeId === null) {
-              throw new InteractionDefiniteDriverError(
-                "invalid_action",
-                "protected-fill key target has no DOM action target",
-              );
-            }
-            const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
-            this.assertProtectedSubmit(metadata, allowedOrigins);
-            submitNodeId = node.backendDOMNodeId;
-          }
-
-          // Locator resolution refreshes browser state. Recheck every causal
-          // fence once more immediately before the first value crosses CDP.
-          await this.refreshFrame(state);
-          this.assertProtectedAuthGenerations(command, state);
-          for (const field of resolvedFields) {
-            await this.focusNode(state, field.backendDOMNodeId);
-            await this.selectAllAndDelete(state, field.backendDOMNodeId);
-            await this.sendActionTarget(state, "Input.insertText", {
-              text: field.value,
-            });
-          }
-
-          if (command.submit.type === "click") {
-            await this.clickNode(state, submitNodeId, "left", 1);
-            submitted = true;
-          } else if (command.submit.type === "press") {
-            await this.focusNode(
-              state,
-              submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
-            );
-            await this.pressKey(state, command.submit.key);
-            submitted = true;
-          }
-
-          const transitioned = await this.waitForProtectedAuthTransition(
-            state,
-            startingDocumentGeneration,
-            startingNetworkActivitySequence,
-          );
-          if (!submitted && !transitioned) {
-            await this.clearProtectedFields(state, resolvedFields);
-            throw new Error(
-              "protected fill without submit did not produce an observable transition",
-            );
-          }
-          if (!transitioned && state.documentGeneration === startingDocumentGeneration) {
-            await this.clearProtectedFields(state, resolvedFields);
-          }
-          const currentInfo = await this.requireTargetInfo(
-            await this.ensureConnection(),
-            info.targetId,
-          );
-          await this.refreshFrame(state);
-          return {
-            target: this.targetFromInfo(currentInfo, state),
-            status: submitted || transitioned ? "submitted" : "working",
-          };
-        } catch (error) {
-          await this.clearProtectedFields(state, resolvedFields).catch(() => undefined);
-          throw error;
-        } finally {
-          state.protectedAuthActive = false;
-          state.protectedAuthQuietUntil = Date.now() + PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS;
+        for (const field of resolvedFields) {
+          await this.focusNode(state, field.backendDOMNodeId);
+          await this.selectAllAndDelete(state, field.backendDOMNodeId);
+          await this.sendActionTarget(state, "Input.insertText", {
+            text: field.value,
+          });
         }
-      },
-      true,
-    );
+
+        if (command.submit.type === "click") {
+          await this.clickNode(state, submitNodeId, "left", 1);
+          submitted = true;
+        } else if (command.submit.type === "press") {
+          await this.focusNode(
+            state,
+            submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
+          );
+          await this.pressKey(state, command.submit.key);
+          submitted = true;
+        }
+
+        const transitioned = await this.waitForProtectedAuthTransition(
+          state,
+          startingDocumentGeneration,
+          startingNetworkActivitySequence,
+        );
+        if (!submitted && !transitioned) {
+          await this.clearProtectedFields(state, resolvedFields);
+          throw new Error("protected fill without submit did not produce an observable transition");
+        }
+        if (!transitioned && state.documentGeneration === startingDocumentGeneration) {
+          await this.clearProtectedFields(state, resolvedFields);
+        }
+        const currentInfo = await this.requireTargetInfo(
+          await this.ensureConnection(),
+          info.targetId,
+        );
+        await this.refreshFrame(state);
+        return {
+          target: this.targetFromInfo(currentInfo, state),
+          status: submitted || transitioned ? "submitted" : "working",
+        };
+      } catch (error) {
+        await this.clearProtectedFields(state, resolvedFields).catch(() => undefined);
+        throw error;
+      } finally {
+        state.protectedAuthActive = false;
+        state.protectedAuthQuietUntil = Date.now() + PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS;
+      }
+    });
   }
 
   /** Controller-private provider authentication. Provider credentials and
@@ -1498,41 +1477,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async withTarget<T>(
     targetId: string,
     operation: (state: TargetState, info: TargetInfo) => Promise<T>,
-    foreground = false,
   ): Promise<T> {
     const connection = await this.ensureConnection();
     const info = await this.requireTargetInfo(connection, targetId);
     const state = await this.ensureTargetState(info);
-    const result = state.tail.then(async () =>
-      foreground
-        ? await this.withForegroundTarget(targetId, async () => await operation(state, info))
-        : await operation(state, info),
-    );
+    const result = state.tail.then(async () => await operation(state, info));
     state.tail = result.then(
       () => undefined,
       () => undefined,
     );
     return await result;
-  }
-
-  private async withForegroundTarget<T>(targetId: string, operation: () => Promise<T>): Promise<T> {
-    if (!this.foregroundManagedTabs) return await operation();
-    // One managed browser has one foreground tab. Keep it active until the
-    // operation completes so concurrent inputs cannot hide each other.
-    const result = this.foregroundTail.then(async () => {
-      const connection = await this.ensureConnection();
-      await connection.send("Target.activateTarget", { targetId });
-      return await operation();
-    });
-    this.foregroundTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return await result;
-  }
-
-  private async activateManagedTarget(targetId: string): Promise<void> {
-    await this.withForegroundTarget(targetId, async () => undefined);
   }
 
   private async ensureTargetState(info: TargetInfo): Promise<TargetState> {
@@ -1758,6 +1712,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
+    if (this.focusEmulation) {
+      // Hidden pages otherwise pause animation callbacks when no viewer is
+      // capturing them. This target-local DevTools override keeps them active
+      // without activating a tab or taking the desktop's foreground seat.
+      // Chromium clears the override when this attachment disconnects.
+      await connection.send("Emulation.setFocusEmulationEnabled", { enabled: true }, { sessionId });
+    }
     if (!this.emulation) return;
     if (this.emulation.locale) {
       if (!this.userAgent) {
