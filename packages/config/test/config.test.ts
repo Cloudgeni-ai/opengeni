@@ -456,6 +456,17 @@ describe("legal document links", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.legalPrivacyPolicyUrl).toBeUndefined();
     expect(settings.legalTermsOfServiceUrl).toBeUndefined();
+    expect(settings.supportEmail).toBeUndefined();
+  });
+
+  test("parse an operator support address and reject a value that is not one", () => {
+    expect(
+      withEnv({ OPENGENI_SUPPORT_EMAIL: " support@opengeni.ai " }, () => getSettings())
+        .supportEmail,
+    ).toBe("support@opengeni.ai");
+    for (const value of ["mailto:support@opengeni.ai", "support", "javascript:alert(1)"]) {
+      expect(() => withEnv({ OPENGENI_SUPPORT_EMAIL: value }, () => getSettings())).toThrow();
+    }
   });
 
   test("parse configured http(s) links and reject anything a browser should not follow", () => {

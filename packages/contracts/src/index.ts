@@ -18078,6 +18078,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         termsOfServiceUrl: ClientLegalDocumentUrl.optional(),
       })
       .optional(),
+    // Operator support address the console offers as a mailto link. Absent
+    // unless the operator configures one.
+    supportEmail: z.string().email().max(254).optional(),
     // Server-wide hint: does this deployment support Channel-A structured services
     // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
     // (it depends on the session's pinned backend); this is the coarse on/off the

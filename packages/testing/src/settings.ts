@@ -49,6 +49,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     analyticsGa4MeasurementId: undefined,
     legalPrivacyPolicyUrl: undefined,
     legalTermsOfServiceUrl: undefined,
+    supportEmail: undefined,
     authRequired: false,
     accessKey: undefined,
     authAllowHealth: true,

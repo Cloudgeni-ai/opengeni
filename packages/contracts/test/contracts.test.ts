@@ -1940,6 +1940,11 @@ describe("contracts", () => {
     expect(() =>
       ClientConfig.parse({ ...base, legal: { privacyPolicyUrl: "javascript:alert(1)" } }),
     ).toThrow();
+    expect(ClientConfig.parse(base).supportEmail).toBeUndefined();
+    expect(ClientConfig.parse({ ...base, supportEmail: "support@opengeni.ai" }).supportEmail).toBe(
+      "support@opengeni.ai",
+    );
+    expect(() => ClientConfig.parse({ ...base, supportEmail: "mailto:x@y.z" })).toThrow();
   });
 
   test("accepts allowlisted browser analytics providers", () => {

@@ -28,14 +28,20 @@ export type SignedOutLegalLinks = {
 export function SignedOutPage({
   children,
   legalLinks,
+  supportEmail,
 }: {
   children: ReactNode;
   legalLinks?: SignedOutLegalLinks | undefined;
+  /** Operator support address, offered as a mailto link when configured. */
+  supportEmail?: string | undefined;
 }) {
   const legal = [
-    { href: legalLinks?.privacyPolicyUrl, label: "Privacy" },
-    { href: legalLinks?.termsOfServiceUrl, label: "Terms" },
-  ].filter((link): link is { href: string; label: string } => Boolean(link.href));
+    { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
+    { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
+    { href: supportEmail ? `mailto:${supportEmail}` : undefined, label: "Contact support" },
+  ].filter((link): link is { href: string; label: string; external?: boolean } =>
+    Boolean(link.href),
+  );
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
@@ -92,13 +98,12 @@ export function SignedOutPage({
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <Wordmark className="text-[15px] text-fg-muted" />
               {legal.length > 0 ? (
-                <nav aria-label="Legal" className="flex items-center gap-4">
+                <nav aria-label="Legal and support" className="flex items-center gap-4">
                   {legal.map((link) => (
                     <a
                       key={link.label}
                       href={link.href}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
                       className="underline-offset-4 hover:text-fg hover:underline"
                     >
                       {link.label}

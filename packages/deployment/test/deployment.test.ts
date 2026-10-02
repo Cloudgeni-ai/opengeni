@@ -1234,6 +1234,7 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
         OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
         OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+        OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai",
         OPENGENI_IMAGE_TAG: "release-prod",
         ...maintenanceImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
@@ -1266,6 +1267,7 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain(
       'OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms"',
     );
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,

@@ -324,6 +324,10 @@ const SettingsSchema = z.object({
   // policies; the managed service points these at its own published pages.
   legalPrivacyPolicyUrl: PublicHttpUrl.optional(),
   legalTermsOfServiceUrl: PublicHttpUrl.optional(),
+  // Optional operator support address, shown as a "Contact support" mailto link
+  // on the signed-out page and in the Help menu. Unset by default for the same
+  // reason as the legal links.
+  supportEmail: z.string().trim().email().max(254).optional(),
   publicBaseUrl: z.string().url().optional(),
   // Product documentation the web console links from its Help menu. Absent
   // means the public OpenGeni docs; `none` hides the link for deployments that
@@ -3330,6 +3334,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
     legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
+    supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),

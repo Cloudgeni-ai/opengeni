@@ -130,6 +130,15 @@
     },
     "links": [
       {
+        "header": "Support",
+        "items": [
+          {
+            "label": "support@opengeni.ai",
+            "href": "mailto:support@opengeni.ai"
+          }
+        ]
+      },
+      {
         "header": "Legal",
         "items": [
           {
