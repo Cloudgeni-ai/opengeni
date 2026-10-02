@@ -74,4 +74,6 @@ export const embeddingMigrationTail = [
   "0564_browser_deadline_checkpoints.sql",
   // Patches the producer fence from withheld 0275/0414/0561; replay after them.
   "0582_scheduled_setup_policy_identity.sql",
+  // Extends the refusal guard from withheld 0539; replay after its creation.
+  "0584_scheduled_model_admission_refusal.sql",
 ];

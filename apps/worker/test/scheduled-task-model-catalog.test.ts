@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { configuredModels, withCodexCatalogProvider, type Settings } from "@opengeni/config";
 import {
   bootstrapWorkspace,
   createDb,
@@ -109,13 +110,14 @@ async function waitForBackendBlockedBy(blockerPid: number, description: string):
   throw new Error(`${description} did not block behind backend ${blockerPid}`);
 }
 
-function activities() {
+function activities(overrides: Partial<Settings> = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
         settings: testSettings({
           databaseUrl: shared!.appUrl,
           sandboxBackend: "none",
+          ...overrides,
         }),
         db: client.db,
         bus: new MemoryEventBus(),
@@ -125,6 +127,108 @@ function activities() {
 }
 
 describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
+  for (const runMode of ["new_session_per_run", "reusable_session", "existing_session"] as const) {
+    test(`records a retired model refusal once for ${runMode}`, async () => {
+      if (!available) return;
+      const access = await bootstrapWorkspace(client.db, {
+        accountExternalSource: "test",
+        accountExternalId: crypto.randomUUID(),
+        accountName: "Retired model admission",
+        workspaceExternalSource: "test",
+        workspaceExternalId: crypto.randomUUID(),
+        workspaceName: "Retired model admission",
+        subjectId: "user:retired-model-owner",
+      });
+      const grant = access.workspaceGrants[0]!;
+      const [personal] = await shared!
+        .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal fixture') returning id`;
+      await shared!
+        .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
+      const catalog = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));
+      const model = configuredModels(catalog).find((candidate) =>
+        candidate.id.startsWith("codex/"),
+      )!;
+      const retiredCatalog = {
+        codexSubscriptionEnabled: true,
+        resolvedCodexModelsJson: JSON.stringify([
+          {
+            id: model.id,
+            upstreamModelId: model.upstreamModelId,
+            capabilities: model.capabilities,
+            retired: true,
+          },
+        ]),
+      };
+      const session =
+        runMode === "existing_session"
+          ? await createSession(client.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              initialMessage: "Synthetic target",
+              resources: [],
+              metadata: {},
+              model: model.id,
+              reasoningEffort: "medium",
+              latencyMode: "standard",
+              sandboxBackend: "none",
+            })
+          : null;
+      const task = await createScheduledTask(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        createdBy: { kind: "subject", subjectId: grant.subjectId },
+        name: "Retired model occurrence",
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: crypto.randomUUID(),
+        runMode,
+        ...(session ? { targetSessionId: session.id } : {}),
+        overlapPolicy: "allow_concurrent",
+        // Existing-session admission must inspect the target's model, not this
+        // otherwise runnable task selection.
+        agentConfig: {
+          prompt: "Synthetic task",
+          model: session ? testSettings().openaiModel : model.id,
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+        metadata: {},
+      });
+      const input = {
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled" as const,
+        producerKey: crypto.randomUUID(),
+      };
+      const dispatcher = activities(retiredCatalog);
+      const result = await dispatcher.dispatchScheduledTaskRun(input);
+      expect(result).toMatchObject({
+        action: "blocked",
+        reason: "scheduled_model_unavailable",
+        refusal: { version: 1, reason: "scheduled_model_unavailable", retryable: false },
+      });
+      expect(await dispatcher.dispatchScheduledTaskRun(input)).toEqual(result);
+      // Catalog repair cannot turn an already refused producer into execution.
+      expect(await activities().dispatchScheduledTaskRun(input)).toEqual(result);
+      const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({
+        status: "failed",
+        error: "scheduled_model_unavailable",
+        sessionId: null,
+      });
+      expect(runs[0]!.completedAt).not.toBeNull();
+      expect(
+        await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: grant.workspaceId,
+          runId: runs[0]!.id,
+        }),
+      ).toBeNull();
+      expect(await listSessions(client.db, grant.workspaceId)).toHaveLength(session ? 1 : 0);
+    });
+  }
+
   test("keeps a retired custom Gateway model for an existing target session", async () => {
     if (!available) return;
     const access = await bootstrapWorkspace(client.db, {
