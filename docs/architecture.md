@@ -160,6 +160,9 @@ settlement atomically advances its outbox. Workflow-close/writer-exit races
 cannot orphan recovery; repeated Pause re-arms missing quiescence wakes.
 
 A command stays attempt-owned until durable exact-provider-identity adoption.
+The reaper recovers missed adoption for closed legacy Modal commands under its
+exact claim. Original identity, output and unknown outcome remain intact;
+the durable wake permits later inference without replay or invented exit.
 Turn completion/Steer then detach; command cancellation, Pause and terminal
 Cancel govern lifetime. Instance stop/revocation/replacement marks Connected
 Machine tracking `lost`, never process death; temporary outages preserve it.

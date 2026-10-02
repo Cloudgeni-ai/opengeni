@@ -439,6 +439,11 @@ Readiness uses a fixed native `/bin/true`
 probe, retries only local pre-dispatch failures, and observes the same invocation
 after a lost reply within its existing budget. See `docs/run-lifecycle.md`.
 
+Closed-attempt legacy Modal commands missing background adoption recover under
+their exact reaper claim. Unknown observation does not block later turns;
+retain physical identity/outcome without replay. Pause and explicit cancellation
+still govern the recovered command. See `docs/run-lifecycle.md`.
+
 Modal lease-owned physical creation uses `modal-create-session.ts` and the
 `modal-create-boundary.ts` RPC hook: persist one operation before dispatch,
 disable create retries, attribute the returned instance before manifest setup.
