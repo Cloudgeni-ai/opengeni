@@ -138,10 +138,14 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const sourceContract = await buildCompleteSchemaContract();
     const usageFrontier = sourceContract.migrations.some(
-      (migration) => migration.path === "0590_complete_insights_usage_amounts.sql",
+      (migration) => migration.path === "0591_insights_aggregate_query_plans.sql",
     )
-      ? "0590_complete_insights_usage_amounts.sql"
-      : "0589_organization_model_usage.sql";
+      ? "0591_insights_aggregate_query_plans.sql"
+      : sourceContract.migrations.some(
+            (migration) => migration.path === "0590_complete_insights_usage_amounts.sql",
+          )
+        ? "0590_complete_insights_usage_amounts.sql"
+        : "0589_organization_model_usage.sql";
     const failedSessionVariableSetAttach = sourceContract.migrations.find(
       (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
     );
@@ -809,6 +813,9 @@ describe("release schema contract", () => {
     const completeInsightsUsageAmounts = completeSourceContract.migrations.some(
       (migration) => migration.path === "0590_complete_insights_usage_amounts.sql",
     );
+    const insightsAggregateQueryPlans = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0591_insights_aggregate_query_plans.sql",
+    );
     const scheduledSetupPolicyIdentity = completeSourceContract.migrations.some(
       (migration) => migration.path === "0582_scheduled_setup_policy_identity.sql",
     );
@@ -1125,6 +1132,7 @@ describe("release schema contract", () => {
         (insightsScopedFactProjection ? 1 : 0) +
         (organizationModelUsage ? 1 : 0) +
         (completeInsightsUsageAmounts ? 1 : 0) +
+        (insightsAggregateQueryPlans ? 1 : 0) +
         (scheduledSetupPolicyIdentity ? 1 : 0) +
         (realtimeConnectionAccounts ? 1 : 0) +
         (organizationOauthPendingStates ? 1 : 0) +
@@ -1643,6 +1651,9 @@ describe("release schema contract", () => {
       ...(completeInsightsUsageAmounts
         ? { latestMigration: "0590_complete_insights_usage_amounts.sql" }
         : {}),
+      ...(insightsAggregateQueryPlans
+        ? { latestMigration: "0591_insights_aggregate_query_plans.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1720,6 +1731,7 @@ describe("release schema contract", () => {
             "0588_insights_scoped_fact_projection.sql",
             "0589_organization_model_usage.sql",
             "0590_complete_insights_usage_amounts.sql",
+            "0591_insights_aggregate_query_plans.sql",
           ].includes(migration.path),
       ),
     };
@@ -3028,10 +3040,14 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const unfilteredSourceContract = await buildCompleteSchemaContract();
     const usageFrontier = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0590_complete_insights_usage_amounts.sql",
+      (migration) => migration.path === "0591_insights_aggregate_query_plans.sql",
     )
-      ? "0590_complete_insights_usage_amounts.sql"
-      : "0589_organization_model_usage.sql";
+      ? "0591_insights_aggregate_query_plans.sql"
+      : unfilteredSourceContract.migrations.some(
+            (migration) => migration.path === "0590_complete_insights_usage_amounts.sql",
+          )
+        ? "0590_complete_insights_usage_amounts.sql"
+        : "0589_organization_model_usage.sql";
     // Assert the current rollout frontier before the historical hash probes
     // remove forward migrations. Archives follow the agent configuration step.
     expect(unfilteredSourceContract.latestMigration).toBe(
@@ -3421,6 +3437,7 @@ describe("release schema contract", () => {
       "0588_insights_scoped_fact_projection.sql",
       "0589_organization_model_usage.sql",
       "0590_complete_insights_usage_amounts.sql",
+      "0591_insights_aggregate_query_plans.sql",
       "0522_scoped_machine_update_status.sql",
       "0523_modal_provider_create_fence.sql",
       "0524_codex_plan_entitlement.sql",
@@ -3998,6 +4015,7 @@ describe("release schema contract", () => {
       "0588_insights_scoped_fact_projection.sql",
       "0589_organization_model_usage.sql",
       "0590_complete_insights_usage_amounts.sql",
+      "0591_insights_aggregate_query_plans.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
